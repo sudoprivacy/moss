@@ -58,7 +58,7 @@ describe("getAttemptOwnerStatus — owner metadata for LB routing", () => {
     const store = setup();
     await store.registerServerInstance("hostA", 101, "a");
     const { attemptId } = await seedSessionAndAttempt(store, "a");
-    store.db
+    store.requireSqliteDb()
       .prepare("UPDATE server_instances SET heartbeat_at = ? WHERE instance_id = ?")
       .run(Date.now() - 60_000, "a");
     const status = await store.getAttemptOwnerStatus(attemptId, 30_000);
@@ -87,7 +87,7 @@ describe("getAttemptOwnerStatus — owner metadata for LB routing", () => {
     const store = setup();
     await store.registerServerInstance("hostA", 101, "a");
     const { attemptId } = await seedSessionAndAttempt(store, "a");
-    store.db
+    store.requireSqliteDb()
       .prepare("UPDATE session_attempts SET server_instance_id = NULL WHERE attempt_id = ?")
       .run(attemptId);
     const status = await store.getAttemptOwnerStatus(attemptId, 30_000);

@@ -1,4 +1,5 @@
 import { toMossOperationsApiPath } from './api-paths'
+import type { ConfigScope } from './types'
 
 export interface OperationsHttpClient {
   get(path: string): Promise<unknown>
@@ -266,11 +267,11 @@ export function createOperationsApi(client: OperationsHttpClient) {
     retryCreditApplicationSync(id: number) {
       return operationsClient.post(`/api/v1/admin/credit-applications/${id}/retry-sync`) as Promise<LegacyEnvelope<unknown>>
     },
-    getSudoworkSystemConfig() {
-      return operationsClient.get('/api/v1/admin/system-config') as Promise<LegacyEnvelope<Record<string, unknown>>>
+    getSudoworkSystemConfig(scope: ConfigScope = 'organization') {
+      return operationsClient.get(withQuery('/api/v1/admin/system-config', { scope })) as Promise<LegacyEnvelope<Record<string, unknown>>>
     },
-    updateSudoworkSystemConfig(input: Record<string, unknown>) {
-      return operationsClient.put('/api/v1/admin/system-config', input) as Promise<LegacyEnvelope<Record<string, unknown>>>
+    updateSudoworkSystemConfig(input: Record<string, unknown>, scope: ConfigScope = 'organization') {
+      return operationsClient.put(withQuery('/api/v1/admin/system-config', { scope }), input) as Promise<LegacyEnvelope<Record<string, unknown>>>
     },
     listAuditEvents(input: { page: number; pageSize: number; action?: string; userId?: number; dateFrom?: number; dateTo?: number }) {
       return operationsClient.get(withQuery('/api/v1/admin/logs', {

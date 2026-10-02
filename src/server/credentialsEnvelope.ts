@@ -21,7 +21,7 @@ const SHARED_KEY_B64 = 'L7CbnQlwVrzWlaehCWSIiKuwBxFDh9i1AFaifYv7UXE='
 export type ClientCredentials = {
   skillhub?: { token: string }
   log_report?: { key: string }
-  product_improvement?: { api_key: string; public_key?: string }
+  product_improvement?: { api_key: string }
 }
 
 export type SealedEnvelope = { nonce: string; ciphertext: string }
@@ -43,11 +43,8 @@ export function sealCredentials(credentials: ClientCredentials): SealedEnvelope 
 /**
  * What this deployment has to hand the client.
  *
- * Only the skill hub is served. The other two fields belong to log reporting
- * and product improvement, which moss declares OFF in its system config — a
- * client reading this has already been told not to use them, so carrying keys
- * for them would be configuration nobody consumes. Adding a field later is one
- * line; the shape is open on purpose.
+ * Reporting credentials are added by the organization-scoped client policy
+ * service at the authenticated route, only when those features are enabled.
  */
 export function buildClientCredentials(hubAuthorization: string | undefined): ClientCredentials {
   const token = hubAuthorization?.trim()

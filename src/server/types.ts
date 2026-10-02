@@ -225,6 +225,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       publicBaseUrl: z.string().url().optional(),
       loginMethod: z.enum(['sms', 'password', 'cas']).default('password'),
       dify: z.object({
+        timeoutMs: z.number().positive().optional(),
         baseUrl: z.string().url().default('http://localhost:5001'),
       }).default({
         baseUrl: 'http://localhost:5001',
@@ -271,21 +272,26 @@ export const serverFileConfigSchema = lazySchema(() =>
       },
     }),
     qms: z.object({
-      enabled: z.boolean().default(false),
+      enabled: z.boolean().optional(),
       apiKeyHeader: z.string().min(1).default('X-API-Key'),
       queueFlushIntervalMs: z.number().int().min(250).default(3_000),
       queueBatchSize: z.number().int().min(1).max(10_000).default(50),
+      queueMaxItems: z.number().int().min(1).default(10_000),
+      queueMaxBytes: z.number().int().min(1).default(16 * 1024 * 1024),
+      queueRetryIntervalMs: z.number().int().min(1).default(1_000),
+      queueDrainTimeoutMs: z.number().int().min(1).default(15_000),
       perfRetentionDays: z.number().int().min(1).default(90),
       conversationRetentionDays: z.number().int().min(1).default(180),
-      encryptionRequired: z.boolean().default(false),
     }).default({
-      enabled: false,
       apiKeyHeader: 'X-API-Key',
       queueFlushIntervalMs: 3_000,
       queueBatchSize: 50,
+      queueMaxItems: 10_000,
+      queueMaxBytes: 16 * 1024 * 1024,
+      queueRetryIntervalMs: 1_000,
+      queueDrainTimeoutMs: 15_000,
       perfRetentionDays: 90,
       conversationRetentionDays: 180,
-      encryptionRequired: false,
     }),
     wikiIndex: z.object({
       enabled: z.boolean().default(true),
@@ -432,12 +438,11 @@ export const serverFileConfigSchema = lazySchema(() =>
       /** When set, registration additionally requires this invitation code. */
       invitationCode: z.string().min(1).optional(),
       /**
-       * Give each new person their own organisation (one-person company) — the
-       * public-cloud shape, and what makes an individual an organisation of one
-       * rather than a second tenancy model. Turn off for a single-company
-       * deployment, where new people join the organisation that already exists.
+       * Legacy migration switch used by provisionPhoneUser. Interactive phone
+       * registration always requires an organization invitation and never
+       * creates a new organization.
        */
-      autoCreateOrg: z.boolean().default(true),
+      autoCreateOrg: z.boolean().default(false),
     }).default({
       enabled: false,
       delivery: 'log',
@@ -445,7 +450,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       resendCooldownSec: 60,
       maxSendsPerHour: 5,
       maxVerifyAttempts: 5,
-      autoCreateOrg: true,
+      autoCreateOrg: false,
     }),
     /**
      * Public, unauthenticated client bootstrap (`GET /api/v1/system-config`).
@@ -455,13 +460,19 @@ export const serverFileConfigSchema = lazySchema(() =>
      * are, instead of hard-coding either. See `publicSystemConfig.ts` for the
      * wire contract and for what must never be put in here.
      *
-     * Defaults describe a self-hosted deployment: username/password login (the
-     * only method moss implements today), no billing, and every phone-home
-     * feature OFF. A public-cloud deployment turns those on explicitly.
+     * Defaults describe a self-hosted deployment: username/password and API Key
+     * login, no billing, and every phone-home feature OFF. A public-cloud
+     * deployment turns additional methods and services on explicitly.
      */
     systemConfig: z.object({
       /** 0 = phone code, 1 = username/password, 2 = third-party (CAS). */
       loginMethod: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(1),
+      /**
+       * Login capabilities advertised to new clients. `loginMethod` remains the
+       * preferred/legacy method for older clients; this list allows a deployment
+       * to expose phone and password login at the same time.
+       */
+      authMethods: z.array(z.enum(['phone', 'password', 'api_key', 'sso'])).min(1).optional(),
       thirdPartyAuth: z.object({
         enabled: z.boolean().default(true),
         defaultProvider: z.string().min(1).optional(),
@@ -486,6 +497,9 @@ export const serverFileConfigSchema = lazySchema(() =>
        * derives it from the system settings' model service url.
        */
       sudorouterBaseUrl: z.string().min(1).optional(),
+      sudorouterEnabled: z.boolean().optional(),
+      sudorouterAdminUserId: z.string().optional(),
+      sudorouterTimeoutMs: z.number().positive().optional(),
       skillhubBaseUrl: z.string().min(1).optional(),
       scodeAutoModel: z.string().min(1).optional(),
       /**
@@ -513,6 +527,7 @@ export const serverFileConfigSchema = lazySchema(() =>
         orderExpireMinutes: z.number().int().min(1).default(30),
         usdToCnyRate: z.number().min(0).default(7.3),
         fuiou: z.object({
+          enabled: z.boolean().optional(),
           testMode: z.boolean().default(false),
           merchantCode: z.string().optional(),
           timeoutMs: z.number().int().min(1000).default(10_000),
@@ -553,7 +568,6 @@ export const serverFileConfigSchema = lazySchema(() =>
       }).optional(),
       productImprovement: z.object({
         enabled: z.boolean().default(false),
-        encryptionRequired: z.boolean().optional(),
       }).optional(),
     }).default({
       loginMethod: 1,
@@ -712,6 +726,7 @@ export type ServerConfig = {
     legacyJwtSecret?: string
     redisUrl?: string
     dify: {
+      timeoutMs?: number
       baseUrl: string
       systemToken?: string
       provisionSecret?: string
@@ -830,6 +845,8 @@ export type AttemptRuntimeState =
 
 export type SessionRecord = {
   sessionId: string
+  /** Provisional implicit Task identifier; one task per newly-created session. */
+  taskId: string
   transcriptSessionId: string
   orgId: string
   userId: string
@@ -903,6 +920,8 @@ export type SessionListFilter = {
 
 export type SessionSummary = {
   sessionId: string
+  /** Provisional implicit Task identifier; not yet the final Task API contract. */
+  taskId: string
   transcriptSessionId: string
   workDir: string
   userId: string
@@ -912,6 +931,7 @@ export type SessionSummary = {
   runtime: SessionRuntimeInfo
   status: SessionStatus
   desiredState: DesiredSessionState
+  currentAttemptId: string | null
   assistantName: string | null
   source?: string
   channelChatId?: string
@@ -959,6 +979,8 @@ export type EnterpriseRecord = {
    * only and surfaced to the client via GET /api/v1/tenant/config.
    */
   client_cron_enabled: boolean | null
+  client_show_tool_calls: boolean | null
+  workspace_upload_limit_bytes: number | null
   created_at: number
   updated_at: number
 }
@@ -1001,6 +1023,8 @@ export type RunnerManifest = {
      */
     availableCorpApps?: Array<{ id: string; name: string; type: string; key: string }>
     sharedMemory?: string | null
+    /** Authorized resource metadata and immutable artifact references for the runner. */
+    resources?: import('./catalog/organizationResources.js').OrganizationResourceSnapshot
     /** Enabled skill names (from client or agent config) */
     enabledSkills?: string[]
     /**

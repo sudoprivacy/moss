@@ -53,7 +53,7 @@ async function seed(store: DirectConnectStore, opts: { owner: string; ownerLive:
   });
   await store.registerServerInstance("hostB", 202, "b");
   if (!opts.ownerLive) {
-    store.db
+    store.requireSqliteDb()
       .prepare("UPDATE server_instances SET heartbeat_at = ? WHERE instance_id = ?")
       .run(Date.now() - 60_000, "b");
   }
@@ -61,7 +61,7 @@ async function seed(store: DirectConnectStore, opts: { owner: string; ownerLive:
   // this in production; the seed must mirror it or ensure sees no attempt).
   await store.setCurrentAttempt(sessionId, attempt.attemptId)
   if (opts.heartbeatAgeMs !== null) {
-    store.db
+    store.requireSqliteDb()
       .prepare("UPDATE session_attempts SET last_heartbeat_at = ? WHERE attempt_id = ?")
       .run(Date.now() - opts.heartbeatAgeMs, attempt.attemptId);
   }
@@ -74,7 +74,7 @@ describe("ensureAttempt — owner-aware liveness layering (P2-2)", () => {
     const { sessionId, attemptId } = await seed(store, { owner: "b", ownerLive: true, heartbeatAgeMs: 1_000 });
     const ready = await runtime.ensureSessionReady(sessionId);
     assert.equal(ready.attempt.attemptId, attemptId);
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT runtime_state, server_instance_id FROM session_attempts WHERE attempt_id = ?")
       .get(attemptId) as { runtime_state: string; server_instance_id: string };
     assert.equal(row.runtime_state, "starting", "must not mark another owner's attempt lost");
@@ -90,7 +90,7 @@ describe("ensureAttempt — owner-aware liveness layering (P2-2)", () => {
     );
     // The claim happened (owner moved to us) — fencing now owns the respawn.
     const session = await store.getSession(sessionId);
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT server_instance_id FROM session_attempts WHERE attempt_id = ?")
       .get(session!.currentAttemptId!) as { server_instance_id: string };
     assert.equal(row.server_instance_id, "a");
@@ -104,7 +104,7 @@ describe("ensureAttempt — owner-aware liveness layering (P2-2)", () => {
       (e: unknown) => e instanceof Error && /Runtime missing/.test((e as Error).message),
     );
     const session = await store.getSession(sessionId);
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT runtime_state FROM session_attempts WHERE attempt_id = ?")
       .get(session!.currentAttemptId!) as { runtime_state: string };
     assert.equal(row.runtime_state, "lost");
@@ -113,16 +113,16 @@ describe("ensureAttempt — owner-aware liveness layering (P2-2)", () => {
   it("ensureSessionReadyNonBlocking: another live owner → metadata only, no lifecycle rewrite, no respawn kick", async () => {
     const { runtime, store } = makeRuntime();
     const { sessionId, attemptId } = await seed(store, { owner: "b", ownerLive: true, heartbeatAgeMs: 1_000 });
-    const before = store.db
+    const before = store.requireSqliteDb()
       .prepare("SELECT status FROM sessions WHERE session_id = ?")
       .get(sessionId) as { status: string };
     const result = await runtime.ensureSessionReadyNonBlocking(sessionId);
     assert.ok(result.session);
-    const after = store.db
+    const after = store.requireSqliteDb()
       .prepare("SELECT status FROM sessions WHERE session_id = ?")
       .get(sessionId) as { status: string };
     assert.equal(after.status, before.status, "must not rewrite lifecycle for a foreign owner");
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT runtime_state FROM session_attempts WHERE attempt_id = ?")
       .get(attemptId) as { runtime_state: string };
     assert.equal(row.runtime_state, "starting", "no lost/spawn side effects");

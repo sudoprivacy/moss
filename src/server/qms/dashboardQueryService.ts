@@ -45,8 +45,12 @@ export class QmsDashboardQueryService {
     const { start, end } = this.range(query, 86_400_000)
     const duration = end.getTime() - start.getTime()
     const previousStart = new Date(start.getTime() - duration)
-    const current = this.scope(start, end, query.tenantId)
-    const previous = this.scope(previousStart, start, query.tenantId)
+    const commonFilters: Array<[string, unknown]> = [['platform', query.platform], ['arch', query.arch], ['version', query.version]]
+    const current = this.filteredScope(this.scope(start, end, query.tenantId), commonFilters)
+    const previous = this.filteredScope(this.scope(previousStart, start, query.tenantId), commonFilters)
+    const currentPerf = this.filteredScope(current, [['metric', query.metric]])
+    const previousPerfScope = this.filteredScope(previous, [['metric', query.metric]])
+    const currentInstall = this.filteredScope(current, [['install_type', query.installType]])
     const [conversations, previousConversations, topErrors, previousErrors, perf, previousPerf, installs,
       installVersions, installPlatforms, crashes, crashTypes, crashPlatforms, crashVersions, crashProcesses,
       previousCrashes] = await Promise.all([
@@ -65,16 +69,16 @@ export class QmsDashboardQueryService {
         WHERE timestamp >= $1 AND timestamp < $2${previous.sql}
         AND status = 'error' AND error_code IS NOT NULL GROUP BY error_code`, previous.parameters),
       this.db.execute(`SELECT metric, value_ms FROM telemetry_perf_raw
-        WHERE timestamp >= $1 AND timestamp < $2${current.sql}`, current.parameters),
+        WHERE timestamp >= $1 AND timestamp < $2${currentPerf.sql}`, currentPerf.parameters),
       this.db.execute(`SELECT metric, AVG(value_ms) AS avg FROM telemetry_perf_raw
-        WHERE timestamp >= $1 AND timestamp < $2${previous.sql} GROUP BY metric`, previous.parameters),
+        WHERE timestamp >= $1 AND timestamp < $2${previousPerfScope.sql} GROUP BY metric`, previousPerfScope.parameters),
       this.db.execute(`SELECT COUNT(*)::INTEGER AS total,
         COUNT(*) FILTER (WHERE status = 'success')::INTEGER AS success,
         COUNT(*) FILTER (WHERE status = 'failed')::INTEGER AS failed,
         AVG(duration_ms)::INTEGER AS avg_duration_ms FROM telemetry_install
-        WHERE timestamp >= $1 AND timestamp < $2${current.sql}`, current.parameters),
-      this.groupCount('telemetry_install', 'version', current),
-      this.groupCount('telemetry_install', 'platform', current),
+        WHERE timestamp >= $1 AND timestamp < $2${currentInstall.sql}`, currentInstall.parameters),
+      this.groupCount('telemetry_install', 'version', currentInstall),
+      this.groupCount('telemetry_install', 'platform', currentInstall),
       this.db.execute(`SELECT COUNT(*)::INTEGER AS total FROM crash_events
         WHERE timestamp >= $1 AND timestamp < $2${current.sql}`, current.parameters),
       this.groupCount('crash_events', 'type', current),
@@ -146,9 +150,11 @@ export class QmsDashboardQueryService {
     ])
     const dimensions = dimension === 'platform' ? ', platform, arch' : dimension === 'version' ? ', version' : ''
     const rows = await this.db.execute(
-      `SELECT bucket AS date, metric${dimensions}, AVG(p50)::INTEGER AS p50, AVG(p90)::INTEGER AS p90,
-       AVG(p95)::INTEGER AS p95, AVG(avg_value)::INTEGER AS avg_value, SUM(count)::INTEGER AS count
-       FROM telemetry_perf_daily WHERE bucket >= $1 AND bucket < $2${range.sql}${filters.sql}
+      `${this.trendSource('perf', range.sql)}
+       SELECT bucket AS date, metric${dimensions}, AVG(p50)::INTEGER AS p50, AVG(p90)::INTEGER AS p90,
+       AVG(p95)::INTEGER AS p95, AVG(p99)::INTEGER AS p99,
+       ROUND(SUM(avg_value * count) / NULLIF(SUM(count), 0))::INTEGER AS avg_value, SUM(count)::INTEGER AS count
+       FROM samples WHERE TRUE${filters.sql}
        GROUP BY bucket, metric${dimensions} ORDER BY bucket ASC${dimensions}`,
       filters.parameters,
     )
@@ -157,7 +163,7 @@ export class QmsDashboardQueryService {
 
   async conversationErrorTrend(query: QmsDashboardQuery) {
     const range = this.scopeRange(query)
-    const filters = this.filters(range.parameters, [['error_code', query.errorCode]])
+    const filters = this.filters(range.parameters, [['error_code', query.errorCode], ['platform', query.platform], ['arch', query.arch], ['version', query.version]])
     const rows = await this.db.execute(
       `SELECT DATE_TRUNC('day', timestamp) AS date, error_code, COUNT(*)::INTEGER AS count
        FROM telemetry_conversations WHERE timestamp >= $1 AND timestamp < $2${range.sql}${filters.sql}
@@ -170,6 +176,7 @@ export class QmsDashboardQueryService {
   async conversationTrend(query: QmsDashboardQuery) {
     const dimension = this.dimension(query.dimension)
     const range = this.scopeRange(query)
+    const filters = this.filters(range.parameters, [['platform', query.platform], ['arch', query.arch], ['version', query.version]])
     const dimensions = dimension === 'platform' ? ', platform, arch' : dimension === 'version' ? ', version' : ''
     const rows = await this.db.execute(
       `SELECT DATE_TRUNC('day', timestamp) AS date${dimensions},
@@ -180,9 +187,9 @@ export class QmsDashboardQueryService {
        AVG(tokens_used)::INTEGER AS avg_tokens,
        COALESCE(ROUND((COUNT(*) FILTER (WHERE status = 'success')::DECIMAL /
          NULLIF(COUNT(*) FILTER (WHERE status IN ('success','error')), 0)) * 100), 100)::INTEGER AS success_rate
-       FROM telemetry_conversations WHERE timestamp >= $1 AND timestamp < $2${range.sql}
+       FROM telemetry_conversations WHERE timestamp >= $1 AND timestamp < $2${range.sql}${filters.sql}
        GROUP BY DATE_TRUNC('day', timestamp)${dimensions} ORDER BY date ASC${dimensions}`,
-      range.parameters,
+      filters.parameters,
     )
     return rows.map(row => ({ ...row, date: date(row.date) }))
   }
@@ -190,13 +197,14 @@ export class QmsDashboardQueryService {
   async installTrend(query: QmsDashboardQuery) {
     const dimension = this.dimension(query.dimension)
     const range = this.scopeRange(query)
-    const filters = this.filters(range.parameters, [['version', query.version], ['install_type', query.installType]])
+    const filters = this.filters(range.parameters, [['version', query.version], ['install_type', query.installType], ['platform', query.platform], ['arch', query.arch]])
     const dimensions = dimension === 'platform' ? ', platform, arch' : dimension === 'version' ? ', version' : ''
     const rows = await this.db.execute(
-      `SELECT bucket AS date${dimensions}, install_type,
+      `${this.trendSource('install', range.sql)} SELECT bucket AS date${dimensions}, install_type,
        SUM(success_count)::INTEGER AS success_count, SUM(failed_count)::INTEGER AS failed_count,
-       SUM(total_count)::INTEGER AS total_count, ROUND(AVG(success_rate))::INTEGER AS success_rate
-       FROM telemetry_install_daily WHERE bucket >= $1 AND bucket < $2${range.sql}${filters.sql}
+       SUM(total_count)::INTEGER AS total_count,
+       ROUND(SUM(success_count)::NUMERIC / NULLIF(SUM(total_count), 0) * 100)::INTEGER AS success_rate
+       FROM samples WHERE TRUE${filters.sql}
        GROUP BY bucket${dimensions}, install_type ORDER BY bucket ASC${dimensions}`,
       filters.parameters,
     )
@@ -205,8 +213,11 @@ export class QmsDashboardQueryService {
 
   async dimensions(kind: 'perf' | 'conversation' | 'install', query: QmsDashboardQuery) {
     const range = this.scopeRange(query)
-    const table = kind === 'perf' ? 'telemetry_perf_daily' : kind === 'install' ? 'telemetry_install_daily' : 'telemetry_conversations'
-    const time = kind === 'conversation' ? 'timestamp' : 'bucket'
+    const extra = kind === 'perf' ? 'metric' : 'install_type'
+    const table = kind === 'conversation' ? 'telemetry_conversations'
+      : `(SELECT timestamp, platform, arch, version, tenant_id, ${extra} FROM ${kind === 'perf' ? 'telemetry_perf_raw' : 'telemetry_install'}
+          UNION ALL SELECT bucket AS timestamp, platform, arch, version, tenant_id, ${extra} FROM telemetry_${kind}_daily) dimensions`
+    const time = 'timestamp'
     const [platforms, versions] = await Promise.all([
       this.db.execute(`SELECT DISTINCT platform, arch FROM ${table}
         WHERE ${time} >= $1 AND ${time} < $2${range.sql} ORDER BY platform, arch`, range.parameters),
@@ -241,6 +252,33 @@ export class QmsDashboardQueryService {
     return dimension
   }
 
+  /** Prefer raw days (including today and late arrivals), retaining older aggregate-only history. */
+  private trendSource(kind: 'perf' | 'install', tenantSql: string): string {
+    const table = kind === 'perf' ? 'telemetry_perf_raw' : 'telemetry_install'
+    const dimension = kind === 'perf' ? 'metric' : 'install_type'
+    const columns = kind === 'perf' ? 'p50, p90, p95, p99, avg_value, count' : 'success_count, failed_count, total_count'
+    const aggregates = kind === 'perf'
+      ? `percentile_cont(0.5) WITHIN GROUP (ORDER BY value_ms) AS p50,
+         percentile_cont(0.9) WITHIN GROUP (ORDER BY value_ms) AS p90,
+         percentile_cont(0.95) WITHIN GROUP (ORDER BY value_ms) AS p95,
+         percentile_cont(0.99) WITHIN GROUP (ORDER BY value_ms) AS p99, AVG(value_ms) AS avg_value, COUNT(*) AS count`
+      : `COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+         COUNT(*) FILTER (WHERE status = 'failed') AS failed_count, COUNT(*) AS total_count`
+    return `WITH raw_days AS (
+      SELECT DATE_TRUNC('day', timestamp) AS bucket, version, platform, arch, tenant_id, ${dimension}, ${aggregates}
+      FROM ${table} WHERE timestamp >= $1 AND timestamp < $2${tenantSql}
+      GROUP BY bucket, version, platform, arch, tenant_id, ${dimension}
+    ), samples AS (
+      SELECT bucket, version, platform, arch, tenant_id, ${dimension}, ${columns} FROM raw_days
+      UNION ALL
+      SELECT bucket, version, platform, arch, tenant_id, ${dimension}, ${columns}
+      FROM telemetry_${kind}_daily d WHERE bucket >= $1 AND bucket < $2${tenantSql}
+        AND NOT EXISTS (SELECT 1 FROM raw_days r WHERE r.bucket = d.bucket
+          AND r.version = d.version AND r.platform = d.platform AND r.arch = d.arch
+          AND r.tenant_id IS NOT DISTINCT FROM d.tenant_id AND r.${dimension} IS NOT DISTINCT FROM d.${dimension})
+    )`
+  }
+
   private range(query: QmsDashboardQuery, defaultDuration = 7 * 86_400_000) {
     const endMs = query.endTime ?? Date.now()
     const startMs = query.startTime ?? endMs - defaultDuration
@@ -259,6 +297,11 @@ export class QmsDashboardQueryService {
       sql: tenantId ? ` AND tenant_id = $${parameters.push(tenantId)}` : '',
       parameters,
     }
+  }
+
+  private filteredScope(scope: { sql: string; parameters: unknown[] }, filters: Array<[string, unknown]>) {
+    const result = this.filters(scope.parameters, filters)
+    return { sql: scope.sql + result.sql, parameters: result.parameters }
   }
 
   private filters(parameters: readonly unknown[], filters: ReadonlyArray<readonly [string, unknown]>) {

@@ -17,6 +17,7 @@
  */
 
 import { createHash } from 'crypto'
+import { PlatformConfigError } from '../configuration/platformConfigService.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import type { ServerConfig } from '../types.js'
 
@@ -24,6 +25,7 @@ export const CONFIG_NAMESPACE = 'moss:config'
 
 export const CONFIG_KEYS = [
   'settings.anthropic-auth-token',
+  'settings.model-provider-api-keys',
   'settings.image-api-key',
   'server.hub-authorization',
   'server.wiki-index-resource-token-secret',
@@ -47,22 +49,34 @@ export const CONFIG_KEYS = [
   'server.sudowork-redis-url',
   'client.log-report-key',
   'client.product-improvement-api-key',
-  'client.product-improvement-public-key',
   'dify.sso-secret',
   'dify.system-secret',
   'dify.system-token',
   'qms.default-api-key',
-  'server.qms-postgres-url',
-  'server.qms-redis-url',
   'server.qms-api-key',
-  'qms.telemetry-private-key',
-  'server.qms-telemetry-private-key',
-  'server.qms-telemetry-public-key',
   'server.qms-lark-webhook-url',
   'server.qms-smtp-url',
 ] as const
 
-export type ConfigKey = (typeof CONFIG_KEYS)[number]
+export type OrganizationConfigKey =
+  | `organization.${string}.settings.anthropic-auth-token`
+  | `organization.${string}.settings.model-provider-api-keys`
+  | `organization.${string}.settings.image-api-key`
+export type ConfigKey = (typeof CONFIG_KEYS)[number] | OrganizationConfigKey
+
+export function organizationConfigKey(
+  orgId: string,
+  suffix:
+    | 'settings.anthropic-auth-token'
+    | 'settings.model-provider-api-keys'
+    | 'settings.image-api-key',
+): OrganizationConfigKey {
+  const trimmed = orgId.trim()
+  if (!trimmed) throw new Error('Organization id is required for scoped config key')
+  const safe = trimmed.replace(/[^a-zA-Z0-9_.-]/g, '_')
+  const hash = createHash('sha256').update(trimmed).digest('hex').slice(0, 12)
+  return `organization.${safe}.${hash}.${suffix}`
+}
 
 /** 供 server-credentials API 使用的脱敏规则：长值显示尾 4 位，短值只显示已设置。 */
 export function maskConfigValue(value: string): string {
@@ -277,24 +291,6 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
     },
   },
   {
-    key: 'server.qms-postgres-url',
-    envName: 'QMS_POSTGRES_URL',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      config.qms.secrets.postgresUrl = value || undefined
-    },
-  },
-  {
-    key: 'server.qms-redis-url',
-    envName: 'QMS_REDIS_URL',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      config.qms.secrets.redisUrl = value || undefined
-    },
-  },
-  {
     key: 'server.qms-api-key',
     envName: 'QMS_API_KEY',
     ignoreEnvGate: false,
@@ -310,33 +306,6 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
     apply: (config, value) => {
       if (!config.qms) return
       if (!config.qms.secrets.apiKey) config.qms.secrets.apiKey = value || undefined
-    },
-  },
-  {
-    key: 'server.qms-telemetry-private-key',
-    envName: 'QMS_TELEMETRY_PRIVATE_KEY',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      config.qms.secrets.privateKeyPem = value || undefined
-    },
-  },
-  {
-    key: 'qms.telemetry-private-key',
-    envName: 'QMS_TELEMETRY_PRIVATE_KEY',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      if (!config.qms.secrets.privateKeyPem) config.qms.secrets.privateKeyPem = value || undefined
-    },
-  },
-  {
-    key: 'server.qms-telemetry-public-key',
-    envName: 'QMS_TELEMETRY_PUBLIC_KEY',
-    ignoreEnvGate: false,
-    apply: (config, value) => {
-      if (!config.qms) return
-      config.qms.secrets.publicKeyPem = value || undefined
     },
   },
   {
@@ -362,6 +331,7 @@ const SERVER_FIELDS: readonly ServerFieldSpec[] = [
 export class ConfigStore {
   private readonly client: NexusClient | null
   private readonly cache = new Map<ConfigKey, string>()
+  private readonly managed = new Map<ConfigKey, string | undefined>()
   private refreshTimer: NodeJS.Timeout | null = null
   private lastFingerprint: string | null = null
 
@@ -371,8 +341,11 @@ export class ConfigStore {
 
   /** 同步读缓存；未初始化（runner 子进程）或未设置时返回 undefined，不抛错。 */
   get(key: ConfigKey): string | undefined {
-    return this.cache.get(key)
+    return this.managed.has(key) ? this.managed.get(key) : this.cache.get(key)
   }
+
+  setManaged(key: ConfigKey, value: string | undefined): void { this.managed.set(key, value) }
+  isManaged(key: ConfigKey): boolean { return this.managed.has(key) }
 
   /** 当前缓存的 key 集合（测试/诊断用）。 */
   keys(): Set<ConfigKey> {
@@ -391,18 +364,26 @@ export class ConfigStore {
     if (!this.client) return
     await this.probe()
     for (const key of CONFIG_KEYS) {
-      const record = await this.client.getSecret(CONFIG_NAMESPACE, key)
-      if (record === null) continue
-      if (record.value === null) {
-        throw new Error(
-          `[ConfigStore] Nexus 记录损坏（存在但无值）: ${key}。` +
-            `恢复方法：停止 moss-server，经加密服务删除该记录 ` +
-            `（password-vault.secret_delete，namespace=${CONFIG_NAMESPACE}）后重启重新录入`,
-        )
-      }
-      this.cache.set(key, record.value)
+      await this.refreshKey(key)
     }
     await this.probe()
+  }
+
+  async refreshKey(key: ConfigKey): Promise<void> {
+    if (!this.client) return
+    const record = await this.client.getSecret(CONFIG_NAMESPACE, key)
+    if (record === null) {
+      this.cache.delete(key)
+      return
+    }
+    if (record.value === null) {
+      throw new Error(
+        `[ConfigStore] Nexus 记录损坏（存在但无值）: ${key}。` +
+          `恢复方法：停止 moss-server，经加密服务删除该记录 ` +
+          `（password-vault.secret_delete，namespace=${CONFIG_NAMESPACE}）后重启重新录入`,
+      )
+    }
+    this.cache.set(key, record.value)
   }
 
   /** put→get→delete 探针：put/get 任一失败或读回值不符 → throw；delete 尽力而为。 */
@@ -421,6 +402,7 @@ export class ConfigStore {
    * 仅用于 server.json 侧 10 个字段时才传 config。
    */
   async put(key: ConfigKey, value: string, config?: ServerConfig): Promise<void> {
+    if (this.isManaged(key)) throw new PlatformConfigError(409, '该凭据已由平台配置接管')
     if (!this.client) {
       throw new Error('[ConfigStore] 未初始化（initConfigStore 未调用），无法写入')
     }
@@ -435,6 +417,7 @@ export class ConfigStore {
    * resolveServerConfig 的取值语义，与现状"从文件删键"运行时等价。
    */
   async remove(key: ConfigKey, config?: ServerConfig): Promise<void> {
+    if (this.isManaged(key)) throw new PlatformConfigError(409, '该凭据已由平台配置接管')
     if (!this.client) {
       throw new Error('[ConfigStore] 未初始化（initConfigStore 未调用），无法删除')
     }
@@ -464,6 +447,12 @@ export class ConfigStore {
    */
   hydrateConfig(config: ServerConfig): void {
     for (const field of SERVER_FIELDS) {
+      if (this.managed.has(field.key)) { field.apply(config, this.managed.get(field.key) || field.fallbackValue); continue }
+      // Keep the legacy QMS alias only for unmanaged deployments; managed values remain authoritative.
+      if (field.key === 'server.qms-api-key' && !process.env.QMS_API_KEY?.trim() && process.env.QMS_DEFAULT_API_KEY?.trim()) {
+        field.apply(config, process.env.QMS_DEFAULT_API_KEY.trim())
+        continue
+      }
       // env 优先（hub 除外）：config 已由 resolveServerConfig 置为 env 值，保持不动
       if (!field.ignoreEnvGate && process.env[field.envName]) continue
       // Nexus 有值用 Nexus，否则回落默认/undefined —— 覆盖并丢弃文件值

@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, type CommandContext } from '../application/commandContext.js'
 import {
   BillingRepository,
@@ -11,7 +10,7 @@ import type { BillingOperationStatus, BillingOrderStatus, CreditApplicationStatu
 import { BillingDomainError } from '../billing/types.js'
 import type { WalletService } from '../billing/walletService.js'
 import type { IdentityRepository } from '../identity/identityRepository.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import type {
   SudoworkP3CreditApplication,
   SudoworkP3Order,
@@ -92,7 +91,7 @@ export class P3BillingMigrationBlockedError extends Error {
 
 export class P3BillingMigrationService {
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly db: DbDriver,
     private readonly identities: IdentityRepository,
     private readonly repository: BillingRepository,
     private readonly wallet: WalletService,
@@ -101,7 +100,7 @@ export class P3BillingMigrationService {
     private readonly secrets?: P3BillingSecretPort,
   ) {}
 
-  plan(source: SudoworkP3Snapshot): P3BillingMigrationPlan {
+  async plan(source: SudoworkP3Snapshot): Promise<P3BillingMigrationPlan> {
     const issues: P3BillingMigrationIssue[] = []
     const users = new Map<number, ResolvedUser>()
     const sourceUsers = new Map(source.users.map(user => [user.id, user]))
@@ -116,13 +115,13 @@ export class P3BillingMigrationService {
     this.checkDuplicates(source.refunds, 'refund_no', row => row.refundNo, issues)
 
     for (const user of source.users) {
-      const mapped = this.identities.resolveNumericAliasGlobal('user', user.id)
+      const mapped = await this.identities.resolveNumericAliasGlobal('user', user.id)
       if (!mapped) {
         issue(issues, 'IDENTITY_MAPPING_MISSING', 'user', user.id, `旧用户 ${user.id} 尚未完成 P1 身份映射`)
         continue
       }
       if (user.enterpriseId !== null) {
-        const org = this.identities.resolveNumericAliasGlobal('enterprise', user.enterpriseId)
+        const org = await this.identities.resolveNumericAliasGlobal('enterprise', user.enterpriseId)
         if (!org) {
           issue(issues, 'IDENTITY_MAPPING_MISSING', 'enterprise', user.enterpriseId, `旧企业 ${user.enterpriseId} 尚未完成 P1 身份映射`)
           continue
@@ -132,7 +131,7 @@ export class P3BillingMigrationService {
           continue
         }
       }
-      const targetWallet = this.repository.getWallet('user', mapped.resourceId)
+      const targetWallet = await this.repository.getWallet('user', mapped.resourceId)
       if (!targetWallet && !this.planning?.isProjected('user', mapped.resourceId)) {
         issue(issues, 'TARGET_CONFLICT', 'user', user.id, 'Moss 用户缺少统一钱包')
       } else if (targetWallet && targetWallet.balanceUnits !== 0 && targetWallet.balanceUnits !== user.balanceUnits) {
@@ -164,7 +163,7 @@ export class P3BillingMigrationService {
       if (!sourceUsers.has(order.userId) || !user) {
         issue(issues, 'INVALID_REFERENCE', 'order', order.id, `引用未映射用户 ${order.userId}`)
       }
-      if (order.enterpriseId !== null) this.assertOrgReference(order.enterpriseId, user, 'order', order.id, issues)
+      if (order.enterpriseId !== null) await this.assertOrgReference(order.enterpriseId, user, 'order', order.id, issues)
       if (order.status === 0 || order.status === 1) issue(issues, 'IN_PROGRESS', 'order', order.id, '订单仍处于待支付或支付中')
       else if (![2, 3, 4, 5].includes(order.status)) issue(issues, 'INVALID_STATUS', 'order', order.id, `未知订单状态 ${order.status}`)
       if (order.paymentMethod !== 'ALIPAY' && order.paymentMethod !== 'WECHAT') {
@@ -200,7 +199,7 @@ export class P3BillingMigrationService {
       if (!user || (application.adminId !== null && !users.has(application.adminId))) {
         issue(issues, 'INVALID_REFERENCE', 'credit_application', application.id, '授信申请引用未映射用户或管理员')
       }
-      if (application.enterpriseId !== null) this.assertOrgReference(application.enterpriseId, user, 'credit_application', application.id, issues)
+      if (application.enterpriseId !== null) await this.assertOrgReference(application.enterpriseId, user, 'credit_application', application.id, issues)
       if (['PENDING', 'PROCESSING', 'SYNC_UNKNOWN'].includes(application.status)) {
         issue(issues, 'IN_PROGRESS', 'credit_application', application.id, `授信申请仍处于 ${application.status}`)
       } else if (!['APPROVED', 'REJECTED', 'SYNC_FAILED'].includes(application.status)) {
@@ -216,24 +215,24 @@ export class P3BillingMigrationService {
       else if (![1, 2].includes(refund.status)) issue(issues, 'INVALID_STATUS', 'refund', refund.id, `未知退款状态 ${refund.status}`)
     }
 
-    const orderIds = this.resolveTargetIds('billing_order', source.orders, row => row.id, issues)
-    const creditApplicationIds = this.resolveTargetIds('credit_application', source.creditApplications, row => row.id, issues)
-    const refundIds = this.resolveTargetIds('billing_refund', source.refunds, row => row.id, issues)
+    const orderIds = await this.resolveTargetIds('billing_order', source.orders, row => row.id, issues)
+    const creditApplicationIds = await this.resolveTargetIds('credit_application', source.creditApplications, row => row.id, issues)
+    const refundIds = await this.resolveTargetIds('billing_refund', source.refunds, row => row.id, issues)
     for (const order of source.orders) {
-      const existing = this.repository.getOrderByLegacyId(order.id)
-      const byNumber = this.repository.getOrderByOrderNo(order.orderNo)
+      const existing = await this.repository.getOrderByLegacyId(order.id)
+      const byNumber = await this.repository.getOrderByOrderNo(order.orderNo)
       if ((existing && existing.orderNo !== order.orderNo) || (byNumber && byNumber.legacyId !== order.id)) {
         issue(issues, 'TARGET_CONFLICT', 'order', order.id, '目标订单 ID 或订单号已被其他记录占用')
       }
     }
     for (const application of source.creditApplications) {
-      const existing = this.repository.getCreditApplicationByLegacyId(application.id)
+      const existing = await this.repository.getCreditApplicationByLegacyId(application.id)
       if (existing && existing.applicationNo !== application.applicationNo) {
         issue(issues, 'TARGET_CONFLICT', 'credit_application', application.id, '目标授信申请 ID 已被其他记录占用')
       }
     }
     for (const refund of source.refunds) {
-      const existing = this.repository.getRefundByLegacyId(refund.id)
+      const existing = await this.repository.getRefundByLegacyId(refund.id)
       if (existing && existing.refundNo !== refund.refundNo) {
         issue(issues, 'TARGET_CONFLICT', 'refund', refund.id, '目标退款 ID 已被其他记录占用')
       }
@@ -253,17 +252,18 @@ export class P3BillingMigrationService {
     if (plan.status === 'blocked') throw new P3BillingMigrationBlockedError(plan)
     await this.stageSudorouterTokens(plan)
     const source = plan.source
-    const before = this.counts()
-    const beforeLedger = source.users.reduce((sum, user) => {
+    const before = await this.counts()
+    let beforeLedger = 0
+    for (const user of source.users) {
       const mapped = plan.users.get(user.id)
-      return sum + (mapped ? this.repository.countOwnerLedgerEntries('user', mapped.userId) : 0)
-    }, 0)
+      beforeLedger += mapped ? await this.repository.countOwnerLedgerEntries('user', mapped.userId) : 0
+    }
 
-    return runInTransaction(this.db, () => {
+    return this.db.transaction(async () => {
       const ledgerByUser = groupBy(source.ledger, row => row.userId)
       for (const sourceUser of source.users) {
         const target = requiredMap(plan.users, sourceUser.id, '用户')
-        this.wallet.importLegacySnapshot({
+        await this.wallet.importLegacySnapshot({
           ownerId: target.userId, legacyUserId: sourceUser.id,
           balanceUnits: sourceUser.balanceUnits, sourceChecksum: source.checksum,
           entries: (ledgerByUser.get(sourceUser.id) ?? []).map(row => ({
@@ -276,13 +276,13 @@ export class P3BillingMigrationService {
         })
       }
 
-      for (const order of source.orders) this.importOrder(order, plan, context)
-      for (const application of source.creditApplications) this.importCreditApplication(application, plan, context)
+      for (const order of source.orders) await this.importOrder(order, plan, context)
+      for (const application of source.creditApplications) await this.importCreditApplication(application, plan, context)
       for (const record of source.rechargeRecords) {
-        if (this.repository.getActivityByLegacyId('CLIENT', record.id)) continue
+        if (await this.repository.getActivityByLegacyId('CLIENT', record.id)) continue
         const order = source.orders.find(item => item.id === record.orderId)!
         const user = requiredMap(plan.users, record.userId, '充值用户')
-        this.repository.insertActivityRecord({
+        await this.repository.insertActivityRecord({
           id: stableId('p3-client-activity', record.id), legacyId: record.id, activityType: 'CLIENT',
           userId: user.userId, orgId: user.orgId, orderId: requiredMap(plan.orderIds, record.orderId, '订单'),
           actorUserId: null, applicationId: null, pointsUnits: record.balanceDeltaUnits,
@@ -299,12 +299,12 @@ export class P3BillingMigrationService {
         })
       }
       for (const record of source.adminRechargeRecords) {
-        if (this.repository.getActivityByLegacyId('ADMIN', record.id)) continue
+        if (await this.repository.getActivityByLegacyId('ADMIN', record.id)) continue
         const user = requiredMap(plan.users, record.userId, '充值用户')
         const admin = requiredMap(plan.users, record.adminId, '管理员')
         const applicationId = record.source === 'CREDIT_APPLICATION' && record.sourceId !== null
           ? requiredMap(plan.creditApplicationIds, record.sourceId, '授信申请') : null
-        this.repository.insertActivityRecord({
+        await this.repository.insertActivityRecord({
           id: stableId('p3-admin-activity', record.id), legacyId: record.id, activityType: 'ADMIN',
           userId: user.userId, orgId: user.orgId, orderId: null, actorUserId: admin.userId,
           applicationId, pointsUnits: record.pointsUnits, quotaUnits: record.quotaUnits,
@@ -319,11 +319,11 @@ export class P3BillingMigrationService {
           createdAt: record.createdAt, processedAt: record.createdAt,
         })
       }
-      for (const refund of source.refunds) this.importRefund(refund, plan, context)
+      for (const refund of source.refunds) await this.importRefund(refund, plan, context)
       for (const sourceUser of source.users) {
         if (!sourceUser.externalUserId) continue
         const user = requiredMap(plan.users, sourceUser.id, '用户')
-        this.repository.upsertExternalAccount({
+        await this.repository.upsertExternalAccount({
           provider: 'sudorouter', ownerType: 'user', ownerId: user.userId,
           externalAccountId: sourceUser.externalUserId, quotaUnits: sourceUser.quotaUnits,
           usedQuotaUnits: sourceUser.usedQuotaUnits,
@@ -332,12 +332,13 @@ export class P3BillingMigrationService {
         })
       }
 
-      const verification = this.verifySnapshot(source, plan)
-      const after = this.counts()
-      const afterLedger = source.users.reduce((sum, user) => {
+      const verification = await this.verifySnapshot(source, plan)
+      const after = await this.counts()
+      let afterLedger = 0
+      for (const user of source.users) {
         const mapped = requiredMap(plan.users, user.id, '用户')
-        return sum + this.repository.countOwnerLedgerEntries('user', mapped.userId)
-      }, 0)
+        afterLedger += await this.repository.countOwnerLedgerEntries('user', mapped.userId)
+      }
       const report: P3BillingMigrationReport = {
         migrationRunId: context.migrationRunId!, sourceChecksum: source.checksum,
         users: source.users.length, orders: source.orders.length,
@@ -349,21 +350,21 @@ export class P3BillingMigrationService {
         importedRefunds: after.refunds - before.refunds,
         importedActivities: after.activities - before.activities,
         financialDifferenceUnits: verification.differenceUnits,
-        deliverableExternalOutboxCount: this.repository.countDeliverableExternalOutbox(),
+        deliverableExternalOutboxCount: await this.repository.countDeliverableExternalOutbox(),
       }
       if (verification.status !== 'matched') {
         throw new BillingDomainError('MIGRATION_VERIFICATION_FAILED', verification.issues.join('; '))
       }
       const auditKey = `migration:p3:summary:${source.checksum}`
-      if (this.repository.countAuditEvents(auditKey) === 0) {
-        this.repository.insertAuditEvent({
+      if (await this.repository.countAuditEvents(auditKey) === 0) {
+        await this.repository.insertAuditEvent({
           id: stableId('p3-summary-audit', source.checksum), action: 'P3_BILLING_MIGRATION_COMPLETED',
           aggregateType: 'migration', aggregateId: context.migrationRunId!, actorUserId: null, orgId: null,
           contextSource: context.source, idempotencyKey: auditKey,
           payload: { ...report, externalEffects: 'suppressed' }, createdAt: this.clock(),
         })
       }
-      this.repository.saveMigrationCheckpoint({
+      await this.repository.saveMigrationCheckpoint({
         sourceChecksum: source.checksum, migrationRunId: context.migrationRunId!,
         report: report as unknown as Record<string, unknown>, createdAt: this.clock(), verifiedAt: this.clock(),
       })
@@ -372,14 +373,14 @@ export class P3BillingMigrationService {
   }
 
   async verify(source: SudoworkP3Snapshot): Promise<P3BillingVerificationReport> {
-    const plan = this.plan(source)
+    const plan = await this.plan(source)
     if (plan.status === 'blocked') {
       return {
         status: 'mismatch', sourceChecksum: source.checksum, differenceUnits: 0,
         issues: plan.issues.map(item => item.message),
       }
     }
-    const report = this.verifySnapshot(source, plan)
+    const report = await this.verifySnapshot(source, plan)
     const tokenIssues = await this.verifySudorouterTokens(source, plan)
     return {
       ...report,
@@ -388,19 +389,19 @@ export class P3BillingMigrationService {
     }
   }
 
-  private verifySnapshot(source: SudoworkP3Snapshot, plan: P3BillingMigrationPlan): P3BillingVerificationReport {
+  private async verifySnapshot(source: SudoworkP3Snapshot, plan: P3BillingMigrationPlan): Promise<P3BillingVerificationReport> {
     const issues: string[] = []
     let differenceUnits = 0
     for (const sourceUser of source.users) {
       const user = plan.users.get(sourceUser.id)
       if (!user) { issues.push(`用户 ${sourceUser.id} 未映射`); continue }
-      const wallet = this.repository.getWallet('user', user.userId)
-      const rebuilt = this.wallet.rebuild('user', user.userId)
+      const wallet = await this.repository.getWallet('user', user.userId)
+      const rebuilt = await this.wallet.rebuild('user', user.userId)
       const walletDifference = (wallet?.balanceUnits ?? 0) - sourceUser.balanceUnits
       differenceUnits += Math.abs(walletDifference) + Math.abs(rebuilt.difference)
       if (walletDifference !== 0 || rebuilt.difference !== 0) issues.push(`用户 ${sourceUser.id} 钱包或账本存在差异`)
       if (sourceUser.externalUserId) {
-        const account = this.repository.getExternalAccount('sudorouter', 'user', user.userId)
+        const account = await this.repository.getExternalAccount('sudorouter', 'user', user.userId)
         if (!account || account.externalAccountId !== sourceUser.externalUserId
           || account.quotaUnits !== sourceUser.quotaUnits || account.usedQuotaUnits !== sourceUser.usedQuotaUnits
           || !account.tokenSecretRef) {
@@ -409,21 +410,21 @@ export class P3BillingMigrationService {
       }
     }
     for (const order of source.orders) {
-      if (this.repository.getOrderByLegacyId(order.id)?.orderNo !== order.orderNo) issues.push(`订单 ${order.id} 未完整导入`)
+      if ((await this.repository.getOrderByLegacyId(order.id))?.orderNo !== order.orderNo) issues.push(`订单 ${order.id} 未完整导入`)
     }
     for (const application of source.creditApplications) {
-      if (this.repository.getCreditApplicationByLegacyId(application.id)?.applicationNo !== application.applicationNo) {
+      if ((await this.repository.getCreditApplicationByLegacyId(application.id))?.applicationNo !== application.applicationNo) {
         issues.push(`授信申请 ${application.id} 未完整导入`)
       }
     }
     for (const refund of source.refunds) {
-      if (this.repository.getRefundByLegacyId(refund.id)?.refundNo !== refund.refundNo) issues.push(`退款 ${refund.id} 未完整导入`)
+      if ((await this.repository.getRefundByLegacyId(refund.id))?.refundNo !== refund.refundNo) issues.push(`退款 ${refund.id} 未完整导入`)
     }
     for (const record of source.rechargeRecords) {
-      if (!this.repository.getActivityByLegacyId('CLIENT', record.id)) issues.push(`客户端充值记录 ${record.id} 未导入`)
+      if (!(await this.repository.getActivityByLegacyId('CLIENT', record.id))) issues.push(`客户端充值记录 ${record.id} 未导入`)
     }
     for (const record of source.adminRechargeRecords) {
-      if (!this.repository.getActivityByLegacyId('ADMIN', record.id)) issues.push(`管理员充值记录 ${record.id} 未导入`)
+      if (!(await this.repository.getActivityByLegacyId('ADMIN', record.id))) issues.push(`管理员充值记录 ${record.id} 未导入`)
     }
     return { status: issues.length ? 'mismatch' : 'matched', sourceChecksum: source.checksum, differenceUnits, issues }
   }
@@ -461,7 +462,7 @@ export class P3BillingMigrationService {
       if (!sourceUser.externalUserId) continue
       const target = plan.users.get(sourceUser.id)
       if (!target) continue
-      const account = this.repository.getExternalAccount('sudorouter', 'user', target.userId)
+      const account = await this.repository.getExternalAccount('sudorouter', 'user', target.userId)
       if (!account?.tokenSecretRef || !this.secrets) {
         issues.push(`用户 ${sourceUser.id} Sudorouter Token 不存在`)
         continue
@@ -476,8 +477,8 @@ export class P3BillingMigrationService {
     return issues
   }
 
-  private importOrder(order: SudoworkP3Order, plan: P3BillingMigrationPlan, context: CommandContext): void {
-    if (this.repository.getOrderByLegacyId(order.id)) return
+  private async importOrder(order: SudoworkP3Order, plan: P3BillingMigrationPlan, context: CommandContext): Promise<void> {
+    if (await this.repository.getOrderByLegacyId(order.id)) return
     const user = requiredMap(plan.users, order.userId, '订单用户')
     const record: BillingOrderRecord = {
       id: requiredMap(plan.orderIds, order.id, '订单'), legacyId: order.id, orderNo: order.orderNo,
@@ -492,16 +493,16 @@ export class P3BillingMigrationService {
       idempotencyKey: `migration:p3:order:${order.id}`, createdAt: order.createdAt,
       updatedAt: order.updatedAt, expiredAt: order.expiredAt, remark: order.remark,
     }
-    this.repository.insertOrder(record)
-    this.assignAlias('billing_order', order.id, record.id, user.orgId, context.migrationRunId!)
+    await this.repository.insertOrder(record)
+    await this.assignAlias('billing_order', order.id, record.id, user.orgId, context.migrationRunId!)
   }
 
-  private importCreditApplication(
+  private async importCreditApplication(
     application: SudoworkP3CreditApplication,
     plan: P3BillingMigrationPlan,
     context: CommandContext,
-  ): void {
-    if (this.repository.getCreditApplicationByLegacyId(application.id)) return
+  ): Promise<void> {
+    if (await this.repository.getCreditApplicationByLegacyId(application.id)) return
     const user = requiredMap(plan.users, application.userId, '授信用户')
     const admin = application.adminId === null ? null : requiredMap(plan.users, application.adminId, '授信管理员')
     const record: CreditApplicationRecord = {
@@ -514,16 +515,16 @@ export class P3BillingMigrationService {
       idempotencyKey: `migration:p3:credit:${application.id}`, requestFingerprint: fingerprint(application),
       createdAt: application.createdAt, reviewedAt: application.reviewedAt, updatedAt: application.updatedAt,
     }
-    this.repository.insertCreditApplication(record)
-    this.assignAlias('credit_application', application.id, record.id, user.orgId, context.migrationRunId!)
+    await this.repository.insertCreditApplication(record)
+    await this.assignAlias('credit_application', application.id, record.id, user.orgId, context.migrationRunId!)
   }
 
-  private importRefund(
+  private async importRefund(
     refund: SudoworkP3Refund,
     plan: P3BillingMigrationPlan,
     context: CommandContext,
-  ): void {
-    if (this.repository.getRefundByLegacyId(refund.id)) return
+  ): Promise<void> {
+    if (await this.repository.getRefundByLegacyId(refund.id)) return
     const user = requiredMap(plan.users, refund.userId, '退款用户')
     const record: RefundRecord = {
       id: requiredMap(plan.refundIds, refund.id, '退款'), legacyId: refund.id,
@@ -535,37 +536,37 @@ export class P3BillingMigrationService {
       idempotencyKey: `migration:p3:refund:${refund.id}`, requestFingerprint: fingerprint(refund),
       createdAt: refund.createdAt, updatedAt: refund.processedAt ?? refund.createdAt,
     }
-    this.repository.insertRefund(record)
-    this.assignAlias('billing_refund', refund.id, record.id, user.orgId, context.migrationRunId!)
+    await this.repository.insertRefund(record)
+    await this.assignAlias('billing_refund', refund.id, record.id, user.orgId, context.migrationRunId!)
   }
 
-  private assertOrgReference(
+  private async assertOrgReference(
     enterpriseId: number,
     user: ResolvedUser | undefined,
     sourceType: string,
     sourceId: number,
     issues: P3BillingMigrationIssue[],
-  ): void {
-    const org = this.identities.resolveNumericAliasGlobal('enterprise', enterpriseId)
+  ): Promise<void> {
+    const org = await this.identities.resolveNumericAliasGlobal('enterprise', enterpriseId)
     if (!org) issue(issues, 'IDENTITY_MAPPING_MISSING', 'enterprise', enterpriseId, `旧企业 ${enterpriseId} 尚未完成 P1 身份映射`)
     else if (user && org.resourceId !== user.orgId) issue(issues, 'INVALID_REFERENCE', sourceType, sourceId, '记录企业与用户所属组织不一致')
   }
 
-  private resolveTargetIds<T>(
+  private async resolveTargetIds<T>(
     namespace: string,
     rows: T[],
     legacyId: (row: T) => number,
     issues: P3BillingMigrationIssue[],
-  ): Map<number, string> {
+  ): Promise<Map<number, string>> {
     const result = new Map<number, string>()
     for (const row of rows) {
       const id = legacyId(row)
-      const alias = this.identities.resolveNumericAliasGlobal(namespace, id)
+      const alias = await this.identities.resolveNumericAliasGlobal(namespace, id)
       const resourceId = alias?.resourceId ?? stableId(namespace, id)
       if (alias) {
-        const owner = namespace === 'billing_order' ? this.repository.getOrderByLegacyId(id)?.id
-          : namespace === 'credit_application' ? this.repository.getCreditApplicationByLegacyId(id)?.id
-            : this.repository.getRefundByLegacyId(id)?.id
+        const owner = namespace === 'billing_order' ? (await this.repository.getOrderByLegacyId(id))?.id
+          : namespace === 'credit_application' ? (await this.repository.getCreditApplicationByLegacyId(id))?.id
+            : (await this.repository.getRefundByLegacyId(id))?.id
         if (owner !== resourceId) issue(issues, 'TARGET_CONFLICT', namespace, id, '数字别名指向不存在或不一致的目标记录')
       }
       result.set(id, resourceId)
@@ -573,9 +574,9 @@ export class P3BillingMigrationService {
     return result
   }
 
-  private assignAlias(namespace: string, legacyId: number, resourceId: string, orgId: string, migrationRunId: string): void {
-    if (this.identities.resolveNumericAliasGlobal(namespace, legacyId)) return
-    this.identities.assignNumericAlias({ namespace, legacyId, resourceId, orgId, migrationRunId })
+  private async assignAlias(namespace: string, legacyId: number, resourceId: string, orgId: string, migrationRunId: string): Promise<void> {
+    if (await this.identities.resolveNumericAliasGlobal(namespace, legacyId)) return
+    await this.identities.assignNumericAlias({ namespace, legacyId, resourceId, orgId, migrationRunId })
   }
 
   private checkDuplicates<T>(
@@ -592,10 +593,10 @@ export class P3BillingMigrationService {
     }
   }
 
-  private counts(): { orders: number; credits: number; refunds: number; activities: number } {
+  private async counts(): Promise<{ orders: number; credits: number; refunds: number; activities: number }> {
     return {
-      orders: this.repository.countOrders(), credits: this.repository.countCreditApplications(),
-      refunds: this.repository.countRefunds(), activities: this.repository.countActivityRecords(),
+      orders: await this.repository.countOrders(), credits: await this.repository.countCreditApplications(),
+      refunds: await this.repository.countRefunds(), activities: await this.repository.countActivityRecords(),
     }
   }
 }

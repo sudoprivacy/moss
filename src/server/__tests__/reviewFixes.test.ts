@@ -60,7 +60,7 @@ describe("A2: setSessionLifecycle onlyWhenDesiredActive", () => {
     const row = await store.getSession("s-a2-1");
     assert.equal(row!.status, "active");
     assert.equal(row!.desiredState, "active");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("does NOT flip a session the user terminated back to active", async () => {
@@ -73,7 +73,7 @@ describe("A2: setSessionLifecycle onlyWhenDesiredActive", () => {
     const row = await store.getSession("s-a2-2");
     assert.equal(row!.status, "terminated", "status must stay terminated");
     assert.equal(row!.desiredState, "terminated", "desired_state must stay terminated");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("without the flag the write stays unconditional (existing callers unchanged)", async () => {
@@ -85,7 +85,7 @@ describe("A2: setSessionLifecycle onlyWhenDesiredActive", () => {
     await store.setSessionLifecycle("s-a2-3", "active", "active");
     const row = await store.getSession("s-a2-3");
     assert.equal(row!.status, "active");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });
 
@@ -97,7 +97,7 @@ describe("markSessionEnded respects a user terminate", () => {
     const row = await store.getSession("s-me-1");
     assert.equal(row!.status, "ended");
     assert.equal(row!.desiredState, "ended");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("does NOT let a runner exit overwrite a terminate with 'failed'", async () => {
@@ -112,7 +112,7 @@ describe("markSessionEnded respects a user terminate", () => {
     const row = await store.getSession("s-me-2");
     assert.equal(row!.status, "terminated", "status must stay terminated");
     assert.equal(row!.desiredState, "terminated", "desired_state must stay terminated");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("does not block the terminate path's own write", async () => {
@@ -123,7 +123,7 @@ describe("markSessionEnded respects a user terminate", () => {
     await store.markSessionEnded("s-me-3", "terminated", "terminated");
     const row = await store.getSession("s-me-3");
     assert.equal(row!.status, "terminated");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });
 
@@ -144,7 +144,7 @@ describe("A6: markAttemptLost owner predicate", () => {
     await store.markAttemptLost(attempt.attemptId, "fencing wait timed out", "instance-B");
     const owned = await store.getAttempt(attempt.attemptId);
     assert.equal(owned!.runtimeState, "lost");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("without ownerInstanceId the legacy unconditional write is preserved", async () => {
@@ -154,7 +154,7 @@ describe("A6: markAttemptLost owner predicate", () => {
     await store.markAttemptLost(attempt.attemptId, "attach socket unavailable");
     const after = await store.getAttempt(attempt.attemptId);
     assert.equal(after!.runtimeState, "lost");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });
 
@@ -175,7 +175,7 @@ describe("A10: listOrphanedActiveSessions is bounded", () => {
     const again = await store.listOrphanedActiveSessions("self-instance", 30_000);
     assert.equal(again.length, 100);
     assert.ok(!again.some(s => s.sessionId === "s-a10-term"), "terminated session excluded");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });
 
@@ -186,11 +186,11 @@ describe("F-25: concurrent registerServerInstance", () => {
       store.registerServerInstance("host-a", 1, "inst-a"),
       store.registerServerInstance("host-b", 2, "inst-b"),
     ]);
-    const rows = store.db
+    const rows = store.requireSqliteDb()
       .prepare("SELECT instance_id FROM server_instances ORDER BY instance_id")
       .all() as Array<{ instance_id: string }>;
     assert.deepEqual(rows.map(r => r.instance_id), ["inst-a", "inst-b"]);
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("same-id concurrent re-register stays UPSERT-safe (single row, no crash)", async () => {
@@ -199,11 +199,11 @@ describe("F-25: concurrent registerServerInstance", () => {
       store.registerServerInstance("host-a", 1, "same-id"),
       store.registerServerInstance("host-a", 2, "same-id"),
     ]);
-    const rows = store.db
+    const rows = store.requireSqliteDb()
       .prepare("SELECT COUNT(*) AS n FROM server_instances WHERE instance_id = 'same-id'")
       .get() as { n: number };
     assert.equal(Number(rows.n), 1, "stable id UPSERTs over itself — exactly one row");
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });
 

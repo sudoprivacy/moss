@@ -2,37 +2,37 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { readTargetIdentitySnapshot } from './targetIdentitySnapshot.js'
 
 void describe('readTargetIdentitySnapshot', () => {
   void test('从 Moss 统一身份表读取组织、用户、验证状态、Provider 与数字别名', async () => {
     const db = new DatabaseSync(':memory:')
     const auth = new AuthCenterDb(db)
-    const identities = new IdentityRepository(db)
+    const identities = createIdentityTestRepository(db, {}, auth.driver)
     await auth.createOrganization('org-a', '企业 A', 1)
-    identities.putOrganizationProfile({
-      orgId: 'org-a', code: 'ENT-A', codeVerified: true,
+    await identities.putOrganizationProfile({
+      orgId: 'org-a', code: 'ENT-A',
       loginMethod: 'password', localEnabled: true, cloudEnabled: true,
     })
-    identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 7, resourceId: 'org-a', orgId: 'org-a' })
+    await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 7, resourceId: 'org-a', orgId: 'org-a' })
     await auth.createUser({
       id: 'user-a', orgId: 'org-a', email: 'a@example.test', name: '13800000000',
       displayName: 'A', departmentId: null, role: 'user', status: 'active', localAuth: true,
       tokenLimit: null, createdAt: 1, passwordHash: 'hash', passwordUpdatedAt: 1,
       lastLoginAt: null, extUserId: null,
     })
-    identities.createAuthIdentity({
+    await identities.createAuthIdentity({
       id: 'phone-a', orgId: 'org-a', userId: 'user-a', provider: 'phone', issuer: 'sudowork',
       normalizedSubject: '13800000000', metadata: { verified: true },
     })
-    identities.createAuthIdentity({
+    await identities.createAuthIdentity({
       id: 'cas-a', orgId: 'org-a', userId: 'user-a', provider: 'cas', issuer: 'cas-main',
       normalizedSubject: 'external-a', metadata: {},
     })
-    identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-a', orgId: 'org-a' })
+    await identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-a', orgId: 'org-a' })
 
-    assert.deepEqual(readTargetIdentitySnapshot(auth, identities), {
+    assert.deepEqual(await readTargetIdentitySnapshot(auth, identities), {
       organizations: [{ id: 'org-a', name: '企业 A', code: 'ENT-A', codeVerified: true, legacyAlias: 7 }],
       users: [{
         id: 'user-a', orgId: 'org-a', email: 'a@example.test', emailVerified: false,

@@ -45,7 +45,7 @@ function setup(runtime = createRuntime(), enhancement = createEnhancement()) {
     runtime,
     enhancement,
     getActor: authorization => authorization === 'Bearer access-token' ? actor : null,
-    buildVisibility: received => {
+    buildVisibility: async received => {
       assert.deepEqual(received, actor)
       return visibility
     },

@@ -202,6 +202,56 @@ describe('NexusClient（加密服务门面语义）', () => {
     expect(fake.entries[0].deleted).toBe(true)
   })
 
+  it('listSecretMetadata: exact/descendant namespaces only, disabled records retained, no value reads', async () => {
+    const fake = new FakeNative()
+    fake.set('org:1:system', 'root', 'fixture-root', 3)
+    fake.set('org:1:system:weather', 'token', 'fixture-token', 4)
+    fake.set('org:1:system:mail', 'smtp-pass', 'fixture-disabled', 2, true)
+    fake.set('org:1:system-other', 'token', 'fixture-other-prefix')
+    fake.set('org:10:system:weather', 'token', 'fixture-other-org')
+    fake.set('user:u1:foo', 'apiKey', 'fixture-user')
+    const client = makeClient(fake)
+
+    expect(await client.listSecretMetadata('org:1:system')).toEqual([
+      { namespace: 'org:1:system', key: 'root', status: 'enabled', version: 3 },
+      { namespace: 'org:1:system:weather', key: 'token', status: 'enabled', version: 4 },
+      { namespace: 'org:1:system:mail', key: 'smtp-pass', status: 'disabled', version: 2 },
+    ])
+    expect(fake.calls).toEqual(['secret_list'])
+  })
+
+  it('listSecretMetadata: empty and unfiltered lists never batchGet', async () => {
+    const fake = new FakeNative()
+    const client = makeClient(fake)
+    expect(await client.listSecretMetadata()).toEqual([])
+    fake.set('ns', 'key', 'fixture-only', 7, true)
+    expect(await client.listSecretMetadata()).toEqual([
+      { namespace: 'ns', key: 'key', status: 'disabled', version: 7 },
+    ])
+    expect(await client.listSecretMetadata('other')).toEqual([])
+    expect(fake.calls).toEqual(['secret_list', 'secret_list', 'secret_list'])
+  })
+
+  it('listSecretMetadata: saved state survives disable/enable and versions update on writes', async () => {
+    const fake = new FakeNative()
+    const client = makeClient(fake)
+    await client.putSecret('ns', 'token', 'fixture-first')
+    await client.disableSecret('ns', 'token')
+    expect(await client.listSecretMetadata('ns')).toEqual([
+      { namespace: 'ns', key: 'token', status: 'disabled', version: 1 },
+    ])
+    await client.enableSecret('ns', 'token')
+    expect(await client.listSecretMetadata('ns')).toEqual([
+      { namespace: 'ns', key: 'token', status: 'enabled', version: 1 },
+    ])
+    await client.putSecret('ns', 'token', 'fixture-second')
+    expect(await client.listSecretMetadata('ns')).toEqual([
+      { namespace: 'ns', key: 'token', status: 'enabled', version: 2 },
+    ])
+    expect(fake.calls).not.toContain('secret_batch_get')
+    expect(fake.calls).not.toContain('secret_get')
+  })
+
   it('listSecrets: 前缀过滤 + status 映射 + 软删项 value 为 null', async () => {
     const fake = new FakeNative()
     fake.set('org:1:system:weather', 'token', 'abc', 1)
@@ -214,6 +264,7 @@ describe('NexusClient（加密服务门面语义）', () => {
       { namespace: 'org:1:system:weather', key: 'token', value: 'abc', status: 'enabled', version: 1 },
       { namespace: 'org:1:system:mail', key: 'smtp-pass', value: null, status: 'disabled', version: 2 },
     ])
+    expect(fake.calls).toEqual(['secret_list', 'secret_batch_get'])
   })
 
   it('listConfiguredNamespaces: DISTINCT + 前缀', async () => {

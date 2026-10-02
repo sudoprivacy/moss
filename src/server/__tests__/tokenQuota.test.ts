@@ -27,6 +27,7 @@ function makeRuntime(limits: Limits, departmentId: string | null = null) {
   // Both are synchronous on the real AuthService; the quota path uses nothing
   // else from it.
   const authService = {
+    buildVisibilityFilter: async () => ({ isAdmin: false, userId: "u", departmentId, visibleDepartmentIds: new Set() }),
     getTokenLimits: () => limits,
     getUserOrNull: () => ({ departmentId }),
   } as unknown as AuthService;

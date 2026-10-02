@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
+import { randomInt, randomUUID } from 'node:crypto'
 import type { CommandContext } from '../application/commandContext.js'
 import { AuthCenterDb, hashPassword, type AuthCenterUser } from '../authCenter/db.js'
 import {
@@ -29,9 +28,14 @@ export function hasGlobalOrganizationAccess(actor: IdentityActor): boolean {
   return actor.role === 'super_admin' && actor.organizationScoped !== true
 }
 
+const INVITATION_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+export function generateInvitationCode(): string {
+  return Array.from({ length: 6 }, () => INVITATION_CODE_ALPHABET[randomInt(INVITATION_CODE_ALPHABET.length)]!).join('')
+}
+
 export class OrganizationIdentityService {
   constructor(
-    private readonly db: DatabaseSync,
     private readonly authDb: AuthCenterDb,
     private readonly repository: IdentityRepository,
     private readonly unifiedIdentity: UnifiedIdentityService,
@@ -67,8 +71,8 @@ export class OrganizationIdentityService {
     if (actor) this.assertSuperAdmin(actor)
     const created = await this.unifiedIdentity.createOrganization(input, context)
     const organization = await this.authDb.getOrganization(created.organizationId)
-    const profile = this.repository.getOrganizationProfile(created.organizationId)
-    const wallet = this.repository.getWallet('organization', created.organizationId)
+    const profile = await this.repository.getOrganizationProfile(created.organizationId)
+    const wallet = await this.repository.getWallet('organization', created.organizationId)
     if (!organization || !profile || !wallet) throw new Error('Created organization is incomplete')
     return { organization, profile, wallet, legacyEnterpriseId: created.legacyEnterpriseId }
   }
@@ -82,13 +86,13 @@ export class OrganizationIdentityService {
       ? allOrganizations.filter((organization) => organization.id === actor.orgId)
       : allOrganizations
     return Promise.all(organizations.flatMap(async (organization) => {
-      const profile = this.repository.getOrganizationProfile(organization.id)
+      const profile = await this.repository.getOrganizationProfile(organization.id)
       if (!profile) return []
       return [{
         organization,
         profile,
-        wallet: this.repository.getWallet('organization', organization.id),
-        legacyEnterpriseId: this.repository.getNumericAlias('enterprise', organization.id),
+        wallet: await this.repository.getWallet('organization', organization.id),
+        legacyEnterpriseId: await this.repository.getNumericAlias('enterprise', organization.id),
         userCount: await this.authDb.countUsersByOrg(organization.id),
       }]
     })).then(items => items.flat())
@@ -110,14 +114,14 @@ export class OrganizationIdentityService {
     if (actor) this.assertOrganizationAdmin(actor, orgId)
     return this.authDb.driver.transaction(async () => {
       const organization = await this.authDb.getOrganization(orgId)
-      const profile = this.repository.getOrganizationProfile(orgId)
+      const profile = await this.repository.getOrganizationProfile(orgId)
       if (!organization || !profile) throw new IdentityDomainError('ORGANIZATION_NOT_FOUND', 'Organization not found')
       if (patch.name !== undefined) {
         const name = patch.name.trim()
         if (!name) throw new IdentityDomainError('INVALID_NAME', 'Organization name is required')
         await this.authDb.updateOrganization(orgId, { name })
       }
-      this.repository.putOrganizationProfile({
+      await this.repository.putOrganizationProfile({
         ...profile,
         ...patch,
         orgId,
@@ -125,7 +129,7 @@ export class OrganizationIdentityService {
       })
       return {
         organization: (await this.authDb.getOrganization(orgId))!,
-        profile: this.repository.getOrganizationProfile(orgId)!,
+        profile: (await this.repository.getOrganizationProfile(orgId))!,
       }
     })
   }
@@ -152,18 +156,18 @@ export class OrganizationIdentityService {
       for (let index = 0; index < input.count; index += 1) {
         let invitation: InvitationRecord | null = null
         for (let attempt = 0; attempt < 100 && !invitation; attempt += 1) {
-          const code = (codeFactory ?? (() => randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()))()
-          if (this.repository.getInvitationByCode(code)) continue
+          const code = (codeFactory ?? generateInvitationCode)()
+          if (await this.repository.getInvitationByCode(code)) continue
           const id = randomUUID()
-          this.repository.createInvitation({
+          await this.repository.createInvitation({
             id,
             orgId: input.orgId,
             code,
             initialCreditUnits,
             legacyInitialQuotaUsd: input.legacyInitialQuotaUsd,
           })
-          this.repository.allocateNumericAlias('invitation', id, input.orgId)
-          invitation = this.repository.getInvitationById(id)
+          await this.repository.allocateNumericAlias('invitation', id, input.orgId)
+          invitation = await this.repository.getInvitationById(id)
         }
         if (!invitation) throw new IdentityDomainError('INVITATION_CODE_EXHAUSTED', 'Unable to generate invitation code')
         created.push(invitation)
@@ -182,8 +186,8 @@ export class OrganizationIdentityService {
     return this.repository.listInvitations(input)
   }
 
-  deleteInvitation(id: string, actor?: IdentityActor): boolean {
-    const invitation = this.repository.getInvitationById(id)
+  async deleteInvitation(id: string, actor?: IdentityActor): Promise<boolean> {
+    const invitation = await this.repository.getInvitationById(id)
     if (!invitation) throw new IdentityDomainError('INVITATION_NOT_FOUND', 'Invitation not found')
     if (actor) this.assertOrganizationAdmin(actor, invitation.orgId)
     if (invitation.status !== 'pending') return false
@@ -249,7 +253,7 @@ export class OrganizationIdentityService {
         orgId: patch.orgId,
       })
       if (patch.orgId && patch.orgId !== user.orgId) {
-        this.repository.moveUserOrganization(userId, patch.orgId)
+        await this.repository.moveUserOrganization(userId, patch.orgId)
         // 低-6：跨 org 移动后旧 org 名下的 delegation 主动 revoke（钩子在
         // 事务提交后调用方不感知——revoke 是 best-effort 网络调用，失败
         // 由 nexus verify 复查兜底）。
@@ -270,7 +274,7 @@ export class OrganizationIdentityService {
       throw new IdentityDomainError('SUPER_ADMIN_IMMUTABLE', 'Super admin cannot be deleted')
     }
     await this.authDb.driver.transaction(async () => {
-      this.repository.deleteUserRecords(userId)
+      await this.repository.deleteUserRecords(userId)
       await this.authDb.deleteUser(userId)
     })
   }
@@ -296,7 +300,7 @@ export class OrganizationIdentityService {
       // binding 僵尸 bound、Nexus grant 泄漏且无收敛路径。非空预检在上，
       // detach 只在删除必然成功的路径上执行。
       await detachAllBindingsForOrg(this.authDb.driver, { orgId, now: Date.now() })
-      this.repository.deleteOrganizationRecords(orgId)
+      await this.repository.deleteOrganizationRecords(orgId)
       await this.authDb.deleteOrganization(orgId)
     })
   }

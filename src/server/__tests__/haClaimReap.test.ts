@@ -26,7 +26,7 @@ describe("B1: wiki build-job claim CAS + stale reaper", () => {
     assert.equal(String(first[0]!.claimed_by), "a");
     assert.equal(String(first[0]!.status), "running");
     assert.equal(Number(first[0]!.started_at), now);
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("reaper lists only stale running jobs, and a reaped job is not resurrected by a later progress update", async () => {
@@ -36,7 +36,7 @@ describe("B1: wiki build-job claim CAS + stale reaper", () => {
     const now = Date.now();
     await store.claimQueuedWikiBuildJobs(5, "a", now);        // jstale + jfresh → running
     // Age jstale's claim beyond the timeout; jfresh stays fresh.
-    store.db.prepare("UPDATE wiki_build_jobs SET claimed_at = ? WHERE id = ?").run(now - 10 * 3600_000, "jstale");
+    store.requireSqliteDb().prepare("UPDATE wiki_build_jobs SET claimed_at = ? WHERE id = ?").run(now - 10 * 3600_000, "jstale");
 
     const stale = await store.listStaleRunningWikiBuildJobs(now - 3600_000);
     assert.equal(stale.length, 1);
@@ -50,13 +50,13 @@ describe("B1: wiki build-job claim CAS + stale reaper", () => {
     const after = await store.getWikiBuildJob("jstale");
     assert.equal(String(after!.status), "failed");
     assert.equal(Number(after!.progress), 50);
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });
 
 describe("B3: event-trigger boot reap age threshold", () => {
   const insertTrigger = (store: DirectConnectStore, id: string, timeoutMs: number | null) => {
-    store.db.prepare(
+    store.requireSqliteDb().prepare(
       "INSERT INTO event_triggers (id, org_id, user_id, name, secret_hash, secret_prefix, prompt_template, timeout_ms, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(id, "o1", "u1", `t-${id}`, "hash", "prefix", "prompt", timeoutMs, Date.now(), Date.now());
   };
@@ -78,15 +78,15 @@ describe("B3: event-trigger boot reap age threshold", () => {
     // An aged run still 'queued' is NEVER reaped — the queued set is the
     // shared claim queue any instance's claimQueuedRuns picks up; reaping by
     // age silently discarded never-executed events.
-    store.db.prepare("UPDATE event_trigger_runs SET created_at = ? WHERE id = ?").run(now - 60 * 60 * 1000, fresh!.id);
+    store.requireSqliteDb().prepare("UPDATE event_trigger_runs SET created_at = ? WHERE id = ?").run(now - 60 * 60 * 1000, fresh!.id);
     const reapedQueued = await ets.reapStaleRuns(now, EVENT_RUN_TIMEOUT_MS, "stale");
     assert.equal(reapedQueued, 0);
 
     // The same aged run flipped to 'running' IS reaped (orphaned by a crash).
-    store.db.prepare("UPDATE event_trigger_runs SET status = 'running' WHERE id = ?").run(fresh!.id);
+    store.requireSqliteDb().prepare("UPDATE event_trigger_runs SET status = 'running' WHERE id = ?").run(fresh!.id);
     const reapedRunning = await ets.reapStaleRuns(now, EVENT_RUN_TIMEOUT_MS, "stale");
     assert.equal(reapedRunning, 1);
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 
   it("honours a per-trigger timeout larger than the default (B-4)", async () => {
@@ -100,14 +100,14 @@ describe("B3: event-trigger boot reap age threshold", () => {
     assert.ok(run);
     // 'running' for 20 minutes: past the 15-min DEFAULT threshold, well
     // within this trigger's 60-min timeout → must NOT be reaped.
-    store.db.prepare("UPDATE event_trigger_runs SET status = 'running', started_at = ? WHERE id = ?").run(now - 20 * 60 * 1000, run!.id);
+    store.requireSqliteDb().prepare("UPDATE event_trigger_runs SET status = 'running', started_at = ? WHERE id = ?").run(now - 20 * 60 * 1000, run!.id);
     const reapedAtDefault = await ets.reapStaleRuns(now, EVENT_RUN_TIMEOUT_MS, "stale");
     assert.equal(reapedAtDefault, 0);
 
     // Aged past the per-trigger threshold (60min + 60s margin) → reaped.
-    store.db.prepare("UPDATE event_trigger_runs SET started_at = ? WHERE id = ?").run(now - 62 * 60 * 1000, run!.id);
+    store.requireSqliteDb().prepare("UPDATE event_trigger_runs SET started_at = ? WHERE id = ?").run(now - 62 * 60 * 1000, run!.id);
     const reapedPastCustom = await ets.reapStaleRuns(now, EVENT_RUN_TIMEOUT_MS, "stale");
     assert.equal(reapedPastCustom, 1);
-    store.db.close();
+    store.requireSqliteDb().close();
   });
 });

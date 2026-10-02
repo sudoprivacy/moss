@@ -176,6 +176,9 @@ CREATE TABLE IF NOT EXISTS qms_task_leases (
   last_started_at TIMESTAMPTZ, last_completed_at TIMESTAMPTZ, last_error TEXT,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+`
+
+const LEGACY_MIGRATION_SCHEMA = `
 CREATE TABLE IF NOT EXISTS qms_migration_checkpoints (
   migration_id TEXT NOT NULL, table_name TEXT NOT NULL, source_checksum TEXT NOT NULL,
   cursor_json JSONB, migrated_rows BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL,
@@ -300,11 +303,45 @@ export interface QmsSchemaState {
   continuousAggregates: boolean
 }
 
+export const MOSS_QMS_SCHEMA = 'moss_qms'
+export const MOSS_QMS_TABLES = new Set(
+  [...`${BASE_SCHEMA}\n${REGULAR_AGGREGATE_SCHEMA}`.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map(match => match[1]!),
+)
+
+const NULLABLE_DIMENSIONS = new Set(['tenant_id', 'org_id', 'login_mode', 'install_type', 'model_provider'])
+
+/** PG 14-compatible identity for nullable aggregate dimensions. */
+export function qmsAggregateConflict(columns: string): string {
+  return columns.split(',').map(column => {
+    const name = column.trim()
+    return NULLABLE_DIMENSIONS.has(name) ? `(COALESCE(${name}, ''))` : name
+  }).join(', ')
+}
+
+function pg14AggregateSchema(sql: string): string {
+  const indexes: string[] = []
+  const tables = sql.replace(/CREATE TABLE IF NOT EXISTS (\w+) \([\s\S]*?\n\);/g, (statement, table: string) =>
+    statement.replace(/UNIQUE NULLS NOT DISTINCT \(([^)]+)\)/g, (_constraint: string, columns: string) => {
+      indexes.push(`CREATE UNIQUE INDEX IF NOT EXISTS uq_${table}_dimensions ON ${table} (${qmsAggregateConflict(columns)});`)
+      return `UNIQUE (${columns})`
+    }),
+  )
+  return `${tables}\n${indexes.join('\n')}`
+}
+
+/** Active Moss QMS uses ordinary tables only, with no queue/inbox or historical migration tables. */
+export async function initializeMossQmsSchema(db: QmsSqlPort): Promise<QmsSchemaState> {
+  await db.execute(pg14AggregateSchema(BASE_SCHEMA))
+  await db.execute(pg14AggregateSchema(REGULAR_AGGREGATE_SCHEMA))
+  return { timescaleAvailable: false, continuousAggregates: false }
+}
+
 export async function initializeQmsSchema(
   db: QmsSqlPort,
   options: { aggregateMode?: QmsAggregateMode } = {},
 ): Promise<QmsSchemaState> {
-  await db.execute(BASE_SCHEMA)
+  await db.execute(pg14AggregateSchema(BASE_SCHEMA))
+  await db.execute(LEGACY_MIGRATION_SCHEMA)
   const extension = await db.execute(
     "SELECT TRUE AS available FROM pg_extension WHERE extname = 'timescaledb' LIMIT 1",
   )
@@ -318,7 +355,12 @@ export async function initializeQmsSchema(
   const aggregateRelation = await db.execute(
     "SELECT relkind FROM pg_class WHERE oid = to_regclass('telemetry_perf_daily')",
   )
-  const relationKind = aggregateRelation[0]?.relkind == null ? undefined : String(aggregateRelation[0].relkind)
+  let relationKind = aggregateRelation[0]?.relkind == null ? undefined : String(aggregateRelation[0].relkind)
+  // Timescale exposes continuous aggregates as ordinary views over materialized hypertables.
+  if (relationKind === 'v' && timescaleAvailable) {
+    const continuous = await db.execute("SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = current_schema() AND view_name = 'telemetry_perf_daily'")
+    if (continuous.length > 0) relationKind = 'm'
+  }
   if (relationKind && !['r', 'p', 'm'].includes(relationKind)) {
     throw new Error(`Unsupported QMS aggregate relation kind: ${relationKind}`)
   }
@@ -347,7 +389,7 @@ export async function initializeQmsSchema(
       await db.execute(`SELECT add_retention_policy('${table}', INTERVAL '365 days', if_not_exists => TRUE)`)
     }
   } else {
-    await db.execute(REGULAR_AGGREGATE_SCHEMA)
+    await db.execute(pg14AggregateSchema(REGULAR_AGGREGATE_SCHEMA))
   }
 
   if (timescaleAvailable) {

@@ -676,7 +676,7 @@ export default function AgentHubPage() {
   const installedAgentLookup = useMemo(() => {
     const lookup = new Map<string, InstalledAgentInfo>()
     for (const agent of installedAgents) {
-      lookup.set(agent.name, agent)
+      if (!agent.isHubInstalled && agent.meta?.source_type !== 'hub') continue
       if (agent.id) {
         lookup.set(agent.id, agent)
       }
@@ -693,7 +693,6 @@ export default function AgentHubPage() {
       if (skill.id) {
         lookup.add(skill.id)
       }
-      lookup.add(skill.name)
     }
     return lookup
   }, [installedSkills])
@@ -704,7 +703,6 @@ export default function AgentHubPage() {
     if (!detailAgent) return null
     return (
       installedAgentLookup.get(detailAgent.id) ||
-      installedAgentLookup.get(detailAgent.name) ||
       null
     )
   }, [detailAgent, installedAgentLookup])
@@ -967,7 +965,7 @@ export default function AgentHubPage() {
       skills.map(skill => ({
         ...skill,
         isInstalled:
-          installedSkillLookup.has(skill.id) || installedSkillLookup.has(skill.name),
+          installedSkillLookup.has(skill.id?.trim()),
       })),
     [installedSkillLookup],
   )
@@ -1084,7 +1082,7 @@ export default function AgentHubPage() {
     setEditOpen(true)
 
     try {
-      const { rules } = await getInstalledAgentRules(agent.name)
+      const { rules } = await getInstalledAgentRules(agent.id)
       setEditRules(rules)
     } catch {
       setEditRules('')
@@ -1198,7 +1196,7 @@ export default function AgentHubPage() {
     setSavingEdit(true)
     try {
       await updateInstalledAgentMeta({
-        assistantName: editingAgent.name,
+        assistantName: editingAgent.id,
         updates: {
           display_name: editName.trim(),
           description: editDescription.trim(),
@@ -1249,7 +1247,7 @@ export default function AgentHubPage() {
 
     try {
       await uninstallAgent({
-        assistantName: pendingUninstallAgent.name,
+        assistantName: pendingUninstallAgent.id,
         sourcePath: pendingUninstallAgent.source,
       })
       toast.success(`已卸载 ${pendingUninstallAgent.displayName}`)
@@ -1301,7 +1299,7 @@ export default function AgentHubPage() {
     setSavingAgentVisibility(true)
     try {
       await updateInstalledAgentMeta({
-        assistantName: editingVisibilityAgent.name,
+        assistantName: editingVisibilityAgent.id,
         updates: {
           visible_to: agentVisibilityMode === 'admin'
             ? { department_ids: [], user_ids: [] }
@@ -1804,7 +1802,7 @@ export default function AgentHubPage() {
   const hubAgents = useMemo(
     () =>
       assistants.filter(
-        a => installedAgentLookup.has(a.id) || installedAgentLookup.has(a.name),
+        a => installedAgentLookup.has(a.id),
       ),
     [assistants, installedAgentLookup],
   )
@@ -1877,8 +1875,7 @@ export default function AgentHubPage() {
     // Otherwise, only show installed agents that match the visibility filter
     return assistants.filter(agent => {
       const installed =
-        installedAgentLookup.has(agent.id) ||
-        installedAgentLookup.has(agent.name)
+        installedAgentLookup.has(agent.id)
 
       if (!installed) return false
 
@@ -2178,8 +2175,7 @@ export default function AgentHubPage() {
                   <div className="grid gap-4 md:grid-cols-2">
                     {filteredStoreAssistants.map(agent => {
                       const installed =
-                        installedAgentLookup.has(agent.id) ||
-                        installedAgentLookup.has(agent.name)
+                        installedAgentLookup.has(agent.id)
 
                       // Find the installed agent info
                       const installedAgentInfo = installed
@@ -2980,7 +2976,7 @@ export default function AgentHubPage() {
                     <div className="space-y-2">
                       {editSkills.map(skill => {
                         const skillId = skill.id || skill.name
-                        const isInstalled = installedSkillLookup.has(skill.id?.trim()) || installedSkillLookup.has(skill.name?.trim())
+                        const isInstalled = installedSkillLookup.has(skill.id?.trim())
                         const isEnabled = editEnabledSkills.includes(skillId) || editEnabledSkills.includes(skill.name?.trim())
                         return (
                           <div
@@ -4808,7 +4804,7 @@ export default function AgentHubPage() {
                       <div className="space-y-2">
                         {tenantEditSkillsDetails.map(skill => {
                           const skillId = skill.id || skill.name
-                          const isInstalled = installedSkillLookup.has(skill.id?.trim()) || installedSkillLookup.has(skill.name?.trim())
+                          const isInstalled = installedSkillLookup.has(skill.id?.trim())
                           const isEnabled = tenantEditEnabledSkills.includes(skillId) || tenantEditEnabledSkills.includes(skill.name?.trim())
                           return (
                             <div

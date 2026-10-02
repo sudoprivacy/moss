@@ -1,7 +1,6 @@
 import type { CatalogRepository } from '../catalog/catalogRepository.js'
 import type { AuthIdentity, IdentityRepository, OrganizationProfile } from '../identity/identityRepository.js'
-import type { IdentityMigrationPlan } from './identityMigrationService.js'
-import type { LegacyIdentitySnapshot } from './identityMergePlanner.js'
+import type { IdentityMergePlan, LegacyIdentitySnapshot } from './identityMergePlanner.js'
 
 type AliasKind = 'enterprise' | 'user'
 type Alias = { resourceId: string; orgId: string }
@@ -29,7 +28,7 @@ export class PlanningIdentityProjection {
     })
   }
 
-  install(plan: IdentityMigrationPlan, source: LegacyIdentitySnapshot): void {
+  async install(plan: IdentityMergePlan, source: LegacyIdentitySnapshot): Promise<void> {
     this.active = true
     this.aliases.clear()
     this.profiles.clear()
@@ -43,7 +42,7 @@ export class PlanningIdentityProjection {
         resourceId: decision.targetId,
         orgId: decision.targetId,
       })
-      if (!this.base.getOrganizationProfile(decision.targetId)) {
+      if (!(await this.base.getOrganizationProfile(decision.targetId))) {
         this.profiles.set(decision.targetId, {
           orgId: decision.targetId,
           code: organization.code?.trim() || `moss-${decision.targetId.slice(0, 8)}`,
@@ -67,7 +66,7 @@ export class PlanningIdentityProjection {
         providers.push({ provider: 'phone', issuer: 'sudowork', subject: user.phone })
       }
       for (const [index, provider] of providers.entries()) {
-        if (this.base.findAuthIdentity(provider.provider, provider.issuer, provider.subject)) continue
+        if (await this.base.findAuthIdentity(provider.provider, provider.issuer, provider.subject)) continue
         this.identities.push({
           id: `projection:${decision.legacyId}:${index}`,
           orgId: decision.targetOrgId,
@@ -91,21 +90,21 @@ export class PlanningIdentityProjection {
     this.active = false
   }
 
-  private resolveNumericAliasGlobal(kind: string, legacyId: number): Alias | null {
-    return this.base.resolveNumericAliasGlobal(kind, legacyId)
+  private async resolveNumericAliasGlobal(kind: string, legacyId: number): Promise<Alias | null> {
+    return await this.base.resolveNumericAliasGlobal(kind, legacyId)
       ?? (this.active ? this.aliases.get(aliasKey(kind as AliasKind, legacyId)) : undefined)
       ?? null
   }
 
-  private resolveNumericAlias(kind: string, legacyId: number, orgId: string): string | null {
-    const actual = this.base.resolveNumericAlias(kind, legacyId, orgId)
+  private async resolveNumericAlias(kind: string, legacyId: number, orgId: string): Promise<string | null> {
+    const actual = await this.base.resolveNumericAlias(kind, legacyId, orgId)
     if (actual) return actual
     const projected = this.active ? this.aliases.get(aliasKey(kind as AliasKind, legacyId)) : undefined
     return projected?.orgId === orgId ? projected.resourceId : null
   }
 
-  private getNumericAlias(kind: string, resourceId: string): number | null {
-    const actual = this.base.getNumericAlias(kind, resourceId)
+  private async getNumericAlias(kind: string, resourceId: string): Promise<number | null> {
+    const actual = await this.base.getNumericAlias(kind, resourceId)
     if (actual !== null) return actual
     if (!this.active) return null
     for (const [key, alias] of this.aliases) {
@@ -114,24 +113,24 @@ export class PlanningIdentityProjection {
     return null
   }
 
-  private getOrganizationProfile(orgId: string): OrganizationProfile | null {
-    return this.base.getOrganizationProfile(orgId) ?? (this.active ? this.profiles.get(orgId) : undefined) ?? null
+  private async getOrganizationProfile(orgId: string): Promise<OrganizationProfile | null> {
+    return await this.base.getOrganizationProfile(orgId) ?? (this.active ? this.profiles.get(orgId) : undefined) ?? null
   }
 
-  private getOrganizationProfileByCode(code: string): OrganizationProfile | null {
-    return this.base.getOrganizationProfileByCode(code)
+  private async getOrganizationProfileByCode(code: string): Promise<OrganizationProfile | null> {
+    return await this.base.getOrganizationProfileByCode(code)
       ?? (this.active ? [...this.profiles.values()].find(profile => profile.code.toLowerCase() === code.trim().toLowerCase()) : undefined)
       ?? null
   }
 
-  private findAuthIdentity(provider: string, issuer: string, subject: string): AuthIdentity | null {
-    return this.base.findAuthIdentity(provider, issuer, subject)
+  private async findAuthIdentity(provider: string, issuer: string, subject: string): Promise<AuthIdentity | null> {
+    return await this.base.findAuthIdentity(provider, issuer, subject)
       ?? (this.active ? this.identities.find(item => item.provider === provider && item.issuer === issuer && item.normalizedSubject === subject) : undefined)
       ?? null
   }
 
-  private findAuthIdentityByUser(userId: string, provider: string, issuer: string): AuthIdentity | null {
-    return this.base.findAuthIdentityByUser(userId, provider, issuer)
+  private async findAuthIdentityByUser(userId: string, provider: string, issuer: string): Promise<AuthIdentity | null> {
+    return await this.base.findAuthIdentityByUser(userId, provider, issuer)
       ?? (this.active ? this.identities.find(item => item.userId === userId && item.provider === provider && item.issuer === issuer) : undefined)
       ?? null
   }
@@ -172,15 +171,15 @@ export class PlanningCatalogProjection {
     }
   }
 
-  private find(kind: 'agent' | 'skill', id: string): unknown {
-    const actual = kind === 'agent' ? this.base.findAgent(id) : this.base.findSkill(id)
+  private async find(kind: 'agent' | 'skill', id: string): Promise<unknown> {
+    const actual = kind === 'agent' ? await this.base.findAgent(id) : await this.base.findSkill(id)
     if (actual) return actual
     const projected = this.resources.get(`${kind}:${id}`)
     return projected ? { id: projected.id, orgId: [...projected.orgIds][0], providerBinding: null } : null
   }
 
-  private isAvailableToOrganization(kind: 'agent' | 'skill', id: string, orgId: string): boolean {
-    if (this.base.isAvailableToOrganization(kind, id, orgId)) return true
+  private async isAvailableToOrganization(kind: 'agent' | 'skill', id: string, orgId: string): Promise<boolean> {
+    if (await this.base.isAvailableToOrganization(kind, id, orgId)) return true
     return this.resources.get(`${kind}:${id}`)?.orgIds.has(orgId) ?? false
   }
 }

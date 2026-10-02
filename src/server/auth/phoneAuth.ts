@@ -21,11 +21,9 @@
  *
  * ## What is deliberately NOT here
  *
- * No SMS provider. moss has no delivery contract yet, so the only shipped
- * transport writes the code to the server log, which is a development and
- * single-operator affordance, not a production one — anyone who can read the
- * log can then log in as anyone. `deliverCode` returns the transport used so
- * the caller can refuse to enable it silently.
+ * SMS delivery is injected by the server. Explicit log delivery is for local
+ * testing only and never calls the injected SMS provider. Verification codes
+ * remain subject to expiry, resend limits and one-time consumption.
  */
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { AuthCenterDb } from '../authCenter/db.js'
@@ -101,6 +99,15 @@ function constantTimeEquals(a: string, b: string): boolean {
  */
 function generateCode(): string {
   return String(randomInt(0, 1_000_000)).padStart(6, '0')
+}
+
+/** Development delivery shared by native and compatibility authentication. */
+export function logPhoneVerificationCode(phone: string, code: string): void {
+  const masked = `${phone.slice(0, 3)}****${phone.slice(-4)}`
+  console.warn(
+    `[PhoneAuth] DEV DELIVERY — verification code for ${masked} is ${code}. ` +
+    'Simulation mode: no SMS is sent. Anyone who can read this log can sign in as this number.',
+  )
 }
 
 export class PhoneAuthService {
@@ -184,19 +191,7 @@ export class PhoneAuthService {
       await this.smsSender(phone, code)
       return
     }
-    this.logCode(phone, code)
-  }
-
-  private logCode(phone: string, code: string): void {
-    // The only transport that exists. Loud on purpose: a deployment that ends up
-    // here without meaning to should see it in the log rather than discover it
-    // when someone reads a code out of journald.
-    const masked = `${phone.slice(0, 3)}****${phone.slice(-4)}`
-    console.warn(
-      `[PhoneAuth] DEV DELIVERY — verification code for ${masked} is ${code}. ` +
-      'Codes are written to the server log because no SMS provider is configured; ' +
-      'anyone who can read this log can sign in as this number.',
-    )
+    logPhoneVerificationCode(phone, code)
   }
 
   /**

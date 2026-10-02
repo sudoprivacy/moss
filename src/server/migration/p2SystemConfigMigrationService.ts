@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { migrationCommandContext } from '../application/commandContext.js'
 import type { SudoworkSystemConfigService } from '../api/compat/sudowork/systemConfigService.js'
 import type { IdentityRepository } from '../identity/identityRepository.js'
 import type { IdentityActor } from '../identity/organizationIdentityService.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 
 type Json = Record<string, unknown>
 
@@ -47,7 +46,7 @@ export class P2SystemConfigMigrationBlockedError extends Error {
 
 export class P2SystemConfigMigrationService {
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     identities: IdentityRepository
     service: Pick<SudoworkSystemConfigService, 'update' | 'validateUpdate'>
     source: P2SystemConfigSource
@@ -63,7 +62,7 @@ export class P2SystemConfigMigrationService {
     const plan = await this.buildPlan(raw)
     if (plan.status === 'blocked') throw new P2SystemConfigMigrationBlockedError(plan)
     const idempotencyKey = `system-config:${snapshotDigest(raw)}`
-    const previous = this.options.identities.getCommandResult<P2SystemConfigMigrationExecution>(
+    const previous = await this.options.identities.getCommandResult<P2SystemConfigMigrationExecution>(
       'configuration.import_system', idempotencyKey,
     )
     if (previous) return { ...previous, migrationRunId, imported: false, reused: true }
@@ -72,8 +71,8 @@ export class P2SystemConfigMigrationService {
     await this.options.service.update(this.actor(), body)
     const result = { migrationRunId, imported: true, reused: false }
     const context = migrationCommandContext(migrationRunId, idempotencyKey)
-    runInTransaction(this.options.db, () => {
-      this.options.identities.recordCommandResult(
+    await this.options.db.transaction(async () => {
+      await this.options.identities.recordCommandResult(
         'configuration.import_system', context.idempotencyKey, context.source, result,
       )
     })
@@ -99,7 +98,7 @@ export class P2SystemConfigMigrationService {
     for (const rawProvider of providers) {
       const provider = object(rawProvider)
       const enterpriseCode = string(provider.enterprise_code)
-      if (!enterpriseCode || !this.options.identities.getOrganizationProfileByCode(enterpriseCode)) {
+      if (!enterpriseCode || !(await this.options.identities.getOrganizationProfileByCode(enterpriseCode))) {
         conflicts.push(`CAS Provider ${string(provider.id, '(unknown)')} 的企业码 ${enterpriseCode || '(empty)'} 未映射`)
       }
     }
@@ -114,7 +113,7 @@ export class P2SystemConfigMigrationService {
       conflicts.push('version_update.cos_domain 不能为空')
     }
     try {
-      this.options.service.validateUpdate(this.actor(), body)
+      await this.options.service.validateUpdate(this.actor(), body)
     } catch (error) {
       const message = errorMessage(error)
       if (!conflicts.includes(message)) conflicts.push(message)

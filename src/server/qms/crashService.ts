@@ -31,7 +31,7 @@ export interface CrashEvent {
 }
 
 export interface CrashTenantDirectory {
-  hasCode(code: string): boolean
+  hasCode(code: string): Promise<boolean>
 }
 
 export interface CrashSourceMapPort {
@@ -80,7 +80,7 @@ export function generateCrashIssueTitle(event: CrashEvent): string {
   return `Crash: ${event.type}`
 }
 
-function validateEvent(event: CrashEvent, tenants: CrashTenantDirectory): string {
+async function validateEvent(event: CrashEvent, tenants: CrashTenantDirectory): Promise<string> {
   for (const field of ['type', 'timestamp', 'version', 'platform', 'process_type'] as const) {
     if (event[field] === undefined || event[field] === null || event[field] === '') {
       throw new CrashServiceError(400, 'MISSING_REQUIRED_FIELDS', `QMS crash event requires ${field}`)
@@ -89,12 +89,12 @@ function validateEvent(event: CrashEvent, tenants: CrashTenantDirectory): string
   return validateTenant(event, tenants)
 }
 
-function validateTenant(event: CrashEvent, tenants: CrashTenantDirectory, item?: string): string {
+async function validateTenant(event: CrashEvent, tenants: CrashTenantDirectory, item?: string): Promise<string> {
   const tenantId = event.tenant_id?.trim()
   if (!tenantId) {
     throw new CrashServiceError(400, 'TENANT_ID_REQUIRED', 'tenant_id is required for QMS crash ingestion', item ? [item] : [])
   }
-  if (!tenants.hasCode(tenantId)) {
+  if (!(await tenants.hasCode(tenantId))) {
     throw new CrashServiceError(400, 'TENANT_NOT_FOUND', `Unknown QMS tenant: ${tenantId}`, item ? [item] : [])
   }
   return tenantId
@@ -109,7 +109,7 @@ export class CrashService {
   }) {}
 
   async ingest(event: CrashEvent, requestedIngestId?: string): Promise<{ issueId: number; duplicate: boolean }> {
-    const tenantId = validateEvent(event, this.options.tenants)
+    const tenantId = await validateEvent(event, this.options.tenants)
     const ingestId = requestedIngestId?.trim() || this.options.createId?.() || randomUUID()
     if (!ingestId) throw new Error('QMS crash ingest id is required')
     const fingerprint = generateCrashFingerprint(event)
@@ -146,7 +146,11 @@ export class CrashService {
       if (existing[0]) {
         issueId = Number(existing[0].id)
         await db.execute(
-          'UPDATE crash_issues SET count = count + 1, last_seen = $1, last_release = $2, updated_at = NOW() WHERE id = $3 AND tenant_id = $4',
+          `UPDATE crash_issues SET count = count + 1,
+           first_release = CASE WHEN $1 < first_seen THEN $2 ELSE first_release END,
+           last_release = CASE WHEN $1 >= last_seen THEN $2 ELSE last_release END,
+           first_seen = LEAST(first_seen, $1), last_seen = GREATEST(last_seen, $1),
+           updated_at = NOW() WHERE id = $3 AND tenant_id = $4`,
           [new Date(event.timestamp), event.release ?? event.version, issueId, tenantId],
         )
       } else {
@@ -166,6 +170,10 @@ export class CrashService {
       }
 
       await this.insertEvent(db, event, ingestId, tenantId, fingerprint, issueId, symbolicatedStack)
+      await db.execute(`UPDATE crash_issues SET user_count = (
+        SELECT COUNT(DISTINCT COALESCE(NULLIF(user_id, ''), NULLIF(user_phone, '')))
+        FROM crash_events WHERE issue_id = $1 AND tenant_id = $2
+      ) WHERE id = $1 AND tenant_id = $2`, [issueId, tenantId])
       return { issueId, duplicate: false }
     })
   }
@@ -177,7 +185,7 @@ export class CrashService {
     for (const [index, event] of events.entries()) {
       const tenantId = event.tenant_id?.trim()
       if (!tenantId) missingTenantItems.push(`events[${index}]`)
-      else if (!this.options.tenants.hasCode(tenantId)) unknownTenantItems.push(`events[${index}]`)
+      else if (!(await this.options.tenants.hasCode(tenantId))) unknownTenantItems.push(`events[${index}]`)
     }
     if (missingTenantItems.length > 0) {
       throw new CrashServiceError(400, 'TENANT_ID_REQUIRED', 'tenant_id is required for QMS crash ingestion', missingTenantItems)
@@ -347,8 +355,15 @@ export class CrashService {
     const parameters: unknown[] = [start]
     const tenant = tenantId ? ` AND tenant_id = $${parameters.push(tenantId)}` : ''
     const rows = await this.options.db.execute(
-      `SELECT bucket AS date, type, SUM(count)::INTEGER AS count FROM crash_daily_stats
-       WHERE bucket >= $1${tenant} GROUP BY bucket, type ORDER BY bucket ASC`,
+      `WITH raw_days AS (
+         SELECT DATE_TRUNC('day', timestamp) AS bucket, tenant_id, type, COUNT(*) AS count
+         FROM crash_events WHERE timestamp >= $1${tenant} GROUP BY bucket, tenant_id, type
+       ), samples AS (
+         SELECT * FROM raw_days UNION ALL
+         SELECT bucket, tenant_id, type, count FROM crash_daily_stats d WHERE bucket >= $1${tenant}
+         AND NOT EXISTS (SELECT 1 FROM raw_days r WHERE r.bucket = d.bucket AND r.type = d.type
+           AND r.tenant_id IS NOT DISTINCT FROM d.tenant_id)
+       ) SELECT bucket AS date, type, SUM(count)::INTEGER AS count FROM samples GROUP BY bucket, type ORDER BY bucket ASC`,
       parameters,
     )
     return rows.map(row => ({

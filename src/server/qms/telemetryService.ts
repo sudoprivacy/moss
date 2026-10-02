@@ -1,4 +1,5 @@
-import type { TelemetryKind, TelemetryQueueMessage } from './reliableTelemetryQueue.js'
+import type { TelemetryKind, TelemetryQueueMessage } from './telemetryTypes.js'
+import { validateTelemetryPayload } from './telemetryPostgresWriter.js'
 
 export interface TelemetryBatchQueue {
   enqueueMany(items: readonly {
@@ -9,7 +10,7 @@ export interface TelemetryBatchQueue {
 }
 
 export interface TelemetryTenantDirectory {
-  hasCode(code: string): boolean
+  hasCode(code: string): Promise<boolean>
 }
 
 export class TelemetryServiceError extends Error {
@@ -91,7 +92,8 @@ export class TelemetryService {
     if (items.length > this.maxBatchSize) {
       throw new TelemetryServiceError(413, 'BATCH_TOO_LARGE', 'Telemetry batch is too large')
     }
-    this.validateTenants(items)
+    await this.validateTenants(items)
+    for (const item of items) this.validate(item)
     await this.options.queue.enqueueMany(items.map(({ ref: _ref, ...item }) => item))
     const received = { perf: 0, conversations: 0, turns: 0, steps: 0, installs: 0 }
     for (const item of items) {
@@ -113,7 +115,8 @@ export class TelemetryService {
     if (!input) throw new TelemetryServiceError(400, 'INVALID_PAYLOAD', 'Invalid telemetry payload')
     const payload = this.withTenant(input, authenticatedTenant)
     const item: NormalizedTelemetryInput = { kind, payload, ingestId: text(input.event_id), ref: kind }
-    this.validateTenants([item])
+    await this.validateTenants([item])
+    this.validate(item)
     const { ref: _ref, ...queued } = item
     await this.options.queue.enqueueMany([queued])
     return { timestamp: this.now(), queued: true }
@@ -136,6 +139,11 @@ export class TelemetryService {
       }
     }
     return items
+  }
+
+  private validate(item: NormalizedTelemetryInput): void {
+    try { validateTelemetryPayload(item.kind, item.payload) }
+    catch (error) { throw new TelemetryServiceError(400, 'INVALID_PAYLOAD', (error as Error).message, [item.ref]) }
   }
 
   private fromEventEnvelope(input: Record<string, unknown>, authenticatedTenant?: string) {
@@ -165,14 +173,18 @@ export class TelemetryService {
     return tenantId ? { ...payload, tenant_id: tenantId } : payload
   }
 
-  private validateTenants(items: readonly Pick<NormalizedTelemetryInput, 'payload' | 'ref'>[]): void {
+  private async validateTenants(items: readonly Pick<NormalizedTelemetryInput, 'payload' | 'ref'>[]): Promise<void> {
     const missing: string[] = []
+    const knownTenants = new Set<string>()
     for (const item of items) {
       const tenantId = text(item.payload.tenant_id)
       if (!tenantId) {
         missing.push(item.ref)
-      } else if (!this.options.tenants.hasCode(tenantId)) {
-        throw new TelemetryServiceError(400, 'TENANT_NOT_FOUND', `Unknown QMS tenant: ${tenantId}`, [item.ref])
+      } else if (!knownTenants.has(tenantId)) {
+        if (!(await this.options.tenants.hasCode(tenantId))) {
+          throw new TelemetryServiceError(400, 'TENANT_NOT_FOUND', `Unknown QMS tenant: ${tenantId}`, [item.ref])
+        }
+        knownTenants.add(tenantId)
       }
     }
     if (missing.length > 0) {

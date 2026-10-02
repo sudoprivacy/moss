@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { onlineCommandContext } from '../application/commandContext.js'
 import type { IdentityActor } from '../identity/organizationIdentityService.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import type { CatalogArtifactKind, CatalogArtifactStore, StagedCatalogArtifact } from './catalogArtifactStore.js'
 import type { CatalogRepository } from './catalogRepository.js'
 import type { CatalogService } from './catalogService.js'
@@ -22,7 +21,7 @@ export interface CatalogArtifactPort {
 
 export class CatalogUploadService {
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     repository: CatalogRepository
     catalog: CatalogService
     artifacts: CatalogArtifactPort | CatalogArtifactStore
@@ -41,11 +40,11 @@ export class CatalogUploadService {
     bytes: Buffer
     idempotencyKey: string
   }) {
-    const prior = this.options.repository.getCommandResult<{ resourceId: string }>(
+    const prior = await this.options.repository.getCommandResult<{ resourceId: string }>(
       'catalog.create_agent', input.idempotencyKey,
     )
     if (prior) {
-      const existing = this.options.repository.getAgent(prior.resourceId, input.actor.orgId)
+      const existing = await this.options.repository.getAgent(prior.resourceId, input.actor.orgId)
       if (existing) return existing
     }
     const id = randomUUID()
@@ -55,7 +54,7 @@ export class CatalogUploadService {
     })
     let created = false
     try {
-      const agent = this.options.catalog.createAgent({
+      const agent = await this.options.catalog.createAgent({
         actor: input.actor,
         id,
         name: input.name,
@@ -80,7 +79,7 @@ export class CatalogUploadService {
       await this.options.artifacts.publish(staged)
       return agent
     } catch (error) {
-      if (created) this.compensate('agent', id, input.actor.orgId, 'catalog.create_agent', input.idempotencyKey)
+      if (created) await this.compensate('agent', id, input.actor.orgId, 'catalog.create_agent', input.idempotencyKey)
       await this.options.artifacts.discard(staged).catch(() => undefined)
       throw error
     }
@@ -102,11 +101,11 @@ export class CatalogUploadService {
     bytes: Buffer
     idempotencyKey: string
   }) {
-    const prior = this.options.repository.getCommandResult<{ resourceId: string }>(
+    const prior = await this.options.repository.getCommandResult<{ resourceId: string }>(
       'catalog.create_skill', input.idempotencyKey,
     )
     if (prior) {
-      const existing = this.options.repository.getSkill(prior.resourceId, input.actor.orgId)
+      const existing = await this.options.repository.getSkill(prior.resourceId, input.actor.orgId)
       if (existing) return existing
     }
     const id = randomUUID()
@@ -116,7 +115,7 @@ export class CatalogUploadService {
     })
     let created = false
     try {
-      const skill = this.options.catalog.createSkill({
+      const skill = await this.options.catalog.createSkill({
         actor: input.actor,
         id,
         name: input.name,
@@ -143,7 +142,7 @@ export class CatalogUploadService {
       await this.options.artifacts.publish(staged)
       return skill
     } catch (error) {
-      if (created) this.compensate('skill', id, input.actor.orgId, 'catalog.create_skill', input.idempotencyKey)
+      if (created) await this.compensate('skill', id, input.actor.orgId, 'catalog.create_skill', input.idempotencyKey)
       await this.options.artifacts.discard(staged).catch(() => undefined)
       throw error
     }
@@ -157,17 +156,17 @@ export class CatalogUploadService {
     return `${this.options.publicBaseUrl.replace(/\/+$/, '')}/api/catalog/artifacts/${kind}/${encodeURIComponent(id)}`
   }
 
-  private compensate(
+  private async compensate(
     kind: CatalogArtifactKind,
     id: string,
     orgId: string,
     commandType: string,
     idempotencyKey: string,
-  ): void {
-    runInTransaction(this.options.db, () => {
-      if (kind === 'agent') this.options.repository.deleteAgent(id, orgId)
-      else this.options.repository.deleteSkill(id, orgId)
-      this.options.repository.clearCommandResult(commandType, idempotencyKey)
+  ): Promise<void> {
+    await this.options.db.transaction(async () => {
+      if (kind === 'agent') await this.options.repository.deleteAgent(id, orgId)
+      else await this.options.repository.deleteSkill(id, orgId)
+      await this.options.repository.clearCommandResult(commandType, idempotencyKey)
     })
   }
 }

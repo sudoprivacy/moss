@@ -1,7 +1,6 @@
-import type { DatabaseSync } from 'node:sqlite'
 import { migrationCommandContext } from '../application/commandContext.js'
 import type { IdentityActor } from '../identity/organizationIdentityService.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import type { CatalogArtifactPort } from '../catalog/catalogUploadService.js'
 import type { CatalogRepository } from '../catalog/catalogRepository.js'
 import type { CatalogService } from '../catalog/catalogService.js'
@@ -25,7 +24,7 @@ export class P2CatalogImportError extends Error {
 
 export class P2CatalogImportService {
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     repository: CatalogRepository
     catalog: CatalogService
     artifacts: CatalogArtifactPort
@@ -71,11 +70,11 @@ export class P2CatalogImportService {
     const externalId = externalIdentity?.externalId ?? input.resource.id
     const commandType = `catalog.import_${kind}`
     const idempotencyKey = `p2:${kind}:${providerId}:${externalId}`
-    const previous = this.options.repository.getCommandResult<{ resourceId: string }>(commandType, idempotencyKey)
+    const previous = await this.options.repository.getCommandResult<{ resourceId: string }>(commandType, idempotencyKey)
     if (previous) {
       const existing = kind === 'agent'
-        ? this.options.repository.getAgent(previous.resourceId, input.orgId)
-        : this.options.repository.getSkill(previous.resourceId, input.orgId)
+        ? await this.options.repository.getAgent(previous.resourceId, input.orgId)
+        : await this.options.repository.getSkill(previous.resourceId, input.orgId)
       if (existing) return existing
     }
 
@@ -103,17 +102,17 @@ export class P2CatalogImportService {
       }
       const context = migrationCommandContext(input.migrationRunId, idempotencyKey)
       const resource = kind === 'agent'
-        ? this.options.catalog.importAgent(common as Parameters<CatalogService['importAgent']>[0], context)
-        : this.options.catalog.importSkill(common as Parameters<CatalogService['importSkill']>[0], context)
+        ? await this.options.catalog.importAgent(common as Parameters<CatalogService['importAgent']>[0], context)
+        : await this.options.catalog.importSkill(common as Parameters<CatalogService['importSkill']>[0], context)
       created = true
       await this.options.artifacts.publish(staged)
       return resource
     } catch (error) {
       if (created) {
-        runInTransaction(this.options.db, () => {
-          if (kind === 'agent') this.options.repository.deleteAgent(input.resource.id, input.orgId)
-          else this.options.repository.deleteSkill(input.resource.id, input.orgId)
-          this.options.repository.clearCommandResult(commandType, idempotencyKey)
+        await this.options.db.transaction(async () => {
+          if (kind === 'agent') await this.options.repository.deleteAgent(input.resource.id, input.orgId)
+          else await this.options.repository.deleteSkill(input.resource.id, input.orgId)
+          await this.options.repository.clearCommandResult(commandType, idempotencyKey)
         })
       }
       await this.options.artifacts.discard(staged).catch(() => undefined)

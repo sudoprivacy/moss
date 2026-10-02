@@ -208,6 +208,8 @@ and its implementation live in `src/server/publicSystemConfig.ts`.
 | Field | Meaning |
 | --- | --- |
 | `login_method` | `0` phone code · `1` username/password · `2` third-party (CAS). Overridable with `MOSS_LOGIN_METHOD` |
+| `auth_methods` | All enabled methods: `phone`, `password`, `api_key`, `sso`. New clients use this list; configurable with `systemConfig.authMethods` or `MOSS_AUTH_METHODS` |
+| `registration` | Public phone-registration policy (`phone_enabled`, invitation requirement, OPC auto-create) |
 | `third_party_auth` | Provider list, sent when `login_method=2` |
 | `sudorouter_baseurl` | SudoRouter **root** (no `/v1` — call sites append their own path). Derived from the system settings' model service URL when unset |
 | `skillhub_baseurl` / `scode_auto_model` | Optional |
@@ -222,6 +224,12 @@ Example response from a self-hosted deployment that configured nothing:
   "success": true,
   "data": {
     "login_method": 1,
+    "auth_methods": ["password", "api_key"],
+    "registration": {
+      "phone_enabled": false,
+      "invitation_required": false,
+      "auto_create_org": false
+    },
     "recharge_mode": "disabled",
     "log_report": { "enabled": 0 },
     "version_update": { "enabled": 0 },
@@ -240,6 +248,27 @@ Example response from a self-hosted deployment that configured nothing:
 > anyone who can reach the port. Feature switches and base URLs only; **never**
 > keys, tokens, or user/org data. The admin-side counterpart that *does* hold
 > credentials is `systemSettings.ts` — do not confuse the two.
+
+## Tenant Config
+
+### GET `/api/v1/tenant/config`
+
+Returns branding and client policy. Without a bearer token it returns the
+deployment default for the pre-login screen. With a valid bearer token it
+returns the current organization row, falling back field-by-field to the
+deployment policy when that organization has not saved an override. The first
+organization save snapshots the deployment branding defaults into its own row.
+An invalid bearer token is rejected instead of silently exposing the default.
+
+Organization-scoped policy currently includes `client_cron_enabled`,
+`client_show_tool_calls`, and `workspace_upload_limit_bytes`. The cron creation
+and scheduler paths and workspace upload paths enforce the same resolved policy
+that this endpoint returns.
+
+### PATCH `/api/v1/settings/enterprise`
+
+Requires `admin:settings`. Updates only the organization in the caller's access
+token; an administrator cannot select a different organization in the body.
 
 ## Admin UI
 
@@ -339,7 +368,7 @@ call. Verifying a code does **not** refund the hourly budget.
 
 ### POST `/api/v1/auth/login` (phone form)
 
-Phone signup/login, step 2. Detected by the body shape — a `{ phone, code }`
+Phone login. Detected by the body shape — a `{ phone, code }`
 body takes the phone branch, anything else falls through to the grant types
 documented above, so password and API-key login are unaffected.
 
@@ -356,39 +385,33 @@ A code is single-use, expires after `codeTtlSec`, and is destroyed after
 { "success": true, "data": { "access_token": "...", "user": {}, "organization": {} } }
 ```
 
-**New number** → not an error; this is the normal first step of signup:
+**New number** → login does not register an account:
 
 ```json
 {
   "success": false,
-  "need_register": true,
-  "register_token": "...",
-  "phone": "13800138000",
-  "msg": "No account for this number yet, please register"
+  "code": "phone_not_registered",
+  "msg": "This phone number is not registered"
 }
 ```
 
-The register token is a short-lived signed attestation that this number passed a
-code check. It carries no server-side state, so it works across instances behind
-a load balancer, and it means the code is verified exactly once even though
-registration is a second request.
-
 ### POST `/api/v1/auth/register`
 
-Phone signup, step 3: exchange the register token for an account, and log in.
+Dedicated phone registration. The invitation selects the organization; this
+route never creates a personal organization.
 
 ```json
-{ "register_token": "...", "nickname": "Ethan", "invitation_code": "optional" }
+{
+  "phone": "13800138000",
+  "code": "123456",
+  "nickname": "Ethan",
+  "invitation_code": "ABC123"
+}
 ```
 
-`invitation_code` is required only when `phoneAuth.invitationCode` is configured.
-
-With `phoneAuth.autoCreateOrg` (the default, and the public-cloud shape) the new
-person also gets **their own organisation and is its admin** — the one-person
-company model, in which an individual is not a second tenancy model but an
-organisation of one. That is what later lets orgs merge or split as a membership
-change rather than a data migration. Turn it off for a single-company
-deployment, where new people should join the organisation that already exists.
+`invitation_code` is mandatory and single-use. It is created under Admin →
+Operations → Invitations. The new user joins the invitation's organization as a
+normal member.
 
 The account's login `name` is the phone number (stable); `nickname` becomes the
 display name (free to collide and change). The users table requires a non-null
@@ -576,6 +599,7 @@ unique email, so a phone-only account gets the platform's synthetic form, which
 ```json
 {
   "sessionId": "uuid",
+  "taskId": "uuid",
   "transcriptSessionId": "uuid",
   "workDir": "/abs/path/project",
   "userId": "user-id",
@@ -591,6 +615,12 @@ unique email, so a phone-only account gets the platform's synthetic form, which
   },
   "status": "creating|active|detached|ended|terminated|failed|lost",
   "desiredState": "active|ended|terminated",
+  "attemptId": "uuid-or-null",
+  "execution": {
+    "requestedLocation": "cloud",
+    "runtimeType": "host|docker|k8s",
+    "sessionStatus": "active"
+  },
   "createdAt": 0,
   "lastActiveAt": 0,
   "endedAt": null
@@ -629,6 +659,8 @@ unique email, so a phone-only account gets the platform's synthetic form, which
 ```json
 {
   "session_id": "uuid",
+  "task_id": "uuid",
+  "attempt_id": "uuid",
   "ws_url": "ws://127.0.0.1:43127/ws/sessions/uuid",
   "work_dir": "/abs/path/project",
   "runtime": {
@@ -640,6 +672,13 @@ unique email, so a phone-only account gets the platform's synthetic form, which
   "owner_live": true
 }
 ```
+
+`taskId`/`task_id` is the **implicit Task compatibility identifier**. In this
+baseline, creating a cloud Session creates exactly one implicit Task and its
+runtime restarts remain Attempts of that task. Older sessions use `sessionId`
+as a stable fallback. This additive compatibility layer does not claim that the
+Proposed Task/Resolution ADR is a finalized contract; a future explicit Task
+API may allow several tasks inside one Session.
 
 多实例（LB）部署说明（create / GET `:sessionId` / resume 三个端点一致，list 与
 `/context` 不含这些字段）：

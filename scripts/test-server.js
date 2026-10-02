@@ -16,7 +16,7 @@
  * it, and `UNLISTED` below makes a new file fail loudly instead of being
  * silently skipped — a test that never runs is worse than one that fails.
  */
-import { readdirSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 
 /**
@@ -29,7 +29,12 @@ const SUITES = [
   'src/server/nexus/__tests__',
   'src/server/zones/__tests__',
   'src/server/zones/__tests__/e2e',
+  'src/server/configStore',
 ]
+
+// Module-level HOME mocks and ConfigStore singletons must not share a Bun process
+// with other suites, which may have already imported systemSettings.
+const BUN_ISOLATED = ['configStore.test.ts']
 
 const BUN = [
   // src/server/nexus/__tests__
@@ -43,9 +48,13 @@ const BUN = [
   'untrustedText.test.ts',
   // src/server/__tests__
   'applicationHelloReplay.test.ts',
+  'contractsActivation.test.ts',
   'nexusZoneId.test.ts',
+  'releaseE2eSmoke.test.ts',
   'authProxyPort.test.ts',
   'credentialsEnvelope.test.ts',
+  'clientRuntime.test.ts',
+  'secretsMetadata.test.ts',
   'credits.test.ts',
   'fuiou.test.ts',
   'lbHaConfig.test.ts',
@@ -73,10 +82,14 @@ const NODE = [
   'authCenterMembershipRevision.test.ts',
   'claimAttempt.test.ts',
   'creditApplicationsDb.test.ts',
+  'enterpriseConfig.test.ts',
+  'enterpriseConfigIsolation.test.ts',
   'jsonlParse.test.ts',
   'lbDraining.test.ts',
   'lbServerInstance.test.ts',
+  'legacyRuntimeSchemaMigration.test.ts',
   'phoneAuth.test.ts',
+  'phoneInvitationRegistration.test.ts',
   'phoneImport.test.ts',
   'rechargeDb.test.ts',
   'zoneBinding.test.ts',
@@ -87,6 +100,7 @@ const NODE = [
   'channelPluginLease.test.ts',
   'configRefresh.test.ts',
   'haClaimReap.test.ts',
+  'implicitTask.test.ts',
   'internalChannelToken.test.ts',
   'lbAuthProxyRulesPoll.test.ts',
   'lbCorpAppSeq.test.ts',
@@ -110,6 +124,22 @@ const NODE = [
 // preserves UNLISTED coverage without introducing cross-file port races.
 const NODE_SERIAL = ['p0E2e.test.ts', 'p1aE2e.test.ts']
 
+const EXTRA_NODE_PATHS = [
+  'src/server/configuration/modelSettings.node-test.ts',
+  'src/server/identity/loginPolicy.node-test.ts',
+  'src/server/identity/organizationAutomationPolicy.node-test.ts',
+  'src/server/identity/passwordCompatibility.node-test.ts',
+  'src/server/api/cron.node-test.ts',
+  'src/server/api/compat/sudowork/app.node-test.ts',
+  'src/server/api/compat/sudowork/casService.node-test.ts',
+  'src/server/api/compat/sudowork/configService.node-test.ts',
+  'src/server/api/compat/sudowork/identityService.node-test.ts',
+  'src/server/api/compat/sudowork/legacyUsageRoutes.node-test.ts',
+  'src/server/api/compat/sudowork/legacyUsageService.node-test.ts',
+  'src/server/api/compat/sudowork/userProjectionService.node-test.ts',
+  'src/server/api/compat/sudowork/systemConfigService.node-test.ts',
+]
+
 /**
  * Currently unrunnable, excluded so the gate reflects a reachable bar.
  *
@@ -117,8 +147,6 @@ const NODE_SERIAL = ['p0E2e.test.ts', 'p1aE2e.test.ts']
  * which is a defect in its own right. Listing them keeps that visible.
  */
 const EXCLUDED = {
-  // Asserts on the contents of the packaged E2E script; fails on dev checkouts.
-  'releaseE2eSmoke.test.ts': 'asserts packaged release artifacts absent from a dev tree',
   // Declared "runnable under Bun only" by its own header, but bun cannot load
   // runtimeService.ts (transitive node:sqlite), and under node its mock.timers
   // / #scheduleFencingWait private-access shape plus real-clock heartbeat
@@ -140,19 +168,25 @@ const present = SUITES.flatMap(dir =>
   acc.set(name, dir)
   return acc
 }, new Map())
-const accounted = new Set([...BUN, ...NODE, ...NODE_SERIAL, ...Object.keys(EXCLUDED)])
+const accounted = new Set([...BUN, ...BUN_ISOLATED, ...NODE, ...NODE_SERIAL, ...Object.keys(EXCLUDED)])
 const unlisted = [...present.keys()].filter(name => !accounted.has(name))
 if (unlisted.length > 0) {
   console.error(
     `Unlisted test files in ${SUITES.join(' / ')}:\n  ${unlisted.join('\n  ')}\n` +
-      'Add each to BUN or NODE in scripts/test-server.js so it actually runs.',
+      'Add each to BUN, BUN_ISOLATED, NODE or NODE_SERIAL in scripts/test-server.js so it actually runs.',
   )
   process.exit(1)
 }
 
-const missing = [...BUN, ...NODE, ...NODE_SERIAL].filter(name => !present.has(name))
+const missing = [...BUN, ...BUN_ISOLATED, ...NODE, ...NODE_SERIAL].filter(name => !present.has(name))
 if (missing.length > 0) {
   console.error(`Listed but absent from ${SUITES.join(' / ')}:\n  ${missing.join('\n  ')}`)
+  process.exit(1)
+}
+
+const missingExtraNode = EXTRA_NODE_PATHS.filter(path => !existsSync(path))
+if (missingExtraNode.length > 0) {
+  console.error(`Listed but absent extra node tests:\n  ${missingExtraNode.join('\n  ')}`)
   process.exit(1)
 }
 
@@ -167,11 +201,26 @@ function run(label, command, leadingArgs, names) {
   return status === 0
 }
 
+function runPaths(label, command, leadingArgs, paths) {
+  if (paths.length === 0) return true
+  console.log(`\n=== ${label} (${paths.length} files) ===`)
+  const { status } = spawnSync(command, [...leadingArgs, ...paths], {
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  })
+  return status === 0
+}
+
 // Both run even when the first fails: one red runner should not hide the
 // other's result, or fixing a failure means discovering the next one a commit
 // later.
 const bunOk = run('bun:test', 'bun', ['test'], BUN)
+let isolatedBunOk = true
+for (const name of BUN_ISOLATED) {
+  if (!run('bun:test (isolated)', 'bun', ['test'], [name])) isolatedBunOk = false
+}
 const nodeOk = run('node:test', 'npx', ['tsx', '--test'], NODE)
+const extraNodeOk = runPaths('node:test (server api)', 'npx', ['tsx', '--test'], EXTRA_NODE_PATHS)
 const nodeSerialOk = run(
   'node:test real-process',
   'npx',
@@ -185,5 +234,5 @@ if (skipped.length > 0) {
   for (const [name, reason] of skipped) console.log(`  ${name} — ${reason}`)
 }
 
-if (!bunOk || !nodeOk || !nodeSerialOk) process.exit(1)
+if (!bunOk || !isolatedBunOk || !nodeOk || !nodeSerialOk || !extraNodeOk) process.exit(1)
 console.log('\nserver suite: both runners passed')

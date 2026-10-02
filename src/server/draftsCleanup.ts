@@ -1,5 +1,4 @@
-import { existsSync } from 'fs'
-import { mkdir, readdir, readFile, rename, rm } from 'fs/promises'
+import { mkdir } from 'fs/promises'
 import path from 'path'
 
 export const DRAFTS_DIR_NAME = '.drafts'
@@ -58,64 +57,7 @@ const DRAFT_FILE_PATTERNS = {
   ],
 }
 
-const FINAL_FILE_PATTERNS = {
-  suffixes: [
-    '_final',
-    '-final',
-    '_result',
-    '-result',
-    '_output',
-    '-output',
-    '_completed',
-    '-completed',
-    '_done',
-    '-done',
-  ],
-}
-
 const DRAFT_EXTENSIONS = ['.tmp', '.temp', '.bak', '.backup', '.log', '.cache']
-
-const FINAL_EXTENSIONS = [
-  '.md',
-  '.txt',
-  '.pdf',
-  '.docx',
-  '.pptx',
-  '.json',
-  '.yaml',
-  '.yml',
-  '.csv',
-  '.xlsx',
-  '.py',
-  '.sh',
-  '.bash',
-  '.zsh',
-  '.ts',
-  '.tsx',
-  '.js',
-  '.jsx',
-  '.rs',
-  '.go',
-  '.java',
-  '.kt',
-  '.c',
-  '.cpp',
-  '.h',
-  '.hpp',
-  '.rb',
-  '.php',
-  '.lua',
-  '.toml',
-  '.ini',
-  '.conf',
-  '.cfg',
-  '.html',
-  '.css',
-  '.scss',
-  '.png',
-  '.jpg',
-  '.svg',
-]
 
 const COMMENT_SYNTAX_MAP: Record<string, string> = {
   '.py': '#',
@@ -126,7 +68,7 @@ const COMMENT_SYNTAX_MAP: Record<string, string> = {
   '.rb': '#',
   '.pl': '#',
   '.pm': '#',
-  '.lua': '#',
+  '.lua': '--',
   '.r': '#',
   '.rscript': '#',
   '.js': '//',
@@ -155,7 +97,6 @@ const COMMENT_SYNTAX_MAP: Record<string, string> = {
   '.ini': '#',
   '.conf': '#',
   '.cfg': '#',
-  '.json': '#',
   '.html': '<!--',
   '.htm': '<!--',
   '.xml': '<!--',
@@ -165,22 +106,6 @@ const COMMENT_SYNTAX_MAP: Record<string, string> = {
   default: '#',
 }
 
-const EXCLUDED_NAMES = new Set([
-  DRAFTS_DIR_NAME,
-  '.git',
-  '.gitignore',
-  '.env',
-  '.env.local',
-  'README.md',
-  'readme.md',
-  'LICENSE',
-  'package.json',
-  'package-lock.json',
-  'node_modules',
-  '.DS_Store',
-  'Thumbs.db',
-])
-
 type FileIntentResult = {
   intent: 'final' | 'draft' | 'unknown'
   reason: string
@@ -188,11 +113,7 @@ type FileIntentResult = {
   line?: number
 }
 
-function log(message: string): void {
-  process.stderr.write(`[draftsCleanup] ${message}\n`)
-}
-
-function matchesDraftPattern(fileName: string): boolean {
+export function matchesDraftPattern(fileName: string): boolean {
   const lower = fileName.toLowerCase()
 
   for (const prefix of DRAFT_FILE_PATTERNS.prefixes) {
@@ -208,20 +129,10 @@ function matchesDraftPattern(fileName: string): boolean {
   return DRAFT_EXTENSIONS.includes(ext)
 }
 
-function matchesFinalPattern(fileName: string): boolean {
-  const lower = fileName.toLowerCase()
-  const ext = path.extname(lower)
-  const baseName = lower.slice(0, lower.length - ext.length)
-
-  for (const suffix of FINAL_FILE_PATTERNS.suffixes) {
-    if (baseName.endsWith(suffix)) return true
-  }
-
-  return FINAL_EXTENSIONS.includes(ext)
-}
-
 export function detectFileIntent(filePath: string, content: string): FileIntentResult {
+  if (filePath.split(/[\\/]/).includes(DRAFTS_DIR_NAME)) return { intent: 'draft', reason: 'Draft directory' }
   const ext = path.extname(filePath).toLowerCase()
+  if (['.json', '.csv'].includes(ext)) return { intent: 'unknown', reason: 'Format does not support comments' }
   const commentPrefix = COMMENT_SYNTAX_MAP[ext] || COMMENT_SYNTAX_MAP.default
   const lines = content.split('\n').slice(0, 10)
 
@@ -271,132 +182,28 @@ export async function ensureDraftsDirectory(workspace: string): Promise<string> 
   return draftsDir
 }
 
+/** Retained for older callers; never sweep input files or relocate live dependencies. */
 export async function cleanupIntermediateFiles(workspace: string): Promise<void> {
-  try {
-    if (!existsSync(workspace)) return
-
-    const draftsDir = await ensureDraftsDirectory(workspace)
-    const entries = await readdir(workspace, { withFileTypes: true })
-    const filesToMove: Array<{ name: string; reason: string }> = []
-    let hasDraftScripts = false
-
-    for (const entry of entries) {
-      if (!entry.isFile()) continue
-      if (EXCLUDED_NAMES.has(entry.name)) continue
-
-      const filePath = path.join(workspace, entry.name)
-      let content: string | null = null
-      try {
-        content = await readFile(filePath, 'utf8')
-      } catch {
-        // Binary files fall through to name-based detection.
-      }
-
-      if (content) {
-        const intentResult = detectFileIntent(filePath, content)
-        if (intentResult.intent === 'draft') {
-          filesToMove.push({
-            name: entry.name,
-            reason: `Detected ${intentResult.marker ?? '@draft'} marker`,
-          })
-          hasDraftScripts = true
-          continue
-        }
-        if (intentResult.intent === 'final') {
-          continue
-        }
-      }
-
-      if (matchesFinalPattern(entry.name)) {
-        continue
-      }
-
-      if (matchesDraftPattern(entry.name)) {
-        filesToMove.push({
-          name: entry.name,
-          reason: 'Matches draft file pattern',
-        })
-        hasDraftScripts = true
-      }
-    }
-
-    for (const { name, reason } of filesToMove) {
-      const srcPath = path.join(workspace, name)
-      let destPath = path.join(draftsDir, name)
-
-      if (existsSync(destPath)) {
-        const ext = path.extname(name)
-        const base = path.basename(name, ext)
-        destPath = path.join(draftsDir, `${base}_${Date.now()}${ext}`)
-      }
-
-      try {
-        await rename(srcPath, destPath)
-        log(`Moved ${name} to ${DRAFTS_DIR_NAME}/ (${reason})`)
-      } catch (error) {
-        log(`Failed to move ${name} to drafts: ${String(error)}`)
-      }
-    }
-
-    if (!hasDraftScripts) return
-
-    for (const fileName of ['package.json', 'package-lock.json', 'bun.lockb']) {
-      const filePath = path.join(workspace, fileName)
-      if (!existsSync(filePath)) continue
-
-      let destPath = path.join(draftsDir, fileName)
-      if (existsSync(destPath)) {
-        const ext = path.extname(fileName)
-        const base = path.basename(fileName, ext)
-        destPath = path.join(draftsDir, `${base}_${Date.now()}${ext}`)
-      }
-
-      try {
-        await rename(filePath, destPath)
-        log(`Moved script side effect ${fileName} to ${DRAFTS_DIR_NAME}/`)
-      } catch (error) {
-        log(`Failed to move script side effect ${fileName}: ${String(error)}`)
-      }
-    }
-
-    const nodeModulesPath = path.join(workspace, 'node_modules')
-    if (existsSync(nodeModulesPath)) {
-      await rm(nodeModulesPath, { recursive: true, force: true })
-      log('Deleted script side effect directory node_modules')
-    }
-  } catch (error) {
-    log(`Cleanup failed: ${String(error)}`)
-  }
+  await ensureDraftsDirectory(workspace)
 }
 
 export function buildDraftsInstruction(workspace: string): string {
-  const draftsPath = `${workspace}/${DRAFTS_DIR_NAME}`
+  return `[Workspace files]
+Workspace: ${workspace}
+Drafts (草稿箱): ${workspace}/.drafts
 
-  return `[CRITICAL: File Intent Marking System - MANDATORY]
-
-Your workspace is: ${workspace}
-A drafts directory exists at: ${draftsPath}
-
-When creating files, add an intent marker as the FIRST LINE:
-- Final deliverables use @final, for example "# @final" or "// @final".
-- Intermediate files use @draft, for example "# @draft" or "// @draft".
-
-Decision rule:
-- If the file is the user-requested final output, mark it @final and keep it in the workspace root.
-- If the file only helps produce the final output, mark it @draft. Examples: helper scripts, temporary data, conversion scripts, scratch files.
-- If a script creates the final output, the script is @draft and the output is @final.
-
-Post-processing behavior:
-- Files with @draft marker are automatically moved to ${draftsPath}/.
-- Files with @final marker stay in ${workspace}/.
-- Files without markers stay in ${workspace}/ as the safe default.
-
-Use language-appropriate comments:
-- Python/Shell/Ruby/Perl: "# @final" or "# @draft"
-- JavaScript/TypeScript/Go/C++/Java/Rust: "// @final" or "// @draft"
-- HTML/XML/Markdown/SVG: "<!-- @final -->" or "<!-- @draft -->"
-
-When script execution creates dependency side effects such as package.json, package-lock.json, bun.lockb, or node_modules, those are treated as intermediate artifacts when draft scripts are present.
-
-[End of File Intent Marking System Rules]`
+Create temporary scripts, intermediate data and dependencies directly in .drafts/.
+Keep final deliverables at the user-requested workspace path. Scripts in .drafts must
+use explicit workspace output paths, not derive outputs from the script directory.
+Keep file contents valid: never add @final/@draft markers to JSON, CSV or binary
+files. No intent comments are required in any format. Preserve shebangs, encoding
+and XML declarations, uploaded inputs, and existing workspace files.
+Keep reusable drafts after a turn or cancellation. Do not delete dependencies or
+move files still needed by another step. Use .drafts/ for the 草稿箱 UI name.
+Before finishing, use moss_declare_artifacts when available to declare each newly
+generated final or draft file. Mark release=true only for drafts that no later step
+needs at the current path; this allows safe physical archival. Declare final files
+only after validating their contents; JSON must parse with a standard JSON parser.
+If validation fails, repair once and revalidate, otherwise report the failure.
+[End workspace files]`
 }

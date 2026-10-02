@@ -1,5 +1,4 @@
-import type { DatabaseSync } from 'node:sqlite'
-import { ensureDifySchema } from './difySchema.js'
+import type { DbDriver, SqlRow } from '../db/driver.js'
 
 export type DifyOperationStatus = 'PENDING' | 'PROCESSING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'SUPPRESSED'
 
@@ -47,20 +46,20 @@ export class DifyRepositoryError extends Error {
   }
 }
 
-type SqlRow = Record<string, unknown>
-
 export class DifyRepository {
-  constructor(private readonly db: DatabaseSync) {
-    ensureDifySchema(db)
-  }
+  constructor(readonly driver: DbDriver) {}
 
   putResource(input: Omit<DifyProviderResource, 'createdAt' | 'updatedAt'> & {
     createdAt?: number
     updatedAt?: number
-  }): DifyProviderResource {
+  }): Promise<DifyProviderResource> {
+    return this.putResourceAsync(input)
+  }
+
+  private async putResourceAsync(input: Parameters<DifyRepository['putResource']>[0]): Promise<DifyProviderResource> {
     assertNoSecretMaterial(input.metadata)
     const timestamp = input.updatedAt ?? input.createdAt ?? Date.now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO dify_provider_resources (
         id, org_id, connection_id, resource_type, external_id, metadata_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -71,15 +70,15 @@ export class DifyRepository {
         external_id = excluded.external_id,
         metadata_json = excluded.metadata_json,
         updated_at = excluded.updated_at
-    `).run(
+    `, [
       input.id, input.orgId, input.connectionId, input.resourceType, input.externalId,
       JSON.stringify(input.metadata), input.createdAt ?? timestamp, timestamp,
-    )
-    return this.getResource(input.id)!
+    ])
+    return (await this.getResource(input.id))!
   }
 
-  getResource(id: string): DifyProviderResource | null {
-    const row = this.db.prepare('SELECT * FROM dify_provider_resources WHERE id = ?').get(id) as SqlRow | undefined
+  async getResource(id: string): Promise<DifyProviderResource | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM dify_provider_resources WHERE id = ?', [id])
     return row ? mapResource(row) : null
   }
 
@@ -88,25 +87,34 @@ export class DifyRepository {
     connectionId: string,
     resourceType: 'dataset',
     externalId: string,
-  ): DifyProviderResource | null {
-    const row = this.db.prepare(`
+  ): Promise<DifyProviderResource | null> {
+    return this.getResourceByExternalIdAsync(orgId, connectionId, resourceType, externalId)
+  }
+
+  private async getResourceByExternalIdAsync(
+    orgId: string,
+    connectionId: string,
+    resourceType: 'dataset',
+    externalId: string,
+  ): Promise<DifyProviderResource | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM dify_provider_resources
       WHERE org_id = ? AND connection_id = ? AND resource_type = ? AND external_id = ?
-    `).get(orgId, connectionId, resourceType, externalId) as SqlRow | undefined
+    `, [orgId, connectionId, resourceType, externalId])
     return row ? mapResource(row) : null
   }
 
-  listResources(orgId: string, resourceType: 'dataset'): DifyProviderResource[] {
-    return (this.db.prepare(`
+  async listResources(orgId: string, resourceType: 'dataset'): Promise<DifyProviderResource[]> {
+    return (await this.driver.all<SqlRow>(`
       SELECT * FROM dify_provider_resources
       WHERE org_id = ? AND resource_type = ? ORDER BY updated_at DESC, id DESC
-    `).all(orgId, resourceType) as SqlRow[]).map(mapResource)
+    `, [orgId, resourceType])).map(mapResource)
   }
 
-  deleteResource(orgId: string, resourceType: 'dataset', externalId: string): boolean {
-    return this.db.prepare(`
+  async deleteResource(orgId: string, resourceType: 'dataset', externalId: string): Promise<boolean> {
+    return await this.driver.run(`
       DELETE FROM dify_provider_resources WHERE org_id = ? AND resource_type = ? AND external_id = ?
-    `).run(orgId, resourceType, externalId).changes === 1
+    `, [orgId, resourceType, externalId]) === 1
   }
 
   createOperation(input: {
@@ -119,31 +127,37 @@ export class DifyRepository {
     request: Record<string, unknown>
     contextSource: DifyProviderOperation['contextSource']
     createdAt?: number
-  }): DifyProviderOperation {
+  }): Promise<DifyProviderOperation> {
+    return this.createOperationAsync(input)
+  }
+
+  private async createOperationAsync(input: Parameters<DifyRepository['createOperation']>[0]): Promise<DifyProviderOperation> {
     assertNoSecretMaterial(input.request)
-    const existing = this.getOperationByIdempotencyKey(input.idempotencyKey)
+    const existing = await this.getOperationByIdempotencyKey(input.idempotencyKey)
     if (existing) return existing
     const timestamp = input.createdAt ?? Date.now()
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO dify_provider_operations (
         id, org_id, operation_type, aggregate_id, idempotency_key, status,
         request_json, result_json, context_source, error_message, attempts, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, 0, ?, ?)
-    `).run(
+      ON CONFLICT (idempotency_key) DO NOTHING
+    `, [
       input.id, input.orgId, input.operationType, input.aggregateId, input.idempotencyKey,
       input.status, JSON.stringify(input.request), input.contextSource, timestamp, timestamp,
-    )
-    return this.getOperation(input.id)!
+    ])
+    const operation = await this.getOperationByIdempotencyKey(input.idempotencyKey)
+    if (!operation) throw new DifyRepositoryError('OPERATION_NOT_FOUND', 'Dify operation was not persisted')
+    return operation
   }
 
-  getOperation(id: string): DifyProviderOperation | null {
-    const row = this.db.prepare('SELECT * FROM dify_provider_operations WHERE id = ?').get(id) as SqlRow | undefined
+  async getOperation(id: string): Promise<DifyProviderOperation | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM dify_provider_operations WHERE id = ?', [id])
     return row ? mapOperation(row) : null
   }
 
-  getOperationByIdempotencyKey(idempotencyKey: string): DifyProviderOperation | null {
-    const row = this.db.prepare('SELECT * FROM dify_provider_operations WHERE idempotency_key = ?')
-      .get(idempotencyKey) as SqlRow | undefined
+  async getOperationByIdempotencyKey(idempotencyKey: string): Promise<DifyProviderOperation | null> {
+    const row = await this.driver.get<SqlRow>('SELECT * FROM dify_provider_operations WHERE idempotency_key = ?', [idempotencyKey])
     return row ? mapOperation(row) : null
   }
 
@@ -152,23 +166,39 @@ export class DifyRepository {
     result?: Record<string, unknown> | null
     errorMessage?: string | null
     attempts?: number
-  }): DifyProviderOperation {
-    const current = this.getOperation(id)
+  }): Promise<DifyProviderOperation> {
+    return this.updateOperationAsync(id, patch)
+  }
+
+  async claimOperation(id: string): Promise<DifyProviderOperation | null> {
+    const changed = await this.driver.run(`
+      UPDATE dify_provider_operations
+      SET status = 'PROCESSING', attempts = attempts + 1, error_message = NULL, updated_at = ?
+      WHERE id = ? AND status IN ('PENDING', 'FAILED')
+    `, [Date.now(), id])
+    return changed === 1 ? this.getOperation(id) : null
+  }
+
+  private async updateOperationAsync(
+    id: string,
+    patch: Parameters<DifyRepository['updateOperation']>[1],
+  ): Promise<DifyProviderOperation> {
+    const current = await this.getOperation(id)
     if (!current) throw new DifyRepositoryError('OPERATION_NOT_FOUND', 'Dify operation not found')
     if (patch.result) assertNoSecretMaterial(patch.result)
-    this.db.prepare(`
+    await this.driver.run(`
       UPDATE dify_provider_operations
       SET status = ?, result_json = ?, error_message = ?, attempts = ?, updated_at = ?
       WHERE id = ?
-    `).run(
+    `, [
       patch.status ?? current.status,
       patch.result === undefined ? (current.result ? JSON.stringify(current.result) : null) : (patch.result ? JSON.stringify(patch.result) : null),
       patch.errorMessage === undefined ? current.errorMessage : patch.errorMessage,
       patch.attempts ?? current.attempts,
       Date.now(),
       id,
-    )
-    return this.getOperation(id)!
+    ])
+    return (await this.getOperation(id))!
   }
 
   putMigrationCheckpoint(input: {
@@ -179,10 +209,16 @@ export class DifyRepository {
     status: DifyMigrationCheckpoint['status']
     detail?: Record<string, unknown>
     updatedAt?: number
-  }): DifyMigrationCheckpoint {
+  }): Promise<DifyMigrationCheckpoint> {
+    return this.putMigrationCheckpointAsync(input)
+  }
+
+  private async putMigrationCheckpointAsync(
+    input: Parameters<DifyRepository['putMigrationCheckpoint']>[0],
+  ): Promise<DifyMigrationCheckpoint> {
     const detail = input.detail ?? {}
     assertNoSecretMaterial(detail)
-    this.db.prepare(`
+    await this.driver.run(`
       INSERT INTO dify_migration_checkpoints (
         migration_run_id, source_checksum, phase, cursor, status, detail_json, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -192,17 +228,17 @@ export class DifyRepository {
         status = excluded.status,
         detail_json = excluded.detail_json,
         updated_at = excluded.updated_at
-    `).run(
+    `, [
       input.migrationRunId, input.sourceChecksum, input.phase, input.cursor ?? null,
       input.status, JSON.stringify(detail), input.updatedAt ?? Date.now(),
-    )
-    return this.getMigrationCheckpoint(input.migrationRunId, input.phase)!
+    ])
+    return (await this.getMigrationCheckpoint(input.migrationRunId, input.phase))!
   }
 
-  getMigrationCheckpoint(migrationRunId: string, phase: string): DifyMigrationCheckpoint | null {
-    const row = this.db.prepare(`
+  async getMigrationCheckpoint(migrationRunId: string, phase: string): Promise<DifyMigrationCheckpoint | null> {
+    const row = await this.driver.get<SqlRow>(`
       SELECT * FROM dify_migration_checkpoints WHERE migration_run_id = ? AND phase = ?
-    `).get(migrationRunId, phase) as SqlRow | undefined
+    `, [migrationRunId, phase])
     return row ? {
       migrationRunId: String(row.migration_run_id),
       sourceChecksum: String(row.source_checksum),

@@ -3,17 +3,18 @@ export interface QmsConfigInput {
   apiKeyHeader?: string
   queueFlushIntervalMs?: number
   queueBatchSize?: number
+  queueMaxItems?: number
+  queueMaxBytes?: number
+  queueRetryIntervalMs?: number
+  queueDrainTimeoutMs?: number
   perfRetentionDays?: number
   conversationRetentionDays?: number
-  encryptionRequired?: boolean
 }
 
 export interface QmsSecretEnvironment {
-  QMS_POSTGRES_URL?: string
-  QMS_REDIS_URL?: string
+  QMS_ENABLED?: string
+  QMS_DEFAULT_API_KEY?: string
   QMS_API_KEY?: string
-  QMS_TELEMETRY_PRIVATE_KEY?: string
-  QMS_TELEMETRY_PUBLIC_KEY?: string
   QMS_LARK_WEBHOOK_URL?: string
   QMS_SMTP_URL?: string
 }
@@ -24,7 +25,10 @@ export interface QmsRuntimeConfig {
   queue: {
     flushIntervalMs: number
     batchSize: number
-    visibilityTimeoutMs: number
+    maxItems: number
+    maxBytes: number
+    retryIntervalMs: number
+    drainTimeoutMs: number
   }
   retention: {
     perfDays: number
@@ -32,13 +36,8 @@ export interface QmsRuntimeConfig {
     crashDays: number
     aggregateDays: number
   }
-  encryptionRequired: boolean
   secrets: {
-    postgresUrl?: string
-    redisUrl?: string
     apiKey?: string
-    privateKeyPem?: string
-    publicKeyPem?: string
     larkWebhookUrl?: string
     smtpUrl?: string
   }
@@ -59,47 +58,22 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
   return resolved
 }
 
-function assertPostgresUrlIsSafe(value: string | undefined): void {
-  if (!value) return
-  let parsed: URL
-  try {
-    parsed = new URL(value)
-  } catch {
-    throw new QmsConfigurationError('QMS_POSTGRES_URL must be a valid URL')
-  }
-  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
-    throw new QmsConfigurationError('QMS_POSTGRES_URL must use postgres:// or postgresql://')
-  }
-  if (parsed.username === 'postgres' && parsed.password === 'postgres') {
-    throw new QmsConfigurationError('QMS uses unsafe legacy PostgreSQL credentials')
-  }
-}
-
 export function resolveQmsConfig(
   input: QmsConfigInput,
   secrets: QmsSecretEnvironment = process.env as QmsSecretEnvironment,
-  options: { validateSecrets?: boolean } = {},
+  options: { validateSecrets?: boolean; dbBackend?: 'sqlite' | 'postgres' } = {},
 ): QmsRuntimeConfig {
-  const enabled = input.enabled ?? false
-  const encryptionRequired = input.encryptionRequired ?? false
+  const enabled = secrets.QMS_ENABLED === undefined ? input.enabled ?? (options.dbBackend === 'postgres') : secrets.QMS_ENABLED === 'true'
+  const apiKey = secrets.QMS_API_KEY?.trim() || secrets.QMS_DEFAULT_API_KEY?.trim()
   const missing: string[] = []
 
   if (enabled && options.validateSecrets !== false) {
-    if (!secrets.QMS_POSTGRES_URL?.trim()) missing.push('QMS_POSTGRES_URL')
-    if (!secrets.QMS_REDIS_URL?.trim()) missing.push('QMS_REDIS_URL')
-    if (!secrets.QMS_API_KEY?.trim()) missing.push('QMS_API_KEY')
-    if (encryptionRequired && !secrets.QMS_TELEMETRY_PRIVATE_KEY?.trim()) {
-      missing.push('QMS_TELEMETRY_PRIVATE_KEY')
-    }
-    if (encryptionRequired && !secrets.QMS_TELEMETRY_PUBLIC_KEY?.trim()) {
-      missing.push('QMS_TELEMETRY_PUBLIC_KEY')
-    }
+    if (!apiKey) missing.push('QMS_API_KEY')
   }
   if (missing.length > 0) {
     throw new QmsConfigurationError(`Missing required QMS secrets: ${missing.join(', ')}`, missing)
   }
 
-  assertPostgresUrlIsSafe(secrets.QMS_POSTGRES_URL)
   const apiKeyHeader = input.apiKeyHeader?.trim() || 'X-API-Key'
   if (!/^[A-Za-z0-9-]+$/.test(apiKeyHeader)) {
     throw new QmsConfigurationError('QMS API key header contains invalid characters')
@@ -111,7 +85,10 @@ export function resolveQmsConfig(
     queue: {
       flushIntervalMs: positiveInteger(input.queueFlushIntervalMs, 3_000, 'QMS queue flush interval'),
       batchSize: positiveInteger(input.queueBatchSize, 50, 'QMS queue batch size'),
-      visibilityTimeoutMs: 60_000,
+      maxItems: positiveInteger(input.queueMaxItems, 10_000, 'QMS memory queue capacity'),
+      maxBytes: positiveInteger(input.queueMaxBytes, 16 * 1024 * 1024, 'QMS memory queue byte capacity'),
+      retryIntervalMs: positiveInteger(input.queueRetryIntervalMs, 1_000, 'QMS queue retry interval'),
+      drainTimeoutMs: positiveInteger(input.queueDrainTimeoutMs, 15_000, 'QMS queue drain timeout'),
     },
     retention: {
       perfDays: positiveInteger(input.perfRetentionDays, 90, 'QMS performance retention'),
@@ -119,13 +96,8 @@ export function resolveQmsConfig(
       crashDays: 90,
       aggregateDays: 365,
     },
-    encryptionRequired,
     secrets: {
-      postgresUrl: secrets.QMS_POSTGRES_URL?.trim() || undefined,
-      redisUrl: secrets.QMS_REDIS_URL?.trim() || undefined,
-      apiKey: secrets.QMS_API_KEY?.trim() || undefined,
-      privateKeyPem: secrets.QMS_TELEMETRY_PRIVATE_KEY?.trim() || undefined,
-      publicKeyPem: secrets.QMS_TELEMETRY_PUBLIC_KEY?.trim() || undefined,
+      apiKey: apiKey || undefined,
       larkWebhookUrl: secrets.QMS_LARK_WEBHOOK_URL?.trim() || undefined,
       smtpUrl: secrets.QMS_SMTP_URL?.trim() || undefined,
     },
@@ -135,13 +107,8 @@ export function resolveQmsConfig(
 export function assertQmsRuntimeConfig(config: QmsRuntimeConfig): void {
   if (!config.enabled) return
   const missing: string[] = []
-  if (!config.secrets.postgresUrl?.trim()) missing.push('QMS_POSTGRES_URL')
-  if (!config.secrets.redisUrl?.trim()) missing.push('QMS_REDIS_URL')
   if (!config.secrets.apiKey?.trim()) missing.push('QMS_API_KEY')
-  if (config.encryptionRequired && !config.secrets.privateKeyPem?.trim()) missing.push('QMS_TELEMETRY_PRIVATE_KEY')
-  if (config.encryptionRequired && !config.secrets.publicKeyPem?.trim()) missing.push('QMS_TELEMETRY_PUBLIC_KEY')
   if (missing.length > 0) {
     throw new QmsConfigurationError(`Missing required QMS secrets: ${missing.join(', ')}`, missing)
   }
-  assertPostgresUrlIsSafe(config.secrets.postgresUrl)
 }

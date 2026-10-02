@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import {
   assertTrustedCommandContext,
   migrationCommandContext,
@@ -7,7 +6,7 @@ import {
   replayCommandContext,
   type CommandContext,
 } from '../application/commandContext.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import type { DifyOrganizationContext } from './difyConnectionService.js'
 import { DifyHttpAdapter, DifyProviderError } from './difyHttpAdapter.js'
 import { DifyRepository, type DifyProviderOperation } from './difyRepository.js'
@@ -42,7 +41,7 @@ export class DifyDatasetService {
   private readonly idFactory: () => string
 
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     repository: DifyRepository
     adapter: DifyHttpAdapter
     connections: OrganizationConnectionResolver
@@ -98,11 +97,11 @@ export class DifyDatasetService {
       return {
         response: result,
         result: operationResult(result, { externalId: datasetId }),
-        finalize: () => {
-          const existing = this.options.repository.getResourceByExternalId(
+        finalize: async () => {
+          const existing = await this.options.repository.getResourceByExternalId(
             orgId, connection.connectionId, 'dataset', datasetId,
           )
-          this.options.repository.putResource({
+          await this.options.repository.putResource({
             id: existing?.id ?? this.idFactory(), orgId, connectionId: connection.connectionId,
             resourceType: 'dataset', externalId: datasetId,
             metadata: { ...(existing?.metadata ?? {}), ...datasetMetadata(dataset) },
@@ -242,59 +241,56 @@ export class DifyDatasetService {
     invoke: (connection: DifyOrganizationContext) => Promise<{
       response: unknown
       result: JsonObject
-      finalize?: () => unknown
+      finalize?: () => Promise<unknown>
     }>,
   ): Promise<unknown> {
     assertTrustedCommandContext(context)
     await this.options.ensureConnection?.(orgId, childCommandContext(context, 'tenant'))
-    const prepared = runInTransaction(this.options.db, () => {
-      const existing = this.options.repository.getOperationByIdempotencyKey(context.idempotencyKey)
-      if (existing) {
-        if (existing.orgId !== orgId
-          || existing.operationType !== operationType
-          || existing.aggregateId !== aggregateId
-          || JSON.stringify(existing.request) !== JSON.stringify(request)) {
-          throw new Error('idempotency key already used for a different Dify command')
-        }
-        return { operation: existing, created: existing.status === 'FAILED' }
+    const prepared = await this.options.db.transaction(async () => {
+      let operation = await this.options.repository.getOperationByIdempotencyKey(context.idempotencyKey)
+      if (!operation) {
+        operation = await this.options.repository.createOperation({
+          id: `dify-operation:${context.idempotencyKey}`, orgId, operationType, aggregateId,
+          idempotencyKey: context.idempotencyKey,
+          status: context.externalEffects === 'suppress_external' ? 'SUPPRESSED' : 'PENDING',
+          request, contextSource: context.source,
+        })
       }
-      const operation = this.options.repository.createOperation({
-        id: `dify-operation:${context.idempotencyKey}`, orgId, operationType, aggregateId,
-        idempotencyKey: context.idempotencyKey,
-        status: context.externalEffects === 'suppress_external' ? 'SUPPRESSED' : 'PENDING',
-        request, contextSource: context.source,
-      })
-      return { operation, created: true }
+      if (operation.orgId !== orgId
+        || operation.operationType !== operationType
+        || operation.aggregateId !== aggregateId
+        || JSON.stringify(operation.request) !== JSON.stringify(request)) {
+        throw new Error('idempotency key already used for a different Dify command')
+      }
+      if (operation.status === 'SUPPRESSED') return { operation, created: false }
+      const claimed = await this.options.repository.claimOperation(operation.id)
+      return { operation: claimed ?? operation, created: claimed !== null }
     })
 
     if (!prepared.created) return replayResult(prepared.operation)
     if (prepared.operation.status === 'SUPPRESSED') return { suppressed: true }
 
-    runInTransaction(this.options.db, () => this.options.repository.updateOperation(prepared.operation.id, {
-      status: 'PROCESSING', attempts: prepared.operation.attempts + 1,
-    }))
-
     try {
       const connection = await this.options.connections.resolveOrganizationContext(orgId)
       const invoked = await invoke(connection)
       try {
-        runInTransaction(this.options.db, () => {
-          invoked.finalize?.()
-          this.options.repository.updateOperation(prepared.operation.id, {
+        await this.options.db.transaction(async () => {
+          await invoked.finalize?.()
+          await this.options.repository.updateOperation(prepared.operation.id, {
             status: 'SUCCEEDED', result: invoked.result, errorMessage: null,
           })
         })
       } catch (error) {
-        runInTransaction(this.options.db, () => this.options.repository.updateOperation(prepared.operation.id, {
+        await this.options.db.transaction(async () => this.options.repository.updateOperation(prepared.operation.id, {
           status: 'UNKNOWN', errorMessage: errorMessage(error),
         }))
         throw error
       }
       return invoked.response
     } catch (error) {
-      const current = this.options.repository.getOperation(prepared.operation.id)
+      const current = await this.options.repository.getOperation(prepared.operation.id)
       if (current?.status !== 'UNKNOWN') {
-        runInTransaction(this.options.db, () => this.options.repository.updateOperation(prepared.operation.id, {
+        await this.options.db.transaction(async () => this.options.repository.updateOperation(prepared.operation.id, {
           status: error instanceof DifyProviderError ? 'FAILED' : 'UNKNOWN',
           errorMessage: errorMessage(error),
         }))

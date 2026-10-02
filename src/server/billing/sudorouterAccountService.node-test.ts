@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { onlineCommandContext } from '../application/commandContext.js'
-import { BillingRepository } from './billingRepository.js'
-import { ensureBillingSchema } from './billingSchema.js'
+import { SqliteDriver } from '../db/driver.js'
+import { createBillingTestRepository } from '../testing/compatibilityRepositories.js'
 import { SudorouterAccountService } from './sudorouterAccountService.js'
 import type { SudorouterAccountPort, SudorouterUserAccount } from './sudorouterAdapter.js'
 
@@ -63,15 +63,45 @@ class FakeSecrets {
 
 function setup() {
   const db = new DatabaseSync(':memory:')
-  ensureBillingSchema(db)
+  const driver = new SqliteDriver(db)
   const provider = new FakeSudorouter()
   const secrets = new FakeSecrets()
-  const repository = new BillingRepository(db)
-  const service = new SudorouterAccountService(db, repository, provider, secrets)
+  const repository = createBillingTestRepository(db, driver)
+  const service = new SudorouterAccountService(driver, repository, provider, secrets)
   return { db, provider, secrets, repository, service }
 }
 
 void describe('SudorouterAccountService', () => {
+  void test('已绑定的欠费用户复用原 Key，不开户、不改额度', async () => {
+    const context = setup()
+    try {
+      await context.repository.upsertExternalAccount({
+        provider: 'sudorouter', ownerType: 'user', ownerId: 'debtor', externalAccountId: '40',
+        quotaUnits: -3076, usedQuotaUnits: 2503076,
+        tokenSecretRef: 'nexus://moss:sudorouter-users/debtor', updatedAt: 1,
+      })
+      context.secrets.values.set('moss:sudorouter-users/debtor', 'sk-existing')
+      const result = await context.service.ensureAccount({
+        ownerId: 'debtor', orgId: 'org-1', username: 'debtor',
+        displayName: 'Debtor', initialQuotaUnits: -3000,
+      }, onlineCommandContext('debtor-login'))
+      assert.equal(result.token, 'sk-existing')
+      assert.equal(result.quotaUnits, -3076)
+      assert.equal(context.provider.findCalls + context.provider.createCalls
+        + context.provider.quotaCalls + context.provider.tokenCalls, 0)
+    } finally { context.db.close() }
+  })
+
+  void test('未绑定的新用户仍拒绝负初始额度', async () => {
+    const context = setup()
+    try {
+      await assert.rejects(context.service.ensureAccount({
+        ownerId: 'new', orgId: 'org-1', username: 'new', displayName: 'New', initialQuotaUnits: -1,
+      }, onlineCommandContext('negative-grant')), /初始额度无效/)
+      assert.equal(context.provider.findCalls + context.provider.createCalls, 0)
+    } finally { context.db.close() }
+  })
+
   void test('幂等创建账号、初始化额度并把 Token 只写入 Nexus', async () => {
     const context = setup()
     const input = {
@@ -90,11 +120,12 @@ void describe('SudorouterAccountService', () => {
     assert.equal(context.provider.quotaCalls, 1)
     assert.equal(context.provider.tokenCalls, 1)
     assert.equal(context.secrets.putCalls, 1)
-    assert.deepEqual(context.repository.getExternalAccount('sudorouter', 'user', 'user-1'), {
+    const externalAccount = await context.repository.getExternalAccount('sudorouter', 'user', 'user-1')
+    assert.deepEqual(externalAccount, {
       provider: 'sudorouter', ownerType: 'user', ownerId: 'user-1', externalAccountId: '91',
       quotaUnits: 500_000, usedQuotaUnits: 0,
       tokenSecretRef: 'nexus://moss:sudorouter-users/user-1',
-      updatedAt: context.repository.getExternalAccount('sudorouter', 'user', 'user-1')?.updatedAt,
+      updatedAt: externalAccount?.updatedAt,
     })
     const rows = JSON.stringify(context.db.prepare('SELECT * FROM billing_external_accounts').all())
       + JSON.stringify(context.db.prepare('SELECT * FROM billing_sudorouter_provisioning').all())
@@ -135,7 +166,7 @@ void describe('SudorouterAccountService', () => {
     assert.equal(recovered.externalUserId, '91')
     assert.equal(context.provider.createCalls, 1)
     assert.equal(context.provider.quotaCalls, 1)
-    assert.equal(context.repository.getSudorouterProvisioningByKey('register-user-3')?.status, 'COMPLETED')
+    assert.equal((await context.repository.getSudorouterProvisioningByKey('register-user-3'))?.status, 'COMPLETED')
     context.db.close()
   })
 

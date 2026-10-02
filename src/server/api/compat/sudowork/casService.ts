@@ -116,13 +116,14 @@ export class SudoworkCasService {
     codeFactory?: () => string
     accountProvisioner?: Pick<SudorouterAccountService, 'ensureAccount'>
     initialQuotaUnits?: number
+    getLoginMethod?: (orgId: string) => 'sms' | 'password' | 'cas' | Promise<'sms' | 'password' | 'cas'>
   }) {
     this.validator = options.ticketValidator ?? new HttpCasTicketValidator()
     this.codeFactory = options.codeFactory ?? (() => randomBytes(32).toString('base64url'))
   }
 
-  getProvider(providerId: string): CasProvider {
-    const connection = this.options.identities.getIntegrationConnection(providerId)
+  async getProvider(providerId: string): Promise<CasProvider> {
+    const connection = await this.options.identities.getIntegrationConnection(providerId)
     if (!connection || connection.providerType !== 'cas' || !connection.enabled) {
       throw new SudoworkCasError(400, '无效的三方认证 Provider')
     }
@@ -130,11 +131,12 @@ export class SudoworkCasService {
   }
 
   async listPublicProviders(): Promise<Array<Record<string, unknown>>> {
-    return (await this.options.authDb.listOrganizations()).flatMap((org) =>
-      this.options.identities.listIntegrationConnections(org.id, 'cas')
+    const providers = await Promise.all((await this.options.authDb.listOrganizations()).map(async (org) =>
+      (await this.options.identities.listIntegrationConnections(org.id, 'cas'))
         .filter((connection) => connection.enabled)
         .map((connection) => toLegacyProvider(parseProvider(connection))),
-    )
+    ))
+    return providers.flat()
   }
 
   async login(input: {
@@ -144,6 +146,7 @@ export class SudoworkCasService {
     deviceId?: string
   }): Promise<SudoworkLegacySession> {
     const resolved = await this.resolveUser(input.providerId, input.ticket, input.service)
+    await this.assertCasLoginEnabled(resolved.provider.orgId)
     return this.options.identity.startSessionForCanonicalUser({
       userId: resolved.user.id,
       account: resolved.profile.account,
@@ -151,11 +154,17 @@ export class SudoworkCasService {
     })
   }
 
+  async loginNative(input: { providerId: string; ticket: string; service: string }): Promise<string> {
+    const resolved = await this.resolveUser(input.providerId, input.ticket, input.service)
+    return resolved.user.id
+  }
+
   async createHandoff(input: { providerId: string; ticket: string }): Promise<{ redirectUrl: string }> {
-    const provider = this.getProvider(input.providerId)
+    const provider = await this.getProvider(input.providerId)
     if (provider.callbackMode !== 'server_callback') {
       throw new SudoworkCasError(400, '当前 Provider 未启用服务端回调模式')
     }
+    await this.assertCasLoginEnabled(provider.orgId)
     if (!provider.serverCallbackUrl) throw new SudoworkCasError(400, '服务端回调 URL 未配置')
     const resolved = await this.resolveUser(provider.id, input.ticket, provider.serverCallbackUrl)
     const code = this.codeFactory()
@@ -172,25 +181,31 @@ export class SudoworkCasService {
   }
 
   async exchange(input: { providerId: string; code: string; deviceId?: string }): Promise<SudoworkLegacySession> {
-    const provider = this.getProvider(input.providerId)
+    const payload = await this.consumeHandoff(input)
+    return this.options.identity.startSessionForCanonicalUser({ userId: payload.userId, account: payload.account, deviceId: input.deviceId })
+  }
+
+  async exchangeNative(input: { providerId: string; code: string }): Promise<string> {
+    return (await this.consumeHandoff(input)).userId
+  }
+
+  private async consumeHandoff(input: { providerId: string; code: string }): Promise<{ userId: string; account: string }> {
+    const provider = await this.getProvider(input.providerId)
     const key = `cas_handoff:${hash(input.code)}`
     const raw = await this.options.tokenStore.get(key)
     if (!raw) throw new SudoworkCasError(401, '登录凭证无效，请重新登录')
     const payload = JSON.parse(raw) as { providerId: string; userId: string; account: string }
     if (payload.providerId !== provider.id) throw new SudoworkCasError(401, '登录凭证无效，请重新登录')
+    await this.assertCasLoginEnabled(provider.orgId)
     const consumed = this.options.tokenStore.rotate
       ? await this.options.tokenStore.rotate(key, `cas_handoff_used:${hash(input.code)}`, 1, 'used')
       : await consumeHandoffToken(this.options.tokenStore, key, `cas_handoff_used:${hash(input.code)}`)
     if (!consumed) throw new SudoworkCasError(401, '登录凭证已失效，请重新登录')
-    return this.options.identity.startSessionForCanonicalUser({
-      userId: payload.userId,
-      account: payload.account,
-      deviceId: input.deviceId,
-    })
+    return payload
   }
 
-  logoutCallbackUrl(providerId: string): string {
-    const provider = this.getProvider(providerId)
+  async logoutCallbackUrl(providerId: string): Promise<string> {
+    const provider = await this.getProvider(providerId)
     const fallback = `sudowork://cas-callback/${encodeURIComponent(provider.id)}/logout`
     const rawUrl = provider.appCallbackUrl || fallback
     try {
@@ -208,14 +223,15 @@ export class SudoworkCasService {
     profile: CasProfile
     user: AuthCenterUser
   }> {
-    const provider = this.getProvider(providerId)
+    const provider = await this.getProvider(providerId)
+    await this.assertCasLoginEnabled(provider.orgId)
     const profile = await this.validator.validate(provider, service, ticket)
     if (!profile.active) throw new SudoworkCasError(403, 'CAS 用户已被禁用')
-    const existingIdentity = this.options.identities.findAuthIdentity('cas', provider.id, profile.subject)
+    const existingIdentity = await this.options.identities.findAuthIdentity('cas', provider.id, profile.subject)
     let user = existingIdentity ? await this.options.authDb.getUserById(existingIdentity.userId) : null
     if (!user) {
-      const accountIdentity = this.options.identities.findAuthIdentity('phone', 'sudowork', profile.account)
-        ?? this.options.identities.findAuthIdentity('password', 'moss', profile.account)
+      const accountIdentity = await this.options.identities.findAuthIdentity('phone', 'sudowork', profile.account)
+        ?? await this.options.identities.findAuthIdentity('password', 'moss', profile.account)
       user = accountIdentity ? await this.options.authDb.getUserById(accountIdentity.userId) : null
       if (user && user.orgId !== provider.orgId) {
         throw new SudoworkCasError(409, 'CAS 账号对应的本地用户已存在但登录方式或企业不匹配，请联系管理员处理')
@@ -238,7 +254,7 @@ export class SudoworkCasService {
         }, onlineCommandContext(`cas-user:${provider.id}:${profile.subject}`))
         user = await this.options.authDb.getUserById(created.userId)
       } else {
-        this.options.identities.createAuthIdentity({
+        await this.options.identities.createAuthIdentity({
           id: randomUUID(), orgId: provider.orgId, userId: user.id,
           provider: 'cas', issuer: provider.id, normalizedSubject: profile.subject,
           metadata: profile.attributes,
@@ -263,6 +279,13 @@ export class SudoworkCasService {
     }
     if (!user) throw new SudoworkCasError(500, '三方认证身份绑定失败')
     return { provider, profile, user }
+  }
+
+  private async assertCasLoginEnabled(orgId: string): Promise<void> {
+    const loginMethod = await this.options.getLoginMethod?.(orgId)
+    if (loginMethod && loginMethod !== 'cas') {
+      throw new SudoworkCasError(403, '当前企业未开启三方认证登录')
+    }
   }
 }
 

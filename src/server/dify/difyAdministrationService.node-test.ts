@@ -4,48 +4,31 @@ import { describe, test } from 'node:test'
 import JSZip from 'jszip'
 import { migrationCommandContext, onlineCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { CatalogRepository } from '../catalog/catalogRepository.js'
 import { CatalogService } from '../catalog/catalogService.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import {
+  createCatalogTestRepository,
+  createDifyTestRepository,
+  createIdentityTestRepository,
+} from '../testing/compatibilityRepositories.js'
 import { DifyAdministrationService } from './difyAdministrationService.js'
 import { DifyProviderError } from './difyHttpAdapter.js'
-import { DifyRepository } from './difyRepository.js'
 
 async function setup(options: { failArtifactPublish?: boolean; failFirstProvision?: boolean } = {}) {
   const db = new DatabaseSync(':memory:')
   const auth = new AuthCenterDb(db)
   await auth.createOrganization('org-a', 'Organization A', 1)
   await auth.createOrganization('org-b', 'Organization B', 2)
-  db.exec(`
-    CREATE TABLE tenant_assistants (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      default_init_prompt TEXT, prompts_i18n TEXT, categories TEXT, avatar TEXT, skills TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, enabled_skills TEXT,
-      publish_note TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE tenant_skills (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, publish_note TEXT,
-      review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-  `)
-  const identities = new IdentityRepository(db)
-  identities.putOrganizationProfile({
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
+  await identities.putOrganizationProfile({
     orgId: 'org-a', code: 'ENT-A', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
   })
-  identities.putOrganizationProfile({
+  await identities.putOrganizationProfile({
     orgId: 'org-b', code: 'ENT-B', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
   })
-  identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 1, resourceId: 'org-a', orgId: 'org-a' })
-  identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 2, resourceId: 'org-b', orgId: 'org-b' })
-  const catalog = new CatalogRepository(db)
-  const difyRepository = new DifyRepository(db)
+  await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 1, resourceId: 'org-a', orgId: 'org-a' })
+  await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 2, resourceId: 'org-b', orgId: 'org-b' })
+  const catalog = createCatalogTestRepository(db, auth.driver)
+  const difyRepository = createDifyTestRepository(db, auth.driver)
   const secretWrites: Array<{ namespace: string; key: string; value: string }> = []
   const secretDeletes: Array<{ namespace: string; key: string }> = []
   const externalCalls: Array<{ method: string; args: unknown[] }> = []
@@ -68,8 +51,8 @@ async function setup(options: { failArtifactPublish?: boolean; failFirstProvisio
     },
   }
   const service = new DifyAdministrationService({
-    db, auth, identities, catalog, difyRepository,
-    catalogService: new CatalogService(db, catalog),
+    db: auth.driver, auth, identities, catalog, difyRepository,
+    catalogService: new CatalogService(catalog),
     adapter: adapter as never,
     secrets: {
       async putSecret(namespace: string, key: string, value: string) {
@@ -107,8 +90,8 @@ void describe('DifyAdministrationService', () => {
     assert.deepEqual(result, { suppressed: true })
     assert.equal(externalCalls.length, 0)
     assert.equal(secretWrites.length, 0)
-    assert.equal(identities.listIntegrationConnections('org-a', 'dify').length, 0)
-    assert.equal(difyRepository.getOperationByIdempotencyKey('provision:org-a')?.status, 'SUPPRESSED')
+    assert.equal((await identities.listIntegrationConnections('org-a', 'dify')).length, 0)
+    assert.equal((await difyRepository.getOperationByIdempotencyKey('provision:org-a'))?.status, 'SUPPRESSED')
     db.close()
   })
 
@@ -120,7 +103,7 @@ void describe('DifyAdministrationService', () => {
     assert.deepEqual(repeated, first)
     assert.equal(externalCalls.filter(call => call.method === 'provisionTenant').length, 1)
     assert.deepEqual(secretWrites, [{ namespace: 'org:org-a:dify', key: 'service-api-key', value: 'service-secret' }])
-    const connection = identities.listIntegrationConnections('org-a', 'dify')[0]
+    const connection = (await identities.listIntegrationConnections('org-a', 'dify'))[0]
     assert.equal(connection?.secretRef, 'nexus://org:org-a:dify/service-api-key')
     assert.deepEqual(connection?.config, {
       tenantId: 'tenant-a', systemAccountId: 'system-a', isDefault: true, createdAt: 1_700_000_000,
@@ -154,7 +137,7 @@ void describe('DifyAdministrationService', () => {
     assert.equal(result.assistantId, 'agent-new')
     assert.equal(externalCalls.filter(call => call.method === 'provisionTenant').length, 1)
     assert.equal(externalCalls.filter(call => call.method === 'systemJson').length, 1)
-    const agent = catalog.getAgent('agent-new', 'org-a')
+    const agent = await catalog.getAgent('agent-new', 'org-a')
     assert.equal(agent?.providerType, 'dify')
     assert.equal(agent?.supportedModes, 'both')
     assert.deepEqual(agent?.providerBinding, {
@@ -163,7 +146,7 @@ void describe('DifyAdministrationService', () => {
     })
     assert.equal(JSON.stringify(agent).includes('app-secret'), false)
     assert(secretWrites.some(write => write.key === 'apps/app-1-api-key' && write.value === 'app-secret'))
-    assert.equal(difyRepository.getOperationByIdempotencyKey('agent:create:1')?.status, 'SUCCEEDED')
+    assert.equal((await difyRepository.getOperationByIdempotencyKey('agent:create:1'))?.status, 'SUCCEEDED')
     const repeated = await service.createAgent({
       actor: admin, orgId: 'org-a', name: 'Dify Agent', description: 'desc', mode: 'agent-chat',
     }, onlineCommandContext('agent:create:1'))
@@ -185,19 +168,19 @@ void describe('DifyAdministrationService', () => {
 
   void test('maps ACL and dataset bindings into the same Catalog record and forbids method changes', async () => {
     const { db, catalog, service, externalCalls } = await setup()
-    catalog.createAgent({
+    await catalog.createAgent({
       id: 'rag-1', orgId: 'org-a', name: 'RAG', authorId: 'admin-a', providerType: 'dify',
       supportedModes: 'both', status: 'approved',
       providerBinding: { connectionId: 'dify:org-a', tenantId: 'tenant-a', datasetIds: ['ds-1'] },
     })
-    assert.deepEqual(service.replaceAcl('org-a', 'rag-1', [
+    assert.deepEqual(await service.replaceAcl('org-a', 'rag-1', [
       { subjectType: 'user', subjectId: 'u1' }, { subjectType: 'role', subjectId: 'reviewer' },
     ]), [
       { subjectType: 'user', subjectId: 'u1' }, { subjectType: 'role', subjectId: 'reviewer' },
     ])
-    assert.deepEqual(service.replaceDatasets('org-a', 'rag-1', ['ds-2', 'ds-2']), ['ds-2'])
-    assert.throws(() => service.replaceDatasets('org-a', 'rag-1', []), /enhancement method cannot be changed/)
-    assert.deepEqual(catalog.getAgent('rag-1', 'org-a')?.visibleTo, {
+    assert.deepEqual(await service.replaceDatasets('org-a', 'rag-1', ['ds-2', 'ds-2']), ['ds-2'])
+    await assert.rejects(service.replaceDatasets('org-a', 'rag-1', []), /enhancement method cannot be changed/)
+    assert.deepEqual((await catalog.getAgent('rag-1', 'org-a'))?.visibleTo, {
       user_ids: ['u1'], role_ids: ['reviewer'], department_ids: null,
     })
     db.close()
@@ -225,13 +208,13 @@ void describe('DifyAdministrationService', () => {
     ) as Record<string, unknown>
     assert.equal(created.assistantId, 'agent-new')
     assert.equal(replayed.assistantId, 'agent-new')
-    const agent = catalog.getAgent('agent-new', 'org-a')
+    const agent = await catalog.getAgent('agent-new', 'org-a')
     assert.equal(agent?.providerType, 'dify')
     assert.deepEqual(agent?.providerBinding, {
       connectionId: 'dify:org-a', tenantId: 'tenant-a', datasetIds: ['ds-1'], mode: 'rag-only',
     })
     assert.deepEqual(agent?.visibleTo, { user_ids: ['u1'], role_ids: null, department_ids: null })
-    assert.deepEqual(catalog.listAssignedOrganizationIds('agent', 'agent-new'), ['org-b'])
+    assert.deepEqual(await catalog.listAssignedOrganizationIds('agent', 'agent-new'), ['org-b'])
     assert.deepEqual(artifactCalls.map(call => call.method), ['stage', 'publish'])
     assert(((artifactCalls[0]?.input as { bytes: Buffer }).bytes.length) > 0)
 
@@ -265,21 +248,21 @@ void describe('DifyAdministrationService', () => {
     await service.createAgent({ actor: admin, orgId: 'org-a', name: 'Delete me' }, onlineCommandContext('agent:create:delete'))
 
     await service.deleteAgent('org-a', 'agent-new', migrationCommandContext('run-delete', 'agent:delete:suppressed'))
-    assert(catalog.getAgent('agent-new', 'org-a'))
-    assert.equal(difyRepository.getOperationByIdempotencyKey('agent:delete:suppressed')?.status, 'SUPPRESSED')
+    assert(await catalog.getAgent('agent-new', 'org-a'))
+    assert.equal((await difyRepository.getOperationByIdempotencyKey('agent:delete:suppressed'))?.status, 'SUPPRESSED')
 
     const context = onlineCommandContext('agent:delete:1')
     await service.deleteAgent('org-a', 'agent-new', context)
     await service.deleteAgent('org-a', 'agent-new', context)
-    assert.equal(catalog.getAgent('agent-new', 'org-a'), null)
+    assert.equal(await catalog.getAgent('agent-new', 'org-a'), null)
     assert.equal(externalCalls.filter(call => call.method === 'systemJson' && call.args[1] === 'DELETE').length, 1)
-    assert.equal(difyRepository.getOperationByIdempotencyKey('agent:delete:1')?.status, 'SUCCEEDED')
+    assert.equal((await difyRepository.getOperationByIdempotencyKey('agent:delete:1'))?.status, 'SUCCEEDED')
     db.close()
   })
 
   void test('service layer rejects enhancement method changes even without the HTTP adapter', async () => {
     const { db, catalog, service } = await setup()
-    catalog.createAgent({
+    await catalog.createAgent({
       id: 'enhanced', orgId: 'org-a', name: 'Enhanced', authorId: 'admin-a', status: 'approved',
       providerType: 'dify', supportedModes: 'both',
       providerBinding: { connectionId: 'dify:org-a', tenantId: 'tenant-a', appId: 'app-1', mode: 'agent-chat' },
@@ -306,8 +289,8 @@ void describe('DifyAdministrationService', () => {
       /publish failed/,
     )
 
-    assert.equal(catalog.getAgent('agent-new', 'org-a'), null)
-    assert.equal(catalog.getCommandResult('catalog.create_agent', 'enterprise-agent:rollback'), null)
+    assert.equal(await catalog.getAgent('agent-new', 'org-a'), null)
+    assert.equal(await catalog.getCommandResult('catalog.create_agent', 'enterprise-agent:rollback'), null)
     assert(secretDeletes.some(item => item.key === 'apps/app-1-api-key'))
     assert(externalCalls.some(call => call.method === 'systemJson'
       && call.args[1] === 'DELETE'
@@ -317,11 +300,11 @@ void describe('DifyAdministrationService', () => {
 
   void test('returns legacy enterprise aliases and tenant codes instead of Moss organization ids', async () => {
     const { db, catalog, service } = await setup()
-    catalog.createAgent({
+    await catalog.createAgent({
       id: 'shared-1', orgId: 'org-a', name: 'Shared', authorId: 'admin-a', status: 'approved',
       providerType: 'local', supportedModes: 'local', availability: 'assigned',
     })
-    catalog.replaceOrganizationAssignments('agent', 'shared-1', ['org-b'])
+    await catalog.replaceOrganizationAssignments('agent', 'shared-1', ['org-b'])
 
     const list = await service.listEnterpriseAssistants('org-a') as Array<Record<string, unknown>>
     assert.equal(list[0]?.enterprise_id, 1)
@@ -332,7 +315,7 @@ void describe('DifyAdministrationService', () => {
 
   void test('publishes a replacement artifact and updates its checksum and path', async () => {
     const { db, catalog, service, artifactCalls } = await setup()
-    catalog.createAgent({
+    await catalog.createAgent({
       id: 'existing-1', orgId: 'org-a', name: 'Old', authorId: 'admin-a', status: 'approved',
       providerType: 'local', supportedModes: 'local', version: '1.0.0',
       checksum: 'old-checksum', filePath: '/managed/old.zip',
@@ -347,7 +330,7 @@ void describe('DifyAdministrationService', () => {
       onlineCommandContext('enterprise-agent:update:1'),
     )
 
-    const updated = catalog.getAgent('existing-1', 'org-a')
+    const updated = await catalog.getAgent('existing-1', 'org-a')
     assert.equal(updated?.checksum, 'checksum-1')
     assert.equal(updated?.filePath, '/managed/agent.zip')
     assert.equal(updated?.version, '1.0.1')
@@ -363,7 +346,7 @@ void describe('DifyAdministrationService', () => {
       localAuth: true, tokenLimit: null, createdAt: 1, passwordHash: null,
       passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
     })
-    identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'admin-a', orgId: 'org-a' })
+    await identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'admin-a', orgId: 'org-a' })
     await service.provision('org-a', onlineCommandContext('provision:sso'))
     const link = await service.buildSsoLink({ actor: admin, orgId: 'org-a', next: '/datasets' })
     assert(link.url.startsWith('https://dify.example.test/sudowork/sso/exchange?token='))

@@ -4,10 +4,8 @@ import { describe, test } from 'node:test'
 import { onlineCommandContext } from '../application/commandContext.js'
 import { migrationCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { BillingCoordinator } from './billingCoordinator.js'
-import { BillingRepository } from './billingRepository.js'
-import { ensureBillingSchema } from './billingSchema.js'
 import type { QuotaSnapshot, SudorouterPort } from './sudorouterAdapter.js'
 import { RefundService, type FuiouRefundPort } from './refundService.js'
 import { WalletService } from './walletService.js'
@@ -35,7 +33,7 @@ async function setup() {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
   await auth.createOrganization('org1', 'Org 1', 1)
   for (const [id, role] of [['u1', 'user'], ['admin1', 'admin']] as const) {
     await auth.createUser({
@@ -43,32 +41,31 @@ async function setup() {
       departmentId: null, role, status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
     })
-    identities.createWallet('user', id, 0)
+    await identities.createWallet('user', id, 0)
   }
-  ensureBillingSchema(db)
-  const repository = new BillingRepository(db)
-  const wallet = new WalletService(db, repository, () => 100)
-  wallet.post({
+  const repository = createBillingTestRepository(db, auth.driver)
+  const wallet = new WalletService(auth.driver, repository, () => 100)
+  await wallet.post({
     ownerType: 'user', ownerId: 'u1', deltaUnits: 5_500, entryType: 'RECHARGE',
     sourceType: 'payment_order', sourceId: 'order-1', orgId: 'org1',
   }, onlineCommandContext('seed-order-balance'))
-  repository.insertOrder({
+  await repository.insertOrder({
     id: 'order-1', legacyId: 7, orderNo: 'USR17NO1', userId: 'u1', orgId: 'org1', userPhone: null,
     amountUsdMicros: 5_000_000, amountCents: 3_650, exchangeRateMicros: 7_300_000,
     quotaUnits: 2_750_000, pointsUnits: 5_500, bonusUnits: 500, paymentMethod: 'ALIPAY',
     orderDate: '20260907', providerOrderInfo: null, status: 'SUCCESS', idempotencyKey: 'seed-order',
     createdAt: 1, updatedAt: 1, expiredAt: 999_999, remark: null,
   })
-  repository.upsertExternalAccount({
+  await repository.upsertExternalAccount({
     provider: 'sudorouter', ownerType: 'user', ownerId: 'u1', externalAccountId: '9',
     quotaUnits: 2_750_000, usedQuotaUnits: 0, updatedAt: 1,
   })
   const router = new FakeSudorouter()
-  const coordinator = new BillingCoordinator(db, repository, wallet, router, {
+  const coordinator = new BillingCoordinator(auth.driver, repository, wallet, router, {
     clock: () => 100, idGenerator: () => 'refund-quota-operation',
   })
   const fuiou = new FakeFuiouRefund()
-  const service = new RefundService(db, repository, identities, wallet, coordinator, fuiou, {
+  const service = new RefundService(auth.driver, repository, identities, wallet, coordinator, fuiou, {
     clock: () => 100, idGenerator: () => 'refund-1', suffixGenerator: () => 'ABC123',
   })
   return { db, identities, repository, wallet, router, fuiou, service }
@@ -77,7 +74,7 @@ async function setup() {
 void describe('RefundService', () => {
   void test('按订单真实到账总积分计算，赠送积分不重复相加', async () => {
     const { db, service } = await setup()
-    assert.deepEqual(service.calculate('USR17NO1'), {
+    assert.deepEqual(await service.calculate('USR17NO1'), {
       orderPoints: 5_500, userBalance: 5_500, usedPoints: 0,
       refundAmountCents: 3_650, deductPoints: 5_500, originalAmountCents: 3_650,
     })
@@ -86,11 +83,11 @@ void describe('RefundService', () => {
 
   void test('部分积分已使用时按旧汇率公式扣除已用金额', async () => {
     const { db, service, wallet } = await setup()
-    wallet.post({
+    await wallet.post({
       ownerType: 'user', ownerId: 'u1', deltaUnits: -1_000, entryType: 'CONSUME',
       sourceType: 'usage', sourceId: 'usage-1', orgId: 'org1',
     }, onlineCommandContext('consume-before-refund'))
-    assert.deepEqual(service.calculate('USR17NO1'), {
+    assert.deepEqual(await service.calculate('USR17NO1'), {
       orderPoints: 5_500, userBalance: 4_500, usedPoints: 1_000,
       refundAmountCents: 2_920, deductPoints: 4_500, originalAmountCents: 3_650,
     })
@@ -107,9 +104,9 @@ void describe('RefundService', () => {
 
     assert.equal(requests.filter(item => item.status === 'fulfilled').length, 1)
     assert.equal(fuiou.calls, 1)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 0)
-    assert.equal(repository.getOrderByOrderNo('USR17NO1')?.status, 'REFUNDED')
-    assert.equal(repository.countRefundsForOrder('order-1'), 1)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 0)
+    assert.equal((await repository.getOrderByOrderNo('USR17NO1'))?.status, 'REFUNDED')
+    assert.equal(await repository.countRefundsForOrder('order-1'), 1)
     db.close()
   })
 
@@ -127,7 +124,7 @@ void describe('RefundService', () => {
     )
 
     assert.equal(fuiou.calls, 0)
-    assert.equal(repository.countRefundsForOrder('order-1'), 0)
+    assert.equal(await repository.countRefundsForOrder('order-1'), 0)
     db.close()
   })
 
@@ -142,8 +139,8 @@ void describe('RefundService', () => {
 
     assert.equal(refund.status, 'SUPPRESSED')
     assert.equal(fuiou.calls, 0)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 0)
-    assert.equal(repository.getOrderByOrderNo('USR17NO1')?.status, 'REFUNDED')
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 0)
+    assert.equal((await repository.getOrderByOrderNo('USR17NO1'))?.status, 'REFUNDED')
     db.close()
   })
 })

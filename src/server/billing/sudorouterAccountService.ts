@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, type CommandContext } from '../application/commandContext.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import {
   BillingRepository,
   type SudorouterProvisioningRecord,
@@ -46,12 +45,16 @@ export class SudorouterAccountService {
   private readonly inFlight = new Map<string, Promise<SudorouterAccountResult>>()
 
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly driver: DbDriver,
     private readonly repository: BillingRepository,
     private readonly provider: SudorouterAccountPort,
     private readonly secrets: SudorouterSecretPort,
     private readonly clock: () => number = Date.now,
   ) {}
+
+  async getAccount(ownerId: string, orgId: string): Promise<SudorouterAccountResult | null> {
+    return readSudorouterAccount(this.repository, this.secrets, ownerId, orgId)
+  }
 
   ensureAccount(
     input: EnsureSudorouterAccountInput,
@@ -75,66 +78,75 @@ export class SudorouterAccountService {
     context: CommandContext,
   ): Promise<SudorouterAccountResult> {
     const requestFingerprint = fingerprint(input)
-    const existingAccount = this.repository.getExternalAccount('sudorouter', 'user', input.ownerId)
-    if (existingAccount?.tokenSecretRef) {
-      const token = await this.readToken(existingAccount.tokenSecretRef, input.orgId)
-      return {
-        externalUserId: existingAccount.externalAccountId,
-        token,
-        tokenSecretRef: existingAccount.tokenSecretRef,
-        quotaUnits: existingAccount.quotaUnits,
-        usedQuotaUnits: existingAccount.usedQuotaUnits,
-      }
+    const existingAccount = await this.getAccount(input.ownerId, input.orgId)
+    if (existingAccount) return existingAccount
+    // An existing account can be in debt. Only a new provision needs a grant.
+    if (!Number.isSafeInteger(input.initialQuotaUnits) || input.initialQuotaUnits < 0) {
+      throw new SudorouterAccountError('Sudorouter 初始额度无效')
     }
 
-    let operation = runInTransaction(this.db, () => {
-      const byKey = this.repository.getSudorouterProvisioningByKey(context.idempotencyKey)
+    const prepared = await this.driver.transaction(async () => {
+      const byKey = await this.repository.getSudorouterProvisioningByKey(context.idempotencyKey)
       if (byKey && byKey.requestFingerprint !== requestFingerprint) {
         throw new SudorouterAccountError('Sudorouter 开户幂等键已用于不同请求')
       }
-      const byOwner = this.repository.getSudorouterProvisioningByOwner(input.ownerId)
+      const byOwner = await this.repository.getSudorouterProvisioningByOwner(input.ownerId)
       if (byOwner && byOwner.requestFingerprint !== requestFingerprint) {
         throw new SudorouterAccountError('该用户已存在不同的 Sudorouter 开户请求')
       }
-      if (byKey ?? byOwner) return (byKey ?? byOwner)!
-      this.repository.insertSudorouterProvisioning({
+      let operation = byKey ?? byOwner
+      if (!operation) {
+        await this.repository.insertSudorouterProvisioning({
         id: randomUUID(), ownerId: input.ownerId, orgId: input.orgId,
         username: input.username.trim(), displayName: input.displayName.trim() || input.username.trim(),
         initialQuotaUnits: input.initialQuotaUnits, status: 'PENDING',
         idempotencyKey: context.idempotencyKey, requestFingerprint,
         contextSource: context.source, createdAt: this.clock(),
       })
-      return this.repository.getSudorouterProvisioningByKey(context.idempotencyKey)!
+        operation = await this.repository.getSudorouterProvisioningByKey(context.idempotencyKey)
+          ?? await this.repository.getSudorouterProvisioningByOwner(input.ownerId)
+      }
+      if (!operation) throw new SudorouterAccountError('Sudorouter 开户操作未持久化')
+      if (operation.requestFingerprint !== requestFingerprint) {
+        throw new SudorouterAccountError('Sudorouter 开户幂等键已用于不同请求')
+      }
+      if (operation.status === 'COMPLETED') return { operation, claimed: false }
+      const claimed = await this.repository.claimSudorouterProvisioning(operation.id, this.clock())
+      return { operation: claimed ?? operation, claimed: claimed !== null }
     })
+    let operation = prepared.operation
 
     if (operation.status === 'COMPLETED' && operation.tokenSecretRef && operation.externalAccountId) {
-      return this.completed(operation, await this.readToken(operation.tokenSecretRef, input.orgId))
+      return this.completed(operation, await readToken(this.secrets, operation.tokenSecretRef, input.orgId))
     }
+    if (!prepared.claimed) throw new SudorouterAccountError('Sudorouter 开户操作正在处理中')
 
     try {
       let account = await this.resolveAccount(operation, input, context)
-      operation = this.repository.getSudorouterProvisioningByOwner(input.ownerId)!
+      operation = (await this.repository.getSudorouterProvisioningByOwner(input.ownerId))!
 
-      if (operation.status !== 'QUOTA_READY' && operation.status !== 'TOKEN_READY' && operation.status !== 'COMPLETED') {
+      if (operation.quotaUnits == null
+        || operation.usedQuotaUnits == null
+        || operation.quotaUnits < input.initialQuotaUnits) {
         account = await this.ensureQuota(account, input.initialQuotaUnits, context.idempotencyKey)
-        runInTransaction(this.db, () => {
-          this.repository.upsertExternalAccount({
+        await this.driver.transaction(async () => {
+          await this.repository.upsertExternalAccount({
             provider: 'sudorouter', ownerType: 'user', ownerId: input.ownerId,
             externalAccountId: account.externalUserId, quotaUnits: account.quotaUnits,
             usedQuotaUnits: account.usedQuotaUnits, updatedAt: this.clock(),
           })
-          this.repository.updateSudorouterProvisioning({
-            id: operation.id, status: 'QUOTA_READY', quotaUnits: account.quotaUnits,
+          await this.repository.updateSudorouterProvisioning({
+            id: operation.id, status: 'PROCESSING', quotaUnits: account.quotaUnits,
             usedQuotaUnits: account.usedQuotaUnits, updatedAt: this.clock(),
           })
         })
-        operation = this.repository.getSudorouterProvisioningByOwner(input.ownerId)!
+        operation = (await this.repository.getSudorouterProvisioningByOwner(input.ownerId))!
       }
 
       const tokenSecretRef = operation.tokenSecretRef ?? secretRef(input.ownerId)
       let token: string
       if (operation.tokenSecretRef) {
-        token = await this.readToken(operation.tokenSecretRef, input.orgId)
+        token = await readToken(this.secrets, operation.tokenSecretRef, input.orgId)
       } else {
         token = await this.provider.createToken({
           externalUserId: operation.externalAccountId!,
@@ -145,14 +157,14 @@ export class SudorouterAccountService {
       }
 
       const timestamp = this.clock()
-      runInTransaction(this.db, () => {
-        this.repository.upsertExternalAccount({
+      await this.driver.transaction(async () => {
+        await this.repository.upsertExternalAccount({
           provider: 'sudorouter', ownerType: 'user', ownerId: input.ownerId,
           externalAccountId: operation.externalAccountId!,
           quotaUnits: operation.quotaUnits!, usedQuotaUnits: operation.usedQuotaUnits!,
           tokenSecretRef, updatedAt: timestamp,
         })
-        this.repository.updateSudorouterProvisioning({
+        await this.repository.updateSudorouterProvisioning({
           id: operation.id, status: 'COMPLETED', tokenSecretRef,
           updatedAt: timestamp, completedAt: timestamp,
         })
@@ -162,7 +174,7 @@ export class SudorouterAccountService {
         quotaUnits: operation.quotaUnits!, usedQuotaUnits: operation.usedQuotaUnits!,
       }
     } catch (error) {
-      runInTransaction(this.db, () => this.repository.updateSudorouterProvisioning({
+      await this.driver.transaction(async () => this.repository.updateSudorouterProvisioning({
         id: operation.id, status: 'FAILED',
         errorText: error instanceof Error ? error.message : String(error),
         updatedAt: this.clock(),
@@ -186,14 +198,14 @@ export class SudorouterAccountService {
         username, displayName: input.displayName,
         idempotencyKey: `${context.idempotencyKey}:account`,
       })
-    runInTransaction(this.db, () => {
-      this.repository.upsertExternalAccount({
+    await this.driver.transaction(async () => {
+      await this.repository.upsertExternalAccount({
         provider: 'sudorouter', ownerType: 'user', ownerId: input.ownerId,
         externalAccountId: account.externalUserId, quotaUnits: account.quotaUnits,
         usedQuotaUnits: account.usedQuotaUnits, updatedAt: this.clock(),
       })
-      this.repository.updateSudorouterProvisioning({
-        id: operation.id, status: 'ACCOUNT_READY', externalAccountId: account.externalUserId,
+      await this.repository.updateSudorouterProvisioning({
+        id: operation.id, status: 'PROCESSING', externalAccountId: account.externalUserId,
         quotaUnits: account.quotaUnits, usedQuotaUnits: account.usedQuotaUnits,
         updatedAt: this.clock(),
       })
@@ -217,14 +229,6 @@ export class SudorouterAccountService {
     return { ...account, quotaUnits: baselineQuotaUnits + deltaUnits }
   }
 
-  private async readToken(reference: string, orgId: string): Promise<string> {
-    const parsed = parseSecretRef(reference)
-    const record = await this.secrets.getSecret(parsed.namespace, parsed.key, `org:${orgId}`)
-    const token = record?.value?.trim()
-    if (!token) throw new SudorouterAccountError('Sudorouter 用户 Token 不存在')
-    return token
-  }
-
   private completed(operation: SudorouterProvisioningRecord, token: string): SudorouterAccountResult {
     return {
       externalUserId: operation.externalAccountId!, token,
@@ -237,10 +241,33 @@ export class SudorouterAccountService {
     if (!input.ownerId.trim() || !input.orgId.trim() || !input.username.trim()) {
       throw new SudorouterAccountError('Sudorouter 开户用户信息不完整')
     }
-    if (!Number.isSafeInteger(input.initialQuotaUnits) || input.initialQuotaUnits < 0) {
-      throw new SudorouterAccountError('Sudorouter 初始额度无效')
-    }
   }
+}
+
+/** Existing user credentials remain readable without enabling the management API. */
+export async function readSudorouterAccount(
+  repository: BillingRepository,
+  secrets: Pick<SudorouterSecretPort, 'getSecret'>,
+  ownerId: string,
+  orgId: string,
+): Promise<SudorouterAccountResult | null> {
+  const account = await repository.getExternalAccount('sudorouter', 'user', ownerId)
+  if (!account?.tokenSecretRef) return null
+  return {
+    externalUserId: account.externalAccountId,
+    token: await readToken(secrets, account.tokenSecretRef, orgId),
+    tokenSecretRef: account.tokenSecretRef,
+    quotaUnits: account.quotaUnits,
+    usedQuotaUnits: account.usedQuotaUnits,
+  }
+}
+
+async function readToken(secrets: Pick<SudorouterSecretPort, 'getSecret'>, reference: string, orgId: string): Promise<string> {
+  const parsed = parseSecretRef(reference)
+  const record = await secrets.getSecret(parsed.namespace, parsed.key, `org:${orgId}`)
+  const token = record?.value?.trim()
+  if (!token) throw new SudorouterAccountError('Sudorouter 用户 Token 不存在')
+  return token
 }
 
 function fingerprint(input: EnsureSudorouterAccountInput): string {

@@ -76,4 +76,20 @@ describe('SqliteDriver transaction serialization', () => {
     await Promise.all([txA, plainWrite])
     assert.deepEqual(values(await driver.all('SELECT v FROM t')), [999])
   })
+
+  it('isolates a handled nested failure with a savepoint', async () => {
+    const driver = await freshDriver()
+    await driver.transaction(async () => {
+      await driver.run('INSERT INTO t (v) VALUES (1)')
+      await assert.rejects(
+        driver.transaction(async () => {
+          await driver.run('INSERT INTO t (v) VALUES (2)')
+          throw new Error('nested')
+        }),
+        /nested/,
+      )
+      await driver.run('INSERT INTO t (v) VALUES (3)')
+    })
+    assert.deepEqual(values(await driver.all('SELECT v FROM t ORDER BY v')), [1, 3])
+  })
 })

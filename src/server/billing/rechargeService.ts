@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, type CommandContext } from '../application/commandContext.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import { BillingRepository, type BillingOrderRecord } from './billingRepository.js'
 import { BillingDomainError } from './types.js'
 import type { VerifiedPaymentEvent } from './fuiouAdapter.js'
@@ -64,7 +63,7 @@ interface RechargeServiceOptions {
   clock?: () => number
   idGenerator?: () => string
   suffixGenerator?: () => string
-  numericAliasAllocator?: (orderId: string, orgId: string) => number
+  numericAliasAllocator?: (orderId: string, orgId: string) => Promise<number>
   testPaymentAmountCents?: number
 }
 
@@ -76,12 +75,12 @@ export class RechargeService {
   private readonly clock: () => number
   private readonly idGenerator: () => string
   private readonly suffixGenerator: () => string
-  private readonly numericAliasAllocator?: (orderId: string, orgId: string) => number
+  private readonly numericAliasAllocator?: (orderId: string, orgId: string) => Promise<number>
   private readonly testPaymentAmountCents?: number
 
   constructor(
-    private readonly db: DatabaseSync,
-    private readonly repository = new BillingRepository(db),
+    private readonly driver: DbDriver,
+    private readonly repository = new BillingRepository(driver),
     options: RechargeServiceOptions = {},
   ) {
     this.clock = options.clock ?? Date.now
@@ -99,7 +98,7 @@ export class RechargeService {
     }))
   }
 
-  createOrder(input: CreateRechargeOrderInput, context: CommandContext): RechargeOrderResult {
+  async createOrder(input: CreateRechargeOrderInput, context: CommandContext): Promise<RechargeOrderResult> {
     assertTrustedCommandContext(context)
     this.validateCreateInput(input)
     const exchangeRate = input.exchangeRate ?? 7.3
@@ -118,8 +117,8 @@ export class RechargeService {
       amountUsdMicros, input.paymentMethod, exchangeRateMicros, input.expireMinutes ?? 30,
     ])
 
-    return runInTransaction(this.db, () => {
-      const previous = this.repository.getCommandResult<RechargeOrderResult>(CREATE_ORDER_COMMAND, context.idempotencyKey)
+    return this.driver.transaction(async () => {
+      const previous = await this.repository.getCommandResult<RechargeOrderResult>(CREATE_ORDER_COMMAND, context.idempotencyKey)
       if (previous) {
         if (previous.requestFingerprint !== requestFingerprint) {
           throw new BillingDomainError('IDEMPOTENCY_CONFLICT', '幂等键已用于不同的充值订单')
@@ -132,7 +131,7 @@ export class RechargeService {
       const orderNo = `USR${input.legacyUserId}NO${now}${this.suffixGenerator()}`
       const orderId = this.idGenerator()
       const order: BillingOrderRecord = {
-        id: orderId, legacyId: this.numericAliasAllocator?.(orderId, input.orgId) ?? null,
+        id: orderId, legacyId: await this.numericAliasAllocator?.(orderId, input.orgId) ?? null,
         orderNo, userId: input.userId, orgId: input.orgId,
         userPhone: input.userPhone, amountUsdMicros, amountCents, exchangeRateMicros,
         quotaUnits, pointsUnits, bonusUnits, paymentMethod: input.paymentMethod, orderDate,
@@ -140,9 +139,9 @@ export class RechargeService {
         createdAt: now, updatedAt: now, expiredAt: now + (input.expireMinutes ?? 30) * 60_000,
         remark: null,
       }
-      this.repository.insertOrder(order)
+      await this.repository.insertOrder(order)
       const result = this.toResult(order)
-      this.repository.saveCommandResult(
+      await this.repository.saveCommandResult(
         CREATE_ORDER_COMMAND, context.idempotencyKey, requestFingerprint,
         context.source, result, now,
       )
@@ -150,23 +149,23 @@ export class RechargeService {
     })
   }
 
-  preparePayment(orderNo: string, userId: string, context: CommandContext): PaymentIntent {
+  async preparePayment(orderNo: string, userId: string, context: CommandContext): Promise<PaymentIntent> {
     assertTrustedCommandContext(context)
     const requestFingerprint = fingerprint([orderNo, userId])
-    const outcome = runInTransaction(this.db, (): { result?: PaymentIntent; error?: BillingDomainError } => {
-      const previous = this.repository.getCommandResult<PaymentIntent>(PREPARE_PAYMENT_COMMAND, context.idempotencyKey)
+    const outcome = await this.driver.transaction(async (): Promise<{ result?: PaymentIntent; error?: BillingDomainError }> => {
+      const previous = await this.repository.getCommandResult<PaymentIntent>(PREPARE_PAYMENT_COMMAND, context.idempotencyKey)
       if (previous) {
         if (previous.requestFingerprint !== requestFingerprint) {
           throw new BillingDomainError('IDEMPOTENCY_CONFLICT', '幂等键已用于不同的支付请求')
         }
         return { result: previous.result }
       }
-      const order = this.repository.getOrderByOrderNo(orderNo, userId)
+      const order = await this.repository.getOrderByOrderNo(orderNo, userId)
       if (!order) return { error: new BillingDomainError('ORDER_NOT_FOUND', '订单不存在') }
       const now = this.clock()
       if (order.expiredAt < now || (order.status === 'CANCELLED' && order.remark === '订单已过期')) {
         if (order.status !== 'CANCELLED') {
-          this.repository.updateOrderStatus({ orderId: order.id, status: 'CANCELLED', updatedAt: now, remark: '订单已过期' })
+          await this.repository.updateOrderStatus({ orderId: order.id, status: 'CANCELLED', updatedAt: now, remark: '订单已过期' })
         }
         return { error: new BillingDomainError('ORDER_EXPIRED', '订单已过期') }
       }
@@ -178,13 +177,13 @@ export class RechargeService {
         orderDate: order.orderDate, amountCents: order.amountCents,
         amountUsd: order.amountUsdMicros / 1_000_000, paymentMethod: order.paymentMethod,
       }
-      this.repository.insertPaymentAttempt({
+      await this.repository.insertPaymentAttempt({
         id: result.attemptId, orderId: order.id, provider: 'fuiou', status: 'PENDING',
         idempotencyKey: context.idempotencyKey,
         request: { orderNo: order.orderNo, amountCents: order.amountCents, paymentMethod: order.paymentMethod },
         createdAt: now,
       })
-      this.repository.saveCommandResult(
+      await this.repository.saveCommandResult(
         PREPARE_PAYMENT_COMMAND, context.idempotencyKey, requestFingerprint,
         context.source, result, now,
       )
@@ -200,10 +199,10 @@ export class RechargeService {
     success: boolean
     providerOrderInfo?: string | null
     errorText?: string | null
-  }): void {
-    runInTransaction(this.db, () => {
+  }): Promise<void> {
+    return this.driver.transaction(async () => {
       const now = this.clock()
-      this.repository.updatePaymentAttempt({
+      await this.repository.updatePaymentAttempt({
         id: input.attemptId,
         status: input.success ? 'SUCCEEDED' : 'FAILED',
         response: input.providerOrderInfo ? { orderInfo: input.providerOrderInfo } : null,
@@ -211,7 +210,7 @@ export class RechargeService {
         updatedAt: now,
       })
       if (input.success) {
-        this.repository.updateOrderStatus({
+        await this.repository.updateOrderStatus({
           orderId: input.orderId, status: 'PAYING', updatedAt: now,
           providerOrderInfo: input.providerOrderInfo,
         })
@@ -219,19 +218,19 @@ export class RechargeService {
     })
   }
 
-  cancelOrder(orderNo: string, userId: string): void {
-    runInTransaction(this.db, () => {
-      const order = this.repository.getOrderByOrderNo(orderNo, userId)
+  async cancelOrder(orderNo: string, userId: string): Promise<void> {
+    await this.driver.transaction(async () => {
+      const order = await this.repository.getOrderByOrderNo(orderNo, userId)
       if (!order) throw new BillingDomainError('ORDER_NOT_FOUND', '订单不存在')
       if (order.status !== 'PENDING' && order.status !== 'PAYING') {
         throw new BillingDomainError('ORDER_STATUS_INVALID', '订单状态无效，无法取消')
       }
-      this.repository.updateOrderStatus({ orderId: order.id, status: 'CANCELLED', updatedAt: this.clock() })
+      await this.repository.updateOrderStatus({ orderId: order.id, status: 'CANCELLED', updatedAt: this.clock() })
     })
   }
 
-  acceptVerifiedCallback(event: VerifiedPaymentEvent, walletService: WalletService): PaymentCallbackResult {
-    const order = this.repository.getOrderByOrderNo(event.orderNo)
+  async acceptVerifiedCallback(event: VerifiedPaymentEvent, walletService: WalletService): Promise<PaymentCallbackResult> {
+    const order = await this.repository.getOrderByOrderNo(event.orderNo)
     if (!order) throw new BillingDomainError('ORDER_NOT_FOUND', '订单不存在')
     if (event.amountCents !== (this.testPaymentAmountCents ?? order.amountCents)) {
       throw new BillingDomainError('PAYMENT_AMOUNT_MISMATCH', '金额不一致')
@@ -240,14 +239,14 @@ export class RechargeService {
       event.orderNo, event.status, event.amountCents, event.orderDate,
     ])
 
-    return runInTransaction(this.db, () => {
-      const existing = this.repository.getProviderEvent('fuiou', event.providerEventId)
+    return this.driver.transaction(async () => {
+      const existing = await this.repository.getProviderEvent('fuiou', event.providerEventId)
       if (existing) {
         if (existing.payloadHash !== payloadHash) {
           throw new BillingDomainError('PROVIDER_EVENT_CONFLICT', '支付回调事件内容冲突')
         }
         if (existing.status === 'SUCCEEDED') {
-          this.ensureClientActivity(order, this.clock())
+          await this.ensureClientActivity(order, this.clock())
           return { success: true, orderNo: order.orderNo, alreadyProcessed: true }
         }
         throw new BillingDomainError('PROVIDER_EVENT_INCOMPLETE', '支付回调正在处理或状态不确定')
@@ -255,7 +254,7 @@ export class RechargeService {
 
       const now = this.clock()
       const eventId = this.idGenerator()
-      this.repository.insertProviderEvent({
+      await this.repository.insertProviderEvent({
         id: eventId,
         provider: 'fuiou',
         providerEventId: event.providerEventId,
@@ -267,11 +266,11 @@ export class RechargeService {
       })
 
       if (event.status === 'FAILED') {
-        this.repository.updateOrderStatus({
+        await this.repository.updateOrderStatus({
           orderId: order.id, status: 'FAILED', updatedAt: now, remark: '支付失败',
           callbackData: JSON.stringify(event.raw), callbackTime: now, callbackAmountCents: event.amountCents,
         })
-        this.repository.updateProviderEvent({ id: eventId, status: 'SUCCEEDED', processedAt: now })
+        await this.repository.updateProviderEvent({ id: eventId, status: 'SUCCEEDED', processedAt: now })
         return { success: true, orderNo: order.orderNo, alreadyProcessed: false }
       }
 
@@ -279,7 +278,7 @@ export class RechargeService {
         if (order.status === 'CANCELLED' || order.status === 'REFUNDED' || order.status === 'PARTIAL_REFUNDED') {
           throw new BillingDomainError('ORDER_STATUS_INVALID', '订单状态无效')
         }
-        walletService.post({
+        await walletService.post({
           ownerType: 'user',
           ownerId: order.userId,
           deltaUnits: order.pointsUnits,
@@ -289,13 +288,13 @@ export class RechargeService {
           sourceId: order.id,
           orgId: order.orgId,
         }, onlineCommandContext(`payment:${order.orderNo}`))
-        this.repository.updateOrderStatus({
+        await this.repository.updateOrderStatus({
           orderId: order.id, status: 'SUCCESS', updatedAt: now,
           callbackData: JSON.stringify(event.raw), callbackTime: now, callbackAmountCents: event.amountCents,
         })
-        this.ensureClientActivity(order, now)
+        await this.ensureClientActivity(order, now)
       }
-      this.repository.updateProviderEvent({ id: eventId, status: 'SUCCEEDED', processedAt: now })
+      await this.repository.updateProviderEvent({ id: eventId, status: 'SUCCEEDED', processedAt: now })
       return { success: true, orderNo: order.orderNo, alreadyProcessed: order.status === 'SUCCESS' }
     })
   }
@@ -304,14 +303,14 @@ export class RechargeService {
     event: VerifiedPaymentEvent,
     coordinator: BillingCoordinator,
   ): Promise<PaymentCallbackResult> {
-    const order = this.repository.getOrderByOrderNo(event.orderNo)
+    const order = await this.repository.getOrderByOrderNo(event.orderNo)
     if (!order) throw new BillingDomainError('ORDER_NOT_FOUND', '订单不存在')
     if (event.amountCents !== (this.testPaymentAmountCents ?? order.amountCents)) {
       throw new BillingDomainError('PAYMENT_AMOUNT_MISMATCH', '金额不一致')
     }
     const payloadHash = fingerprint([event.orderNo, event.status, event.amountCents, event.orderDate])
-    const prepared = runInTransaction(this.db, () => {
-      const existing = this.repository.getProviderEvent('fuiou', event.providerEventId)
+    const prepared = await this.driver.transaction(async () => {
+      const existing = await this.repository.getProviderEvent('fuiou', event.providerEventId)
       if (existing) {
         if (existing.payloadHash !== payloadHash) {
           throw new BillingDomainError('PROVIDER_EVENT_CONFLICT', '支付回调事件内容冲突')
@@ -319,7 +318,7 @@ export class RechargeService {
         return { id: existing.id, alreadyProcessed: existing.status === 'SUCCEEDED' }
       }
       const id = this.idGenerator()
-      this.repository.insertProviderEvent({
+      await this.repository.insertProviderEvent({
         id, provider: 'fuiou', providerEventId: event.providerEventId,
         eventType: 'PAYMENT_CALLBACK', payloadHash, payload: event.raw,
         status: 'PROCESSING', receivedAt: this.clock(),
@@ -327,38 +326,38 @@ export class RechargeService {
       return { id, alreadyProcessed: false }
     })
     if (prepared.alreadyProcessed) {
-      runInTransaction(this.db, () => this.ensureClientActivity(order, this.clock()))
+      await this.driver.transaction(async () => this.ensureClientActivity(order, this.clock()))
       return { success: true, orderNo: order.orderNo, alreadyProcessed: true }
     }
 
     if (event.status === 'FAILED') {
-      runInTransaction(this.db, () => {
-        this.repository.updateOrderStatus({
+      await this.driver.transaction(async () => {
+        await this.repository.updateOrderStatus({
           orderId: order.id, status: 'FAILED', updatedAt: this.clock(), remark: '支付失败',
           callbackData: JSON.stringify(event.raw), callbackTime: this.clock(), callbackAmountCents: event.amountCents,
         })
-        this.repository.updateProviderEvent({ id: prepared.id, status: 'SUCCEEDED', processedAt: this.clock() })
+        await this.repository.updateProviderEvent({ id: prepared.id, status: 'SUCCEEDED', processedAt: this.clock() })
       })
       return { success: true, orderNo: order.orderNo, alreadyProcessed: false }
     }
 
-    const external = this.repository.getExternalAccount('sudorouter', 'user', order.userId)
+    const external = await this.repository.getExternalAccount('sudorouter', 'user', order.userId)
     if (!external) {
-      runInTransaction(this.db, () => this.repository.updateProviderEvent({
+      await this.driver.transaction(async () => this.repository.updateProviderEvent({
         id: prepared.id, status: 'UNKNOWN', errorText: '用户未绑定 sudorouter 账号', processedAt: this.clock(),
       }))
       throw new BillingDomainError('SUDOROUTER_NOT_BOUND', '用户未绑定 sudorouter 账号')
     }
     const operationKey = `payment:${order.orderNo}`
-    const finalizeLocal = () => {
-      this.repository.updateOrderStatus({
+    const finalizeLocal = async () => {
+      await this.repository.updateOrderStatus({
         orderId: order.id, status: 'SUCCESS', updatedAt: this.clock(),
         callbackData: JSON.stringify(event.raw), callbackTime: this.clock(), callbackAmountCents: event.amountCents,
       })
-      this.repository.updateProviderEvent({ id: prepared.id, status: 'SUCCEEDED', processedAt: this.clock() })
-      this.ensureClientActivity(order, this.clock())
+      await this.repository.updateProviderEvent({ id: prepared.id, status: 'SUCCEEDED', processedAt: this.clock() })
+      await this.ensureClientActivity(order, this.clock())
     }
-    const existingOperation = this.repository.getQuotaOperationByKey(operationKey)
+    const existingOperation = await this.repository.getQuotaOperationByKey(operationKey)
     const adjustment = existingOperation
       ? await coordinator.retry(existingOperation.id, finalizeLocal)
       : await coordinator.adjustPoints({
@@ -368,7 +367,7 @@ export class RechargeService {
           sourceId: order.id,
         }, onlineCommandContext(operationKey), finalizeLocal)
     if (adjustment.status !== 'SUCCEEDED') {
-      runInTransaction(this.db, () => this.repository.updateProviderEvent({
+      await this.driver.transaction(async () => this.repository.updateProviderEvent({
         id: prepared.id, status: 'UNKNOWN', errorText: adjustment.error ?? '额度发放状态待确认',
         processedAt: this.clock(),
       }))
@@ -391,11 +390,11 @@ export class RechargeService {
     }
   }
 
-  private ensureClientActivity(order: BillingOrderRecord, processedAt: number): void {
+  private async ensureClientActivity(order: BillingOrderRecord, processedAt: number): Promise<void> {
     const idempotencyKey = `billing:activity:payment:${order.orderNo}`
-    if (this.repository.getActivityByIdempotencyKey(idempotencyKey)) return
-    this.repository.insertActivityRecord({
-      id: this.idGenerator(), legacyId: this.repository.allocateActivityLegacyId('CLIENT'),
+    if (await this.repository.getActivityByIdempotencyKey(idempotencyKey)) return
+    await this.repository.insertActivityRecord({
+      id: this.idGenerator(), legacyId: await this.repository.allocateActivityLegacyId('CLIENT'),
       activityType: 'CLIENT', userId: order.userId, orgId: order.orgId,
       orderId: order.id, actorUserId: null, applicationId: null,
       pointsUnits: order.pointsUnits, quotaUnits: order.quotaUnits,

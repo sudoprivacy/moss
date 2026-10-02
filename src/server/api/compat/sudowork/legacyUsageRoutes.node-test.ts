@@ -10,7 +10,7 @@ const admin: IdentityActor = { userId: 'admin-1', orgId: 'org-1', role: 'admin' 
 function createApp(overrides: Partial<SudoworkLegacyUsagePort> = {}) {
   const calls: Array<{ name: string; input?: unknown }> = []
   const usage: SudoworkLegacyUsagePort = {
-    listModels() { calls.push({ name: 'listModels' }); return [{ label: '模型一', value: 'model-1' }] },
+    listModels(actor) { calls.push({ name: 'listModels', input: actor }); return [{ label: '模型一', value: 'model-1' }] },
     reportUsage(input) {
       calls.push({ name: 'reportUsage', input })
       return { success: true, deducted: 1, newBalance: 9 }
@@ -37,6 +37,7 @@ void describe('Sudowork legacy usage routes', () => {
     const models = await app.request('/api/v1/router/models')
     assert.equal(models.status, 200)
     assert.deepEqual(await models.json(), { success: true, data: [{ label: '模型一', value: 'model-1' }] })
+    assert.equal((calls.find(call => call.name === 'listModels')?.input as IdentityActor | undefined), undefined)
 
     const report = await app.request('/api/v1/usage/report', {
       method: 'POST',
@@ -46,6 +47,16 @@ void describe('Sudowork legacy usage routes', () => {
     assert.equal(report.status, 200)
     assert.deepEqual(await report.json(), { success: true, deducted: 1, newBalance: 9 })
     assert.equal((calls.find(call => call.name === 'reportUsage')?.input as any).idempotencyKey, 'usage-1')
+  })
+
+  void test('模型列表有 bearer 时按用户组织解析 catalog', async () => {
+    const { app, calls } = createApp()
+    const models = await app.request('/api/v1/router/models', {
+      headers: { authorization: 'Bearer user' },
+    })
+    assert.equal(models.status, 200)
+    assert.deepEqual(await models.json(), { success: true, data: [{ label: '模型一', value: 'model-1' }] })
+    assert.equal((calls.at(-1)?.input as IdentityActor | undefined)?.orgId, 'org-1')
   })
 
   void test('用户和管理员接口分别执行旧鉴权边界', async () => {

@@ -40,6 +40,18 @@ describe('points and gateway quota', () => {
 })
 
 describe('sudorouter client', () => {
+  it('sends the configured platform admin identity with its token', async () => {
+    const client = createSudorouterClient({ baseUrl: 'https://router.example.test', adminUserId: '42', getAdminToken: async () => 'test-token',
+      fetchImpl: (async (_url, init) => {
+        const headers = new Headers(init?.headers)
+        expect(headers.get('New-Api-User')).toBe('42')
+        expect(headers.get('Authorization')).toBe('Bearer test-token')
+        return new Response(JSON.stringify({ success: true, data: { quota: 0, used_quota: 0 } }))
+      }) as typeof fetch,
+    })
+    await client.getCredits('13')
+  })
+
   function clientWith(handler: (url: string, init?: RequestInit) => Response): SudorouterClient {
     return createSudorouterClient({
       baseUrl: 'https://gateway.example/',
@@ -459,6 +471,6 @@ describe('gateway field limits', () => {
     })
     await expect(client.provisionAccount({
       username: 'x'.repeat(21), initialPoints: 0,
-    })).rejects.toThrow(/too long for the gateway/)
+    })).rejects.toThrow(/Sudorouter 账户名须为 1–20 个字符/)
   })
 })

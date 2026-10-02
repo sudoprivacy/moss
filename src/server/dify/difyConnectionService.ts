@@ -73,8 +73,8 @@ export class DifyConnectionService {
     secrets: DifySecretPort
   }) {}
 
-  getConnection(orgId: string, connectionId: string): IntegrationConnection {
-    const connection = this.options.identities.getIntegrationConnection(connectionId)
+  async getConnection(orgId: string, connectionId: string): Promise<IntegrationConnection> {
+    const connection = await this.options.identities.getIntegrationConnection(connectionId)
     if (!connection || connection.orgId !== orgId || connection.providerType !== 'dify' || !connection.enabled) {
       throw new DifyDomainError(404, 'CONNECTION_NOT_FOUND', 'agent binding missing')
     }
@@ -82,7 +82,7 @@ export class DifyConnectionService {
   }
 
   async resolveOrganizationContext(orgId: string): Promise<DifyOrganizationContext> {
-    const enabled = this.options.identities.listIntegrationConnections(orgId, 'dify')
+    const enabled = (await this.options.identities.listIntegrationConnections(orgId, 'dify'))
       .filter(connection => connection.enabled)
     const defaults = enabled.filter(connection => connection.config.isDefault === true)
     const selected = enabled.length === 1 ? enabled[0] : defaults.length === 1 ? defaults[0] : null
@@ -113,8 +113,8 @@ export class DifyConnectionService {
   ): Promise<{ enabled: boolean; mode: 'agent-chat' | 'workflow' | 'rag-only' | null }> {
     const user = await this.options.auth.getUserByIdAndOrg(actor.userId, actor.orgId)
     if (!user || user.status !== 'active') throw new DifyDomainError(401, 'USER_NOT_ACTIVE', 'unauthorized')
-    const agent = this.options.catalog.findAgent(assistantId)
-    const available = agent && this.options.catalog.isAvailableToOrganization('agent', assistantId, actor.orgId)
+    const agent = await this.options.catalog.findAgent(assistantId)
+    const available = agent && await this.options.catalog.isAvailableToOrganization('agent', assistantId, actor.orgId)
     const visible = agent && agent.enabled && agent.status === 'approved' && isVisibleTo(agent.visibleTo, visibility)
     if (!available || !visible) throw new DifyDomainError(403, 'AGENT_NOT_VISIBLE', 'agent not visible to user')
     if (agent.providerType !== 'dify' || !agent.providerBinding) return { enabled: false, mode: null }
@@ -173,8 +173,8 @@ export class DifyConnectionService {
       throw new DifyDomainError(401, 'USER_NOT_ACTIVE', 'unauthorized')
     }
 
-    const agent = this.options.catalog.findAgent(assistantId)
-    const available = agent && this.options.catalog.isAvailableToOrganization('agent', assistantId, actor.orgId)
+    const agent = await this.options.catalog.findAgent(assistantId)
+    const available = agent && await this.options.catalog.isAvailableToOrganization('agent', assistantId, actor.orgId)
     const visible = agent && agent.enabled && agent.status === 'approved' && isVisibleTo(agent.visibleTo, visibility)
     if (!available || !visible) {
       throw new DifyDomainError(403, 'AGENT_NOT_VISIBLE', 'agent not visible to user')
@@ -183,8 +183,8 @@ export class DifyConnectionService {
       throw new DifyDomainError(404, 'AGENT_BINDING_MISSING', 'agent binding missing')
     }
 
-    const legacyEnterpriseId = this.options.identities.getNumericAlias('enterprise', actor.orgId)
-    const legacyUserId = this.options.identities.getNumericAlias('user', actor.userId)
+    const legacyEnterpriseId = await this.options.identities.getNumericAlias('enterprise', actor.orgId)
+    const legacyUserId = await this.options.identities.getNumericAlias('user', actor.userId)
     if (legacyEnterpriseId === null || legacyUserId === null) {
       throw new DifyDomainError(500, 'LEGACY_ALIAS_MISSING', 'Dify legacy identity alias missing')
     }
@@ -194,7 +194,7 @@ export class DifyConnectionService {
     if (!connectionId) {
       throw new DifyDomainError(404, 'AGENT_BINDING_MISSING', 'agent binding missing')
     }
-    const connection = this.getConnection(actor.orgId, connectionId)
+    const connection = await this.getConnection(actor.orgId, connectionId)
     if (!connection.secretRef) {
       throw new DifyDomainError(502, 'SECRET_NOT_CONFIGURED', 'Dify API key not configured')
     }

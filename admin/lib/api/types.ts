@@ -14,7 +14,11 @@ export interface AuthUser {
   role: UserRole
   status: 'pending' | 'active' | 'locked' | 'disabled'
   balanceUnits?: number
+  sudorouterUserId?: string | null
+  sudorouterApiKeyMasked?: string | null
+  sudorouterCredentialStatus?: 'ready' | 'missing' | 'unavailable'
   localAuth: boolean
+  localExecutionAllowed?: boolean
   tokenLimit: number | null
   createdAt: number
   passwordUpdatedAt: number | null
@@ -189,6 +193,7 @@ export interface SystemSettingsImage {
   provider: string
   url: string
   apiKey: string
+  apiKeyConfigured: boolean
   model: string
 }
 
@@ -203,7 +208,34 @@ export interface SystemSettingsOAuth2 {
   requireState: boolean
 }
 
+export type ModelProviderProtocol =
+  | 'openai-completions'
+  | 'openai-responses'
+  | 'anthropic-messages'
+
+/** Provider metadata returned by the server. The credential itself is never returned. */
+export interface SystemSettingsModelProvider {
+  id: string
+  name: string
+  kind: 'openai-compatible'
+  baseUrl: string
+  discoveryUrl: string
+  protocol: ModelProviderProtocol
+  enabled: boolean
+  apiKeyConfigured: boolean
+}
+
+/** Write shape. `apiKey` is write-only and omitted to preserve the stored key. */
+export interface UpdateSystemSettingsModelProvider extends Omit<SystemSettingsModelProvider, 'apiKeyConfigured'> {
+  apiKey?: string
+}
+
+export type ConfigScope = 'organization' | 'platform'
+
 export interface SystemSettings {
+  scopeType?: ConfigScope
+  /** Empty for platform configuration. */
+  organizationId?: string
   bypassPermissions: boolean
   model: string
   maxTurns: number
@@ -211,6 +243,9 @@ export interface SystemSettings {
   thinkingBudgetTokens: number
   url: string
   apiKey: string
+  apiKeyConfigured: boolean
+  modelProviders: SystemSettingsModelProvider[]
+  defaultModelProviderId: string
   image: SystemSettingsImage
   skillStore: SystemSettingsSkillStore
   oauth2: SystemSettingsOAuth2
@@ -250,6 +285,8 @@ export interface UpdateSystemSettingsRequest {
   thinkingBudgetTokens?: number
   url?: string
   apiKey?: string
+  modelProviders?: UpdateSystemSettingsModelProvider[]
+  defaultModelProviderId?: string
   image?: Partial<SystemSettingsImage>
   skillStore?: Partial<SystemSettingsSkillStore>
   oauth2?: Partial<SystemSettingsOAuth2>
@@ -516,6 +553,7 @@ export interface EnterpriseConfig {
    * the chat stream. Client users may override locally. null = unset → shown.
    */
   client_show_tool_calls: boolean | null;
+  workspace_upload_limit_bytes: number;
   /**
    * Whether Cabin AI gateway/admin features are enabled on this server.
    */

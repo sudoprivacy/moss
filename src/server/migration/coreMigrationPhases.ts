@@ -39,7 +39,7 @@ export class OrganizationMigrationPhase implements MigrationPhase {
   ) {}
 
   async plan(_context: MigrationPlanningContext): Promise<IdentityPhasePlan> {
-    const plan = this.service.plan(this.resolutions)
+    const plan = await this.service.plan(this.resolutions)
     this.onPlanned?.(plan)
     return identityPlan(plan)
   }
@@ -54,7 +54,7 @@ export class OrganizationMigrationPhase implements MigrationPhase {
   }
 
   async verify(_context: MigrationVerificationContext): Promise<MigrationPhaseVerification> {
-    const plan = this.service.plan(this.resolutions)
+    const plan = await this.service.plan(this.resolutions)
     return this.service.verify(plan)
   }
 }
@@ -70,7 +70,7 @@ export class UserIdentityMigrationPhase implements MigrationPhase {
   ) {}
 
   async plan(_context: MigrationPlanningContext): Promise<IdentityPhasePlan> {
-    const plan = this.service.plan(this.resolutions)
+    const plan = await this.service.plan(this.resolutions)
     this.onPlanned?.(plan)
     return identityPlan(plan)
   }
@@ -85,7 +85,7 @@ export class UserIdentityMigrationPhase implements MigrationPhase {
   }
 
   async verify(_context: MigrationVerificationContext): Promise<MigrationPhaseVerification> {
-    const plan = this.service.plan(this.resolutions)
+    const plan = await this.service.plan(this.resolutions)
     return this.service.verify(plan)
   }
 }
@@ -99,7 +99,7 @@ export class GovernanceMigrationPhase implements MigrationPhase {
   ) {}
 
   async plan(_context: MigrationPlanningContext): Promise<GovernancePhasePlan> {
-    const domainPlan = this.service.plan(this.resolutions)
+    const domainPlan = await this.service.plan(this.resolutions)
     return attachDomainPlan({
       status: domainPlan.status,
       sourceChecksum: domainPlan.sourceChecksum,
@@ -121,7 +121,7 @@ export class GovernanceMigrationPhase implements MigrationPhase {
   }
 
   async verify(_context: MigrationVerificationContext): Promise<MigrationPhaseVerification> {
-    const plan = this.service.plan(this.resolutions)
+    const plan = await this.service.plan(this.resolutions)
     return this.service.verify(plan)
   }
 }

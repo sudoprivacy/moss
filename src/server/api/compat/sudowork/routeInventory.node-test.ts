@@ -23,7 +23,7 @@ void describe('Sudowork compatibility implementation inventory', () => {
       difyEnhancement: inert,
       difyDataset: inert,
       difyAdministration: inert,
-      resolveEnterpriseAlias: () => null,
+      resolveEnterpriseAlias: async () => null,
       buildVisibility: inert,
       cas: inert,
       sms: inert,

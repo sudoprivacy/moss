@@ -21,7 +21,7 @@ export class BillingOutboxWorker {
   ) {}
 
   async runOnce(limit = 100): Promise<BillingWorkerRunResult> {
-    const ids = this.repository.listRecoverableQuotaOperationIds(limit)
+    const ids = await this.repository.listRecoverableQuotaOperationIds(limit)
     let succeeded = 0
     let failed = 0
     for (const id of ids) {

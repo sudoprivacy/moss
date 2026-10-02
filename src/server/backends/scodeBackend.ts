@@ -1,7 +1,9 @@
+import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { spawn } from 'child_process'
 import { writeFileSync } from 'fs'
-import { mkdir, readFile } from 'fs/promises'
-import { join } from 'path'
+import { mkdir, readFile, copyFile } from 'fs/promises'
+import { join, dirname } from 'path'
+import { fileURLToPath } from 'node:url'
 import {
   buildSessionEnv,
   resolveScodeCliPath,
@@ -39,7 +41,7 @@ export class ScodeBackend implements SessionBackend {
     // 2. 如果没有指定智能体，使用客户端传递的 enabledSkillNames
     // 3. 如果都没有，使用所有可用 skills（已在 getAssistantRuntimeConfig 中处理）
     const enabledSkills = options.assistantName
-      ? assistantConfig.enabledSkills
+      ? [...new Set([...assistantConfig.enabledSkills, ...(options.enabledSkillNames ?? [])])]
       : (options.enabledSkillNames ?? assistantConfig.enabledSkills)
 
     // 根据 memory_mode 决定 mode
@@ -89,7 +91,13 @@ export class ScodeBackend implements SessionBackend {
 
       // Preload all available models from sudorouter API
       // This allows dynamic model switching without modifying sudocode.json
-      const allModels = ensureOpenAIModelConfig(await buildAllModelsConfig(baseUrl), model)
+      const allModels = ensureOpenAIModelConfig(
+        await buildAllModelsConfig(baseUrl),
+        model,
+        env.MOSS_MODEL_PROVIDER_PROTOCOL === 'openai-responses' || env.MOSS_MODEL_PROVIDER_PROTOCOL === 'anthropic-messages'
+          ? env.MOSS_MODEL_PROVIDER_PROTOCOL
+          : 'openai-completions',
+      )
 
       const scodeConfig = {
         auth_modes: {
@@ -137,6 +145,7 @@ export class ScodeBackend implements SessionBackend {
       workspaceSkillLinks = await syncWorkspaceSkills(options.cwd, enabledSkills, options.visibilityFilter)
       process.stderr.write(`[ScodeBackend] Workspace skills synced to ${options.cwd}/.nexus/sudocode/skills/ with ${enabledSkills.length} skills: ${enabledSkills.join(', ') || 'none'}\n`)
     } catch (err) {
+      if (getOrganizationResourceScope()) throw err
       process.stderr.write(`[ScodeBackend] Workspace skills sync warning: ${err}\n`)
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)
@@ -158,6 +167,10 @@ export class ScodeBackend implements SessionBackend {
     process.stderr.write(`  Base URL: ${env.ANTHROPIC_BASE_URL}\n`)
     process.stderr.write(`  Auth: ${env.ANTHROPIC_API_KEY ? 'Present' : 'MISSING'}\n\n`)
 
+    const artifactToolPath = join(options.cwd, '.moss', 'artifact-mcp.mjs')
+    await mkdir(dirname(artifactToolPath), { recursive: true })
+    await copyFile(join(dirname(fileURLToPath(import.meta.url)), 'artifact-mcp.mjs'), artifactToolPath)
+
     const child = spawn(scodePath, args, {
       cwd: options.cwd,
       env: {
@@ -177,9 +190,11 @@ export class ScodeBackend implements SessionBackend {
 
     const handle = createAcpBridgeHandle({
       child,
+      mcpServers: [{ name: 'moss-artifacts', command: process.execPath, args: [artifactToolPath], env: [] }],
       sessionId: options.sessionId,
       cwd: options.cwd,
       model: scodeModel,
+      modelProviderId: env.MOSS_MODEL_PROVIDER_ID,
       transcriptPath: (options as any).transcriptPath,
       resumeSessionId,
       scodeSessionIdPath,

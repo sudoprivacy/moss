@@ -141,6 +141,12 @@ const external = [
   '--external=koffi',
 ]
 
+// Adapter tool shipped alongside the runner, also usable inside a workspace mount.
+build('bin/artifact-mcp.mjs', [
+  'build', 'src/server/artifactMcp.ts', '--outfile=bin/artifact-mcp.mjs',
+  '--target=node', '--format=esm', ...aliases, ...defines,
+])
+
 // bin/moss-server.mjs（统一服务端入口）
 build('bin/moss-server.mjs', [
   'build', 'src/server/serverCli.ts',

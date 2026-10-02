@@ -8,8 +8,8 @@
  * 用模块级 mock（bun test）把 os.homedir() 指向临时目录，避免读写真实用户目录。
  * mock 必须在动态 import 被测模块之前完成。
  */
-import { describe, expect, it, mock } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import * as nodeOs from 'os'
 import { join } from 'path'
 import type { NexusClient } from '../nexus/nexusClient.js'
@@ -26,8 +26,20 @@ mock.module('os', () => {
 })
 
 // mock 生效后再动态加载被测模块（systemSettings 的 SYSTEM_SETTINGS_PATH 基于 os.homedir()）。
-const { ConfigStore, initConfigStore, CONFIG_NAMESPACE } = await import('./configStore.js')
-const { updateSystemSettings } = await import('../systemSettings.js')
+const { ConfigStore, initConfigStore, CONFIG_NAMESPACE, organizationConfigKey } = await import('./configStore.js')
+const {
+  getOrganizationSystemSettings,
+  getSystemSettings,
+  SYSTEM_SETTINGS_PATH,
+  SystemSettingsScopeError,
+  updateOrganizationSystemSettings,
+  updateSystemSettings,
+} = await import('../systemSettings.js')
+const { getModelProviderApiKey } = await import('../modelListCache.js')
+
+// 必须在任何 settings 写入前确认隔离路径，模块 mock 失效时直接终止。
+expect(SYSTEM_SETTINGS_PATH).toBe(SETTINGS_PATH)
+afterAll(() => rmSync(FAKE_HOME, { recursive: true, force: true }))
 
 /** value 为 null 表示"记录存在但无值"（损坏记录），用于三分支测试。 */
 type Rec = { value: string | null }
@@ -35,6 +47,7 @@ type Rec = { value: string | null }
 /** 最小 NexusClient 替身：内存 Map，可模拟 putSecret 失败与损坏记录。 */
 class FakeNexus {
   readonly records = new Map<string, Rec>()
+  readonly mutations: Array<{ operation: 'put' | 'delete'; key: string }> = []
   failPut = false
 
   private k(namespace: string, key: string): string {
@@ -43,6 +56,7 @@ class FakeNexus {
 
   async putSecret(namespace: string, key: string, value: string): Promise<void> {
     if (this.failPut) throw new Error('simulated putSecret failure')
+    this.mutations.push({ operation: 'put', key })
     this.records.set(this.k(namespace, key), { value })
   }
 
@@ -52,6 +66,7 @@ class FakeNexus {
   }
 
   async deleteSecret(namespace: string, key: string): Promise<void> {
+    this.mutations.push({ operation: 'delete', key })
     this.records.delete(this.k(namespace, key))
   }
 
@@ -205,23 +220,344 @@ describe('hydrateConfig：Nexus/env 生效，文件值一律丢弃', () => {
 })
 
 describe('updateSystemSettings 敏感字段写 Nexus、文件不落盘', () => {
-  it('apiKey/image.apiKey 写入 Nexus，落盘文件无敏感字段', async () => {
-    const fake = new FakeNexus()
-    initConfigStore(asClient(fake)) // 单例：systemSettings 经 getConfigStore 读到同一实例
-    writeFileSync(SETTINGS_PATH, JSON.stringify({ model: 'm', env: {} }), 'utf8')
+  const AUTH_KEY = 'settings.anthropic-auth-token'
+  const IMAGE_KEY = 'settings.image-api-key'
+  const fake = new FakeNexus()
+  const store = initConfigStore(asClient(fake))
 
+  beforeEach(async () => {
+    // initConfigStore 是单例；每个用例重置内存 Nexus 及缓存，不创建真实客户端。
+    fake.failPut = false
+    fake.records.clear()
+    await store.remove(AUTH_KEY)
+    await store.remove(IMAGE_KEY)
+    fake.mutations.length = 0
+    writeFileSync(SETTINGS_PATH, JSON.stringify({ model: 'm', env: {} }), 'utf8')
+  })
+
+  async function seedSecrets(): Promise<void> {
+    fake.seed(AUTH_KEY, 'saved-auth')
+    fake.seed(IMAGE_KEY, 'saved-image')
+    await store.loadAll()
+    fake.mutations.length = 0 // 不计入 loadAll 的健康探针。
+  }
+
+  function expectSecretsPreserved(): void {
+    expect(fake.read(AUTH_KEY)).toEqual({ value: 'saved-auth' })
+    expect(fake.read(IMAGE_KEY)).toEqual({ value: 'saved-image' })
+    expect(store.get(AUTH_KEY)).toBe('saved-auth')
+    expect(store.get(IMAGE_KEY)).toBe('saved-image')
+    expect(fake.mutations).toEqual([])
+  }
+
+  function expectFileHasNoSecrets(): void {
+    const saved = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'))
+    expect(saved.apiKey).toBeUndefined()
+    expect(saved.image?.apiKey).toBeUndefined()
+    expect(saved.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+  }
+
+  it('apiKey/image.apiKey 写入 Nexus，落盘文件无敏感字段', async () => {
     await updateSystemSettings({
       apiKey: 'sk-secret-text',
       image: { provider: 'openai', url: 'http://img', apiKey: 'img-secret', model: 'dall-e' },
     })
 
-    expect(fake.read('settings.anthropic-auth-token')).toEqual({ value: 'sk-secret-text' })
-    expect(fake.read('settings.image-api-key')).toEqual({ value: 'img-secret' })
-
-    const saved = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'))
-    expect(saved.apiKey).toBeUndefined()
-    expect(saved.image?.apiKey).toBeUndefined()
-    expect(saved.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
-    expect(saved.image?.provider).toBe('openai')
+    expect(fake.read(AUTH_KEY)).toEqual({ value: 'sk-secret-text' })
+    expect(fake.read(IMAGE_KEY)).toEqual({ value: 'img-secret' })
+    expectFileHasNoSecrets()
+    expect(JSON.parse(readFileSync(SETTINGS_PATH, 'utf8')).image.provider).toBe('openai')
   })
+
+  for (const fileState of ['valid', 'malformed', 'missing'] as const) {
+    describe(`settings.json ${fileState}`, () => {
+      beforeEach(async () => {
+        await seedSecrets()
+        if (fileState === 'malformed') writeFileSync(SETTINGS_PATH, '{broken json', 'utf8')
+        if (fileState === 'missing') rmSync(SETTINGS_PATH)
+      })
+
+      it('读取 Nexus 密钥与文件加载状态互不影响', () => {
+        const settings = getSystemSettings()
+        expect(settings.apiKey).toBe('saved-auth')
+        expect(settings.image.apiKey).toBe('saved-image')
+        expect(settings.settingsExists).toBe(fileState !== 'missing')
+        expect(settings.settingsLoaded).toBe(fileState === 'valid')
+        expect(Boolean(settings.settingsParseError)).toBe(fileState === 'malformed')
+        expectSecretsPreserved()
+      })
+
+      it.each([
+        { model: 'updated-model' },
+        { image: { model: 'updated-image-model' } },
+        { clientCronEnabled: false, clientShowToolCalls: false },
+      ])('非密钥 PATCH %j 保留密钥，且不调用 put/delete', async patch => {
+        const settings = await updateSystemSettings(patch)
+        expectSecretsPreserved()
+        expect(settings.apiKey).toBe('saved-auth')
+        expect(settings.image.apiKey).toBe('saved-image')
+        expect(settings.settingsLoaded).toBe(true)
+        expect(settings.settingsParseError).toBe('')
+        const saved = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'))
+        if ('model' in patch) expect(saved.model).toBe(patch.model)
+        if (patch.image) expect(saved.image.model).toBe(patch.image.model)
+        if ('clientCronEnabled' in patch) {
+          expect(saved.clientCronEnabled).toBe(false)
+          expect(saved.clientShowToolCalls).toBe(false)
+        }
+        expect(getSystemSettings().apiKey).toBe('saved-auth')
+        expect(getSystemSettings().image.apiKey).toBe('saved-image')
+        expectFileHasNoSecrets()
+      })
+
+      it.each(['', ' \t '])('显式 apiKey=%j 只清除文本密钥', async apiKey => {
+        const settings = await updateSystemSettings({ apiKey })
+        expect(fake.read(AUTH_KEY)).toBeUndefined()
+        expect(store.get(AUTH_KEY)).toBeUndefined()
+        expect(settings.apiKey).toBe('')
+        expect(fake.read(IMAGE_KEY)).toEqual({ value: 'saved-image' })
+        expect(settings.image.apiKey).toBe('saved-image')
+        expect(fake.mutations).toEqual([{ operation: 'delete', key: AUTH_KEY }])
+        expectFileHasNoSecrets()
+      })
+
+      it.each(['', ' \t '])('显式 image.apiKey=%j 只清除图片密钥', async apiKey => {
+        const settings = await updateSystemSettings({ image: { apiKey } })
+        expect(fake.read(IMAGE_KEY)).toBeUndefined()
+        expect(store.get(IMAGE_KEY)).toBeUndefined()
+        expect(settings.image.apiKey).toBe('')
+        expect(fake.read(AUTH_KEY)).toEqual({ value: 'saved-auth' })
+        expect(settings.apiKey).toBe('saved-auth')
+        expect(fake.mutations).toEqual([{ operation: 'delete', key: IMAGE_KEY }])
+        expectFileHasNoSecrets()
+      })
+    })
+  }
+
+  it.each([
+    null,
+    [],
+    {},
+    { apiKey: undefined, image: { apiKey: undefined } },
+    { apiKey: null, image: { apiKey: null } },
+    { apiKey: 123, image: { apiKey: false } },
+    { image: null },
+    { image: [{ apiKey: '' }] },
+  ])('未明确提供密钥字符串的 PATCH %j 不写入或删除密钥', async patch => {
+    await seedSecrets()
+    await updateSystemSettings(patch)
+    expectSecretsPreserved()
+  })
+
+  it('仅修改 apiKey 不重写图片密钥，字符串仍执行 trim', async () => {
+    await seedSecrets()
+    const settings = await updateSystemSettings({ apiKey: ' new-auth ' })
+    expect(fake.read(AUTH_KEY)).toEqual({ value: 'new-auth' })
+    expect(settings.apiKey).toBe('new-auth')
+    expect(fake.read(IMAGE_KEY)).toEqual({ value: 'saved-image' })
+    expect(fake.mutations).toEqual([{ operation: 'put', key: AUTH_KEY }])
+    expectFileHasNoSecrets()
+  })
+
+  it('仅修改 image.apiKey 不重写文本密钥，字符串仍执行 trim', async () => {
+    await seedSecrets()
+    const settings = await updateSystemSettings({ image: { apiKey: ' new-image ' } })
+    expect(fake.read(IMAGE_KEY)).toEqual({ value: 'new-image' })
+    expect(settings.image.apiKey).toBe('new-image')
+    expect(fake.read(AUTH_KEY)).toEqual({ value: 'saved-auth' })
+    expect(fake.mutations).toEqual([{ operation: 'put', key: IMAGE_KEY }])
+    expectFileHasNoSecrets()
+  })
+
+  it.each([false, true])('env 不写入 Nexus 或配置文件，也不受 PATCH 清除（已存密钥=%j）', async hasSecrets => {
+    const envKeys = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'] as const
+    const previous = envKeys.map(key => process.env[key])
+    try {
+      process.env.ANTHROPIC_AUTH_TOKEN = 'env-auth'
+      process.env.ANTHROPIC_API_KEY = 'env-api-key'
+      process.env.ANTHROPIC_BASE_URL = 'https://env.example.test'
+      if (hasSecrets) await seedSecrets()
+      writeFileSync(SETTINGS_PATH, '{broken json', 'utf8')
+
+      const settings = await updateSystemSettings({ model: 'updated-model' })
+      expect(settings.apiKey).toBe(hasSecrets ? 'saved-auth' : '')
+      expect(settings.image.apiKey).toBe(hasSecrets ? 'saved-image' : '')
+      expect(fake.mutations).toEqual([])
+      expectFileHasNoSecrets()
+      const saved = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'))
+      expect(saved.env).toBeUndefined()
+
+      await updateSystemSettings({ apiKey: '', image: { apiKey: '' } })
+      expect(fake.read(AUTH_KEY)).toBeUndefined()
+      expect(fake.read(IMAGE_KEY)).toBeUndefined()
+      expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe('env-auth')
+      expect(process.env.ANTHROPIC_API_KEY).toBe('env-api-key')
+      expect(process.env.ANTHROPIC_BASE_URL).toBe('https://env.example.test')
+    } finally {
+      envKeys.forEach((key, index) => {
+        if (previous[index] === undefined) delete process.env[key]
+        else process.env[key] = previous[index]
+      })
+    }
+  })
+
+  it('非密钥 PATCH 保留配置文件中的 URL、其他 env 及未知字段', async () => {
+    await seedSecrets()
+    const env = { ANTHROPIC_BASE_URL: 'https://settings.example.test', CUSTOM_FLAG: 'keep' }
+    writeFileSync(SETTINGS_PATH, JSON.stringify({ env, custom: { keep: true } }), 'utf8')
+    const settings = await updateSystemSettings({ model: 'updated-model' })
+    expect(settings.url).toBe(env.ANTHROPIC_BASE_URL)
+    const saved = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'))
+    expect(saved.env).toEqual(env)
+    expect(saved.custom).toEqual({ keep: true })
+    expectSecretsPreserved()
+  })
+
+  it('Nexus 没有密钥时不采用旧文件密钥，也不执行空值删除', async () => {
+    writeFileSync(SETTINGS_PATH, JSON.stringify({
+      apiKey: 'old-file-auth',
+      image: { apiKey: 'old-file-image' },
+    }), 'utf8')
+    expect(getSystemSettings().apiKey).toBe('')
+    expect(getSystemSettings().image.apiKey).toBe('')
+    await updateSystemSettings({ model: 'updated-model' })
+    expect(fake.mutations).toEqual([])
+    expectFileHasNoSecrets()
+  })
+
+  it('parses string boolean settings without treating "false" as true', async () => {
+    const settings = await updateSystemSettings({
+      bypassPermissions: 'false',
+      clientCronEnabled: 'false',
+      clientShowToolCalls: 'false',
+      oauth2: {
+        enabled: 'false',
+        requireState: 'false',
+      },
+    })
+
+    expect(settings.bypassPermissions).toBe(false)
+    expect(settings.clientCronEnabled).toBe(false)
+    expect(settings.clientShowToolCalls).toBe(false)
+    expect(settings.oauth2.enabled).toBe(false)
+    expect(settings.oauth2.requireState).toBe(false)
+  })
+
+  it('组织模型设置按 orgId 隔离，并且 API 响应不返回密钥原文', async () => {
+    await updateSystemSettings({
+      model: 'platform-model',
+      apiKey: 'platform-text-key',
+      image: { apiKey: 'platform-image-key' },
+      modelProviders: [{
+        id: 'platform-provider',
+        name: 'Platform Provider',
+        kind: 'openai-compatible',
+        baseUrl: 'https://platform.example.invalid/v1',
+        discoveryUrl: 'https://platform.example.invalid/v1/models',
+        protocol: 'openai-completions',
+        enabled: true,
+        apiKey: 'platform-provider-key',
+      }],
+      defaultModelProviderId: 'platform-provider',
+    })
+    fake.mutations.length = 0
+
+    const repository = new FakeOrganizationModelSettingsRepository() as never
+    const orgA = await updateOrganizationSystemSettings('org-a', repository, {
+      model: 'org-a-model',
+      apiKey: 'org-a-text-key',
+      image: { model: 'org-a-image', apiKey: 'org-a-image-key' },
+      modelProviders: [{
+        id: 'org-a-provider',
+        name: 'Org A Provider',
+        kind: 'openai-compatible',
+        baseUrl: 'https://org-a.example.invalid/v1',
+        discoveryUrl: 'https://org-a.example.invalid/v1/models',
+        protocol: 'openai-responses',
+        enabled: true,
+        apiKey: 'org-a-provider-key',
+      }],
+      defaultModelProviderId: 'org-a-provider',
+    }, 'admin-a', { redactSecrets: true })
+
+    expect(orgA.model).toBe('org-a-model')
+    expect(orgA.apiKey).toBe('')
+    expect(orgA.apiKeyConfigured).toBe(true)
+    expect(orgA.image.apiKey).toBe('')
+    expect(orgA.image.apiKeyConfigured).toBe(true)
+    expect(orgA.image.model).toBe('org-a-image')
+    expect(orgA.modelProviders[0]?.id).toBe('org-a-provider')
+    expect(orgA.modelProviders[0]?.apiKeyConfigured).toBe(true)
+    expect(fake.read(organizationConfigKey('org-a', 'settings.anthropic-auth-token'))).toEqual({ value: 'org-a-text-key' })
+    expect(fake.read(organizationConfigKey('org-a', 'settings.image-api-key'))).toEqual({ value: 'org-a-image-key' })
+    expect(fake.read(organizationConfigKey('org-a', 'settings.model-provider-api-keys'))?.value).toContain('org-a-provider-key')
+    expect(getModelProviderApiKey('org-a-provider', orgA.apiKey, 'org-a')).toBe('org-a-provider-key')
+    expect(getModelProviderApiKey('org-a-provider', orgA.apiKey, 'org-a', 'user-gateway-key')).toBe('org-a-provider-key')
+
+    const orgB = await getOrganizationSystemSettings('org-b', repository, { redactSecrets: true })
+    expect(orgB.model).toBe('platform-model')
+    expect(orgB.apiKey).toBe('')
+    expect(orgB.apiKeyConfigured).toBe(false)
+    expect(orgB.image.apiKeyConfigured).toBe(false)
+    expect(orgB.modelProviders[0]?.id).toBe('platform-provider')
+    expect(orgB.modelProviders[0]?.apiKeyConfigured).toBe(false)
+    expect(getModelProviderApiKey('platform-provider', orgB.apiKey, 'org-b')).toBeUndefined()
+  })
+
+  it('组织系统设置入口拒绝部署级字段且不修改全局设置', async () => {
+    await updateSystemSettings({ clientCronEnabled: false, bypassPermissions: false })
+    const repository = new FakeOrganizationModelSettingsRepository() as never
+
+    await expect(updateOrganizationSystemSettings('org-a', repository, {
+      model: 'org-a-model',
+      clientCronEnabled: true,
+    }, 'admin-a')).rejects.toThrow(SystemSettingsScopeError)
+
+    expect(getSystemSettings().clientCronEnabled).toBe(false)
+    expect(getSystemSettings().bypassPermissions).toBe(false)
+    expect((repository as FakeOrganizationModelSettingsRepository).get('org-a')).toEqual({})
+  })
+})
+
+class FakeOrganizationModelSettingsRepository {
+  private readonly records = new Map<string, Record<string, unknown>>()
+
+  get(orgId: string): Record<string, unknown> {
+    return this.records.get(orgId) ?? {}
+  }
+
+  put(orgId: string, patch: Record<string, unknown>): Record<string, unknown> {
+    const next = deepMerge(this.get(orgId), patch)
+    this.records.set(orgId, next)
+    return next
+  }
+}
+
+function deepMerge(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const result = structuredClone(base)
+  for (const [key, value] of Object.entries(patch)) {
+    result[key] = typeof value === 'object' && value !== null && !Array.isArray(value)
+      && typeof result[key] === 'object' && result[key] !== null && !Array.isArray(result[key])
+      ? deepMerge(result[key] as Record<string, unknown>, value as Record<string, unknown>)
+      : structuredClone(value)
+  }
+  return result
+}
+
+it('preserves the legacy QMS environment key during vault hydration', async () => {
+  const previous = { api: process.env.QMS_API_KEY, legacy: process.env.QMS_DEFAULT_API_KEY }
+  try {
+    delete process.env.QMS_API_KEY
+    process.env.QMS_DEFAULT_API_KEY = 'legacy-env-qms-key'
+    const store = new ConfigStore(asClient(new FakeNexus()))
+    await store.loadAll()
+    const config = { wikiIndex: {}, cabin: {}, qms: { secrets: { apiKey: 'legacy-env-qms-key' } } } as ServerConfig
+    store.hydrateConfig(config)
+    expect(config.qms.secrets.apiKey).toBe('legacy-env-qms-key')
+  } finally {
+    if (previous.api === undefined) delete process.env.QMS_API_KEY
+    else process.env.QMS_API_KEY = previous.api
+    if (previous.legacy === undefined) delete process.env.QMS_DEFAULT_API_KEY
+    else process.env.QMS_DEFAULT_API_KEY = previous.legacy
+  }
 })

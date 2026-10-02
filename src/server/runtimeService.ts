@@ -1,3 +1,6 @@
+import { SessionStartupError } from './sessionStartup.js'
+import { withOrganizationResources, requireOrganizationResource, resolveOrganizationSkillIds, snapshotOrganizationResources, pinSessionResourceSnapshot } from './catalog/organizationResources.js'
+import { ResourceAccessError } from './catalog/resourceError.js'
 import { randomUUID } from 'crypto'
 import { accessSync, constants, existsSync } from 'fs'
 import { mkdir, readFile, writeFile, open } from 'fs/promises'
@@ -45,8 +48,8 @@ import {
   getTranscriptPath,
 } from './runtimePaths.js'
 import { errorMessage } from '../utils/errors.js'
-import { getSystemSettings } from './systemSettings.js'
 import { getUserModelPreference } from './userModelPreference.js'
+import { getModelProviderApiKey, getModelsForSelection } from './modelListCache.js'
 import type { AuthProxyServer } from './authProxy/authProxyServer.js'
 import {
   appendSharedAgentMemory,
@@ -627,7 +630,33 @@ export class RuntimeService {
     }
   }
 
+  private async resourceScope(session: { orgId: string; userId: string; role: string; scopes: string[] }) {
+    return { orgId: session.orgId, userId: session.userId, driver: this.store.driver,
+      visibility: await this.authService.buildVisibilityFilter({ ...session, rawToken: '', keyId: '', jti: '', exp: 0 }) }
+  }
+
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
+    if (this.draining) throw new ServerDrainingError()
+    return withOrganizationResources(await this.resourceScope(input), async () => {
+      if (input.assistantName) {
+        const resource = await requireOrganizationResource('agent', input.assistantName)
+        if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
+        const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
+        await getAssistantRuntimeConfig(input.assistantName)
+        input = { ...input, assistantName: input.assistantName.startsWith('moss-prepared:') ? input.assistantName : resource.id }
+      }
+      if (input.enabledSkills) {
+        const resolved = await resolveOrganizationSkillIds(input.enabledSkills)
+        input = { ...input, enabledSkills: input.enabledSkills.map((ref, index) => ref.startsWith('moss-prepared:') ? ref : resolved[index]!) }
+      }
+      return this.createSessionInResourceScope(input)
+    }).catch(error => {
+      if (error instanceof ResourceAccessError) throw new SessionStartupError(error)
+      throw error
+    })
+  }
+
+  private async createSessionInResourceScope(input: SessionCreateInput): Promise<SessionRecord> {
     // Graceful drain: reject before writing any session row (avoids a stranded
     // status='failed' half-created record that spawnAttempt-level rejection
     // would leave behind).
@@ -1727,6 +1756,44 @@ export class RuntimeService {
       enabledSkills?: string[]
     } = {},
   ): Promise<AttemptRecord> {
+    if (this.draining) throw new ServerDrainingError()
+    const scope = await this.resourceScope(session)
+    return withOrganizationResources(scope, async () => {
+      await this.assertWithinTokenQuota(session.userId, session.orgId)
+      const effectiveAssistant = options.assistantName ?? session.assistantName
+      if (effectiveAssistant) {
+        const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
+        await getAssistantRuntimeConfig(effectiveAssistant)
+      }
+      if (options.enabledSkills) await resolveOrganizationSkillIds(options.enabledSkills)
+      const pinned = await pinSessionResourceSnapshot(
+        join(this.options.config.runtimeDir, 'sessions', session.sessionId),
+        await snapshotOrganizationResources(), options.enabledSkills,
+      )
+      return withOrganizationResources({ ...scope, snapshot: pinned.snapshot }, () => this.spawnAttemptInResourceScope(
+        session, { ...options, enabledSkills: options.enabledSkills ?? pinned.enabledSkills },
+      ))
+    }).catch(async error => {
+      if (error instanceof ServerDrainingError || error instanceof TokenQuotaExceededError || error instanceof AttemptTakeoverPendingError) throw error
+      const current = await this.store.getSession(session.sessionId)
+      const attemptId = current?.currentAttemptId !== session.currentAttemptId ? current?.currentAttemptId : null
+      const failure = new SessionStartupError(error, session.sessionId, attemptId ?? randomUUID())
+      await this.store.addEvent(session.sessionId, attemptId ?? null, 'startup_failed', failure.failure as unknown as Record<string, unknown>)
+      if (attemptId) await this.store.markAttemptStopped(attemptId, { runtimeState: 'failed', stopReason: 'startup_failed', errorText: JSON.stringify(failure.failure) })
+      throw failure
+    })
+  }
+
+  private async spawnAttemptInResourceScope(
+    session: SessionRecord,
+    options: {
+      dangerouslySkipPermissions?: boolean
+      resumeTranscriptSessionId?: string
+      assistantName?: string
+      assistantDisplayName?: string
+      enabledSkills?: string[]
+    } = {},
+  ): Promise<AttemptRecord> {
     // Graceful drain: this is the single choke point every "spin up a new
     // runner / new attempt" path funnels through (createSession, resume cold
     // start, GET respawn, WS cold upgrade, background services). Reconnects to
@@ -1747,7 +1814,12 @@ export class RuntimeService {
     // below still runs. Without this, a reused session signs a token with
     // `assistant_id: null`, which makes every assistant-gated agent endpoint
     // (corp-app send, enabled wikis, …) 403 with "insufficient scope".
-    const effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
+    let effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
+    if (effectiveAssistantName) {
+      const resource = await requireOrganizationResource('agent', effectiveAssistantName)
+      effectiveAssistantName = resource.id
+      if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
+    }
     let assistantDisplayName = options.assistantDisplayName
     if (!assistantDisplayName && effectiveAssistantName) {
       try {
@@ -1758,6 +1830,8 @@ export class RuntimeService {
       }
     }
 
+    if (options.enabledSkills) options = { ...options, enabledSkills: await resolveOrganizationSkillIds(options.enabledSkills) }
+    const resourceSnapshot = await snapshotOrganizationResources()
     const generation = await this.store.getNextGeneration(session.sessionId)
     const attemptDir = getAttemptDir(this.options.config, session.sessionId, generation)
     const attachPath = getAttachPath(this.options.config, session.sessionId, generation)
@@ -2199,6 +2273,7 @@ export class RuntimeService {
         availableCorpApps,
         sharedMemory,
         enabledSkills: options.enabledSkills,
+        resources: resourceSnapshot,
         visibilityFilter: visibilityFilter ? {
           isAdmin: visibilityFilter.isAdmin,
           userId: visibilityFilter.userId,
@@ -2234,18 +2309,33 @@ export class RuntimeService {
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
     // Build environment for runner from system settings
-    const systemSettings = getSystemSettings()
+    const systemSettings = await this.authService.getOrganizationSystemSettings(session.orgId)
+    const userModelKey = session.userId
+      ? (await this.authService.getUserModelCredential(session.userId))?.sudorouterKey
+      : undefined
 
     // Get user model preference in main process (runner doesn't have DB access)
     // Model priority: user preference > system settings > default
     const userModelPref = session.userId ? await getUserModelPreference(session.userId) : null
     const isCabinSession = session.source === 'cabin'
-    const defaultModel = isCabinSession
+    const requestedModel = isCabinSession
       ? (session.runtime.model || this.options.config.cabin.llmModel)
       : userModelPref?.modelId
       || systemSettings.model
       || process.env.MOSS_DEFAULT_MODEL
       || 'gemini-3-flash-preview'
+
+    // A selected Provider is a routing boundary.  Do not fall back to the
+    // process-global endpoint when its catalog cannot be resolved: that would
+    // make an unavailable/stale selection call a different Provider.
+    const providerCatalog = !isCabinSession
+      ? await getModelsForSelection(requestedModel, {
+        settings: systemSettings,
+        orgId: session.orgId,
+        userApiKey: userModelKey,
+      })
+      : null
+    const defaultModel = providerCatalog?.selection.modelId || requestedModel
 
     process.stderr.write(`[RuntimeService] Model selection for session ${session.sessionId}:\n`)
     process.stderr.write(`  - userId: ${session.userId}\n`)
@@ -2262,9 +2352,12 @@ export class RuntimeService {
     // credential 永不进入 runner env。
     const { applyRunnerZoneContext } = await import('./zones/runtime/sessionZoneBridge.js')
     runnerEnv = applyRunnerZoneContext(runnerEnv, p1aRunnerZoneContext)
-    // Pass settings.json env vars to runner
-    if (systemSettings.url) {
-      runnerEnv.ANTHROPIC_BASE_URL = systemSettings.url
+    if (providerCatalog) {
+      runnerEnv.MOSS_MODEL_PROVIDER_ID = providerCatalog.selection.provider.id
+      runnerEnv.MOSS_MODEL_PROVIDER_PROTOCOL = providerCatalog.selection.provider.protocol
+      runnerEnv.MOSS_PROVIDER_MODELS_JSON = JSON.stringify(providerCatalog.models)
+      runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
+      runnerEnv.ANTHROPIC_BASE_URL = providerCatalog.selection.provider.baseUrl
     }
     // A metered deployment keys its credit ledger on a per-user gateway token,
     // so a session must spend the token of the user who owns it. Falling back to
@@ -2272,10 +2365,20 @@ export class RuntimeService {
     // balance untouched. Users without a token (private / on-prem deployments,
     // where no metered gateway exists) keep the shared key. Resolved here in the
     // main process: the runner subprocess has no database.
-    const userModelKey = session.userId
-      ? (await this.authService.getUserModelCredential(session.userId))?.sudorouterKey
+    const providerApiKey = providerCatalog
+      ? getModelProviderApiKey(providerCatalog.selection.provider.id, systemSettings.apiKey, session.orgId)
       : undefined
-    const sessionApiKey = userModelKey || systemSettings.apiKey
+    // Per-user Sudorouter keys only apply to the legacy default provider. A
+    // configured Provider must never receive a process-global or legacy key;
+    // local unauthenticated endpoints intentionally run with no credential.
+    const isLegacyProvider = providerCatalog?.selection.provider.id === 'legacy-default'
+    const sessionApiKey = isLegacyProvider
+      ? userModelKey || providerApiKey
+      : providerApiKey
+    if (providerCatalog) {
+      delete runnerEnv.ANTHROPIC_AUTH_TOKEN
+      delete runnerEnv.ANTHROPIC_API_KEY
+    }
     if (sessionApiKey) {
       runnerEnv.ANTHROPIC_AUTH_TOKEN = sessionApiKey
       // 同值补设 API_KEY：runner 子进程 buildSessionEnv 的选值链为
@@ -2283,8 +2386,8 @@ export class RuntimeService {
       // 两个同名值可消除主进程 env 自带 ANTHROPIC_API_KEY 时的优先级翻转
       runnerEnv.ANTHROPIC_API_KEY = sessionApiKey
     }
-    if (systemSettings.model) {
-      runnerEnv.ANTHROPIC_MODEL = systemSettings.model
+    if (defaultModel) {
+      runnerEnv.ANTHROPIC_MODEL = defaultModel
     }
     if (isCabinSession) {
       runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'

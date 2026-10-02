@@ -17,6 +17,7 @@ export interface DifyHttpAdapterOptions {
   provisionSecret?: string
   fetchImpl?: typeof fetch
   streamTimeoutMs?: number
+  timeoutMs?: number
 }
 
 export interface DifyFileInput {
@@ -40,7 +41,11 @@ export class DifyHttpAdapter {
 
   constructor(private readonly options: DifyHttpAdapterOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '')
-    this.fetchImpl = options.fetchImpl ?? fetch
+    const doFetch = options.fetchImpl ?? fetch
+    this.fetchImpl = options.timeoutMs ? (((url, init) => doFetch(url, {
+      ...init,
+      signal: AbortSignal.any([AbortSignal.timeout(options.timeoutMs!), ...(init?.signal ? [init.signal] : [])]),
+    })) as typeof fetch) : doFetch
     this.streamTimeoutMs = options.streamTimeoutMs ?? 330_000
   }
 

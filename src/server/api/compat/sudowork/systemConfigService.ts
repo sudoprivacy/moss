@@ -1,16 +1,24 @@
-import type { DatabaseSync } from 'node:sqlite'
 import type { ClientPolicyRepository } from '../../../configuration/clientPolicyRepository.js'
 import { PlatformIntegrationSettingsRepository } from '../../../configuration/platformIntegrationSettingsRepository.js'
+import { resolveEffectiveLoginMethod } from '../../../configuration/loginPolicy.js'
 import type { ConfigKey } from '../../../configStore/configStore.js'
-import type { IdentityActor } from '../../../identity/organizationIdentityService.js'
+import {
+  hasGlobalOrganizationAccess,
+  type IdentityActor,
+} from '../../../identity/organizationIdentityService.js'
 import type { IdentityRepository, IntegrationConnection } from '../../../identity/identityRepository.js'
-import { runInTransaction } from '../../../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../../../db/driver.js'
+import { getSystemSettings, updateSystemSettingsWithCommit } from '../../../systemSettings.js'
 
 const LOG_REPORT_SECRET_KEY = 'client.log-report-key' as const
 
 type LoginMethod = 'sms' | 'password' | 'cas'
 type RechargeMode = 'pay' | 'approve' | 'disabled'
 type Json = Record<string, unknown>
+
+export interface ProductImprovementRuntime {
+  apiKey?: string
+}
 
 export interface SudoworkInfrastructureConfig {
   sms: {
@@ -58,7 +66,7 @@ export class SudoworkSystemConfigService {
   private readonly infrastructureSettings: PlatformIntegrationSettingsRepository
 
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     policies: ClientPolicyRepository
     infrastructureSettings?: PlatformIntegrationSettingsRepository
     identities: IdentityRepository
@@ -66,15 +74,18 @@ export class SudoworkSystemConfigService {
       loginMethod: LoginMethod
       skillhubBaseUrl: string
       sudorouterBaseUrl?: string
-      productImprovementEncryptionRequired?: boolean
       productImprovementApiKey?: string
-      productImprovementPublicKey?: string
       sms?: SudoworkInfrastructureConfig['sms']
       billing?: SudoworkInfrastructureConfig['billing']
     }
     smsRuntimeAvailable?: boolean
     smsCredentialsAvailable?: boolean
+    productImprovementAvailable?: boolean
+    platformConfigPage?: boolean
     smsConfigured?: boolean
+    getSmsReadiness?: () => Promise<{ ready: boolean; reason?: string }>
+    resolveInfrastructure?: (legacy: SudoworkInfrastructureConfig) => SudoworkInfrastructureConfig
+    productImprovementRuntime?: () => ProductImprovementRuntime | Promise<ProductImprovementRuntime>
     secrets: {
       get(key: ConfigKey): string | undefined
       put(key: ConfigKey, value: string): Promise<void>
@@ -85,21 +96,23 @@ export class SudoworkSystemConfigService {
       ?? new PlatformIntegrationSettingsRepository(options.db)
   }
 
-  getLoginMethod(): LoginMethod {
-    return loginMethodFromNumber(this.policy().loginMethod, this.options.defaults.loginMethod)
+  async getLoginMethod(orgId?: string): Promise<LoginMethod> {
+    return resolveEffectiveLoginMethod(this.options, orgId)
   }
 
-  getPublicConfig(): Json {
-    const policy = this.policy()
-    const infrastructure = this.getInfrastructureConfig()
+  async getPublicConfig(orgId?: string): Promise<Json> {
+    const policy = await this.policy(orgId)
+    const infrastructure = await this.getInfrastructureConfig()
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
     const productImprovement = object(policy.productImprovement)
     const enabledLogReport = flag(logReport.enabled)
     const enabledVersionUpdate = flag(versionUpdate.enabled)
-    const enabledProductImprovement = flag(productImprovement.enabled)
+    const enabledProductImprovement = this.options.productImprovementAvailable === false ? 0 : flag(productImprovement.enabled)
+    const systemSettings = getSystemSettings()
     return {
-      login_method: loginMethodToNumber(this.getLoginMethod()),
+      login_method: loginMethodToNumber(await this.getLoginMethod(orgId)),
+      auth_methods: [({ sms: 'phone', password: 'password', cas: 'sso' } as const)[await this.getLoginMethod(orgId)]],
       log_report: enabledLogReport === 1
         ? { enabled: 1, baseurl: `${string(logReport.protocol, 'https')}://${string(logReport.domain)}` }
         : { enabled: 0 },
@@ -107,27 +120,33 @@ export class SudoworkSystemConfigService {
         ? { enabled: 1, cos_domain: string(versionUpdate.cosDomain) }
         : { enabled: 0 },
       product_improvement: enabledProductImprovement === 1
-        ? { enabled: 1, encryption_required: this.options.defaults.productImprovementEncryptionRequired === true }
+        ? { enabled: 1, encryption_required: false,
+            ...(string(productImprovement.baseurl) ? { baseurl: string(productImprovement.baseurl) } : {}) }
         : { enabled: 0 },
       sudorouter_baseurl: withoutTrailingSlash(string(
-        policy.sudorouterBaseUrl,
-        infrastructure.billing.sudorouter.baseUrl || this.options.defaults.sudorouterBaseUrl || '',
+        infrastructure.billing.sudorouter.baseUrl,
+        this.options.defaults.sudorouterBaseUrl || '',
       )),
       skillhub_baseurl: withoutTrailingSlash(string(policy.skillhubBaseUrl, this.options.defaults.skillhubBaseUrl)),
       scode_auto_model: string(policy.scodeAutoModel),
-      third_party_auth: this.thirdPartyAuth(false),
+      third_party_auth: await this.thirdPartyAuth(false, orgId),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
+      client_cron_enabled: await this.effectiveClientCronEnabled(orgId, systemSettings.clientCronEnabled),
+      client_show_tool_calls: typeof policy.clientShowToolCalls === 'boolean'
+        ? policy.clientShowToolCalls
+        : systemSettings.clientShowToolCalls,
+      workspace_upload_limit_bytes: workspaceUploadLimit(policy.workspaceUploadLimitBytes, systemSettings.workspaceUploadLimitBytes),
     }
   }
 
-  getCreditApplicationPolicy(): {
+  async getCreditApplicationPolicy(orgId?: string): Promise<{
     rechargeMode: 'payment' | 'approve' | 'disabled'
     minPoints: number
     maxPoints: number
     allowDuplicatePending: boolean
-  } {
-    const policy = this.policy()
+  }> {
+    const policy = await this.policy(orgId)
     const credit = normalizeCreditApplication(policy.creditApplication)
     const mode = rechargeMode(policy.rechargeMode)
     return {
@@ -138,29 +157,59 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  getInfrastructureConfig(): SudoworkInfrastructureConfig {
-    return {
+  /** Only persisted reporting policies override native Moss bootstrap defaults. */
+  async getClientReportingConfig(orgId?: string): Promise<Json> {
+    const policy = await this.policy(orgId)
+    const result: Json = {}
+    if (policy.logReport !== undefined) {
+      const value = object(policy.logReport)
+      result.log_report = flag(value.enabled) ? { enabled: 1, baseurl: `${string(value.protocol, 'https')}://${string(value.domain)}` } : { enabled: 0 }
+    }
+    if (policy.versionUpdate !== undefined) {
+      const value = object(policy.versionUpdate)
+      result.version_update = flag(value.enabled) ? { enabled: 1, cos_domain: string(value.cosDomain) } : { enabled: 0 }
+    }
+    if (policy.productImprovement !== undefined) {
+      const value = object(policy.productImprovement)
+      result.product_improvement = flag(value.enabled) && this.options.productImprovementAvailable !== false ? { enabled: 1, encryption_required: false,
+        ...(string(value.baseurl) ? { baseurl: string(value.baseurl) } : {}) } : { enabled: 0 }
+    }
+    if (orgId && result.product_improvement) {
+      const profile = await this.options.identities.getOrganizationProfile(orgId)
+      if (profile?.code) result.product_improvement = { ...object(result.product_improvement), tenant_id: profile.code }
+    }
+    return result
+  }
+
+  async getInfrastructureConfig(): Promise<SudoworkInfrastructureConfig> {
+    const result: SudoworkInfrastructureConfig = {
       sms: normalizeSmsInfrastructure(
-        this.infrastructureSettings.get('sudowork.sms'),
+        await this.infrastructureSettings.get('sudowork.sms'),
         this.options.defaults.sms ?? DEFAULT_SMS_INFRASTRUCTURE,
       ),
       billing: normalizeBillingInfrastructure(
-        this.infrastructureSettings.get('sudowork.billing'),
+        await this.infrastructureSettings.get('sudowork.billing'),
         this.options.defaults.billing ?? DEFAULT_BILLING_INFRASTRUCTURE,
       ),
     }
+    return this.options.resolveInfrastructure?.(result) ?? result
   }
 
-  getAdminConfig(actor: IdentityActor): Json {
+  async getAdminConfig(actor: IdentityActor): Promise<Json> {
     this.assertAdmin(actor)
-    const policy = this.policy()
+    const orgId = this.policyOrgId(actor)
+    const policy = await this.policy(orgId)
     const logReport = object(policy.logReport)
     const versionUpdate = object(policy.versionUpdate)
     const productImprovement = object(policy.productImprovement)
     const config: Json = {
-      login_method: loginMethodToNumber(this.getLoginMethod()),
-      sms_configured: this.isSmsConfigured(),
-      third_party_auth: this.thirdPartyAuth(true),
+      scope_type: orgId ? 'organization' : 'platform',
+      organization_id: orgId ?? '',
+      login_method: loginMethodToNumber(await this.getLoginMethod(orgId)),
+      sms_configured: await this.isSmsConfigured(),
+      sms_status: await this.options.getSmsReadiness?.(),
+      login_method_inherited: orgId ? (await this.options.policies.getOrganization(orgId)).loginMethod === undefined : false,
+      third_party_auth: await this.thirdPartyAuth(true, orgId),
       log_report: {
         enabled: flag(logReport.enabled),
         protocol: string(logReport.protocol),
@@ -172,54 +221,78 @@ export class SudoworkSystemConfigService {
         enabled: flag(versionUpdate.enabled),
         cos_domain: string(versionUpdate.cosDomain),
       },
-      product_improvement: { enabled: flag(productImprovement.enabled) },
+      product_improvement: { enabled: flag(productImprovement.enabled), baseurl: string(productImprovement.baseurl) },
       scode_auto_model: string(policy.scodeAutoModel),
       recharge_mode: rechargeMode(policy.rechargeMode),
       credit_application: normalizeCreditApplication(policy.creditApplication),
+      client_cron_enabled: await this.effectiveClientCronEnabled(orgId),
+      client_show_tool_calls: typeof policy.clientShowToolCalls === 'boolean'
+        ? policy.clientShowToolCalls
+        : getSystemSettings().clientShowToolCalls,
+      workspace_upload_limit_bytes: workspaceUploadLimit(
+        policy.workspaceUploadLimitBytes,
+        getSystemSettings().workspaceUploadLimitBytes,
+      ),
     }
-    if (!actor.organizationScoped) return config
-    const infrastructure = this.getInfrastructureConfig()
+    if (orgId) return config
+    const infrastructure = await this.getInfrastructureConfig()
     return {
       ...config,
       restart_required: true,
-      sms: adminSmsConfig(infrastructure.sms),
-      billing: adminBillingConfig(infrastructure.billing),
+      ...(this.options.platformConfigPage ? { platform_config_url: '/settings/platform-config' } : { sms: adminSmsConfig(infrastructure.sms), billing: adminBillingConfig(infrastructure.billing) }),
     }
   }
 
-  getCredentialData(): Json {
+  async getCredentialData(orgId?: string): Promise<Json> {
     const result: Json = {}
-    const logReport = object(this.policy().logReport)
+    const policy = await this.policy(orgId)
+    const logReport = object(policy.logReport)
     const logKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
     if (flag(logReport.enabled) === 1 && logKey) result.log_report = { key: logKey }
-    const productImprovement = object(this.policy().productImprovement)
-    if (flag(productImprovement.enabled) === 1) {
-      const value: Json = { api_key: this.options.defaults.productImprovementApiKey ?? '' }
-      if (this.options.defaults.productImprovementEncryptionRequired) {
-        value.public_key = this.options.defaults.productImprovementPublicKey ?? ''
-      }
+    const productImprovement = object(policy.productImprovement)
+    if (flag(productImprovement.enabled) === 1 && this.options.productImprovementAvailable !== false) {
+      const runtime = await this.productImprovementRuntime()
+      const value: Json = { api_key: runtime.apiKey ?? '' }
       result.product_improvement = value
     }
     return result
   }
 
+  private async productImprovementRuntime(): Promise<ProductImprovementRuntime> {
+    return this.options.productImprovementRuntime?.() ?? {
+      apiKey: this.options.secrets.get('client.product-improvement-api-key') ?? this.options.defaults.productImprovementApiKey,
+    }
+  }
+
   async update(actor: IdentityActor, body: Json): Promise<void> {
     const {
-      patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure,
-    } = this.prepareUpdate(actor, body)
+      patch, inheritedKeys, providers, nextLogKey, smsInfrastructure, billingInfrastructure, orgId, clientCronEnabled,
+    } = await this.prepareUpdate(actor, body)
     const previousLogKey = this.options.secrets.get(LOG_REPORT_SECRET_KEY)
-    if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
     try {
-      runInTransaction(this.options.db, () => {
-        this.options.policies.putPlatform(patch, actor.userId)
+      if (nextLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, nextLogKey)
+      const commit = () => this.options.db.transaction(async () => {
+        if (Object.keys(patch).length > 0) {
+          if (orgId) await this.options.policies.putOrganization(orgId, patch, actor.userId)
+          else await this.options.policies.putPlatform(patch, actor.userId)
+        }
+        if (orgId && inheritedKeys.length > 0) {
+          await this.options.policies.removeOrganizationKeys(orgId, inheritedKeys, actor.userId)
+        }
+        if (clientCronEnabled !== undefined && orgId !== undefined) {
+          await this.options.identities.setOrganizationClientCronEnabled(orgId, clientCronEnabled)
+        }
         if (smsInfrastructure) {
-          this.infrastructureSettings.put('sudowork.sms', smsInfrastructure, actor.userId)
+          await this.infrastructureSettings.put('sudowork.sms', smsInfrastructure, actor.userId)
         }
         if (billingInfrastructure) {
-          this.infrastructureSettings.put('sudowork.billing', billingInfrastructure, actor.userId)
+          await this.infrastructureSettings.put('sudowork.billing', billingInfrastructure, actor.userId)
         }
-        if (providers) this.replaceCasConnections(providers)
+        if (providers) await this.replaceCasConnections(providers, orgId)
       })
+      if (clientCronEnabled !== undefined && orgId === undefined) {
+        await updateSystemSettingsWithCommit({ clientCronEnabled }, commit)
+      } else await commit()
     } catch (error) {
       if (nextLogKey !== undefined) {
         if (previousLogKey !== undefined) await this.options.secrets.put(LOG_REPORT_SECRET_KEY, previousLogKey)
@@ -229,41 +302,53 @@ export class SudoworkSystemConfigService {
     }
   }
 
-  validateUpdate(actor: IdentityActor, body: Json): void {
-    this.prepareUpdate(actor, body)
+  async validateUpdate(actor: IdentityActor, body: Json): Promise<void> {
+    await this.prepareUpdate(actor, body)
   }
 
-  private prepareUpdate(actor: IdentityActor, body: Json): {
+  private async prepareUpdate(actor: IdentityActor, body: Json): Promise<{
     patch: Json
+    inheritedKeys: string[]
     providers?: NormalizedProvider[]
     nextLogKey?: string
     smsInfrastructure?: SudoworkInfrastructureConfig['sms']
     billingInfrastructure?: SudoworkInfrastructureConfig['billing']
-  } {
-    if (actor.role !== 'super_admin') throw new SudoworkSystemConfigError(403, '权限不足')
+    orgId?: string
+    clientCronEnabled?: boolean
+  }> {
+    this.assertAdmin(actor)
+    const orgId = this.policyOrgId(actor)
+    const platformActor = orgId === undefined
+    if (this.options.platformConfigPage && (body.sms !== undefined || body.billing !== undefined)) {
+      throw new SudoworkSystemConfigError(platformActor ? 409 : 403, '公共服务连接已移至平台配置，请在平台配置页面修改')
+    }
+    if (body.inherit_login_method !== undefined && typeof body.inherit_login_method !== 'boolean') {
+      throw new SudoworkSystemConfigError(400, 'inherit_login_method 必须为布尔值')
+    }
     const patch: Json = {}
     let providers: NormalizedProvider[] | undefined
     let smsInfrastructure: SudoworkInfrastructureConfig['sms'] | undefined
     let billingInfrastructure: SudoworkInfrastructureConfig['billing'] | undefined
+    let clientCronEnabled: boolean | undefined
 
     if (body.third_party_auth !== undefined) {
       const normalized = normalizeThirdPartyAuth(body.third_party_auth)
-      providers = normalized.providers.map(provider => this.validateProvider(provider))
+      providers = await Promise.all(normalized.providers.map(provider => this.validateProvider(provider, orgId)))
       if (normalized.enabled === 1 && !providers.some(provider => provider.id === normalized.defaultProvider && provider.enabled)) {
         throw new SudoworkSystemConfigError(400, '默认三方认证 Provider 不存在或未启用')
       }
       patch.thirdPartyAuth = { enabled: normalized.enabled, defaultProvider: normalized.defaultProvider }
     }
 
-    if (body.login_method !== undefined) {
+    if (body.login_method !== undefined && body.inherit_login_method !== true) {
       if (body.login_method !== 0 && body.login_method !== 1 && body.login_method !== 2) {
         throw new SudoworkSystemConfigError(400, '无效的登录方式')
       }
-      if (body.login_method === 0 && !this.isSmsConfigured()) {
-        throw new SudoworkSystemConfigError(400, '短信通道未配置,无法切换到手机验证码')
+      if (body.login_method === 0 && !(await this.isSmsConfigured())) {
+        const readiness = await this.options.getSmsReadiness?.()
+        throw new SudoworkSystemConfigError(400, readiness?.reason || '短信通道未配置,无法切换到手机验证码')
       }
-      const thirdParty = object(patch.thirdPartyAuth ?? this.policy().thirdPartyAuth)
-      if (body.login_method === 2 && flag(thirdParty.enabled) !== 1) {
+      if (body.login_method === 2 && !(await this.hasEnabledThirdPartyAuth(orgId, patch.thirdPartyAuth, providers))) {
         throw new SudoworkSystemConfigError(400, '三方认证配置未启用')
       }
       patch.loginMethod = body.login_method
@@ -276,6 +361,9 @@ export class SudoworkSystemConfigService {
       const protocol = string(value.protocol)
       const domain = string(value.domain)
       nextLogKey = typeof value.key === 'string' && value.key.length > 0 ? value.key : undefined
+      if (!platformActor && nextLogKey !== undefined) {
+        throw new SudoworkSystemConfigError(403, '日志上报密钥属于部署级配置,仅平台超级管理员可修改')
+      }
       if (enabled === 1 && protocol !== 'http' && protocol !== 'https') {
         throw new SudoworkSystemConfigError(400, '日志上报开启时,协议类型必须为 http 或 https')
       }
@@ -296,15 +384,22 @@ export class SudoworkSystemConfigService {
       patch.versionUpdate = { enabled, cosDomain }
     }
     if (body.product_improvement !== undefined) {
-      const enabled = flag(object(body.product_improvement).enabled)
-      if (enabled === 1 && !this.options.defaults.productImprovementApiKey) {
+      const value = object(body.product_improvement)
+      const enabled = flag(value.enabled)
+      if (enabled === 1 && this.options.productImprovementAvailable === false) throw new SudoworkSystemConfigError(400, '平台 QMS 服务未启用或尚未重启生效')
+      const runtime = await this.productImprovementRuntime()
+      if (enabled === 1 && !runtime.apiKey) {
         throw new SudoworkSystemConfigError(400, '未配置 QMS_DEFAULT_API_KEY,无法开启产品改进计划')
       }
-      if (enabled === 1 && this.options.defaults.productImprovementEncryptionRequired
-        && (!this.options.defaults.productImprovementPublicKey)) {
-        throw new SudoworkSystemConfigError(400, '已开启遥测加密,但未配置 QMS_TELEMETRY_PUBLIC_KEY')
+      const baseurl = value.baseurl === undefined ? undefined : string(value.baseurl).trim().replace(/\/+$/, '')
+      if (baseurl) {
+        let url: URL
+        try { url = new URL(baseurl) } catch { throw new SudoworkSystemConfigError(400, '质量上报地址必须是完整的 HTTP 或 HTTPS 地址') }
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
+          throw new SudoworkSystemConfigError(400, '质量上报地址仅填写协议和域名（可包含端口），不要包含接口路径、账号或查询参数')
+        }
       }
-      patch.productImprovement = { enabled }
+      patch.productImprovement = { enabled, ...(baseurl === undefined ? {} : { baseurl }) }
     }
     if (body.scode_auto_model !== undefined) {
       if (typeof body.scode_auto_model !== 'string') {
@@ -314,50 +409,158 @@ export class SudoworkSystemConfigService {
     }
     if (body.recharge_mode !== undefined) patch.rechargeMode = rechargeMode(body.recharge_mode)
     if (body.credit_application !== undefined) patch.creditApplication = normalizeCreditApplication(body.credit_application)
+    if (body.client_cron_enabled !== undefined) {
+      const requested = parseBoolean(body.client_cron_enabled, 'client_cron_enabled')
+      const current = orgId
+        ? (await this.options.identities.getOrganizationProfile(orgId))?.clientCronEnabled
+        : getSystemSettings().clientCronEnabled
+      if (current === undefined || requested !== current) clientCronEnabled = requested
+    }
+    if (body.client_show_tool_calls !== undefined) {
+      patch.clientShowToolCalls = parseBoolean(body.client_show_tool_calls, 'client_show_tool_calls')
+    }
+    if (body.workspace_upload_limit_bytes !== undefined) {
+      patch.workspaceUploadLimitBytes = parseWorkspaceUploadLimit(body.workspace_upload_limit_bytes)
+    }
     if (body.sms !== undefined) {
+      if (!platformActor) throw new SudoworkSystemConfigError(403, '短信基础设施属于部署级配置,仅平台超级管理员可修改')
       smsInfrastructure = parseSmsInfrastructure(
         body.sms,
-        this.getInfrastructureConfig().sms,
+        (await this.getInfrastructureConfig()).sms,
       )
     }
     if (body.billing !== undefined) {
+      if (!platformActor) throw new SudoworkSystemConfigError(403, '支付基础设施属于部署级配置,仅平台超级管理员可修改')
       billingInfrastructure = parseBillingInfrastructure(
         body.billing,
-        this.getInfrastructureConfig().billing,
+        (await this.getInfrastructureConfig()).billing,
       )
     }
-    return { patch, providers, nextLogKey, smsInfrastructure, billingInfrastructure }
+    const scoped = orgId
+      ? splitPlatformInheritedValues(patch, await this.platformInheritedValues(orgId))
+      : { patch, inheritedKeys: [] }
+    if (body.inherit_login_method === true) {
+      if (!orgId) throw new SudoworkSystemConfigError(400, '只有组织策略可跟随平台默认')
+      delete scoped.patch.loginMethod
+      scoped.inheritedKeys.push('loginMethod')
+    }
+    return {
+      patch: scoped.patch,
+      inheritedKeys: scoped.inheritedKeys,
+      providers,
+      nextLogKey,
+      smsInfrastructure,
+      billingInfrastructure,
+      orgId,
+      clientCronEnabled,
+    }
   }
 
-  isSmsConfigured(): boolean {
+  async isSmsConfigured(): Promise<boolean> {
+    if (this.options.getSmsReadiness) return (await this.options.getSmsReadiness()).ready
     if (this.options.smsConfigured !== undefined) return this.options.smsConfigured
-    const sms = this.getInfrastructureConfig().sms
+    const sms = (await this.getInfrastructureConfig()).sms
     return this.options.smsRuntimeAvailable === true
       && sms.provider === 'tencent'
-      && [sms.sdkAppId, sms.signName, sms.templateId, sms.signId, sms.region].every(Boolean)
+      && [sms.sdkAppId, sms.signName, sms.templateId, sms.region].every(Boolean)
       && (this.options.smsCredentialsAvailable === true || (
         Boolean(this.options.secrets.get('server.sudowork-tencent-secret-id'))
         && Boolean(this.options.secrets.get('server.sudowork-tencent-secret-key'))
       ))
   }
 
-  private policy(): Json {
-    return this.options.policies.getEffective()
+  private policy(orgId?: string): Promise<Json> {
+    return this.options.policies.getEffective(orgId)
   }
 
-  private thirdPartyAuth(admin: boolean): Json {
-    const policy = object(this.policy().thirdPartyAuth)
-    const providers = this.options.identities.listOrganizationProfiles().flatMap(profile =>
-      this.options.identities.listIntegrationConnections(profile.orgId, 'cas').map(connection =>
+  private async platformInheritedValues(orgId: string): Promise<Json> {
+    const platform = await this.options.policies.getPlatform()
+    const systemSettings = getSystemSettings()
+    return {
+      ...platform,
+      loginMethod: loginMethodToNumber(await resolveEffectiveLoginMethod(this.options, orgId, { ignoreOrganizationPolicy: true })),
+      logReport: platform.logReport ?? { enabled: 0, protocol: '', domain: '', keySet: Boolean(this.options.secrets.get(LOG_REPORT_SECRET_KEY)) },
+      versionUpdate: platform.versionUpdate ?? { enabled: 0, cosDomain: '' },
+      productImprovement: { ...object(platform.productImprovement ?? { enabled: 0 }), baseurl: string(object(platform.productImprovement).baseurl) },
+      thirdPartyAuth: platform.thirdPartyAuth ?? { enabled: 0, defaultProvider: '' },
+      scodeAutoModel: string(platform.scodeAutoModel),
+      rechargeMode: rechargeMode(platform.rechargeMode),
+      creditApplication: normalizeCreditApplication(platform.creditApplication),
+      clientShowToolCalls: typeof platform.clientShowToolCalls === 'boolean'
+        ? platform.clientShowToolCalls
+        : systemSettings.clientShowToolCalls,
+      workspaceUploadLimitBytes: workspaceUploadLimit(
+        platform.workspaceUploadLimitBytes,
+        systemSettings.workspaceUploadLimitBytes,
+      ),
+    }
+  }
+
+  private async thirdPartyAuth(admin: boolean, orgId?: string): Promise<Json> {
+    const policy = object((await this.policy(orgId)).thirdPartyAuth)
+    const profiles = orgId
+      ? (await this.options.identities.listOrganizationProfiles()).filter(profile => profile.orgId === orgId)
+      : await this.options.identities.listOrganizationProfiles()
+    const groups = await Promise.all(profiles.map(async profile =>
+      (await this.options.identities.listIntegrationConnections(profile.orgId, 'cas')).map(connection =>
         legacyProvider(connection, profile.code, admin)),
-    )
-    const defaultProvider = string(policy.defaultProvider, providers[0]?.id as string | undefined)
-    return { enabled: flag(policy.enabled), default_provider: defaultProvider, providers: providers.filter(item => admin || item.enabled === 1) }
+    ))
+    const providers = groups.flat()
+    const visibleProviders = providers.filter(item => admin || item.enabled === 1)
+    const enabledProviders = visibleProviders.filter(item => item.enabled === 1)
+    const configuredDefault = string(policy.defaultProvider)
+    const defaultProvider = enabledProviders.some(provider => provider.id === configuredDefault)
+      ? configuredDefault
+      : string(enabledProviders[0]?.id as string | undefined)
+    return {
+      enabled: enabledProviders.length > 0 ? flag(policy.enabled) : 0,
+      default_provider: defaultProvider,
+      providers: visibleProviders,
+    }
   }
 
-  private validateProvider(provider: NormalizedProvider): NormalizedProvider {
+  private async hasEnabledThirdPartyAuth(
+    orgId?: string,
+    policyOverride?: unknown,
+    providersOverride?: NormalizedProvider[],
+  ): Promise<boolean> {
+    const policy = object(policyOverride ?? (await this.policy(orgId)).thirdPartyAuth)
+    if (flag(policy.enabled) !== 1) return false
+    const enabledProviderIds = providersOverride
+      ? providersOverride
+        .filter(provider => provider.enabled && (!orgId || provider.orgId === orgId))
+        .map(provider => provider.id)
+      : await this.enabledCasProviderIds(orgId)
+    if (enabledProviderIds.length === 0) return false
+    const defaultProvider = string(policy.defaultProvider)
+    return !defaultProvider || enabledProviderIds.includes(defaultProvider) || enabledProviderIds.length > 0
+  }
+
+  private async enabledCasProviderIds(orgId?: string): Promise<string[]> {
+    const profiles = orgId
+      ? (await this.options.identities.listOrganizationProfiles()).filter(profile => profile.orgId === orgId)
+      : await this.options.identities.listOrganizationProfiles()
+    const groups = await Promise.all(profiles.map(async profile =>
+      (await this.options.identities.listIntegrationConnections(profile.orgId, 'cas'))
+        .filter(connection => connection.enabled)
+        .map(connection => connection.id),
+    ))
+    return groups.flat()
+  }
+
+  private async validateProvider(provider: NormalizedProvider, orgScopeId?: string): Promise<NormalizedProvider> {
     if (provider.type !== 'cas') throw new SudoworkSystemConfigError(400, '当前仅支持 CAS 类型 Provider')
     if (!provider.id || !provider.name) throw new SudoworkSystemConfigError(400, 'Provider ID 和名称不能为空')
+    const profile = await this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
+    if (!profile) throw new SudoworkSystemConfigError(400, `Provider 绑定企业码 ${provider.enterpriseCode} 不存在`)
+    const existing = await this.options.identities.getIntegrationConnection(provider.id)
+    if (orgScopeId && existing && existing.orgId !== orgScopeId) {
+      throw new SudoworkSystemConfigError(403, '无权修改其他企业的三方认证 Provider')
+    }
+    if (orgScopeId && profile.orgId !== orgScopeId) {
+      throw new SudoworkSystemConfigError(403, '无权修改其他企业的三方认证 Provider')
+    }
+    if (!provider.enabled) return { ...provider, orgId: profile.orgId }
     if (!validHttpUrl(provider.casUrl)) throw new SudoworkSystemConfigError(400, 'CAS URL 格式不正确')
     if (!provider.loginPath || !provider.validatePath || !provider.logoutPath || !provider.serviceParam) {
       throw new SudoworkSystemConfigError(400, 'CAS 登录地址、校验地址、登出地址和 service 参数名不能为空')
@@ -369,20 +572,21 @@ export class SudoworkSystemConfigService {
       throw new SudoworkSystemConfigError(400, '登出回跳 URL 必须使用 http 或 https')
     }
     if (!provider.appCallbackUrl) throw new SudoworkSystemConfigError(400, 'App 回调 URL 不能为空')
-    const profile = this.options.identities.getOrganizationProfileByCode(provider.enterpriseCode)
-    if (!profile) throw new SudoworkSystemConfigError(400, `Provider 绑定企业码 ${provider.enterpriseCode} 不存在`)
     return { ...provider, orgId: profile.orgId }
   }
 
-  private replaceCasConnections(providers: NormalizedProvider[]): void {
+  private async replaceCasConnections(providers: NormalizedProvider[], orgScopeId?: string): Promise<void> {
     const ids = new Set(providers.map(provider => provider.id))
-    for (const profile of this.options.identities.listOrganizationProfiles()) {
-      for (const existing of this.options.identities.listIntegrationConnections(profile.orgId, 'cas')) {
-        if (!ids.has(existing.id)) this.options.identities.putIntegrationConnection({ ...existing, enabled: false })
+    const profiles = orgScopeId
+      ? (await this.options.identities.listOrganizationProfiles()).filter(profile => profile.orgId === orgScopeId)
+      : await this.options.identities.listOrganizationProfiles()
+    for (const profile of profiles) {
+      for (const existing of await this.options.identities.listIntegrationConnections(profile.orgId, 'cas')) {
+        if (!ids.has(existing.id)) await this.options.identities.putIntegrationConnection({ ...existing, enabled: false })
       }
     }
     for (const provider of providers) {
-      this.options.identities.putIntegrationConnection({
+      await this.options.identities.putIntegrationConnection({
         id: provider.id,
         orgId: provider.orgId!,
         providerType: 'cas',
@@ -410,6 +614,16 @@ export class SudoworkSystemConfigService {
     if (actor.role !== 'admin' && actor.role !== 'super_admin') {
       throw new SudoworkSystemConfigError(403, '权限不足')
     }
+  }
+
+  private policyOrgId(actor: IdentityActor): string | undefined {
+    return hasGlobalOrganizationAccess(actor) ? undefined : actor.orgId
+  }
+
+  private async effectiveClientCronEnabled(orgId?: string, global = getSystemSettings().clientCronEnabled): Promise<boolean> {
+    return orgId
+      ? global && ((await this.options.identities.getOrganizationProfile(orgId))?.clientCronEnabled ?? true)
+      : global
   }
 }
 
@@ -491,12 +705,46 @@ function object(value: unknown): Json {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Json : {}
 }
 
+function splitPlatformInheritedValues(patch: Json, platform: Json): { patch: Json; inheritedKeys: string[] } {
+  const result: Json = {}
+  const inheritedKeys: string[] = []
+  for (const [key, value] of Object.entries(patch)) {
+    if (key !== 'loginMethod' && jsonEqual(value, platform[key])) inheritedKeys.push(key)
+    else result[key] = value
+  }
+  return { patch: result, inheritedKeys }
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
 function string(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value.trim() : fallback
 }
 
 function flag(value: unknown): 0 | 1 {
   return value === true || value === 1 || value === '1' ? 1 : 0
+}
+
+function parseBoolean(value: unknown, fieldName: string): boolean {
+  if (typeof value === 'boolean') return value
+  if (value === 0 || value === 1) return value === 1
+  throw new SudoworkSystemConfigError(400, `${fieldName} 必须为布尔值`)
+}
+
+function workspaceUploadLimit(value: unknown, fallback: number): number {
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (Number.isSafeInteger(limit) && limit >= 1 && limit <= 1024 * 1024 * 1024) return limit
+  return fallback
+}
+
+function parseWorkspaceUploadLimit(value: unknown): number {
+  const limit = typeof value === 'number' ? value : Number.NaN
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1024 * 1024 * 1024) {
+    throw new SudoworkSystemConfigError(400, '工作区上传限制必须为 1 至 1073741824 字节之间的整数')
+  }
+  return limit
 }
 
 function rechargeMode(value: unknown): RechargeMode {
@@ -703,11 +951,6 @@ function adminOptionalUrl(value: unknown, fallback: string | undefined, label: s
   const normalized = value === undefined ? fallback : string(value)
   if (normalized && !validHttpUrl(normalized)) throw new SudoworkSystemConfigError(400, `${label}格式不正确`)
   return normalized || undefined
-}
-
-function loginMethodFromNumber(value: unknown, fallback: LoginMethod): LoginMethod {
-  return value === 0 ? 'sms' : value === 1 ? 'password' : value === 2 ? 'cas'
-    : value === 'sms' || value === 'password' || value === 'cas' ? value : fallback
 }
 
 function loginMethodToNumber(value: LoginMethod): 0 | 1 | 2 {

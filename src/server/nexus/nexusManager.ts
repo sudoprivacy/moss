@@ -1,23 +1,53 @@
+import { randomUUID } from 'crypto'
 import { validateZoneId, describeRefusal } from '@sudo/contracts/zone-id'
 import { spawn, spawnSync, type ChildProcess } from 'child_process'
 import {
+  closeSync,
   copyFileSync,
   existsSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
+  openSync,
+  opendirSync,
+  readFileSync,
+  unlinkSync,
   writeFileSync,
 } from 'fs'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { createServer } from 'net'
 import { homedir } from 'os'
-import { join } from 'path'
+import { basename, dirname, join } from 'path'
+import { getErrnoCode } from '../../utils/errors.js'
+import { lock } from '../../utils/lockfile.js'
 import runtimeVersions from './runtime-versions.json' with { type: 'json' }
+import {
+  NEXUS_DEFAULT_GRPC_PORT,
+  resolveNexusConfigFromEnv,
+  type NexusMode,
+  type NexusTlsConfig,
+  type ResolvedNexusConfig,
+} from './nexusEnvConfig.js'
+
+// The env-resolved config moved to `nexusEnvConfig.ts` so consumers that only
+// need the config (the session runner's k8s backend) do not inline this
+// module's daemon-lifecycle imports. Re-exported here because every existing
+// caller — `readiness.ts`, the tests — reaches for it through this module.
+export {
+  resolveNexusConfigFromEnv,
+  type NexusMode,
+  type NexusTlsConfig,
+  type ResolvedNexusConfig,
+}
 
 const NEXUS_VERSION = runtimeVersions['nexusd-cluster']
-const NEXUS_DEFAULT_GRPC_PORT = Number(process.env.MOSS_NEXUS_GRPC_PORT) || 2126
 const NEXUS_POLL_INTERVAL_MS = 200
 const NEXUS_HEALTH_TIMEOUT_MS = 30_000
 const NEXUS_CONNECT_TIMEOUT_MS = 1_000
 const NEXUS_STOP_TIMEOUT_MS = 3_000
+const NEXUS_STARTUP_LOCK_STALE_MS = 60_000
+const NEXUS_STARTUP_LOCK_UPDATE_MS = 5_000
 const MAX_STDERR_CAPTURE_CHARS = 8 * 1024
 const MAX_LOG_LINE_CHARS = 4 * 1024
 
@@ -34,78 +64,24 @@ export type NexusManagerOptions = {
   connectTimeoutMs?: number
   /** Override the env-resolved runtime config (tests / embedding hosts). */
   config?: ResolvedNexusConfig
+  /** Override process boundaries without changing production defaults. */
+  pluginDir?: string
+  spawnProcess?: typeof spawn
+  readinessProbe?: () => Promise<void>
+  runtimeResolver?: () => { path: string; version: string | null }
+  startupLock?: typeof lock
 }
 
-/** mTLS material for connecting to an external `nexusd-cluster`. */
-export type NexusTlsConfig = {
-  caPath: string
-  certPath: string
-  keyPath: string
-  /** Server-cert SAN to validate; defaults to the cluster's `nexus-node`. */
-  serverName?: string
-}
 
-export type NexusMode = 'embedded' | 'external'
-
-/**
- * Resolved nexus runtime config.
- *
- * - `embedded`: moss spawns its own `nexusd serve-local` (trusted loopback,
- *   `--no-tls`) — the standalone/dev default, unchanged behavior.
- * - `external`: moss connects to an already-running production
- *   `nexusd-cluster` over its advertise bind, optionally with mTLS. moss does
- *   NOT spawn or manage the daemon lifecycle in this mode.
- */
-export type ResolvedNexusConfig =
-  | { mode: 'embedded'; grpcPort: number }
-  | { mode: 'external'; endpoint: string; authToken: string; tls: NexusTlsConfig | null }
-
-/**
- * Resolve the nexus runtime config from the environment.
- *
- * `MOSS_NEXUS_MODE=external` switches moss from the embedded serve-local
- * daemon to an external cluster client:
- *   - `MOSS_NEXUS_ENDPOINT`   host+scheme+port, e.g. `https://127.0.0.1:8443`
- *   - `MOSS_NEXUS_TLS_CA`     cluster CA cert (PEM path)
- *   - `MOSS_NEXUS_TLS_CERT`   moss client cert (PEM path)
- *   - `MOSS_NEXUS_TLS_KEY`    moss client key  (PEM path)
- *   - `MOSS_NEXUS_TLS_SERVER_NAME`  optional SAN override (default `nexus-node`)
- *   - `MOSS_NEXUS_AUTH_TOKEN` optional per-RPC auth token
- *
- * Anything else stays `embedded` (default), preserving the current
- * spawn-serve-local behavior for standalone/dev.
- */
-export function resolveNexusConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ResolvedNexusConfig {
-  const mode: NexusMode = env.MOSS_NEXUS_MODE?.trim() === 'external' ? 'external' : 'embedded'
-  if (mode === 'embedded') {
-    return { mode, grpcPort: Number(env.MOSS_NEXUS_GRPC_PORT) || NEXUS_DEFAULT_GRPC_PORT }
-  }
-
-  const endpoint = env.MOSS_NEXUS_ENDPOINT?.trim()
-  if (!endpoint) {
+function assertValidNexusZoneId(zoneId: string): void {
+  const refusal = validateZoneId(zoneId)
+  if (refusal) {
     throw new Error(
-      'MOSS_NEXUS_MODE=external requires MOSS_NEXUS_ENDPOINT (e.g. https://127.0.0.1:8443)',
+      `refusing to start nexusd with zone id ${JSON.stringify(zoneId)}: ${describeRefusal(refusal)}. ` +
+        'A zone id is the first path segment of everything in the zone and cannot be changed afterwards — ' +
+        'pointing at a different id later creates a new empty zone and abandons the old one.',
     )
   }
-
-  const caPath = env.MOSS_NEXUS_TLS_CA?.trim()
-  const certPath = env.MOSS_NEXUS_TLS_CERT?.trim()
-  const keyPath = env.MOSS_NEXUS_TLS_KEY?.trim()
-  let tls: NexusTlsConfig | null = null
-  if (caPath || certPath || keyPath) {
-    if (!caPath || !certPath || !keyPath) {
-      throw new Error(
-        'mTLS to the external nexus requires all of MOSS_NEXUS_TLS_CA, MOSS_NEXUS_TLS_CERT, MOSS_NEXUS_TLS_KEY',
-      )
-    }
-    tls = { caPath, certPath, keyPath, serverName: env.MOSS_NEXUS_TLS_SERVER_NAME?.trim() || undefined }
-  } else if (endpoint.startsWith('https://')) {
-    throw new Error(
-      'MOSS_NEXUS_ENDPOINT uses https:// but no client certs were provided; set MOSS_NEXUS_TLS_CA/CERT/KEY for mTLS',
-    )
-  }
-
-  return { mode, endpoint, authToken: env.MOSS_NEXUS_AUTH_TOKEN?.trim() ?? '', tls }
 }
 
 /**
@@ -148,18 +124,192 @@ export function buildNexusArgs(
   ]
 
   if (clusterInit !== undefined) {
-    const refusal = validateZoneId(clusterInit)
-    if (refusal) {
-      throw new Error(
-        `refusing to start nexusd with zone id ${JSON.stringify(clusterInit)}: ${describeRefusal(refusal)}. ` +
-          'A zone id is the first path segment of everything in the zone and cannot be changed afterwards — ' +
-          'pointing at a different id later creates a new empty zone and abandons the old one.',
-      )
-    }
+    assertValidNexusZoneId(clusterInit)
     args.push('--cluster-init', clusterInit)
   }
 
   return args
+}
+
+const NEXUS_ZONE_ID_LOCK_VERSION = 1
+const NEXUS_ZONE_ID_LOCK_MAX_BYTES = 512
+
+export function resolveNexusZoneIdLockPath(dataDir: string): string {
+  return join(dirname(dataDir), `${basename(dataDir)}.zone-id.lock.json`)
+}
+
+function serializeNexusZoneIdLock(zoneId: string): string {
+  return `${JSON.stringify({ version: NEXUS_ZONE_ID_LOCK_VERSION, zoneId }, null, 2)}\n`
+}
+
+function lstatIfExists(path: string): ReturnType<typeof lstatSync> | null {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if (getErrnoCode(error) === 'ENOENT') return null
+    throw error
+  }
+}
+
+function readNexusZoneIdLock(lockPath: string): string | undefined {
+  const stat = lstatIfExists(lockPath)
+  if (!stat) return undefined
+  if (!stat.isFile()) {
+    throw new Error(`Invalid Nexus ZoneId lock at ${lockPath}: expected a regular file`)
+  }
+  if (stat.size > NEXUS_ZONE_ID_LOCK_MAX_BYTES) {
+    throw new Error(
+      `Invalid Nexus ZoneId lock at ${lockPath}: record exceeds ${NEXUS_ZONE_ID_LOCK_MAX_BYTES} bytes`,
+    )
+  }
+
+  const raw = readFileSync(lockPath, 'utf8')
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    throw new Error(`Invalid Nexus ZoneId lock at ${lockPath}: malformed JSON`)
+  }
+
+  if (
+    typeof value !== 'object' || value === null || Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    !Object.hasOwn(value, 'version') || !Object.hasOwn(value, 'zoneId') ||
+    (value as { version?: unknown }).version !== NEXUS_ZONE_ID_LOCK_VERSION ||
+    typeof (value as { zoneId?: unknown }).zoneId !== 'string'
+  ) {
+    throw new Error(
+      `Invalid Nexus ZoneId lock at ${lockPath}: expected version ${NEXUS_ZONE_ID_LOCK_VERSION} and one string zoneId`,
+    )
+  }
+
+  const zoneId = (value as { zoneId: string }).zoneId
+  try {
+    assertValidNexusZoneId(zoneId)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(`Invalid Nexus ZoneId lock at ${lockPath}: ${reason}`)
+  }
+  if (raw !== serializeNexusZoneIdLock(zoneId)) {
+    throw new Error(`Invalid Nexus ZoneId lock at ${lockPath}: record is not in canonical versioned form`)
+  }
+  return zoneId
+}
+
+function assertNexusDataUninitialized(dataDir: string): void {
+  const stat = lstatIfExists(dataDir)
+  if (!stat) return
+  if (!stat.isDirectory()) {
+    throw new Error(
+      `Cannot declare MOSS_NEXUS_ZONE_ID: Nexus data path ${dataDir} already exists and is not a directory`,
+    )
+  }
+  const directory = opendirSync(dataDir)
+  try {
+    if (directory.readSync() !== null) {
+      throw new Error(
+        `Cannot declare MOSS_NEXUS_ZONE_ID: Nexus data directory ${dataDir} is already initialized or non-empty; ` +
+          'a separately authorized migration is required',
+      )
+    }
+  } finally {
+    directory.closeSync()
+  }
+}
+
+type EmbeddedNexusZoneIdResolution =
+  | { zoneId: string | undefined; needsBinding: false }
+  | { zoneId: string; needsBinding: true }
+
+function inspectEmbeddedNexusZoneId(
+  dataDir: string,
+  requestedZoneId?: string,
+): EmbeddedNexusZoneIdResolution {
+  if (requestedZoneId !== undefined) assertValidNexusZoneId(requestedZoneId)
+
+  const lockPath = resolveNexusZoneIdLockPath(dataDir)
+  const lockedZoneId = readNexusZoneIdLock(lockPath)
+  if (lockedZoneId !== undefined) {
+    if (requestedZoneId !== undefined && requestedZoneId !== lockedZoneId) {
+      throw new Error(
+        `MOSS_NEXUS_ZONE_ID ${JSON.stringify(requestedZoneId)} does not byte-match the immutable local ` +
+          `binding ${JSON.stringify(lockedZoneId)} at ${lockPath}`,
+      )
+    }
+    return { zoneId: lockedZoneId, needsBinding: false }
+  }
+  if (requestedZoneId === undefined) return { zoneId: undefined, needsBinding: false }
+
+  assertNexusDataUninitialized(dataDir)
+  return { zoneId: requestedZoneId, needsBinding: true }
+}
+
+function syncParentDirectory(path: string): void {
+  if (process.platform === 'win32') return
+  const directory = openSync(path, 'r')
+  try {
+    fsyncSync(directory)
+  } finally {
+    closeSync(directory)
+  }
+}
+
+function publishNexusZoneIdLock(dataDir: string, requestedZoneId: string): string {
+  const lockPath = resolveNexusZoneIdLockPath(dataDir)
+  const serialized = serializeNexusZoneIdLock(requestedZoneId)
+  const tempPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`
+  let published = false
+
+  try {
+    writeFileSync(tempPath, serialized, { encoding: 'utf8', flag: 'wx', mode: 0o600, flush: true })
+    try {
+      linkSync(tempPath, lockPath)
+      published = true
+    } catch (error) {
+      if (getErrnoCode(error) !== 'EEXIST') throw error
+    }
+  } finally {
+    try {
+      unlinkSync(tempPath)
+    } catch (error) {
+      if (getErrnoCode(error) !== 'ENOENT') throw error
+    }
+  }
+
+  if (published) {
+    syncParentDirectory(dirname(lockPath))
+    return requestedZoneId
+  }
+
+  const racedZoneId = readNexusZoneIdLock(lockPath)
+  if (racedZoneId !== requestedZoneId) {
+    throw new Error(
+      `MOSS_NEXUS_ZONE_ID ${JSON.stringify(requestedZoneId)} lost an atomic lock race to ` +
+        `${JSON.stringify(racedZoneId)} at ${lockPath}; the existing binding was not overwritten`,
+    )
+  }
+  return racedZoneId
+}
+
+function resolveEmbeddedNexusZoneId(dataDir: string, requestedZoneId?: string): string | undefined {
+  const resolution = inspectEmbeddedNexusZoneId(dataDir, requestedZoneId)
+  if (!resolution.needsBinding) return resolution.zoneId
+  return publishNexusZoneIdLock(dataDir, resolution.zoneId)
+}
+
+function assertExternalNexusZoneIdSafe(dataDir: string, requestedZoneId?: string): void {
+  if (requestedZoneId !== undefined) {
+    throw new Error(
+      'MOSS_NEXUS_ZONE_ID is only valid for Moss-managed embedded Nexus; external Nexus topology is owned outside Moss',
+    )
+  }
+  const lockPath = resolveNexusZoneIdLockPath(dataDir)
+  if (lstatIfExists(lockPath)) {
+    throw new Error(
+      `Cannot switch to external Nexus while the embedded ZoneId lock exists at ${lockPath}; ` +
+        'a separately authorized topology migration is required',
+    )
+  }
 }
 
 /**
@@ -264,6 +414,11 @@ export class NexusManager {
   private readonly healthTimeoutMs: number
   private readonly pollIntervalMs: number
   private readonly connectTimeoutMs: number
+  private readonly pluginDir: string
+  private readonly spawnProcess: typeof spawn
+  private readonly readinessProbe?: () => Promise<void>
+  private readonly runtimeResolver?: () => { path: string; version: string | null }
+  private readonly startupLock: typeof lock
   private probeClient: NexusVfsClient | null = null
   private readonly config: ResolvedNexusConfig
   private isRustBinary = false
@@ -277,6 +432,11 @@ export class NexusManager {
     this.healthTimeoutMs = options.healthTimeoutMs ?? NEXUS_HEALTH_TIMEOUT_MS
     this.pollIntervalMs = options.pollIntervalMs ?? NEXUS_POLL_INTERVAL_MS
     this.connectTimeoutMs = options.connectTimeoutMs ?? NEXUS_CONNECT_TIMEOUT_MS
+    this.pluginDir = options.pluginDir ?? resolveNexusPluginDir()
+    this.spawnProcess = options.spawnProcess ?? spawn
+    this.readinessProbe = options.readinessProbe
+    this.runtimeResolver = options.runtimeResolver
+    this.startupLock = options.startupLock ?? lock
   }
 
   get mode(): NexusMode {
@@ -311,7 +471,9 @@ export class NexusManager {
   }
 
   async start(): Promise<void> {
+    const dataDir = join(this.nexusDir, 'data')
     if (this.config.mode === 'external') {
+      assertExternalNexusZoneIdSafe(dataDir, this.config.zoneId)
       // Connect-only: the production nexusd-cluster owns the daemon lifecycle.
       // moss neither spawns nor claims the port; it just points its client at
       // the configured endpoint.
@@ -322,10 +484,77 @@ export class NexusManager {
       return
     }
 
+    inspectEmbeddedNexusZoneId(dataDir, this.config.zoneId)
+    mkdirSync(this.nexusDir, { recursive: true })
+
+    let releaseStartupLock: () => Promise<void>
+    try {
+      releaseStartupLock = await this.startupLock(this.nexusDir, {
+        realpath: false,
+        stale: NEXUS_STARTUP_LOCK_STALE_MS,
+        update: NEXUS_STARTUP_LOCK_UPDATE_MS,
+      })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new Error(`Cannot start embedded Nexus while another startup owns ${this.nexusDir}: ${reason}`)
+    }
+
+    let startupFailed = false
+    let startupError: unknown
+    try {
+      await this.startEmbedded(dataDir)
+    } catch (error) {
+      startupFailed = true
+      startupError = error
+    }
+
+    let releaseError: unknown
+    try {
+      await releaseStartupLock()
+    } catch (error) {
+      releaseError = error
+    }
+
+    if (startupFailed) {
+      if (releaseError !== undefined) {
+        console.error(
+          `[NexusManager] Failed to release startup lock after startup failure: ${String(releaseError)}`,
+        )
+      }
+      throw startupError
+    }
+
+    if (releaseError !== undefined) {
+      const child = this.child
+      let terminationError: unknown
+      if (child) {
+        try {
+          await this.terminateChild(child)
+        } catch (error) {
+          terminationError = error
+        } finally {
+          if (this.child === child) this.child = null
+        }
+      }
+      const message = `Failed to release embedded Nexus startup lock at ${this.nexusDir}; spawned child was stopped`
+      if (terminationError !== undefined) {
+        throw new AggregateError([releaseError, terminationError], message)
+      }
+      throw new Error(message, { cause: releaseError })
+    }
+  }
+
+  private async startEmbedded(dataDir: string): Promise<void> {
     await assertTcpPortAvailable(this.grpcPort)
 
-    const resolvedBin = this.resolveCompatibleBinary()
-    const binaryVersion = this.readBinaryVersion(resolvedBin)
+    let resolvedBin: string
+    let binaryVersion: string | null
+    if (this.runtimeResolver) {
+      ({ path: resolvedBin, version: binaryVersion } = this.runtimeResolver())
+    } else {
+      resolvedBin = this.resolveCompatibleBinary()
+      binaryVersion = this.readBinaryVersion(resolvedBin)
+    }
     this.isRustBinary = binaryVersion === NEXUS_VERSION
     console.log(`[NexusManager] Binary path: ${resolvedBin}`)
     console.log(`[NexusManager] Binary version: ${binaryVersion ?? 'unknown'} (expected ${NEXUS_VERSION})`)
@@ -335,15 +564,12 @@ export class NexusManager {
       )
     }
 
-    mkdirSync(this.nexusDir, { recursive: true })
-
-    const dataDir = join(this.nexusDir, 'data')
-    const pluginDir = resolveNexusPluginDir()
-    assertVaultPluginAvailable(pluginDir)
-    const args = buildNexusArgs(this.grpcPort, dataDir, pluginDir)
+    assertVaultPluginAvailable(this.pluginDir)
+    const clusterInit = resolveEmbeddedNexusZoneId(dataDir, this.config.zoneId)
+    const args = buildNexusArgs(this.grpcPort, dataDir, this.pluginDir, clusterInit)
     console.log(`[NexusManager] Spawning: ${resolvedBin} ${args.join(' ')}`)
 
-    const child = spawn(resolvedBin, args, {
+    const child = this.spawnProcess(resolvedBin, args, {
       stdio: 'pipe',
       // vault 插件读 NEXUS_DATA_DIR 决定数据目录（含 master.key），不读
       // --data-dir 参数；不设置会把加密数据落到 cwd 的 ./nexus-data
@@ -467,6 +693,10 @@ export class NexusManager {
    * whole startup poll: a client per attempt would open a channel per attempt.
    */
   private async probeServing(): Promise<void> {
+    if (this.readinessProbe) {
+      await this.readinessProbe()
+      return
+    }
     if (!this.probeClient) {
       const tls = this.tlsConfig
       this.probeClient = tls

@@ -4,6 +4,7 @@ import { describe, test } from 'node:test'
 import { onlineCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
 import { verifyPassword } from '../authCenter/db.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { IdentityRepository } from './identityRepository.js'
 import {
   IdentityDomainError,
@@ -14,13 +15,26 @@ import { UnifiedIdentityService } from './unifiedIdentityService.js'
 function setup() {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  const repository = new IdentityRepository(db)
-  const unified = new UnifiedIdentityService(db, authDb, repository)
-  const service = new OrganizationIdentityService(db, authDb, repository, unified)
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
+  const unified = new UnifiedIdentityService(authDb, repository)
+  const service = new OrganizationIdentityService(authDb, repository, unified)
   return { db, authDb, repository, unified, service }
 }
 
 void describe('organization identity service', () => {
+  void test('generates six-character invitations and retries collisions without invalidating legacy codes', async () => {
+    const { db, service } = setup()
+    try {
+      const org = await service.createOrganization({ name: 'Invites', code: 'INV' }, onlineCommandContext('org'))
+      const created = await service.createInvitations({ orgId: org.organization.id, count: 100 })
+      assert.equal(new Set(created.map(i => i.code)).size, 100)
+      for (const invitation of created) assert.match(invitation.code, /^[A-HJ-NP-Z2-9]{6}$/)
+      const attempts = [created[0]!.code, 'LEGACY123456']
+      const [legacy] = await service.createInvitations({ orgId: org.organization.id, count: 1 }, () => attempts.shift()!)
+      assert.equal(legacy!.code, 'LEGACY123456')
+      assert.equal((await service.listInvitations({ orgId: org.organization.id })).total, 101)
+    } finally { db.close() }
+  })
   void test('creates and updates a canonical organization with its compatibility profile', async () => {
     const { db, service } = setup()
     const created = await service.createOrganization({
@@ -54,7 +68,7 @@ void describe('organization identity service', () => {
 
     assert.deepEqual(created.map((item) => item.code), ['CODE-A', 'CODE-B'])
     assert.equal((await service.listInvitations({ orgId: org.organization.id, status: 'pending' })).total, 2)
-    assert.equal(service.deleteInvitation(created[0]!.id), true)
+    assert.equal(await service.deleteInvitation(created[0]!.id), true)
     assert.equal((await service.listInvitations({ orgId: org.organization.id })).total, 1)
     db.close()
   })
@@ -176,8 +190,8 @@ void describe('organization identity service', () => {
     )
     await service.deleteUser(created.userId, actor)
     assert.equal(await authDb.getUserById(created.userId), null)
-    assert.equal(repository.getNumericAlias('user', created.userId), null)
-    assert.equal(repository.findAuthIdentity('phone', 'sudowork', '13800000000'), null)
+    assert.equal(await repository.getNumericAlias('user', created.userId), null)
+    assert.equal(await repository.findAuthIdentity('phone', 'sudowork', '13800000000'), null)
     // N-1（低-4）：identity 路径删除 org 必须把 binding 翻为 detached 并写
     // detach outbox（此前该路径不触碰 org_zone_bindings——僵尸 bound + grant 泄漏）。
     const firstBinding = db.prepare(
@@ -195,7 +209,7 @@ void describe('organization identity service', () => {
     assert.equal(detachOutbox.n, 1, 'outbox-backed revoke path exists (低-4)')
     await service.deleteOrganization(second.organization.id, actor)
     assert.equal(await authDb.getOrganization(first.organization.id), null)
-    assert.equal(repository.getOrganizationProfile(second.organization.id), null)
+    assert.equal(await repository.getOrganizationProfile(second.organization.id), null)
     db.close()
   })
 })

@@ -1,3 +1,4 @@
+import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { spawn } from 'child_process'
 import { existsSync, writeFileSync } from 'fs'
 import { mkdir, readFile, rm } from 'fs/promises'
@@ -78,7 +79,7 @@ export class DockerBackend implements SessionBackend {
     const assistantConfig = await getAssistantRuntimeConfig(options.assistantName)
 
     const enabledSkills = options.assistantName
-      ? assistantConfig.enabledSkills
+      ? [...new Set([...assistantConfig.enabledSkills, ...(options.enabledSkillNames ?? [])])]
       : (options.enabledSkillNames ?? assistantConfig.enabledSkills)
 
     // 根据 memory_mode 决定 mode
@@ -115,6 +116,7 @@ export class DockerBackend implements SessionBackend {
       workspaceSkillLinks = await syncWorkspaceSkills(safeCwd, enabledSkills, options.visibilityFilter)
       process.stderr.write(`[DockerBackend] Workspace skills synced to ${safeCwd}/.nexus/sudocode/skills/ with ${enabledSkills.length} skills\n`)
     } catch (err) {
+      if (getOrganizationResourceScope()) throw err
       process.stderr.write(`[DockerBackend] Workspace skills sync warning: ${err}\n`)
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)
@@ -192,7 +194,13 @@ export class DockerBackend implements SessionBackend {
 
       // Preload all available models from sudorouter API
       // This allows dynamic model switching without modifying sudocode.json
-      const allModels = ensureOpenAIModelConfig(await buildAllModelsConfig(baseUrl), model)
+      const allModels = ensureOpenAIModelConfig(
+        await buildAllModelsConfig(baseUrl),
+        model,
+        env.MOSS_MODEL_PROVIDER_PROTOCOL === 'openai-responses' || env.MOSS_MODEL_PROVIDER_PROTOCOL === 'anthropic-messages'
+          ? env.MOSS_MODEL_PROVIDER_PROTOCOL
+          : 'openai-completions',
+      )
 
       const scodeConfig = {
         auth_modes: {
@@ -389,6 +397,7 @@ export class DockerBackend implements SessionBackend {
       sessionId: options.sessionId,
       cwd: safeCwd,
       model,
+      modelProviderId: env.MOSS_MODEL_PROVIDER_ID,
       transcriptPath: (options as any).transcriptPath,
       resumeSessionId,
       scodeSessionIdPath,

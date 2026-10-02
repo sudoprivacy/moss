@@ -8,7 +8,7 @@ export class PostgresQmsLeaseStore implements QmsLeaseStore {
     const rows = await this.db.execute(
       `INSERT INTO qms_task_leases (
         task_name, owner_id, lease_until, last_started_at, last_error, updated_at
-      ) VALUES ($1, $2, TO_TIMESTAMP($3 / 1000.0), TO_TIMESTAMP($3 / 1000.0), NULL, NOW())
+      ) VALUES ($1, $2, TO_TIMESTAMP($4 / 1000.0), TO_TIMESTAMP($3 / 1000.0), NULL, NOW())
       ON CONFLICT (task_name) DO UPDATE SET
         owner_id = EXCLUDED.owner_id,
         lease_until = TO_TIMESTAMP($4 / 1000.0),

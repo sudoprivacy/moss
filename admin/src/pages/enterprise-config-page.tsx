@@ -159,8 +159,13 @@ export default function EnterpriseConfigPage() {
 
     setIsSaving(true)
     try {
-      const { logo, cabin_enabled: _cabinEnabled, ...textFields } = config
-      const response = await updateEnterpriseConfig(textFields)
+      const response = await updateEnterpriseConfig({
+        app_name: config.app_name,
+        top_name: config.top_name,
+        about_name: config.about_name,
+        app_company_name: config.app_company_name,
+        login_desp: config.login_desp,
+      })
       if (response.success) {
         setConfig(response.data)
         toast.success('配置保存成功')

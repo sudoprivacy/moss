@@ -3,13 +3,11 @@ import { createServer } from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { AuthCenterDb } from '../../../authCenter/db.js'
-import { BillingRepository } from '../../../billing/billingRepository.js'
-import { ensureBillingSchema } from '../../../billing/billingSchema.js'
 import { SudorouterAccountService } from '../../../billing/sudorouterAccountService.js'
 import { SudorouterAdapter } from '../../../billing/sudorouterAdapter.js'
 import { WalletService } from '../../../billing/walletService.js'
-import { IdentityRepository } from '../../../identity/identityRepository.js'
 import type { LegacyKeyValueStore } from '../../../identity/legacyToken.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
 import { SudoworkIdentityService } from './identityService.js'
 import { SudoworkLegacyUsageService } from './legacyUsageService.js'
 import { SudoworkUserProjectionService } from './userProjectionService.js'
@@ -68,15 +66,14 @@ void test('邀请码注册到 Sudorouter 登录凭据与模型用量完整闭环
   const db = new DatabaseSync(':memory:')
   try {
     const auth = new AuthCenterDb(db)
-    const identities = new IdentityRepository(db)
+    const identities = createIdentityTestRepository(db, {}, auth.driver)
     await auth.createOrganization('org-1', '企业一', 1)
-    identities.putOrganizationProfile({
+    await identities.putOrganizationProfile({
       orgId: 'org-1', code: 'ENT-A', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
     })
-    identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 3, resourceId: 'org-1', orgId: 'org-1' })
-    identities.createInvitation({ id: 'invite-1', orgId: 'org-1', code: 'JOINME', initialCreditUnits: 10 })
-    ensureBillingSchema(db)
-    const billing = new BillingRepository(db)
+    await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 3, resourceId: 'org-1', orgId: 'org-1' })
+    await identities.createInvitation({ id: 'invite-1', orgId: 'org-1', code: 'JOINME', initialCreditUnits: 10 })
+    const billing = createBillingTestRepository(db, auth.driver)
     const secretValues = new Map<string, string>()
     const secrets = {
       async putSecret(namespace: string, key: string, value: string) { secretValues.set(`${namespace}:${key}`, value) },
@@ -89,7 +86,7 @@ void test('邀请码注册到 Sudorouter 登录凭据与模型用量完整闭环
     const adapter = new SudorouterAdapter({
       baseUrl, apiToken: 'admin-token', adminUserId: '76',
     })
-    const accountService = new SudorouterAccountService(db, billing, adapter, secrets)
+    const accountService = new SudorouterAccountService(auth.driver, billing, adapter, secrets)
     const identity = new SudoworkIdentityService({
       authDb: auth, identities, tokenStore: new MemoryTokens(), legacyJwtSecret: 'legacy-secret',
       accountProvisioner: accountService, refreshTokenFactory: () => 'refresh-token',
@@ -110,10 +107,10 @@ void test('邀请码注册到 Sudorouter 登录凭据与模型用量完整闭环
       { total: 12, used: 2, remaining: 10 },
     )
     const usage = new SudoworkLegacyUsageService({
-      db, auth, identities, repository: billing,
-      wallet: new WalletService(db, billing), listModels: async () => [{ id: 'model-a' }], sudorouter: adapter,
+      db: auth.driver, auth, identities, repository: billing,
+      wallet: new WalletService(auth.driver, billing), listModels: async () => [{ id: 'model-a' }], sudorouter: adapter,
     })
-    const canonical = identities.resolveNumericAliasGlobal('user', session.user.id)!
+    const canonical = (await identities.resolveNumericAliasGlobal('user', session.user.id))!
     const dashboard = await usage.getDashboard({ userId: canonical.resourceId, orgId: canonical.orgId, role: 'user' }) as any
     assert.deepEqual(dashboard.usage_today, { tokens: 50, cost_points: 1, requests: 1 })
   } finally {

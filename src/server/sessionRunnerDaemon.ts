@@ -1,3 +1,4 @@
+import { withOrganizationResources } from './catalog/organizationResources.js'
 import net from 'net'
 import { appendFile, mkdir, unlink, writeFile } from 'fs/promises'
 import { dirname } from 'path'
@@ -173,7 +174,10 @@ export class SessionRunnerDaemon {
       })
       await this.#store.updateAttemptRunner(this.manifest.attempt.attemptId, process.pid)
 
-      const handle = await this.#backend.spawn({
+      const handle = await withOrganizationResources({
+        orgId: this.manifest.session.orgId, userId: this.manifest.session.userId,
+        snapshot: this.manifest.session.resources ?? { orgId: this.manifest.session.orgId, resources: [] },
+      }, () => this.#backend.spawn({
         sessionId: this.manifest.session.sessionId,
         resumeSessionId: this.manifest.session.resumeFromTranscript
           ? this.manifest.session.transcriptSessionId
@@ -202,7 +206,7 @@ export class SessionRunnerDaemon {
             : null,
         } : null,
         mcpSettings: this.manifest.session.mcpSettings,
-      })
+      }))
 
       this.#handle = handle
       this.manifest.session.runtime.containerName = handle.runtime.containerName

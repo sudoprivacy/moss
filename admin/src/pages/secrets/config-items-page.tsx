@@ -1,12 +1,14 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { hasScope } from '@/lib/api/client'
+import { ListEmptyState, ListError, ListPagination, ListSkeleton, ListStatusBadge, ListSurface, ListToolbar } from '@/components/list-page'
 import { pinyin as pinyinPro } from 'pinyin-pro'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -43,27 +45,12 @@ const schemeLabels: Record<string, string> = {
   query: 'Query 参数',
 }
 
-const scopeLabels: Record<string, { label: string; color: string }> = {
-  system: { label: '企业凭据', color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' },
-  department: { label: '部门凭据', color: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' },
-  user: { label: '用户凭据', color: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' },
-}
+const PAGE_SIZE = 20
 
-function ConfigItemsSkeleton() {
-  return (
-    <div className="space-y-4">
-      {[...Array(5)].map((_, i) => (
-        <div key={i} className="flex items-center gap-4 p-4 border rounded-lg">
-          <Skeleton className="h-4 w-32" />
-          <Skeleton className="h-4 w-16" />
-          <Skeleton className="h-4 w-20" />
-          <Skeleton className="h-4 w-40" />
-          <Skeleton className="h-4 w-16" />
-          <Skeleton className="h-8 w-20" />
-        </div>
-      ))}
-    </div>
-  )
+const scopeLabels: Record<string, string> = {
+  system: '企业凭据',
+  department: '部门凭据',
+  user: '用户凭据',
 }
 
 interface EntryForm {
@@ -135,9 +122,13 @@ function isValidUrlPattern(value: string): boolean {
 }
 
 export default function ConfigItemsPage() {
-  const [items, setItems] = useState<ConfigItem[]>([])
-  const [total, setTotal] = useState(0)
-  const [isLoading, setIsLoading] = useState(true)
+  const { scopes, activeOrgId } = useAuth()
+  const canWrite = hasScope(scopes, 'admin:secrets:write')
+  const [result, setResult] = useState<{ query: string; items: ConfigItem[]; total: number } | null>(null)
+  const [load, setLoad] = useState<{ query: string; busy: boolean; error: boolean }>({ query: '', busy: true, error: false })
+  const [page, setPage] = useState(1)
+  const [refreshVersion, setRefreshVersion] = useState(0)
+  const [pendingId, setPendingId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [scopeFilter, setScopeFilter] = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<string>('all')
@@ -161,23 +152,35 @@ export default function ConfigItemsPage() {
       .catch(() => { /* keep the default on failure */ })
   }, [])
 
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await getConfigItems({
-        name: searchQuery || undefined,
-        scope: scopeFilter !== 'all' ? scopeFilter : undefined,
-        status: statusFilter !== 'all' ? statusFilter : undefined,
-      })
-      setItems(res.items)
-      setTotal(res.total)
-    } catch {
-      toast.error('获取配置项列表失败')
-    } finally {
-      setIsLoading(false)
-    }
-  }, [searchQuery, scopeFilter, statusFilter])
+  const query = JSON.stringify([activeOrgId, searchQuery, scopeFilter, statusFilter, page])
+  const hasData = result?.query === query
+  const items = hasData ? result.items : []
+  const total = hasData ? result.total : 0
+  const isLoading = load.query !== query || load.busy
+  const loadError = load.query === query && load.error
+  const fetchData = useCallback(() => setRefreshVersion(value => value + 1), [])
 
-  useEffect(() => { fetchData() }, [fetchData])
+  useEffect(() => {
+    let active = true
+    setLoad({ query, busy: true, error: false })
+    getConfigItems({
+      page,
+      page_size: PAGE_SIZE,
+      name: searchQuery || undefined,
+      scope: scopeFilter !== 'all' ? scopeFilter : undefined,
+      status: statusFilter !== 'all' ? statusFilter : undefined,
+    }).then(res => {
+      if (!active) return
+      const lastPage = Math.max(1, Math.ceil(res.total / PAGE_SIZE))
+      if (page > lastPage) { setPage(lastPage); return }
+      setResult({ query, items: res.items, total: res.total })
+    }).catch(() => {
+      if (active) setLoad({ query, busy: true, error: true })
+    }).finally(() => {
+      if (active) setLoad(state => ({ ...state, busy: false }))
+    })
+    return () => { active = false }
+  }, [query, page, searchQuery, scopeFilter, statusFilter, refreshVersion])
 
   const handleCreate = () => {
     setEditingItem(null)
@@ -211,6 +214,7 @@ export default function ConfigItemsPage() {
   }
 
   const handleSave = async () => {
+    if (!canWrite || isSaving || isUploadingIcon) return
     if (!form.name.trim()) { toast.error('请输入配置项名称'); return }
     if (!form.pinyin.trim()) { toast.error('请输入拼音标识'); return }
     const isLogin = form.authMode === 'login'
@@ -309,7 +313,8 @@ export default function ConfigItemsPage() {
   }
 
   const handleDelete = async () => {
-    if (!deleteTarget) return
+    if (!canWrite || !deleteTarget || pendingId !== null) return
+    setPendingId(deleteTarget.id)
     try {
       await deleteConfigItem(deleteTarget.id)
       toast.success(`已删除配置项「${deleteTarget.name}」`)
@@ -317,16 +322,22 @@ export default function ConfigItemsPage() {
       fetchData()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '删除失败')
+    } finally {
+      setPendingId(null)
     }
   }
 
   const handleToggleStatus = async (item: ConfigItem) => {
+    if (!canWrite || pendingId !== null) return
+    setPendingId(item.id)
     try {
       await updateConfigItemStatus(item.id, item.status === 1 ? 0 : 1)
       toast.success(`已${item.status === 1 ? '禁用' : '启用'}配置项「${item.name}」`)
       fetchData()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '操作失败')
+    } finally {
+      setPendingId(null)
     }
   }
 
@@ -339,124 +350,86 @@ export default function ConfigItemsPage() {
     }))
   }
 
-  if (isLoading) {
-    return <DashboardLayout title="配置项列表" description="管理凭据服务的配置模板"><ConfigItemsSkeleton /></DashboardLayout>
-  }
-
   return (
-    <DashboardLayout title="配置项列表" description="管理凭据服务的配置模板">
-      <div className="space-y-6">
-        {/* Filters */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-1 flex-wrap gap-2">
-            <div className="relative w-full max-w-[200px]">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-              <Input placeholder="搜索名称或拼音..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="pl-9" />
-            </div>
-            <Select value={scopeFilter} onValueChange={setScopeFilter}>
-              <SelectTrigger className="w-[130px]"><SelectValue placeholder="分类" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部分类</SelectItem>
-                <SelectItem value="system">企业凭据</SelectItem>
-                <SelectItem value="department">部门凭据</SelectItem>
-                <SelectItem value="user">用户凭据</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-[120px]"><SelectValue placeholder="状态" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部状态</SelectItem>
-                <SelectItem value="1">已启用</SelectItem>
-                <SelectItem value="0">已禁用</SelectItem>
-              </SelectContent>
-            </Select>
+    <DashboardLayout title="配置项列表" description="定义凭据字段、作用范围与认证方式">
+      <div className="space-y-4">
+        <ListToolbar actions={<>
+          <Button variant="outline" size="sm" onClick={fetchData} disabled={isLoading}>
+            <RefreshCw className={`size-3.5 ${isLoading ? 'animate-spin motion-reduce:animate-none' : ''}`} aria-hidden="true" />刷新
+          </Button>
+          {canWrite && <Button size="sm" onClick={handleCreate}><Plus className="size-3.5" aria-hidden="true" />创建配置项</Button>}
+        </>}>
+          <div className="relative w-full sm:w-60">
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <Input aria-label="搜索配置项名称或拼音" placeholder="搜索名称或拼音…" value={searchQuery} onChange={e => { setSearchQuery(e.target.value); setPage(1) }} className="h-9 pl-9" />
           </div>
-          <Button onClick={handleCreate}><Plus className="size-4 mr-1" />创建配置项</Button>
-        </div>
-
-        {/* Table */}
-        <div className="border rounded-lg">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>名称</TableHead>
-                <TableHead>分类</TableHead>
-                <TableHead>认证方案</TableHead>
-                <TableHead>URL 模式</TableHead>
-                <TableHead>字段数</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead className="text-right">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.map(item => (
+          <Select value={scopeFilter} onValueChange={value => { setScopeFilter(value); setPage(1) }}>
+            <SelectTrigger aria-label="凭据分类" className="h-9 w-[130px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部分类</SelectItem>
+              {Object.entries(scopeLabels).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Select value={statusFilter} onValueChange={value => { setStatusFilter(value); setPage(1) }}>
+            <SelectTrigger aria-label="配置项状态" className="h-9 w-[120px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部状态</SelectItem>
+              <SelectItem value="1">已启用</SelectItem>
+              <SelectItem value="0">已禁用</SelectItem>
+            </SelectContent>
+          </Select>
+        </ListToolbar>
+        {loadError && <ListError title={hasData ? '刷新配置项失败' : '无法加载配置项'} description={hasData ? '当前显示上次加载的结果，请重新加载。' : '请检查连接及访问权限后重试。'} onRetry={fetchData} retrying={isLoading} />}
+        {!hasData && isLoading ? <ListSkeleton label="正在加载配置项" /> : hasData && (
+          <ListSurface aria-label="配置项列表" aria-busy={isLoading} footer={<ListPagination page={page} pageSize={PAGE_SIZE} total={total} busy={isLoading} onPageChange={setPage} />}>
+            {items.length > 0 ? <Table className="min-w-[880px]">
+              <TableHeader><TableRow>
+                <TableHead>名称</TableHead><TableHead>分类</TableHead><TableHead>认证方式</TableHead>
+                <TableHead>URL 模式</TableHead><TableHead>字段</TableHead><TableHead>状态</TableHead>
+                {canWrite && <TableHead className="text-right">操作</TableHead>}
+              </TableRow></TableHeader>
+              <TableBody>{items.map(item => (
                 <TableRow key={item.id}>
                   <TableCell>
                     <div className="flex items-center gap-3">
-                      <div className="flex size-8 items-center justify-center rounded-lg bg-muted shrink-0">
-                        {item.icon ? (
-                          <img src={item.icon} alt={item.name} className="size-5 rounded" />
-                        ) : (
-                          <Shield className="size-4 text-muted-foreground" />
-                        )}
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">
+                        {item.icon ? <img src={item.icon} alt="" className="size-5 rounded" /> : <Shield className="size-4 text-muted-foreground" aria-hidden="true" />}
                       </div>
-                      <div className="flex flex-col">
-                        <span className="font-medium">{item.name}</span>
-                        {item.description && <span className="text-xs text-muted-foreground mt-0.5">{item.description}</span>}
+                      <div className="min-w-0 max-w-64">
+                        <p className="truncate font-medium" title={item.name}>{item.name}</p>
+                        <p className="truncate text-xs text-muted-foreground" title={item.description || item.pinyin}>{item.description || item.pinyin}</p>
                       </div>
                     </div>
                   </TableCell>
-                  <TableCell>
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${scopeLabels[item.scope].color}`}>
-                      {scopeLabels[item.scope].label}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    {item.auth_type && item.auth_type !== 'static'
-                      ? <Badge variant="secondary">{item.auth_type === 'script' ? '登录(脚本)' : '登录(换取令牌)'}</Badge>
-                      : item.scheme ? <Badge variant="secondary">{schemeLabels[item.scheme]}</Badge> : <span className="text-xs text-muted-foreground">-</span>}
-                  </TableCell>
-                  <TableCell><span className="text-xs text-muted-foreground font-mono truncate max-w-[200px] block">{item.url_pattern || '-'}</span></TableCell>
-                  <TableCell>{item.entries.length}</TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-2">
-                      <Switch checked={item.status === 1} onCheckedChange={() => handleToggleStatus(item)} />
-                      <span className="text-xs text-muted-foreground">{item.status === 1 ? '启用' : '禁用'}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      <Button variant="ghost" size="icon" onClick={() => handleEdit(item)} title="编辑"><Pencil className="size-4" /></Button>
-                      <Button variant="destructive" size="icon" onClick={() => setDeleteTarget(item)} title="删除"><Trash2 className="size-4" /></Button>
-                    </div>
-                  </TableCell>
+                  <TableCell><Badge variant="outline" className="font-normal">{scopeLabels[item.scope] ?? item.scope}</Badge></TableCell>
+                  <TableCell><span className="text-[13px]">{item.auth_type && item.auth_type !== 'static'
+                    ? item.auth_type === 'script' ? '登录脚本' : '登录换取令牌'
+                    : item.scheme ? schemeLabels[item.scheme] ?? item.scheme : '未设置'}</span></TableCell>
+                  <TableCell><span className="block max-w-52 truncate font-mono text-xs text-muted-foreground" title={item.url_pattern || undefined}>{item.url_pattern || '—'}</span></TableCell>
+                  <TableCell className="text-muted-foreground">{item.entries.length} 个</TableCell>
+                  <TableCell><div className="flex items-center gap-2">
+                    {canWrite && <Switch aria-label={`${item.status === 1 ? '禁用' : '启用'}配置项 ${item.name}`} checked={item.status === 1} disabled={pendingId !== null || isLoading} onCheckedChange={() => handleToggleStatus(item)} />}
+                    <ListStatusBadge tone={item.status === 1 ? 'positive' : 'neutral'}>{item.status === 1 ? '已启用' : '已禁用'}</ListStatusBadge>
+                  </div></TableCell>
+                  {canWrite && <TableCell className="text-right"><div className="flex justify-end gap-1">
+                    <Button variant="ghost" size="icon" disabled={pendingId !== null || isLoading} onClick={() => handleEdit(item)} aria-label={`编辑 ${item.name}`} title="编辑"><Pencil className="size-4" /></Button>
+                    <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-destructive" disabled={pendingId !== null || isLoading} onClick={() => setDeleteTarget(item)} aria-label={`删除 ${item.name}`} title="删除"><Trash2 className="size-4" /></Button>
+                  </div></TableCell>}
                 </TableRow>
-              ))}
-              {items.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={7} className="text-center py-12">
-                    <div className="flex flex-col items-center text-muted-foreground">
-                      <Search className="size-8 mb-2 opacity-50" />
-                      <p>没有找到配置项</p>
-                      <p className="text-xs mt-1">点击「创建配置项」添加新的凭据模板</p>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </div>
-        <div className="text-sm text-muted-foreground">共 {total} 个配置项</div>
+              ))}</TableBody>
+            </Table> : <ListEmptyState title={searchQuery || scopeFilter !== 'all' || statusFilter !== 'all' ? '没有匹配的配置项' : '暂无配置项'} description={searchQuery || scopeFilter !== 'all' || statusFilter !== 'all' ? '调整名称、分类或状态筛选后重试。' : canWrite ? '创建配置项，定义需要保存的凭据字段。' : '管理员创建配置项后，将显示在这里。'} />}
+          </ListSurface>
+        )}
       </div>
 
       {/* Create/Edit Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-y-auto">
+      <Dialog open={dialogOpen} onOpenChange={open => { if (!isSaving && !isUploadingIcon) setDialogOpen(open) }}>
+        <DialogContent className="min-w-0 sm:max-w-[600px] max-h-[85vh] overflow-y-auto [&_input]:min-w-0 [&_textarea]:min-w-0 [&_[data-slot=select-trigger]]:max-w-full [&_code]:break-all">
           <DialogHeader>
             <DialogTitle>{editingItem ? '编辑配置项' : '创建配置项'}</DialogTitle>
             <DialogDescription>{editingItem ? '修改配置项信息和字段定义' : '定义新的凭据服务模板'}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2">
+          <fieldset disabled={isSaving} className="min-w-0 space-y-4 py-2">
             <div className="space-y-2">
               <Label>名称 <span className="text-destructive">*</span></Label>
               <Input value={form.name} onChange={e => {
@@ -700,10 +673,10 @@ export default function ConfigItemsPage() {
                 </div>
               ))}
             </div>
-          </div>
+          </fieldset>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>取消</Button>
-            <Button onClick={handleSave} disabled={isSaving}>
+            <Button variant="outline" disabled={isSaving || isUploadingIcon} onClick={() => setDialogOpen(false)}>取消</Button>
+            <Button onClick={handleSave} disabled={!canWrite || isSaving || isUploadingIcon}>
               {isSaving && <Loader2 className="size-4 mr-1 animate-spin" />}
               {editingItem ? '保存' : '创建'}
             </Button>
@@ -712,7 +685,7 @@ export default function ConfigItemsPage() {
       </Dialog>
 
       {/* Delete Confirmation */}
-      <AlertDialog open={!!deleteTarget} onOpenChange={open => !open && setDeleteTarget(null)}>
+      <AlertDialog open={!!deleteTarget} onOpenChange={open => { if (!open && pendingId === null) setDeleteTarget(null) }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>确认删除</AlertDialogTitle>
@@ -721,9 +694,9 @@ export default function ConfigItemsPage() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-              删除
+            <AlertDialogCancel disabled={pendingId !== null}>取消</AlertDialogCancel>
+            <AlertDialogAction disabled={!canWrite || pendingId !== null} onClick={event => { event.preventDefault(); handleDelete() }} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              {pendingId !== null ? '正在删除' : '删除'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

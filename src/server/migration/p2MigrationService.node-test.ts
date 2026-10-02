@@ -9,10 +9,9 @@ import JSZip from 'jszip'
 import { migrationCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
 import { CatalogArtifactStore } from '../catalog/catalogArtifactStore.js'
-import { CatalogRepository } from '../catalog/catalogRepository.js'
 import { CatalogService } from '../catalog/catalogService.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
+import { createCatalogTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { P2CatalogImportService } from './p2CatalogImport.js'
 import { P2MigrationBlockedError, P2MigrationService } from './p2MigrationService.js'
 import type { SudoworkHubManifest } from './sudoworkP2SourceReader.js'
@@ -20,39 +19,20 @@ import type { SudoworkHubManifest } from './sudoworkP2SourceReader.js'
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'moss-p2-migration-'))
   const db = new DatabaseSync(':memory:')
-  db.exec(`
-    CREATE TABLE tenant_assistants (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      default_init_prompt TEXT, prompts_i18n TEXT, categories TEXT, avatar TEXT, skills TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, enabled_skills TEXT,
-      publish_note TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE tenant_skills (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, publish_note TEXT,
-      review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-  `)
   const authDb = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
-  const identity = new UnifiedIdentityService(db, authDb, identities)
+  const identities = createIdentityTestRepository(db, {}, authDb.driver)
+  const identity = new UnifiedIdentityService(authDb, identities)
   const context = migrationCommandContext('identity-run', 'org-a')
   const orgA = await identity.createOrganization({ name: '企业 A', code: 'ENT-A', legacyEnterpriseId: 1 }, context)
   const orgB = await identity.createOrganization({ name: '企业 B', code: 'ENT-B', legacyEnterpriseId: 2 }, migrationCommandContext('identity-run', 'org-b'))
   const owner = await identity.createUser({
     orgId: orgA.organizationId, username: 'owner', password: 'secret', role: 'admin', legacyUserId: 10,
   }, migrationCommandContext('identity-run', 'user-owner'))
-  const repository = new CatalogRepository(db)
+  const repository = createCatalogTestRepository(db, authDb.driver)
   const importer = new P2CatalogImportService({
-    db,
+    db: authDb.driver,
     repository,
-    catalog: new CatalogService(db, repository),
+    catalog: new CatalogService(repository),
     artifacts: new CatalogArtifactStore(root),
     publicBaseUrl: 'https://moss.example.test',
   })
@@ -106,7 +86,7 @@ void describe('P2 目录迁移计划与执行', () => {
       const plan = await fixture.migration.plan()
       assert.equal(plan.status, 'ready')
       assert.deepEqual(plan.counts, { agents: 1, skills: 1, imports: 2, reuses: 0 })
-      assert.equal(fixture.repository.listAgents({ orgId: fixture.orgA.organizationId }).items.length, 0)
+      assert.equal((await fixture.repository.listAgents({ orgId: fixture.orgA.organizationId })).items.length, 0)
 
       const first = await fixture.migration.execute('run-p2')
       fixture.manifest.source.hubExportId = 'hub-export-next-snapshot'
@@ -115,13 +95,13 @@ void describe('P2 目录迁移计划与执行', () => {
       assert.equal(repeated.imported, 0)
       assert.equal(repeated.reused, 2)
       assert.deepEqual(
-        fixture.repository.listAgents({ orgId: fixture.orgB.organizationId }).items.map(item => item.id),
+        (await fixture.repository.listAgents({ orgId: fixture.orgB.organizationId })).items.map(item => item.id),
         ['agent-1'],
       )
-      assert.deepEqual(fixture.repository.listSkills({ orgId: fixture.orgB.organizationId }).items.map(item => item.id), ['skill-1'])
-      assert.equal(fixture.repository.findAgent('agent-1')?.authorId, fixture.owner.userId)
-      assert.equal(fixture.repository.findAgent('agent-1')?.availability, 'assigned')
-      assert.equal(fixture.repository.findSkill('skill-1')?.availability, 'all')
+      assert.deepEqual((await fixture.repository.listSkills({ orgId: fixture.orgB.organizationId })).items.map(item => item.id), ['skill-1'])
+      assert.equal((await fixture.repository.findAgent('agent-1'))?.authorId, fixture.owner.userId)
+      assert.equal((await fixture.repository.findAgent('agent-1'))?.availability, 'assigned')
+      assert.equal((await fixture.repository.findSkill('skill-1'))?.availability, 'all')
     } finally {
       fixture.db.close()
       await rm(fixture.root, { recursive: true, force: true })
@@ -131,7 +111,7 @@ void describe('P2 目录迁移计划与执行', () => {
   void test('未知企业和同名目标资源形成阻塞报告，execute 不做部分写入', async () => {
     const fixture = await setup()
     try {
-      fixture.repository.createSkill({
+      await fixture.repository.createSkill({
         id: 'existing', orgId: fixture.orgA.organizationId, name: 'writer',
         authorId: fixture.owner.userId, status: 'approved',
       })
@@ -145,8 +125,8 @@ void describe('P2 目录迁移计划与执行', () => {
         fixture.migration.execute('blocked-run'),
         (error: unknown) => error instanceof P2MigrationBlockedError && error.report.status === 'blocked',
       )
-      assert.equal(fixture.repository.findAgent('agent-1'), null)
-      assert.equal(fixture.repository.findSkill('skill-1'), null)
+      assert.equal(await fixture.repository.findAgent('agent-1'), null)
+      assert.equal(await fixture.repository.findSkill('skill-1'), null)
     } finally {
       fixture.db.close()
       await rm(fixture.root, { recursive: true, force: true })

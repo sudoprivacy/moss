@@ -43,7 +43,7 @@ describe("touchAttemptHeartbeat — fencing conditions (HA)", () => {
     const { attemptId } = await seedAttempt(store, "a");
     const ok = await store.touchAttemptHeartbeat(attemptId, "running", "a");
     assert.equal(ok, true);
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT runtime_state FROM session_attempts WHERE attempt_id = ?")
       .get(attemptId) as { runtime_state: string };
     assert.equal(row.runtime_state, "running");
@@ -56,7 +56,7 @@ describe("touchAttemptHeartbeat — fencing conditions (HA)", () => {
     const { attemptId } = await seedAttempt(store, "a");
     // Instance a dies (heartbeat goes stale) — its detached runner is still
     // alive and will keep heartbeating.
-    store.db
+    store.requireSqliteDb()
       .prepare("UPDATE server_instances SET heartbeat_at = ? WHERE instance_id = ?")
       .run(Date.now() - 60_000, "a");
     // Failover: b wins the CAS while a's old runner is still alive.
@@ -65,7 +65,7 @@ describe("touchAttemptHeartbeat — fencing conditions (HA)", () => {
 
     const ok = await store.touchAttemptHeartbeat(attemptId, "running", "a");
     assert.equal(ok, false, "old owner's heartbeat must not land after the claim");
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT server_instance_id, runtime_state, last_heartbeat_at FROM session_attempts WHERE attempt_id = ?")
       .get(attemptId) as { server_instance_id: string; runtime_state: string; last_heartbeat_at: number };
     assert.equal(row.server_instance_id, "b");
@@ -80,7 +80,7 @@ describe("touchAttemptHeartbeat — fencing conditions (HA)", () => {
     await store.markAttemptStopped(attemptId, { runtimeState: "stopped", stopReason: "terminated" });
     const ok = await store.touchAttemptHeartbeat(attemptId, "running", "a");
     assert.equal(ok, false, "heartbeat must not resurrect a stopped attempt");
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT runtime_state FROM session_attempts WHERE attempt_id = ?")
       .get(attemptId) as { runtime_state: string };
     assert.equal(row.runtime_state, "stopped");
@@ -112,7 +112,7 @@ describe("markAttemptStopped — owner-conditional exit chain (B4/R9)", () => {
       "a",
     );
     assert.equal(ok, true);
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT runtime_state FROM session_attempts WHERE attempt_id = ?")
       .get(attemptId) as { runtime_state: string };
     assert.equal(row.runtime_state, "stopped");
@@ -123,7 +123,7 @@ describe("markAttemptStopped — owner-conditional exit chain (B4/R9)", () => {
     await store.registerServerInstance("hostA", 101, "a");
     await store.registerServerInstance("hostB", 202, "b");
     const { attemptId } = await seedAttempt(store, "a");
-    store.db
+    store.requireSqliteDb()
       .prepare("UPDATE server_instances SET heartbeat_at = ? WHERE instance_id = ?")
       .run(Date.now() - 60_000, "a");
     // Failover: b claims while a's old daemon is still alive and now exits,
@@ -135,7 +135,7 @@ describe("markAttemptStopped — owner-conditional exit chain (B4/R9)", () => {
       "a",
     );
     assert.equal(ok, false, "fenced old owner's terminal write must not land");
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT server_instance_id, runtime_state FROM session_attempts WHERE attempt_id = ?")
       .get(attemptId) as { server_instance_id: string; runtime_state: string };
     assert.equal(row.server_instance_id, "b", "attempt still owned by the takeover instance");
@@ -147,7 +147,7 @@ describe("markAttemptStopped — owner-conditional exit chain (B4/R9)", () => {
     const { attemptId } = await seedAttempt(store, "a");
     const ok = await store.markAttemptStopped(attemptId, { runtimeState: "lost", stopReason: "runner_unavailable" });
     assert.equal(ok, true);
-    const row = store.db
+    const row = store.requireSqliteDb()
       .prepare("SELECT runtime_state FROM session_attempts WHERE attempt_id = ?")
       .get(attemptId) as { runtime_state: string };
     assert.equal(row.runtime_state, "lost");

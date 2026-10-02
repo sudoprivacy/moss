@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, type CommandContext } from '../application/commandContext.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import { BillingRepository } from './billingRepository.js'
 import { BillingDomainError, type BillingOwnerType } from './types.js'
 import { toStoredPointUnits } from './pointUnits.js'
@@ -53,18 +52,18 @@ export interface LegacyWalletImportResult {
 
 export class WalletService {
   constructor(
-    private readonly db: DatabaseSync,
-    private readonly repository = new BillingRepository(db),
+    private readonly driver: DbDriver,
+    private readonly repository = new BillingRepository(driver),
     private readonly clock: () => number = Date.now,
   ) {}
 
-  post(input: PostWalletEntryInput, context: CommandContext): WalletPostingResult {
+  async post(input: PostWalletEntryInput, context: CommandContext): Promise<WalletPostingResult> {
     assertTrustedCommandContext(context)
     this.validateInput(input)
     const requestFingerprint = this.fingerprintPost(input)
 
-    return runInTransaction(this.db, () => {
-      const previous = this.repository.getCommandResult<WalletPostingResult>(COMMAND_TYPE, context.idempotencyKey)
+    return this.driver.transaction(async () => {
+      const previous = await this.repository.getCommandResult<WalletPostingResult>(COMMAND_TYPE, context.idempotencyKey)
       if (previous) {
         if (previous.requestFingerprint !== requestFingerprint) {
           throw new BillingDomainError('IDEMPOTENCY_CONFLICT', '幂等键已用于不同的财务命令')
@@ -72,27 +71,27 @@ export class WalletService {
         return previous.result
       }
 
-      const wallet = this.repository.getWallet(input.ownerType, input.ownerId)
+      const wallet = await this.repository.getWallet(input.ownerType, input.ownerId)
       if (!wallet) throw new BillingDomainError('WALLET_NOT_FOUND', '钱包不存在')
-      this.ensureOpeningEntry(input, wallet.balanceUnits, context)
+      await this.ensureOpeningEntry(input, wallet.balanceUnits, context)
 
       const nextBalance = wallet.balanceUnits + input.deltaUnits
       if (!input.allowNegative && nextBalance < 0) {
         throw new BillingDomainError('INSUFFICIENT_BALANCE', '积分不足')
       }
       const timestamp = this.clock()
-      if (!this.repository.updateWallet({
+      if (!(await this.repository.updateWallet({
         ownerType: input.ownerType,
         ownerId: input.ownerId,
         expectedVersion: wallet.version,
         balanceUnits: nextBalance,
         updatedAt: timestamp,
-      })) {
+      }))) {
         throw new BillingDomainError('WALLET_VERSION_CONFLICT', '钱包余额已变化，请重试')
       }
 
       const ledgerKey = `wallet:${context.idempotencyKey}`
-      this.repository.insertLedgerEntry({
+      await this.repository.insertLedgerEntry({
         id: randomUUID(),
         ownerType: input.ownerType,
         ownerId: input.ownerId,
@@ -108,7 +107,7 @@ export class WalletService {
         actorUserId: input.actorUserId,
         createdAt: timestamp,
       })
-      this.repository.insertAuditEvent({
+      await this.repository.insertAuditEvent({
         id: randomUUID(),
         action: 'WALLET_POSTED',
         aggregateType: 'wallet',
@@ -133,7 +132,7 @@ export class WalletService {
         deltaUnits: input.deltaUnits,
         version: wallet.version + 1,
       }
-      this.repository.saveCommandResult(
+      await this.repository.saveCommandResult(
         COMMAND_TYPE,
         context.idempotencyKey,
         requestFingerprint,
@@ -145,21 +144,21 @@ export class WalletService {
     })
   }
 
-  rebuild(ownerType: BillingOwnerType, ownerId: string): {
+  async rebuild(ownerType: BillingOwnerType, ownerId: string): Promise<{
     stored: number
     rebuilt: number
     difference: number
-  } {
-    const wallet = this.repository.getWallet(ownerType, ownerId)
+  }> {
+    const wallet = await this.repository.getWallet(ownerType, ownerId)
     if (!wallet) throw new BillingDomainError('WALLET_NOT_FOUND', '钱包不存在')
-    const rebuilt = this.repository.sumOwnerLedger(ownerType, ownerId)
+    const rebuilt = await this.repository.sumOwnerLedger(ownerType, ownerId)
     return { stored: wallet.balanceUnits, rebuilt, difference: wallet.balanceUnits - rebuilt }
   }
 
   importLegacySnapshot(
     input: ImportLegacyWalletSnapshotInput,
     context: CommandContext,
-  ): LegacyWalletImportResult {
+  ): Promise<LegacyWalletImportResult> {
     assertTrustedCommandContext(context)
     if (context.source !== 'migration' || context.externalEffects !== 'suppress_external') {
       throw new BillingDomainError('MIGRATION_CONTEXT_REQUIRED', '历史钱包导入必须使用迁移上下文')
@@ -167,8 +166,8 @@ export class WalletService {
     this.validateLegacySnapshot(input)
     const requestFingerprint = createHash('sha256').update(JSON.stringify(input)).digest('hex')
 
-    return runInTransaction(this.db, () => {
-      const previous = this.repository.getCommandResult<LegacyWalletImportResult>(
+    return this.driver.transaction(async () => {
+      const previous = await this.repository.getCommandResult<LegacyWalletImportResult>(
         LEGACY_IMPORT_COMMAND_TYPE,
         context.idempotencyKey,
       )
@@ -179,18 +178,18 @@ export class WalletService {
         return previous.result
       }
 
-      const wallet = this.repository.getWallet('user', input.ownerId)
+      const wallet = await this.repository.getWallet('user', input.ownerId)
       if (!wallet) throw new BillingDomainError('WALLET_NOT_FOUND', '钱包不存在')
       if (wallet.balanceUnits !== 0 && wallet.balanceUnits !== input.balanceUnits) {
         throw new BillingDomainError('MIGRATION_TARGET_CONFLICT', 'Moss 钱包余额与旧余额不一致')
       }
-      const existingEntryCount = this.repository.countOwnerLedgerEntries('user', input.ownerId)
+      const existingEntryCount = await this.repository.countOwnerLedgerEntries('user', input.ownerId)
       if (existingEntryCount !== 0) {
-        const existingResult = this.matchImportedLegacySnapshot(input, wallet.version, existingEntryCount)
+        const existingResult = await this.matchImportedLegacySnapshot(input, wallet.version, existingEntryCount)
         if (!existingResult) {
           throw new BillingDomainError('MIGRATION_TARGET_CONFLICT', '目标钱包已有不一致账本，禁止覆盖或拼接历史流水')
         }
-        this.repository.saveCommandResult(
+        await this.repository.saveCommandResult(
           LEGACY_IMPORT_COMMAND_TYPE, context.idempotencyKey, requestFingerprint,
           context.source, existingResult, this.clock(),
         )
@@ -198,7 +197,7 @@ export class WalletService {
       }
 
       const openingAt = input.entries[0]?.createdAt ?? this.clock()
-      this.repository.insertLedgerEntry({
+      await this.repository.insertLedgerEntry({
         id: stableId('p3-opening', String(input.legacyUserId)),
         ownerType: 'user', ownerId: input.ownerId, deltaUnits: 0,
         balanceBeforeUnits: 0, balanceAfterUnits: 0, entryType: 'OPENING',
@@ -211,7 +210,7 @@ export class WalletService {
       for (const entry of input.entries) {
         const before = runningBalance
         runningBalance += entry.deltaUnits
-        this.repository.insertLedgerEntry({
+        await this.repository.insertLedgerEntry({
           id: stableId('p3-ledger', String(entry.legacyId)),
           legacyId: entry.legacyId,
           ownerType: 'user', ownerId: input.ownerId, deltaUnits: entry.deltaUnits,
@@ -225,14 +224,14 @@ export class WalletService {
 
       let version = wallet.version
       if (wallet.balanceUnits !== input.balanceUnits) {
-        if (!this.repository.updateWallet({
+        if (!(await this.repository.updateWallet({
           ownerType: 'user', ownerId: input.ownerId, expectedVersion: wallet.version,
           balanceUnits: input.balanceUnits, updatedAt: this.clock(),
-        })) throw new BillingDomainError('WALLET_VERSION_CONFLICT', '钱包余额已变化，请重试')
+        }))) throw new BillingDomainError('WALLET_VERSION_CONFLICT', '钱包余额已变化，请重试')
         version += 1
       }
       const auditKey = `migration:p3:wallet:${input.legacyUserId}:${input.sourceChecksum}`
-      this.repository.insertAuditEvent({
+      await this.repository.insertAuditEvent({
         id: stableId('p3-wallet-audit', `${input.legacyUserId}:${input.sourceChecksum}`),
         action: 'LEGACY_WALLET_IMPORTED', aggregateType: 'wallet', aggregateId: `user:${input.ownerId}`,
         actorUserId: null, orgId: null, contextSource: context.source, idempotencyKey: auditKey,
@@ -244,7 +243,7 @@ export class WalletService {
         createdAt: this.clock(),
       })
       const result = { balanceUnits: input.balanceUnits, importedEntries: input.entries.length + 1, version }
-      this.repository.saveCommandResult(
+      await this.repository.saveCommandResult(
         LEGACY_IMPORT_COMMAND_TYPE, context.idempotencyKey, requestFingerprint,
         context.source, result, this.clock(),
       )
@@ -252,14 +251,14 @@ export class WalletService {
     })
   }
 
-  private ensureOpeningEntry(
+  private async ensureOpeningEntry(
     input: PostWalletEntryInput,
     balanceUnits: number,
     context: CommandContext,
-  ): void {
-    if (balanceUnits === 0 || this.repository.countOwnerLedgerEntries(input.ownerType, input.ownerId) > 0) return
+  ): Promise<void> {
+    if (balanceUnits === 0 || await this.repository.countOwnerLedgerEntries(input.ownerType, input.ownerId) > 0) return
     const ownerKey = `${input.ownerType}:${input.ownerId}`
-    this.repository.insertLedgerEntry({
+    await this.repository.insertLedgerEntry({
       id: randomUUID(),
       ownerType: input.ownerType,
       ownerId: input.ownerId,
@@ -315,19 +314,19 @@ export class WalletService {
     }
   }
 
-  private matchImportedLegacySnapshot(
+  private async matchImportedLegacySnapshot(
     input: ImportLegacyWalletSnapshotInput,
     version: number,
     existingEntryCount: number,
-  ): LegacyWalletImportResult | null {
+  ): Promise<LegacyWalletImportResult | null> {
     if (existingEntryCount !== input.entries.length + 1) return null
-    const opening = this.repository.getLedgerEntry(`migration:p3:opening:user:${input.legacyUserId}`)
+    const opening = await this.repository.getLedgerEntry(`migration:p3:opening:user:${input.legacyUserId}`)
     if (!opening || opening.ownerId !== input.ownerId || opening.deltaUnits !== 0
       || opening.balanceBeforeUnits !== 0 || opening.balanceAfterUnits !== 0
       || opening.entryType !== 'OPENING') return null
     let runningBalance = 0
     for (const source of input.entries) {
-      const entry = this.repository.getLedgerEntry(`migration:p3:ledger:${source.legacyId}`)
+      const entry = await this.repository.getLedgerEntry(`migration:p3:ledger:${source.legacyId}`)
       const before = runningBalance
       runningBalance += source.deltaUnits
       if (!entry || entry.ownerId !== input.ownerId || entry.deltaUnits !== source.deltaUnits

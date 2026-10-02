@@ -1,11 +1,9 @@
-import type { DatabaseSync } from 'node:sqlite'
 import { migrationCommandContext } from '../application/commandContext.js'
 import type { ImportedConfigItem } from '../api/compat/sudowork/configService.js'
 import type { IdentityRepository } from '../identity/identityRepository.js'
 import type { IdentityActor } from '../identity/organizationIdentityService.js'
 import type { SudoworkSourceConfigItem } from './sudoworkP2SourceReader.js'
-
-type SqlRow = Record<string, unknown>
+import type { DbDriver, SqlRow } from '../db/driver.js'
 
 interface P2ConfigurationSource {
   readConfigItems(): SudoworkSourceConfigItem[]
@@ -51,14 +49,14 @@ export class P2ConfigurationMigrationBlockedError extends Error {
 
 export class P2ConfigurationMigrationService {
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     identities: IdentityRepository
     config: P2ConfigurationImporter
     source: P2ConfigurationSource
     platformConfigOrgId: string
   }) {}
 
-  plan(): P2ConfigurationMigrationPlan {
+  async plan(): Promise<P2ConfigurationMigrationPlan> {
     const sourceItems = this.options.source.readConfigItems()
     const conflicts: P2ConfigurationMigrationIssue[] = []
     const orphans: P2ConfigurationMigrationIssue[] = []
@@ -89,8 +87,8 @@ export class P2ConfigurationMigrationService {
 
       const assignedOrgIds: string[] = []
       for (const enterpriseId of new Set(source.enterpriseIds)) {
-        const alias = this.options.identities.resolveNumericAliasGlobal('enterprise', enterpriseId)
-        if (!alias || !this.options.identities.getOrganizationProfile(alias.resourceId)) {
+        const alias = await this.options.identities.resolveNumericAliasGlobal('enterprise', enterpriseId)
+        if (!alias || !(await this.options.identities.getOrganizationProfile(alias.resourceId))) {
           orphans.push({ sourceId: String(source.id), reason: `企业 ID ${enterpriseId} 未映射到 Moss Organization` })
         } else {
           assignedOrgIds.push(alias.resourceId)
@@ -98,10 +96,10 @@ export class P2ConfigurationMigrationService {
       }
       if (assignedOrgIds.length !== new Set(source.enterpriseIds).size) continue
 
-      const alias = this.options.identities.resolveNumericAliasGlobal('config_item', source.id)
+      const alias = await this.options.identities.resolveNumericAliasGlobal('config_item', source.id)
       if (alias) {
         const nativeId = numericResourceId(alias.resourceId)
-        if (nativeId === null || !this.matchesExisting(nativeId, source, assignedOrgIds)) {
+        if (nativeId === null || !(await this.matchesExisting(nativeId, source, assignedOrgIds))) {
           conflicts.push({ sourceId: String(source.id), reason: '已有配置项 ID 映射与源数据不一致' })
           continue
         }
@@ -109,18 +107,25 @@ export class P2ConfigurationMigrationService {
         continue
       }
 
-      const existing = this.options.db.prepare(`
-        SELECT id FROM config_items
-        WHERE org_id = ? AND (name = ? OR (? IS NOT NULL AND pinyin = ?))
-        LIMIT 1
-      `).get(this.options.platformConfigOrgId, source.name, source.pinyin, source.pinyin) as SqlRow | undefined
+      const existing = source.pinyin === null
+        ? await this.options.db.get<SqlRow>(`
+            SELECT id FROM config_items WHERE org_id = ? AND name = ? LIMIT 1
+          `, [this.options.platformConfigOrgId, source.name])
+        : await this.options.db.get<SqlRow>(`
+            SELECT id FROM config_items WHERE org_id = ? AND (name = ? OR pinyin = ?) LIMIT 1
+          `, [this.options.platformConfigOrgId, source.name, source.pinyin])
       if (existing) {
         conflicts.push({ sourceId: String(source.id), reason: `名称或拼音已被目标配置项 ${existing.id} 使用` })
         continue
       }
 
-      const occupiedEntry = source.entries.find(entry =>
-        this.options.identities.resolveNumericAliasGlobal('config_entry', entry.id) !== null)
+      let occupiedEntry: SudoworkSourceConfigItem['entries'][number] | undefined
+      for (const entry of source.entries) {
+        if (await this.options.identities.resolveNumericAliasGlobal('config_entry', entry.id) !== null) {
+          occupiedEntry = entry
+          break
+        }
+      }
       if (occupiedEntry) {
         conflicts.push({ sourceId: String(source.id), reason: `配置字段 ID ${occupiedEntry.id} 已被占用` })
         continue
@@ -145,7 +150,7 @@ export class P2ConfigurationMigrationService {
   }
 
   async execute(migrationRunId: string): Promise<P2ConfigurationMigrationExecution> {
-    const plan = this.plan()
+    const plan = await this.plan()
     if (plan.status === 'blocked') throw new P2ConfigurationMigrationBlockedError(plan)
     const actor: IdentityActor = {
       userId: 'migration-system',
@@ -189,8 +194,8 @@ export class P2ConfigurationMigrationService {
     return { migrationRunId, imported, reused, source: plan.counts.source }
   }
 
-  private matchesExisting(nativeId: number, source: SudoworkSourceConfigItem, assignedOrgIds: string[]): boolean {
-    const row = this.options.db.prepare('SELECT * FROM config_items WHERE id = ?').get(nativeId) as SqlRow | undefined
+  private async matchesExisting(nativeId: number, source: SudoworkSourceConfigItem, assignedOrgIds: string[]): Promise<boolean> {
+    const row = await this.options.db.get<SqlRow>('SELECT * FROM config_items WHERE id = ?', [nativeId])
     if (!row) return false
     const expectedAvailability = source.visibleToAll ? 'all' : assignedOrgIds.length > 0 ? 'assigned' : 'organization'
     if (
@@ -205,25 +210,26 @@ export class P2ConfigurationMigrationService {
       || row.availability !== expectedAvailability
     ) return false
 
-    const assigned = (this.options.db.prepare(`
+    const assigned = (await this.options.db.all<{ org_id: string }>(`
       SELECT org_id FROM config_item_org_assignments WHERE config_item_id = ? ORDER BY org_id
-    `).all(nativeId) as Array<{ org_id: string }>).map(item => item.org_id)
+    `, [nativeId])).map(item => item.org_id)
     if (!sameStrings(assigned, assignedOrgIds)) return false
 
-    const entries = this.options.db.prepare(`
+    const entries = await this.options.db.all<SqlRow>(`
       SELECT * FROM config_entries WHERE config_item_id = ? ORDER BY config_key
-    `).all(nativeId) as SqlRow[]
+    `, [nativeId])
     if (entries.length !== source.entries.length) return false
     const sourceByKey = new Map(source.entries.map(entry => [entry.configKey, entry]))
-    return entries.every(entry => {
+    for (const entry of entries) {
       const expected = sourceByKey.get(String(entry.config_key))
       if (!expected) return false
-      const alias = this.options.identities.getNumericAlias('config_entry', String(entry.id))
-      return alias === expected.id
-        && entry.name === expected.name
-        && nullable(entry.config_desc) === expected.description
-        && Number(entry.required) === (expected.required ? 1 : 0)
-    })
+      const alias = await this.options.identities.getNumericAlias('config_entry', String(entry.id))
+      if (alias !== expected.id
+        || entry.name !== expected.name
+        || nullable(entry.config_desc) !== expected.description
+        || Number(entry.required) !== (expected.required ? 1 : 0)) return false
+    }
+    return true
   }
 }
 

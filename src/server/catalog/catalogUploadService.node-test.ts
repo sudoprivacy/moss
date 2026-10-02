@@ -1,31 +1,16 @@
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
+import { SqliteDriver } from '../db/driver.js'
+import { createCatalogTestRepository } from '../testing/compatibilityRepositories.js'
 import type { StagedCatalogArtifact } from './catalogArtifactStore.js'
-import { CatalogRepository } from './catalogRepository.js'
 import { CatalogService } from './catalogService.js'
 import { CatalogUploadService, type CatalogArtifactPort } from './catalogUploadService.js'
 
 function setup(failPublish = false) {
   const db = new DatabaseSync(':memory:')
-  db.exec(`
-    CREATE TABLE tenant_assistants (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      default_init_prompt TEXT, prompts_i18n TEXT, categories TEXT, avatar TEXT, skills TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, enabled_skills TEXT,
-      publish_note TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE tenant_skills (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, publish_note TEXT, review_note TEXT,
-      reviewed_by TEXT, reviewed_at INTEGER, enabled INTEGER DEFAULT 1, visible_to TEXT,
-      org_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-  `)
-  const repository = new CatalogRepository(db)
+  const driver = new SqliteDriver(db)
+  const repository = createCatalogTestRepository(db, driver)
   const staged: StagedCatalogArtifact[] = []
   const discarded: StagedCatalogArtifact[] = []
   const artifacts: CatalogArtifactPort = {
@@ -43,7 +28,7 @@ function setup(failPublish = false) {
     async read() { return Buffer.from('artifact') },
   }
   const service = new CatalogUploadService({
-    db, repository, catalog: new CatalogService(db, repository), artifacts,
+    db: driver, repository, catalog: new CatalogService(repository), artifacts,
     publicBaseUrl: 'https://moss.example.test/',
   })
   return { db, repository, service, staged, discarded }
@@ -64,7 +49,7 @@ void describe('统一目录上传编排', () => {
     assert.equal(first.id, repeated.id)
     assert.equal(staged.length, 1)
     assert.equal(first.sourceUrl, `https://moss.example.test/api/catalog/artifacts/skill/${first.id}`)
-    assert.equal(repository.listSkills({ orgId: 'org-a' }).items.length, 1)
+    assert.equal((await repository.listSkills({ orgId: 'org-a' })).items.length, 1)
     db.close()
   })
 
@@ -75,8 +60,8 @@ void describe('统一目录上传编排', () => {
       name: 'agent', profession: '助手', bytes: Buffer.from('zip'), idempotencyKey: 'upload-agent-a',
     }
     await assert.rejects(service.uploadAgent(input), /disk full/)
-    assert.equal(repository.listAgents({ orgId: 'org-a' }).items.length, 0)
-    assert.equal(repository.getCommandResult('catalog.create_agent', 'upload-agent-a'), null)
+    assert.equal((await repository.listAgents({ orgId: 'org-a' })).items.length, 0)
+    assert.equal(await repository.getCommandResult('catalog.create_agent', 'upload-agent-a'), null)
     assert.equal(discarded.length, 1)
     db.close()
   })

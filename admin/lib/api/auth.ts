@@ -38,7 +38,7 @@ export async function login(
     username,
     password,
   }
-  const response = await authClient.post<LoginResponse>('/api/v1/auth/token', body)
+  const response = await authClient.post<LoginResponse>('/api/v1/moss/auth/login', body)
   storeLoginResponse(response)
   return response
 }
@@ -98,8 +98,14 @@ export async function getUsers(): Promise<UsersListResponse> {
   return authClient.get<UsersListResponse>('/api/v1/users')
 }
 
-export async function createUser(data: CreateUserRequest): Promise<CreateUserResponse> {
-  return authClient.post<CreateUserResponse>('/api/v1/users', data)
+export async function copyUserSudorouterKey(userId: string): Promise<{ key: string }> {
+  return authClient.post<{ key: string }>(`/api/v1/users/${encodeURIComponent(userId)}/sudorouter-key/copy`, {})
+}
+
+export async function createUser(data: CreateUserRequest, idempotencyKey?: string): Promise<CreateUserResponse> {
+  return authClient.post<CreateUserResponse>('/api/v1/users', data, {
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+  })
 }
 
 export async function updateUser(
@@ -212,4 +218,8 @@ export async function setDepartmentTokenLimit(
 
 export function isAuthenticated(): boolean {
   return !!getToken()
+}
+
+export function changeOwnPassword(oldPassword: string, newPassword: string): Promise<{ success: boolean }> {
+  return authClient.post('/api/v1/moss/auth/change-password', { oldPassword, newPassword })
 }

@@ -7,6 +7,7 @@ class RecordingSql implements QmsSqlPort {
   readonly statements: string[] = []
   timescaleAvailable = true
   aggregateRelationKind: string | null = null
+  continuousView = false
 
   async execute(sql: string): Promise<readonly Record<string, unknown>[]> {
     this.statements.push(sql)
@@ -16,6 +17,7 @@ class RecordingSql implements QmsSqlPort {
     if (sql.includes("to_regclass('telemetry_perf_daily')")) {
       return this.aggregateRelationKind ? [{ relkind: this.aggregateRelationKind }] : []
     }
+    if (sql.includes('FROM timescaledb_information.continuous_aggregates')) return this.continuousView ? [{ exists: 1 }] : []
     return []
   }
 }
@@ -42,7 +44,9 @@ void describe('QMS PostgreSQL schema', () => {
     assert.match(sql, /telemetry_user_conversations_daily[\s\S]*conversation_count INTEGER NOT NULL/)
     assert.match(sql, /telemetry_user_turns_daily[\s\S]*turn_count INTEGER NOT NULL/)
     assert.match(sql, /telemetry_user_steps_daily[\s\S]*step_count INTEGER NOT NULL/)
-    assert.match(sql, /UNIQUE NULLS NOT DISTINCT \(bucket, user_id, org_id, tenant_id, login_mode\)/)
+    assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS uq_telemetry_user_conversations_daily_dimensions/)
+    assert.match(sql, /COALESCE\(org_id, ''\)/)
+    assert.doesNotMatch(sql, /NULLS NOT DISTINCT/)
     assert.match(sql, /create_hypertable\('telemetry_perf_raw'/)
     assert.match(sql, /CREATE MATERIALIZED VIEW IF NOT EXISTS telemetry_perf_daily/)
     assert.match(sql, /CREATE MATERIALIZED VIEW IF NOT EXISTS telemetry_turns_daily/)
@@ -79,4 +83,12 @@ void describe('QMS PostgreSQL schema', () => {
     assert.match(sql, /CREATE TABLE IF NOT EXISTS telemetry_perf_daily/)
     assert.doesNotMatch(sql, /CREATE MATERIALIZED VIEW IF NOT EXISTS telemetry_perf_daily/)
   })
+})
+
+void it('recognizes verified Timescale continuous views on restart without accepting unrelated views', async () => {
+  const db = new RecordingSql()
+  db.aggregateRelationKind = 'v'
+  await assert.rejects(() => initializeQmsSchema(db), /Unsupported QMS aggregate relation/)
+  db.continuousView = true
+  assert.equal((await initializeQmsSchema(db)).continuousAggregates, true)
 })

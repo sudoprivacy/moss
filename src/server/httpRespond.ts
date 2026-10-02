@@ -1,3 +1,6 @@
+import { SessionStartupError } from './sessionStartup.js'
+import { ResourceAccessError } from './catalog/resourceError.js'
+import { PlatformConfigError } from './configuration/platformConfigService.js'
 // Extracted from server.ts for testability: importing the whole server.js
 // pulls in node:sqlite (bun cannot load it) AND bun:bundle (node cannot load
 // it), so its unit tests ran under neither runner. This module may transitively
@@ -44,6 +47,14 @@ export function writeError(
   // unavailable). Kept as the first check and before the fallback 500 below so
   // ServerDrainingError never degrades to a 500. Flat `{ error: <string> }`
   // matches every other writeError branch.
+  if (error instanceof SessionStartupError) {
+    writeJson(res, error.statusCode, { error: error.message, startup: error.failure })
+    return
+  }
+  if (error instanceof ResourceAccessError) {
+    writeJson(res, error.statusCode, { error: error.message })
+    return
+  }
   if (error instanceof ServerDrainingError) {
     writeJson(res, 503, { error: error.message })
     return
@@ -70,7 +81,7 @@ export function writeError(
     writeJson(res, 403, { error: error.message })
     return
   }
-  if (error instanceof AuthServiceError || error instanceof HttpError) {
+  if (error instanceof AuthServiceError || error instanceof HttpError || error instanceof PlatformConfigError) {
     writeJson(res, error.statusCode, { error: error.message })
     return
   }

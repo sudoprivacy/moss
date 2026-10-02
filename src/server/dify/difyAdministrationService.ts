@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { sign } from 'hono/jwt'
 import JSZip from 'jszip'
 import { assertTrustedCommandContext, onlineCommandContext, type CommandContext } from '../application/commandContext.js'
@@ -9,7 +8,7 @@ import type { CatalogService } from '../catalog/catalogService.js'
 import type { CatalogArtifactPort } from '../catalog/catalogUploadService.js'
 import type { IdentityRepository, IntegrationConnection } from '../identity/identityRepository.js'
 import type { IdentityActor } from '../identity/organizationIdentityService.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import type { DbDriver } from '../db/driver.js'
 import type { VisibleTo } from '../visibilityFilter.js'
 import { DifyProviderError, type DifyHttpAdapter } from './difyHttpAdapter.js'
 import type { DifyProviderOperation, DifyRepository } from './difyRepository.js'
@@ -38,7 +37,7 @@ export class DifyAdministrationService {
   private readonly idFactory: () => string
 
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     auth: AuthCenterDb
     identities: IdentityRepository
     catalog: CatalogRepository
@@ -68,9 +67,9 @@ export class DifyAdministrationService {
     if (!secret) throw new Error('DIFY_SSO_SECRET not configured: cannot mint SSO tokens')
     const binding = await this.provision(input.orgId, onlineCommandContext(`dify:sso:provision:${input.orgId}`))
     if ('suppressed' in binding) throw new Error('Dify provisioning suppressed')
-    const profile = this.options.identities.getOrganizationProfile(input.orgId)
+    const profile = await this.options.identities.getOrganizationProfile(input.orgId)
     const user = await this.options.auth.getUserByIdAndOrg(input.actor.userId, input.actor.orgId)
-    const legacyUserId = this.options.identities.getNumericAlias('user', input.actor.userId)
+    const legacyUserId = await this.options.identities.getNumericAlias('user', input.actor.userId)
     if (!profile || !user || legacyUserId === null) throw new Error('Dify SSO identity is incomplete')
     const nowSeconds = Math.floor((this.options.clock?.() ?? Date.now()) / 1000)
     const expiresAt = nowSeconds + 300
@@ -94,12 +93,12 @@ export class DifyAdministrationService {
     }
   }
 
-  getBinding(orgId: string): {
+  async getBinding(orgId: string): Promise<{
     dify_tenant_id: string
     dify_system_account_id: string | null
     created_at: number | null
-  } | null {
-    const connection = this.defaultConnection(orgId)
+  } | null> {
+    const connection = await this.defaultConnection(orgId)
     if (!connection) return null
     return {
       dify_tenant_id: configString(connection, 'tenantId'),
@@ -113,13 +112,13 @@ export class DifyAdministrationService {
     dify_system_account_id: string | null
   } | { suppressed: true }> {
     assertTrustedCommandContext(context)
-    const existing = this.defaultConnection(orgId)
+    const existing = await this.defaultConnection(orgId)
     if (existing) return connectionDto(existing)
     const organization = await this.options.auth.getOrganization(orgId)
-    const profile = this.options.identities.getOrganizationProfile(orgId)
+    const profile = await this.options.identities.getOrganizationProfile(orgId)
     if (!organization || !profile) throw new Error(`enterprise ${orgId} not found`)
 
-    const operation = this.prepareOperation({
+    const operation = await this.prepareOperation({
       orgId,
       operationType: 'tenant.provision',
       aggregateId: orgId,
@@ -131,8 +130,6 @@ export class DifyAdministrationService {
       throw operationReplayError(operation.operation)
     }
     if (operation.operation.status === 'SUPPRESSED') return { suppressed: true }
-    this.markOperationProcessing(operation.operation)
-
     const namespace = secretNamespace(orgId)
     const key = 'service-api-key'
     let externalSucceeded = false
@@ -143,8 +140,8 @@ export class DifyAdministrationService {
       })
       externalSucceeded = true
       await this.options.secrets.putSecret(namespace, key, provisioned.service_api_key, `org:${orgId}`)
-      runInTransaction(this.options.db, () => {
-        this.options.identities.putIntegrationConnection({
+      await this.options.db.transaction(async () => {
+        await this.options.identities.putIntegrationConnection({
           id: connectionId(orgId), orgId, providerType: 'dify', name: 'Dify', enabled: true,
           secretRef: secretReference(namespace, key),
           config: {
@@ -154,7 +151,7 @@ export class DifyAdministrationService {
             createdAt: Math.floor((this.options.clock?.() ?? Date.now()) / 1000),
           },
         })
-        this.options.difyRepository.updateOperation(operation.operation.id, {
+        await this.options.difyRepository.updateOperation(operation.operation.id, {
           status: 'SUCCEEDED',
           result: {
             tenantId: provisioned.dify_tenant_id,
@@ -169,7 +166,7 @@ export class DifyAdministrationService {
       }
     } catch (error) {
       await this.options.secrets.deleteSecret(namespace, key, `org:${orgId}`).catch(() => undefined)
-      this.markOperationFailed(
+      await this.markOperationFailed(
         operation.operation,
         error,
         externalSucceeded || !(error instanceof DifyProviderError),
@@ -200,7 +197,7 @@ export class DifyAdministrationService {
       iconType: input.iconType ?? null,
       iconBackground: input.iconBackground ?? null,
     }
-    const operation = this.prepareOperation({
+    const operation = await this.prepareOperation({
       orgId: input.orgId,
       operationType: 'app.create',
       aggregateId: input.assistantId ?? context.idempotencyKey,
@@ -211,14 +208,12 @@ export class DifyAdministrationService {
       if (operation.operation.status === 'SUPPRESSED') return { suppressed: true }
       if (operation.operation.status === 'SUCCEEDED') {
         const assistantId = stringValue(operation.operation.result?.assistantId)
-        const existing = assistantId ? this.options.catalog.getAgent(assistantId, input.orgId) : null
+        const existing = assistantId ? await this.options.catalog.getAgent(assistantId, input.orgId) : null
         if (existing) return this.agentSummary(existing)
       }
       throw operationReplayError(operation.operation)
     }
     if (operation.operation.status === 'SUPPRESSED') return { suppressed: true }
-    this.markOperationProcessing(operation.operation)
-
     const namespace = secretNamespace(input.orgId)
     let key: string | null = null
     let appId: string | null = null
@@ -230,7 +225,7 @@ export class DifyAdministrationService {
       )
       if ('suppressed' in provisioned) return provisioned
       tenantId = provisioned.dify_tenant_id
-      const connection = this.requireConnection(input.orgId)
+      const connection = await this.requireConnection(input.orgId)
       const created = objectValue(await this.options.adapter.systemJson(
         tenantId,
         'POST',
@@ -251,8 +246,8 @@ export class DifyAdministrationService {
       const mode = stringValue(created.mode) || input.mode || 'agent-chat'
       key = `apps/${appId}-api-key`
       await this.options.secrets.putSecret(namespace, key, appKey, `org:${input.orgId}`)
-      const catalogAgent = runInTransaction(this.options.db, () => {
-        const result = this.options.catalogService.createAgent({
+      const catalogAgent = await this.options.db.transaction(async () => {
+        const result = await this.options.catalogService.createAgent({
           actor: input.actor, orgId: input.orgId, id: input.assistantId ?? this.idFactory(),
           name: input.name, displayName: input.name, description: input.description,
           providerType: 'dify', supportedModes: 'both',
@@ -262,7 +257,7 @@ export class DifyAdministrationService {
           },
           externalIdentity: { providerType: 'dify', providerId: connection.id, externalId: appId! },
         }, context)
-        this.options.difyRepository.updateOperation(operation.operation.id, {
+        await this.options.difyRepository.updateOperation(operation.operation.id, {
           status: 'SUCCEEDED', result: { assistantId: result.id, appId }, errorMessage: null,
         })
         return result
@@ -276,7 +271,7 @@ export class DifyAdministrationService {
           tenantId, 'DELETE', `/sudowork/system/apps/${encodeURIComponent(appId)}`,
         ).then(() => true, () => false)
       }
-      this.markOperationFailed(
+      await this.markOperationFailed(
         operation.operation,
         error,
         externalSucceeded ? !compensated : !(error instanceof DifyProviderError),
@@ -287,7 +282,7 @@ export class DifyAdministrationService {
 
   async deleteAgent(orgId: string, assistantId: string, context: CommandContext): Promise<void> {
     assertTrustedCommandContext(context)
-    const operation = this.prepareOperation({
+    const operation = await this.prepareOperation({
       orgId,
       operationType: 'app.delete',
       aggregateId: assistantId,
@@ -299,8 +294,7 @@ export class DifyAdministrationService {
       throw operationReplayError(operation.operation)
     }
     if (operation.operation.status === 'SUPPRESSED') return
-    const agent = this.requireAgent(orgId, assistantId)
-    this.markOperationProcessing(operation.operation)
+    const agent = await this.requireAgent(orgId, assistantId)
     const binding = agent.providerBinding ?? {}
     const appId = stringValue(binding.appId)
     const tenantId = stringValue(binding.tenantId)
@@ -316,14 +310,14 @@ export class DifyAdministrationService {
         const ref = parseSecretReference(stringValue(binding.appSecretRef))
         if (ref) await this.options.secrets.deleteSecret(ref.namespace, ref.key, `org:${orgId}`)
       }
-      runInTransaction(this.options.db, () => {
-        this.options.catalogService.deleteAgent({ userId: 'system', orgId, role: 'super_admin' }, assistantId, orgId)
-        this.options.difyRepository.updateOperation(operation.operation.id, {
+      await this.options.db.transaction(async () => {
+        await this.options.catalogService.deleteAgent({ userId: 'system', orgId, role: 'super_admin' }, assistantId, orgId)
+        await this.options.difyRepository.updateOperation(operation.operation.id, {
           status: 'SUCCEEDED', result: { assistantId }, errorMessage: null,
         })
       })
     } catch (error) {
-      this.markOperationFailed(
+      await this.markOperationFailed(
         operation.operation,
         error,
         externalCompleted || (externalAttempted && !(error instanceof DifyProviderError)),
@@ -332,21 +326,21 @@ export class DifyAdministrationService {
     }
   }
 
-  listAgents(orgId: string): DifyAgentSummary[] {
-    return this.options.catalog.listAgents({ orgId, includeDisabled: true }).items
+  async listAgents(orgId: string): Promise<DifyAgentSummary[]> {
+    const agents = (await this.options.catalog.listAgents({ orgId, includeDisabled: true })).items
       .filter(agent => agent.providerType === 'dify' && Boolean(agent.providerBinding?.appId))
-      .map(agent => this.agentSummary(agent))
+    return Promise.all(agents.map(agent => this.agentSummary(agent)))
   }
 
-  getAgent(orgId: string, assistantId: string): DifyAgentSummary | null {
-    const agent = this.options.catalog.getAgent(assistantId, orgId)
+  async getAgent(orgId: string, assistantId: string): Promise<DifyAgentSummary | null> {
+    const agent = await this.options.catalog.getAgent(assistantId, orgId)
     return agent?.providerType === 'dify' && agent.providerBinding?.appId
       ? this.agentSummary(agent)
       : null
   }
 
-  listAcl(orgId: string, assistantId: string): DifyAclEntry[] {
-    const agent = this.requireAgent(orgId, assistantId)
+  async listAcl(orgId: string, assistantId: string): Promise<DifyAclEntry[]> {
+    const agent = await this.requireAgent(orgId, assistantId)
     const visible = agent.visibleTo
     if (!visible) return [{ subjectType: 'all', subjectId: null }]
     return [
@@ -356,8 +350,8 @@ export class DifyAdministrationService {
     ]
   }
 
-  replaceAcl(orgId: string, assistantId: string, entries: DifyAclEntry[]): DifyAclEntry[] {
-    this.requireAgent(orgId, assistantId)
+  async replaceAcl(orgId: string, assistantId: string, entries: DifyAclEntry[]): Promise<DifyAclEntry[]> {
+    await this.requireAgent(orgId, assistantId)
     const visibleTo: VisibleTo = entries.length === 0 || entries.some(entry => entry.subjectType === 'all')
       ? null
       : {
@@ -365,21 +359,21 @@ export class DifyAdministrationService {
           role_ids: nullableSubjectIds(entries, 'role'),
           department_ids: nullableSubjectIds(entries, 'department'),
         }
-    runInTransaction(this.options.db, () => {
-      if (!this.options.catalog.updateAgentConfiguration(assistantId, orgId, { visibleTo })) {
+    await this.options.db.transaction(async () => {
+      if (!(await this.options.catalog.updateAgentConfiguration(assistantId, orgId, { visibleTo }))) {
         throw new Error('not found')
       }
     })
     return this.listAcl(orgId, assistantId)
   }
 
-  listDatasets(orgId: string, assistantId: string): string[] {
-    const agent = this.requireAgent(orgId, assistantId)
+  async listDatasets(orgId: string, assistantId: string): Promise<string[]> {
+    const agent = await this.requireAgent(orgId, assistantId)
     return stringArray(agent.providerBinding?.datasetIds)
   }
 
-  replaceDatasets(orgId: string, assistantId: string, datasetIds: string[]): string[] {
-    const agent = this.requireAgent(orgId, assistantId)
+  async replaceDatasets(orgId: string, assistantId: string, datasetIds: string[]): Promise<string[]> {
+    const agent = await this.requireAgent(orgId, assistantId)
     const binding = agent.providerBinding ?? {}
     const current = stringArray(binding.datasetIds)
     const desired = [...new Set(datasetIds.map(value => value.trim()).filter(Boolean))]
@@ -389,8 +383,8 @@ export class DifyAdministrationService {
     if (binding.appId && desired.length > 0) {
       throw new Error(`assistant ${assistantId} has Dify enhancement; dataset attachment is exclusive — clear enhancement first`)
     }
-    runInTransaction(this.options.db, () => {
-      this.options.catalog.updateAgentConfiguration(assistantId, orgId, {
+    await this.options.db.transaction(async () => {
+      await this.options.catalog.updateAgentConfiguration(assistantId, orgId, {
         providerBinding: { ...binding, datasetIds: desired },
       })
     })
@@ -403,7 +397,7 @@ export class DifyAdministrationService {
       onlineCommandContext(`dify:datasets:auto-provision:${orgId}`),
     )
     if ('suppressed' in provisioned) throw new Error('Dify provisioning suppressed')
-    const connection = this.requireConnection(orgId)
+    const connection = await this.requireConnection(orgId)
     const response = objectValue(await this.options.adapter.systemJson(
       configString(connection, 'tenantId'), 'GET', '/sudowork/system/datasets',
     ))
@@ -411,9 +405,9 @@ export class DifyAdministrationService {
   }
 
   async listShareableOrganizations(): Promise<Array<{ id: number; name: string; code: string }>> {
-    const items = await Promise.all(this.options.identities.listOrganizationProfiles().map(async profile => {
+    const items = await Promise.all((await this.options.identities.listOrganizationProfiles()).map(async profile => {
       const organization = await this.options.auth.getOrganization(profile.orgId)
-      const legacyId = this.options.identities.getNumericAlias('enterprise', profile.orgId)
+      const legacyId = await this.options.identities.getNumericAlias('enterprise', profile.orgId)
       return organization && legacyId !== null
         ? [{ id: legacyId, name: organization.name, code: profile.code }]
         : []
@@ -422,16 +416,16 @@ export class DifyAdministrationService {
   }
 
   async listEnterpriseAssistants(orgId: string): Promise<unknown> {
-    const profile = this.requireProfile(orgId)
-    const enterpriseId = this.options.identities.getNumericAlias('enterprise', orgId)
-    return this.options.catalog.listAgents({ orgId, includeDisabled: true }).items
+    const profile = await this.requireProfile(orgId)
+    const enterpriseId = await this.options.identities.getNumericAlias('enterprise', orgId)
+    const agents = (await this.options.catalog.listAgents({ orgId, includeDisabled: true })).items
       .filter(agent => agent.orgId === orgId)
-      .map(agent => {
-        const sharedTenantCodes = this.organizationCodes(
-          this.options.catalog.listAssignedOrganizationIds('agent', agent.id),
-        )
-        return enterpriseAssistantDto(agent, enterpriseId, profile.code, sharedTenantCodes)
-      })
+    return Promise.all(agents.map(async (agent) => {
+      const sharedTenantCodes = await this.organizationCodes(
+        await this.options.catalog.listAssignedOrganizationIds('agent', agent.id),
+      )
+      return enterpriseAssistantDto(agent, enterpriseId, profile.code, sharedTenantCodes)
+    }))
   }
 
   async createEnterpriseAssistant(
@@ -440,7 +434,7 @@ export class DifyAdministrationService {
   ): Promise<unknown> {
     assertTrustedCommandContext(context)
     const parsed = parseAssistantForm(input.form)
-    const operation = this.prepareOperation({
+    const operation = await this.prepareOperation({
       orgId: input.orgId,
       operationType: 'enterprise-assistant.create',
       aggregateId: context.idempotencyKey,
@@ -451,11 +445,11 @@ export class DifyAdministrationService {
       if (operation.operation.status === 'SUPPRESSED') return { suppressed: true }
       if (operation.operation.status === 'SUCCEEDED') {
         const assistantId = stringValue(operation.operation.result?.assistantId)
-        const existing = assistantId ? this.options.catalog.getAgent(assistantId, input.orgId) : null
+        const existing = assistantId ? await this.options.catalog.getAgent(assistantId, input.orgId) : null
         if (existing) {
           return enterpriseAssistantSummary(
             existing,
-            this.requireProfile(input.orgId).code,
+            (await this.requireProfile(input.orgId)).code,
             stringArray(existing.providerBinding?.datasetIds),
           )
         }
@@ -463,9 +457,8 @@ export class DifyAdministrationService {
       throw operationReplayError(operation.operation)
     }
     if (operation.operation.status === 'SUPPRESSED') return { suppressed: true }
-    this.markOperationProcessing(operation.operation)
     const id = this.idFactory()
-    const assignedOrgIds = this.resolveSharedOrganizations(input.orgId, parsed.sharedTenantScope, parsed.sharedTenantIds)
+    const assignedOrgIds = await this.resolveSharedOrganizations(input.orgId, parsed.sharedTenantScope, parsed.sharedTenantIds)
     const visibleTo = aclToVisibleTo(parsed.aclEntries)
     const staged = await this.stageAssistantArtifact(input.orgId, id, parsed)
     let providerBinding: Record<string, unknown> | null = null
@@ -481,7 +474,7 @@ export class DifyAdministrationService {
           input.orgId, onlineCommandContext(`${context.idempotencyKey}:provision`),
         )
         if ('suppressed' in provisioned) return provisioned
-        const connection = this.requireConnection(input.orgId)
+        const connection = await this.requireConnection(input.orgId)
         externalAttempted = true
         const created = objectValue(await this.options.adapter.systemJson(
           provisioned.dify_tenant_id, 'POST', '/sudowork/system/apps',
@@ -507,11 +500,11 @@ export class DifyAdministrationService {
         if ('suppressed' in provisioned) return provisioned
         providerType = 'dify'
         providerBinding = {
-          connectionId: this.requireConnection(input.orgId).id,
+          connectionId: (await this.requireConnection(input.orgId)).id,
           tenantId: provisioned.dify_tenant_id, datasetIds: parsed.datasetIds, mode: 'rag-only',
         }
       }
-      const agent = this.options.catalogService.createAgent({
+      const agent = await this.options.catalogService.createAgent({
         actor: input.actor, orgId: input.orgId, id, name: parsed.name, displayName: parsed.name,
         profession: parsed.profession, description: parsed.description,
         defaultInitPrompt: parsed.defaultInitPrompt, promptsI18n: parsed.promptsI18n,
@@ -522,15 +515,15 @@ export class DifyAdministrationService {
         availability: assignedOrgIds.length > 0 ? 'assigned' : 'organization',
       }, context)
       catalogCreated = agent.id === id
-      runInTransaction(this.options.db, () => {
-        this.options.catalog.updateAgentConfiguration(id, input.orgId, { visibleTo })
-        this.options.catalog.replaceOrganizationAssignments('agent', id, assignedOrgIds)
+      await this.options.db.transaction(async () => {
+        await this.options.catalog.updateAgentConfiguration(id, input.orgId, { visibleTo })
+        await this.options.catalog.replaceOrganizationAssignments('agent', id, assignedOrgIds)
       })
       if (staged) await this.options.artifacts!.publish(staged)
-      runInTransaction(this.options.db, () => this.options.difyRepository.updateOperation(operation.operation.id, {
+      await this.options.db.transaction(async () => this.options.difyRepository.updateOperation(operation.operation.id, {
         status: 'SUCCEEDED', result: { assistantId: agent.id }, errorMessage: null,
       }))
-      return enterpriseAssistantSummary(agent, this.requireProfile(input.orgId).code, parsed.datasetIds)
+      return enterpriseAssistantSummary(agent, (await this.requireProfile(input.orgId)).code, parsed.datasetIds)
     } catch (error) {
       if (staged) await this.options.artifacts!.discard(staged).catch(() => undefined)
       const compensated = createdApp ? await this.options.adapter.systemJson(
@@ -539,11 +532,11 @@ export class DifyAdministrationService {
       if (appSecret) await this.options.secrets.deleteSecret(
         appSecret.namespace, appSecret.key, `org:${input.orgId}`,
       ).catch(() => undefined)
-      if (catalogCreated) runInTransaction(this.options.db, () => {
-        this.options.catalog.deleteAgent(id, input.orgId)
-        this.options.catalog.clearCommandResult('catalog.create_agent', context.idempotencyKey)
+      if (catalogCreated) await this.options.db.transaction(async () => {
+        await this.options.catalog.deleteAgent(id, input.orgId)
+        await this.options.catalog.clearCommandResult('catalog.create_agent', context.idempotencyKey)
       })
-      this.markOperationFailed(
+      await this.markOperationFailed(
         operation.operation,
         error,
         externalSucceeded ? !compensated : (externalAttempted && !(error instanceof DifyProviderError)),
@@ -553,8 +546,8 @@ export class DifyAdministrationService {
   }
 
   async getEnterpriseAssistant(orgId: string, assistantId: string): Promise<unknown> {
-    const agent = this.requireAgent(orgId, assistantId)
-    const profile = this.requireProfile(orgId)
+    const agent = await this.requireAgent(orgId, assistantId)
+    const profile = await this.requireProfile(orgId)
     let promptText: string | null = null
     if (agent.filePath && agent.checksum && this.options.artifacts) {
       try {
@@ -563,26 +556,23 @@ export class DifyAdministrationService {
         promptText = null
       }
     }
-    const assigned = this.options.catalog.listAssignedOrganizationIds('agent', agent.id)
-    const tenantIds = [profile.code, ...assigned.flatMap(id => {
-      const item = this.options.identities.getOrganizationProfile(id)
-      return item ? [item.code] : []
-    })]
-    const acl = this.listAcl(orgId, assistantId)
+    const assigned = await this.options.catalog.listAssignedOrganizationIds('agent', agent.id)
+    const tenantIds = [profile.code, ...(await this.organizationCodes(assigned))]
+    const acl = await this.listAcl(orgId, assistantId)
     const scope = acl.length === 1 && acl[0]?.subjectType === 'all' ? 'all' : 'specific'
     return {
       assistant: enterpriseAssistantDto(
         agent,
-        this.options.identities.getNumericAlias('enterprise', orgId),
+        await this.options.identities.getNumericAlias('enterprise', orgId),
         profile.code,
-        this.organizationCodes(assigned),
+        await this.organizationCodes(assigned),
       ),
       tenantIds, tenant_ids: tenantIds,
       shared_tenant_scope: assigned.length > 0 ? 'selected' : 'none',
       shared_tenant_ids: tenantIds.slice(1),
       promptText, prompt_text: promptText,
-      enhancement: this.getEnhancement(orgId, assistantId),
-      dataset_ids: this.listDatasets(orgId, assistantId),
+      enhancement: await this.getEnhancement(orgId, assistantId),
+      dataset_ids: await this.listDatasets(orgId, assistantId),
       acl_summary: { scope, user_ids: acl.filter(entry => entry.subjectType === 'user').flatMap(entry => entry.subjectId ? [entry.subjectId] : []) },
     }
   }
@@ -592,18 +582,18 @@ export class DifyAdministrationService {
     context: CommandContext,
   ): Promise<unknown> {
     assertTrustedCommandContext(context)
-    const agent = this.requireAgent(input.orgId, input.assistantId)
+    const agent = await this.requireAgent(input.orgId, input.assistantId)
     if (context.externalEffects === 'suppress_external') return { suppressed: true }
     const parsed = parseAssistantForm(input.form)
-    const assigned = this.resolveSharedOrganizations(input.orgId, parsed.sharedTenantScope, parsed.sharedTenantIds)
-    const priorAssigned = this.options.catalog.listAssignedOrganizationIds('agent', input.assistantId)
+    const assigned = await this.resolveSharedOrganizations(input.orgId, parsed.sharedTenantScope, parsed.sharedTenantIds)
+    const priorAssigned = await this.options.catalog.listAssignedOrganizationIds('agent', input.assistantId)
     const nextVersion = parsed.sourceFile || parsed.promptFile ? incrementPatchVersion(agent.version) : agent.version
     const staged = parsed.sourceFile || parsed.promptFile
       ? await this.stageAssistantArtifact(input.orgId, input.assistantId, parsed, nextVersion ?? '1.0.1')
       : null
     try {
-      runInTransaction(this.options.db, () => {
-        this.options.catalog.updateAgentConfiguration(input.assistantId, input.orgId, {
+      await this.options.db.transaction(async () => {
+        await this.options.catalog.updateAgentConfiguration(input.assistantId, input.orgId, {
           name: parsed.name, displayName: parsed.name, profession: parsed.profession,
           description: parsed.description, defaultInitPrompt: parsed.defaultInitPrompt,
           promptsI18n: parsed.promptsI18n, categories: parsed.categories, skills: parsed.skills,
@@ -615,29 +605,29 @@ export class DifyAdministrationService {
             sourceUrl: `${(this.options.publicBaseUrl ?? '').replace(/\/+$/, '')}/api/assistants/${input.assistantId}/download`,
           } : {}),
         })
-        this.options.catalog.replaceOrganizationAssignments('agent', input.assistantId, assigned)
+        await this.options.catalog.replaceOrganizationAssignments('agent', input.assistantId, assigned)
       })
       if (staged) await this.options.artifacts!.publish(staged)
     } catch (error) {
       if (staged) await this.options.artifacts!.discard(staged).catch(() => undefined)
-      runInTransaction(this.options.db, () => {
-        this.options.catalog.updateAgentConfiguration(input.assistantId, input.orgId, catalogConfiguration(agent))
-        this.options.catalog.replaceOrganizationAssignments('agent', input.assistantId, priorAssigned)
+      await this.options.db.transaction(async () => {
+        await this.options.catalog.updateAgentConfiguration(input.assistantId, input.orgId, catalogConfiguration(agent))
+        await this.options.catalog.replaceOrganizationAssignments('agent', input.assistantId, priorAssigned)
       })
       throw error
     }
-    const updated = this.requireAgent(input.orgId, input.assistantId)
+    const updated = await this.requireAgent(input.orgId, input.assistantId)
     return {
       assistantId: updated.id,
-      enterpriseId: this.options.identities.getNumericAlias('enterprise', input.orgId),
-      tenantCode: this.requireProfile(input.orgId).code,
+      enterpriseId: await this.options.identities.getNumericAlias('enterprise', input.orgId),
+      tenantCode: (await this.requireProfile(input.orgId)).code,
       version: updated.version ?? '1.0.0',
       raw: updated,
     }
   }
 
-  getEnhancement(orgId: string, assistantId: string): { enabled: boolean; mode?: string; dify_app_id?: string; dify_tenant_id?: string } {
-    const agent = this.requireAgent(orgId, assistantId)
+  async getEnhancement(orgId: string, assistantId: string): Promise<{ enabled: boolean; mode?: string; dify_app_id?: string; dify_tenant_id?: string }> {
+    const agent = await this.requireAgent(orgId, assistantId)
     const binding = agent.providerBinding ?? {}
     const appId = stringValue(binding.appId)
     const mode = stringValue(binding.mode)
@@ -657,55 +647,57 @@ export class DifyAdministrationService {
     appName?: string
   }, context: CommandContext): Promise<unknown> {
     assertTrustedCommandContext(context)
-    const current = this.getEnhancement(input.orgId, input.assistantId)
+    const current = await this.getEnhancement(input.orgId, input.assistantId)
     const changes = current.enabled !== input.enable
       || (current.enabled && input.enable && input.mode !== undefined && input.mode !== current.mode)
     if (changes) throw new Error('enhancement method cannot be changed after creation')
     return current
   }
 
-  private defaultConnection(orgId: string): IntegrationConnection | null {
-    const enabled = this.options.identities.listIntegrationConnections(orgId, 'dify')
+  private async defaultConnection(orgId: string): Promise<IntegrationConnection | null> {
+    const enabled = (await this.options.identities.listIntegrationConnections(orgId, 'dify'))
       .filter(connection => connection.enabled)
     return enabled.find(connection => connection.config.isDefault === true)
       ?? (enabled.length === 1 ? enabled[0]! : null)
   }
 
-  private requireConnection(orgId: string): IntegrationConnection {
-    const connection = this.defaultConnection(orgId)
+  private async requireConnection(orgId: string): Promise<IntegrationConnection> {
+    const connection = await this.defaultConnection(orgId)
     if (!connection) throw new Error(`enterprise ${orgId} has no Dify tenant binding`)
     return connection
   }
 
-  private requireAgent(orgId: string, assistantId: string): CatalogAgent {
-    const agent = this.options.catalog.getAgent(assistantId, orgId)
+  private async requireAgent(orgId: string, assistantId: string): Promise<CatalogAgent> {
+    const agent = await this.options.catalog.getAgent(assistantId, orgId)
     if (!agent) throw new Error('not found')
     return agent
   }
 
-  private requireProfile(orgId: string) {
-    const profile = this.options.identities.getOrganizationProfile(orgId)
+  private async requireProfile(orgId: string) {
+    const profile = await this.options.identities.getOrganizationProfile(orgId)
     if (!profile) throw new Error(`enterprise ${orgId} missing`)
     return profile
   }
 
-  private resolveSharedOrganizations(orgId: string, scope: string | undefined, codes: string[]): string[] {
+  private async resolveSharedOrganizations(orgId: string, scope: string | undefined, codes: string[]): Promise<string[]> {
     if (scope === 'all') throw new Error('shared_tenant_scope=all is no longer supported; select tenants explicitly')
     if (scope !== 'selected') return []
-    const ids = [...new Set(codes)].flatMap(code => {
-      const profile = this.options.identities.getOrganizationProfileByCode(code)
+    const resolved = await Promise.all([...new Set(codes)].map(async (code) => {
+      const profile = await this.options.identities.getOrganizationProfileByCode(code)
       if (!profile) throw new Error(`tenant ${code} not found`)
       return profile.orgId === orgId ? [] : [profile.orgId]
-    })
+    }))
+    const ids = resolved.flat()
     if (ids.length === 0) throw new Error('shared_tenant_ids is required when shared_tenant_scope is selected')
     return ids
   }
 
-  private organizationCodes(orgIds: string[]): string[] {
-    return orgIds.flatMap(orgId => {
-      const profile = this.options.identities.getOrganizationProfile(orgId)
+  private async organizationCodes(orgIds: string[]): Promise<string[]> {
+    const codes = await Promise.all(orgIds.map(async (orgId) => {
+      const profile = await this.options.identities.getOrganizationProfile(orgId)
       return profile ? [profile.code] : []
-    })
+    }))
+    return codes.flat()
   }
 
   private prepareOperation(input: {
@@ -714,18 +706,11 @@ export class DifyAdministrationService {
     aggregateId: string
     context: CommandContext
     request: Record<string, unknown>
-  }): { operation: DifyProviderOperation; created: boolean } {
-    return runInTransaction(this.options.db, () => {
-      const existing = this.options.difyRepository.getOperationByIdempotencyKey(input.context.idempotencyKey)
-      if (existing) {
-        if (JSON.stringify(existing.request) !== JSON.stringify(input.request)) {
-          throw new Error('idempotency key already used for a different Dify command')
-        }
-        if (existing.status === 'FAILED') return { operation: existing, created: true }
-        return { operation: existing, created: false }
-      }
-      return {
-        operation: this.options.difyRepository.createOperation({
+  }): Promise<{ operation: DifyProviderOperation; created: boolean }> {
+    return this.options.db.transaction(async () => {
+      let operation = await this.options.difyRepository.getOperationByIdempotencyKey(input.context.idempotencyKey)
+      if (!operation) {
+        operation = await this.options.difyRepository.createOperation({
           id: `dify-operation:${input.context.idempotencyKey}`,
           orgId: input.orgId,
           operationType: input.operationType,
@@ -734,20 +719,22 @@ export class DifyAdministrationService {
           status: input.context.externalEffects === 'suppress_external' ? 'SUPPRESSED' : 'PENDING',
           request: input.request,
           contextSource: input.context.source,
-        }),
-        created: true,
+        })
       }
+      if (operation.orgId !== input.orgId
+        || operation.operationType !== input.operationType
+        || operation.aggregateId !== input.aggregateId
+        || JSON.stringify(operation.request) !== JSON.stringify(input.request)) {
+        throw new Error('idempotency key already used for a different Dify command')
+      }
+      if (operation.status === 'SUPPRESSED') return { operation, created: false }
+      const claimed = await this.options.difyRepository.claimOperation(operation.id)
+      return { operation: claimed ?? operation, created: claimed !== null }
     })
   }
 
-  private markOperationProcessing(operation: DifyProviderOperation): void {
-    runInTransaction(this.options.db, () => this.options.difyRepository.updateOperation(operation.id, {
-      status: 'PROCESSING', attempts: operation.attempts + 1, errorMessage: null,
-    }))
-  }
-
-  private markOperationFailed(operation: DifyProviderOperation, error: unknown, uncertain: boolean): void {
-    runInTransaction(this.options.db, () => this.options.difyRepository.updateOperation(operation.id, {
+  private async markOperationFailed(operation: DifyProviderOperation, error: unknown, uncertain: boolean): Promise<void> {
+    await this.options.db.transaction(async () => this.options.difyRepository.updateOperation(operation.id, {
       status: uncertain ? 'UNKNOWN' : 'FAILED',
       errorMessage: error instanceof Error ? error.message : String(error),
     }))
@@ -769,11 +756,11 @@ export class DifyAdministrationService {
     })
   }
 
-  private agentSummary(agent: CatalogAgent): DifyAgentSummary {
+  private async agentSummary(agent: CatalogAgent): Promise<DifyAgentSummary> {
     const binding = agent.providerBinding ?? {}
     return {
       assistantId: agent.id,
-      enterpriseId: this.options.identities.getNumericAlias('enterprise', agent.orgId),
+      enterpriseId: await this.options.identities.getNumericAlias('enterprise', agent.orgId),
       difyTenantId: stringValue(binding.tenantId),
       difyAppId: stringValue(binding.appId),
       difyAppMode: stringValue(binding.mode) || 'agent-chat',

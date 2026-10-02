@@ -63,7 +63,7 @@ function globalSnapshot(): SudoworkSourceSnapshot {
 }
 
 const aliases = {
-  resolveNumericAliasGlobal(kind: string, legacyId: number) {
+  async resolveNumericAliasGlobal(kind: string, legacyId: number) {
     if (kind === 'enterprise' && legacyId === 7) return { resourceId: 'org-7', orgId: 'org-7' }
     if (kind === 'user' && legacyId === 17) return { resourceId: 'user-17', orgId: 'org-7' }
     return null

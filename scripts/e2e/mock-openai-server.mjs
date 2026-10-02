@@ -218,14 +218,7 @@ const server = http.createServer(async (request, response) => {
   ) {
     writeJson(response, 200, {
       object: "list",
-      data: [{ id: "moss-e2e-model", object: "model", owned_by: "moss-e2e" }],
-    });
-    return;
-  }
-  if (request.method === "GET" && pathname === "/api/specific_pricing") {
-    writeJson(response, 200, {
-      success: true,
-      data: [{ model_id: "moss-e2e-model", model: "Moss E2E Model", ratio: 1 }],
+      data: [{ id: "claude-sonnet-4-6", object: "model", owned_by: "moss-e2e" }],
     });
     return;
   }
@@ -322,7 +315,7 @@ const server = http.createServer(async (request, response) => {
     const body = JSON.parse(rawBody);
     const content = responseText(body);
     const model =
-      typeof body.model === "string" ? body.model : "moss-e2e-model";
+      typeof body.model === "string" ? body.model : "claude-sonnet-4-6";
     appendRecord({
       timestamp: new Date().toISOString(),
       path: pathname,

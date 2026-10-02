@@ -33,6 +33,7 @@ function parseJsonlEntries(buf: string): SimpleMessage[] {
       if (
         t === 'user' ||
         t === 'assistant' ||
+        t === 'artifacts' ||
         t === 'thinking' ||
         t === 'tool_use' ||
         t === 'tool_result'

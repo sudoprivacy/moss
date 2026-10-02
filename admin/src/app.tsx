@@ -14,6 +14,8 @@ const OperationsBillingPage = lazy(() => import('./pages/operations-billing-page
 const ApiKeysPage = lazy(() => import('./pages/api-keys-page'))
 const ZonesPage = lazy(() => import('./pages/zones-page'))
 const SystemSettingsPage = lazy(() => import('./pages/system-settings-page'))
+const PlatformConfigPage = lazy(() => import('./pages/platform-config-page'))
+const AccountSecurityPage = lazy(() => import('./pages/account-security-page'))
 const ServerCredentialsPage = lazy(() => import('./pages/server-credentials-page'))
 const ChannelsPage = lazy(() => import('./pages/channels-page'))
 const CorpAppsPage = lazy(() => import('./pages/corp-apps-page'))
@@ -164,6 +166,11 @@ export default function App() {
           }
         />
         <Route
+          path="/settings/platform-config"
+          element={<SuspendedRoute><PlatformConfigPage /></SuspendedRoute>}
+        />
+        <Route path="/account/security" element={<SuspendedRoute><AccountSecurityPage /></SuspendedRoute>} />
+        <Route
           path="/settings/server-credentials"
           element={
             <SuspendedRoute>
@@ -310,6 +317,10 @@ export default function App() {
               <EventTriggersPage />
             </SuspendedRoute>
           }
+        />
+        <Route
+          path="/operations"
+          element={<Navigate to={OPERATION_ROUTES.invitations} replace />}
         />
         <Route
           path={OPERATION_ROUTES.invitations}

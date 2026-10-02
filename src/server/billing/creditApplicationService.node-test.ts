@@ -3,10 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { onlineCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { BillingCoordinator } from './billingCoordinator.js'
-import { BillingRepository } from './billingRepository.js'
-import { ensureBillingSchema } from './billingSchema.js'
 import { CreditApplicationService } from './creditApplicationService.js'
 import type { QuotaSnapshot, SudorouterPort } from './sudorouterAdapter.js'
 import { BillingDomainError } from './types.js'
@@ -31,7 +29,7 @@ async function setup() {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
   await auth.createOrganization('org1', 'Org 1', 1)
   await auth.createOrganization('org2', 'Org 2', 1)
   for (const [id, orgId, role] of [
@@ -43,21 +41,20 @@ async function setup() {
       departmentId: null, role, status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
     })
-    identities.createWallet('user', id, 0)
+    await identities.createWallet('user', id, 0)
   }
-  ensureBillingSchema(db)
-  const repository = new BillingRepository(db)
-  repository.upsertExternalAccount({
+  const repository = createBillingTestRepository(db, auth.driver)
+  await repository.upsertExternalAccount({
     provider: 'sudorouter', ownerType: 'user', ownerId: 'u1', externalAccountId: '9',
     quotaUnits: 0, usedQuotaUnits: 0, updatedAt: 1,
   })
   const fake = new FakeSudorouter()
-  const wallet = new WalletService(db, repository, () => 100)
-  const coordinator = new BillingCoordinator(db, repository, wallet, fake, {
+  const wallet = new WalletService(auth.driver, repository, () => 100)
+  const coordinator = new BillingCoordinator(auth.driver, repository, wallet, fake, {
     clock: () => 100, idGenerator: () => 'quota-operation-1',
   })
   let sequence = 0
-  const service = new CreditApplicationService(db, repository, identities, coordinator, {
+  const service = new CreditApplicationService(auth.driver, repository, identities, coordinator, {
     getPolicy: () => ({ rechargeMode: 'approve', minPoints: 200, maxPoints: 2_000, allowDuplicatePending: false }),
   }, { clock: () => 100, idGenerator: () => `application-${++sequence}`, suffixGenerator: () => 'ABC123' })
   return { db, identities, repository, fake, service }
@@ -67,12 +64,12 @@ void describe('CreditApplicationService', () => {
   void test('创建申请分配永久数字别名并阻止重复待审批', async () => {
     const { db, identities, service } = await setup()
     const actor = { userId: 'u1', orgId: 'org1', role: 'user' as const }
-    const created = service.createApplication({ requestedPoints: 500, reason: '项目需要' }, actor, onlineCommandContext('apply-1'))
+    const created = await service.createApplication({ requestedPoints: 500, reason: '项目需要' }, actor, onlineCommandContext('apply-1'))
 
     assert.equal(created.applicationNo, 'CA100ABC123')
     assert(created.legacyId >= 2_000_000_000)
-    assert.equal(identities.resolveNumericAlias('credit_application', created.legacyId, 'org1'), created.id)
-    assert.throws(() => service.createApplication(
+    assert.equal(await identities.resolveNumericAlias('credit_application', created.legacyId, 'org1'), created.id)
+    await assert.rejects(service.createApplication(
       { requestedPoints: 600, reason: '再次申请' }, actor, onlineCommandContext('apply-2'),
     ), (error: unknown) => error instanceof BillingDomainError && error.code === 'DUPLICATE_PENDING_APPLICATION')
     db.close()
@@ -80,7 +77,7 @@ void describe('CreditApplicationService', () => {
 
   void test('企业管理员不能审批其他组织，超级管理员审批重复调用只发放一次', async () => {
     const { db, repository, fake, service } = await setup()
-    const application = service.createApplication(
+    const application = await service.createApplication(
       { requestedPoints: 500, reason: '项目需要' },
       { userId: 'u1', orgId: 'org1', role: 'user' },
       onlineCommandContext('apply-1'),
@@ -101,9 +98,9 @@ void describe('CreditApplicationService', () => {
     assert.equal(first.status, 'APPROVED')
     assert.deepEqual(replay, first)
     assert.equal(fake.changeCalls, 1)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 400)
-    assert.equal(repository.getCreditApplication(application.id)?.status, 'APPROVED')
-    const activities = repository.listRechargeActivities({ activityType: 'ADMIN', limit: 20, offset: 0 })
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 400)
+    assert.equal((await repository.getCreditApplication(application.id))?.status, 'APPROVED')
+    const activities = await repository.listRechargeActivities({ activityType: 'ADMIN', limit: 20, offset: 0 })
     assert.equal(activities.total, 1)
     assert.equal(activities.list[0]?.sourceType, 'CREDIT_APPLICATION')
     assert.equal(activities.list[0]?.applicationId, application.id)
@@ -112,7 +109,7 @@ void describe('CreditApplicationService', () => {
 
   void test('外部发放失败标记 SYNC_FAILED，显式重试成功且不重复申请记录', async () => {
     const { db, repository, fake, service } = await setup()
-    const application = service.createApplication(
+    const application = await service.createApplication(
       { requestedPoints: 300, reason: '测试失败' },
       { userId: 'u1', orgId: 'org1', role: 'user' },
       onlineCommandContext('apply-fail'),
@@ -121,31 +118,31 @@ void describe('CreditApplicationService', () => {
     const failed = await service.approveApplication({ applicationId: application.id },
       { userId: 'admin1', orgId: 'org1', role: 'admin' }, onlineCommandContext('approve-fail'))
     assert.equal(failed.status, 'SYNC_FAILED')
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 0)
-    assert.equal(repository.countActivityRecords(), 0)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 0)
+    assert.equal(await repository.countActivityRecords(), 0)
 
     fake.fail = false
     const recovered = await service.retryApplication(application.id,
       { userId: 'admin1', orgId: 'org1', role: 'admin' })
     assert.equal(recovered.status, 'APPROVED')
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 300)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 300)
     assert.equal(fake.changeCalls, 2)
-    assert.equal(repository.countActivityRecords(), 1)
+    assert.equal(await repository.countActivityRecords(), 1)
     db.close()
   })
 
   void test('拒绝申请必须有原因且只允许 PENDING', async () => {
     const { db, repository, service } = await setup()
-    const application = service.createApplication(
+    const application = await service.createApplication(
       { requestedPoints: 300, reason: '不再需要' },
       { userId: 'u1', orgId: 'org1', role: 'user' }, onlineCommandContext('apply-reject'),
     )
-    assert.throws(() => service.rejectApplication(application.id, '',
+    await assert.rejects(service.rejectApplication(application.id, '',
       { userId: 'admin1', orgId: 'org1', role: 'admin' }), /拒绝原因不能为空/)
-    service.rejectApplication(application.id, '不符合规则',
+    await service.rejectApplication(application.id, '不符合规则',
       { userId: 'admin1', orgId: 'org1', role: 'admin' })
-    assert.equal(repository.getCreditApplication(application.id)?.status, 'REJECTED')
-    assert.throws(() => service.rejectApplication(application.id, '再次拒绝',
+    assert.equal((await repository.getCreditApplication(application.id))?.status, 'REJECTED')
+    await assert.rejects(service.rejectApplication(application.id, '再次拒绝',
       { userId: 'admin1', orgId: 'org1', role: 'admin' }), /当前状态不可拒绝/)
     db.close()
   })

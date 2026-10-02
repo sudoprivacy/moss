@@ -194,6 +194,46 @@ Server 侧**无需任何改动**：继续用种子节点写出的 `moss-k3s-kube
   **注意**：须在仓库根目录既 `bun run build:node` 又启动 server——运行期按
   `process.cwd()` 定位 `bin/nexus/plugins`，构建与启动的工作目录必须一致，否则运行期找不到插件。
 
+### Embedded Nexus ZoneId（可选）
+
+单机 embedded 模式可在首次启动前显式设置 `MOSS_NEXUS_ZONE_ID`。该值不是密钥；它会按原始字节
+交给内置的 `@sudo/contracts` ZoneId 校验器，不会 trim、改写或从实例 ID、主机名、组织、路径推导。
+未设置且没有既有锁时保持旧行为，不传 `--cluster-init`。
+
+```bash
+MOSS_NEXUS_ZONE_ID=customer-a docker compose -f deploy/docker-compose.yml up -d
+```
+
+非容器安装可在首次安装时传入同一变量；安装器会把它原样保存在权限为 `600` 的
+`moss-server.env` 中，并在升级时保留：
+
+```bash
+sudo env MOSS_NEXUS_ZONE_ID=customer-a ./install.sh --non-interactive
+```
+
+已有安装不能在同一次原地升级中首次声明 ZoneId：升级失败时旧版本无法安全回滚新创建的不可变绑定。
+应先不带该变量完成升级并确认健康，再在 Nexus 数据仍为空时单独配置 `moss-server.env` 并重启。
+已有锁的安装仍可正常升级；显式值必须与锁逐字节一致。
+
+首次声明只允许 Nexus 数据目录不存在或完全为空。接受后，Moss 以 exclusive-create 写入版本化锁：
+
+- Docker 默认：`./.moss/nexus/data.zone-id.lock.json`（容器内
+  `/root/.moss/nexus/data.zone-id.lock.json`）；
+- 安装器默认：`<安装目录>/.moss/nexus/data.zone-id.lock.json`。
+
+备份和恢复必须把整个 Nexus 目录作为一个单元：同时包含 `data/`（包括 `vault/master.key`）和同级
+`data.zone-id.lock.json`，并保留 `moss-server.env` 中相关的 `MOSS_NEXUS_ZONE_ID` 声明。不得只恢复
+数据而漏掉锁，也不得单独恢复、删除或替换锁；否则在环境变量省略时会落回 legacy argv，无法证明
+恢复后的数据与 ZoneId 绑定一致。
+
+之后即使不再提供环境变量，启动也会复用锁中的精确值；显式值必须逐字节相同。锁不可重命名、
+覆盖或删除来切换 ZoneId。格式损坏、值不匹配、首次声明时已有数据都会在启动子进程和改动 Nexus
+数据前失败。若首次子进程启动失败，锁仍会保留，同一 ZoneId 可安全重试。
+
+`MOSS_NEXUS_ZONE_ID` 不适用于 `MOSS_NEXUS_MODE=external`：外部 Nexus 自己拥有拓扑。存在本地锁时
+也不得直接切换到 external；这需要另行批准的拓扑迁移方案，Moss 不会自动删除、忽略或迁移锁和数据。
+HA / external 部署清单因此不会注入这个变量。
+
 ## 常用操作
 
 ```bash

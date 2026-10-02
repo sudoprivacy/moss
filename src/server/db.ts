@@ -1,3 +1,4 @@
+import { ensureOrganizationResourceSchema } from './catalog/organizationResourceSchema.js'
 import { randomUUID } from 'crypto'
 import { mkdirSync } from 'fs'
 import { dirname } from 'path'
@@ -84,8 +85,15 @@ function mapRuntime(row: SqlRow): SessionRuntimeInfo {
 }
 
 function mapSession(row: SqlRow): SessionRecord {
+  const clientMetadata = parseJsonObject(row.client_metadata)
   return {
     sessionId: String(row.session_id),
+    // Sessions created before the implicit-task compatibility layer use their
+    // session id as a stable fallback. New rows receive an independent id.
+    taskId:
+      typeof clientMetadata?.implicit_task_id === 'string'
+        ? clientMetadata.implicit_task_id
+        : String(row.session_id),
     transcriptSessionId: String(row.transcript_session_id),
     orgId: String(row.org_id),
     userId: String(row.user_id),
@@ -103,7 +111,7 @@ function mapSession(row: SqlRow): SessionRecord {
     assistantName: typeof row.assistant_name === 'string' ? row.assistant_name : null,
     source: typeof row.source === 'string' ? row.source : undefined,
     channelChatId: typeof row.channel_chat_id === 'string' ? row.channel_chat_id : undefined,
-    clientMetadata: parseJsonObject(row.client_metadata),
+    clientMetadata,
     createdAt: Number(row.created_at),
     lastActiveAt: Number(row.last_active_at),
     endedAt: row.ended_at == null ? null : Number(row.ended_at),
@@ -137,8 +145,92 @@ function mapAttempt(row: SqlRow): AttemptRecord {
   }
 }
 
+type SqliteColumnInfo = {
+  name: string
+  notnull: number
+  dflt_value: unknown
+}
+
+/**
+ * Upgrade the pre-runtime-backend SQLite tables in place. Some early local
+ * deployments used profile_dir/transcript_dir and attempt_dir/manifest_path as
+ * mandatory columns. CREATE TABLE IF NOT EXISTS cannot evolve those tables, so
+ * new session writes otherwise fail before the normal recovery path can run.
+ */
+function migrateLegacyRuntimeTables(db: DatabaseSync): void {
+  const sessionColumns = db.prepare('PRAGMA table_info(sessions)').all() as SqliteColumnInfo[]
+  const sessionNames = new Set(sessionColumns.map(column => column.name))
+  const attemptColumns = db.prepare('PRAGMA table_info(session_attempts)').all() as SqliteColumnInfo[]
+  const attemptNames = new Set(attemptColumns.map(column => column.name))
+  const statements: string[] = []
+
+  if (!sessionNames.has('runtime_type')) {
+    statements.push(
+      `ALTER TABLE sessions ADD COLUMN runtime_type TEXT NOT NULL DEFAULT 'host'`,
+      `UPDATE sessions
+       SET runtime_type = CASE
+         WHEN docker_image IS NOT NULL OR container_name IS NOT NULL THEN 'docker'
+         ELSE 'host'
+       END`,
+    )
+  }
+  if (!sessionNames.has('docker_mode')) {
+    statements.push(
+      `ALTER TABLE sessions ADD COLUMN docker_mode TEXT`,
+      `UPDATE sessions
+       SET docker_mode = 'session'
+       WHERE docker_image IS NOT NULL OR container_name IS NOT NULL`,
+    )
+  }
+  if (!sessionNames.has('config_dir')) {
+    statements.push(`ALTER TABLE sessions ADD COLUMN config_dir TEXT`)
+  }
+  if (sessionNames.has('profile_dir')) {
+    statements.push(`UPDATE sessions SET config_dir = COALESCE(config_dir, profile_dir)`)
+  }
+  for (const legacyColumn of ['profile_dir', 'transcript_dir']) {
+    const column = sessionColumns.find(candidate => candidate.name === legacyColumn)
+    if (column?.notnull === 1 && column.dflt_value == null) {
+      statements.push(`ALTER TABLE sessions DROP COLUMN ${legacyColumn}`)
+    }
+  }
+
+  if (!attemptNames.has('backend_type')) {
+    statements.push(
+      `ALTER TABLE session_attempts ADD COLUMN backend_type TEXT NOT NULL DEFAULT 'host'`,
+      `UPDATE session_attempts
+       SET backend_type = COALESCE(
+         (SELECT runtime_type FROM sessions WHERE sessions.session_id = session_attempts.session_id),
+         'host'
+       )`,
+    )
+  }
+  for (const legacyColumn of ['attempt_dir', 'manifest_path']) {
+    const column = attemptColumns.find(candidate => candidate.name === legacyColumn)
+    if (column?.notnull === 1 && column.dflt_value == null) {
+      statements.push(`ALTER TABLE session_attempts DROP COLUMN ${legacyColumn}`)
+    }
+  }
+
+  if (statements.length === 0) return
+
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    for (const statement of statements) db.exec(statement)
+    db.exec('COMMIT')
+    console.log('[DB] Migrated legacy session runtime tables')
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK')
+    } catch {
+      // Preserve the original migration error.
+    }
+    throw error
+  }
+}
+
 export class DirectConnectStore {
-  readonly db: DatabaseSync
+  readonly db: DatabaseSync | undefined
   /**
    * Async driver seam (HA PG support). For sqlite this wraps `db` with async
    * signatures — zero behaviour change. Method bodies migrate from
@@ -154,7 +246,7 @@ export class DirectConnectStore {
     // undefined on purpose — sqlite-only consumers (tests, schema migration
     // code) never run on this form.
     if (pgDriver) {
-      this.db = undefined as unknown as DatabaseSync
+      this.db = undefined
       this.driver = pgDriver
       return
     }
@@ -256,6 +348,8 @@ export class DirectConnectStore {
         app_company_name TEXT,
         login_desp TEXT,
         client_cron_enabled INTEGER,
+        client_show_tool_calls INTEGER,
+        workspace_upload_limit_bytes INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -320,6 +414,7 @@ export class DirectConnectStore {
         user_id TEXT
       );
     `)
+    migrateLegacyRuntimeTables(this.db)
     ensureCabinTables(this.db)
 
     const nowTs = now()
@@ -406,6 +501,14 @@ export class DirectConnectStore {
     if (!enterprisesColumns.some(col => col.name === 'client_cron_enabled')) {
       this.db.exec(`ALTER TABLE enterprises ADD COLUMN client_cron_enabled INTEGER`)
       console.log('[DB] Added client_cron_enabled column to enterprises')
+    }
+    if (!enterprisesColumns.some(col => col.name === 'client_show_tool_calls')) {
+      this.db.exec(`ALTER TABLE enterprises ADD COLUMN client_show_tool_calls INTEGER`)
+      console.log('[DB] Added client_show_tool_calls column to enterprises')
+    }
+    if (!enterprisesColumns.some(col => col.name === 'workspace_upload_limit_bytes')) {
+      this.db.exec(`ALTER TABLE enterprises ADD COLUMN workspace_upload_limit_bytes INTEGER`)
+      console.log('[DB] Added workspace_upload_limit_bytes column to enterprises')
     }
 
     // Migration: backfill org_id on department_secret_policies rows written by
@@ -655,6 +758,8 @@ export class DirectConnectStore {
       }
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_org ON ${table} (org_id)`)
     }
+
+    ensureOrganizationResourceSchema(this.db)
 
     // Secrets base table must exist before column migrations below. On a fresh
     // DB, PRAGMA table_info(nonexistent) returns an empty list, and ALTER TABLE
@@ -1298,6 +1403,7 @@ export class DirectConnectStore {
    * org_id column + per-org partial unique indexes. Idempotent.
    */
   private migrateConfigItemsOrgScoping(): void {
+    if (!this.db) throw new Error('SQLite database handle is unavailable')
     try {
       const createSql = (this.db
         .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='config_items'`)
@@ -1413,9 +1519,8 @@ export class DirectConnectStore {
         `UPDATE secret_audit_log SET org_id = ? WHERE org_id IS NULL`,
         [defaultOrgId],
       )
-      // Tenant skills/assistants: stranded global rows go to the default org.
-      await this.driver.run(`UPDATE tenant_skills SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId])
-      await this.driver.run(`UPDATE tenant_assistants SET org_id = ? WHERE org_id IS NULL`, [defaultOrgId])
+      // Unowned tenant resources require explicit migration mappings; never
+      // infer ownership from the first organization created during bootstrap.
       // Channels: backfill from the owning user's org where resolvable, else default.
       // C-5: parameterized run, not string-interpolated exec — the exec
       // interface has no parameter slots, which is what forced the template
@@ -1444,6 +1549,11 @@ export class DirectConnectStore {
     // The postgres construction form leaves `db` undefined, so the old
     // `this.db.close()` crashed there and never released the connections.
     await this.driver.close()
+  }
+
+  requireSqliteDb(): DatabaseSync {
+    if (!this.db) throw new Error('SQLite database handle is unavailable for the PostgreSQL store')
+    return this.db
   }
 
   isOpen(): boolean {
@@ -1579,14 +1689,19 @@ export class DirectConnectStore {
     channelChatId?: string
   }): Promise<SessionRecord> {
     const ts = now()
+    const clientMetadata = JSON.stringify({
+      implicit_task_id: randomUUID(),
+      task_contract: 'implicit-v1',
+      requested_execution: 'cloud',
+    })
     await this.driver.run(`
       INSERT INTO sessions (
         session_id, transcript_session_id, org_id, user_id, role, scopes_json,
         cwd, runtime_type, docker_image, docker_mode, config_dir, container_name,
         status, desired_state, current_attempt_id, transcript_path, title, summary, assistant_name,
-        source, channel_chat_id,
+        source, channel_chat_id, client_metadata,
         created_at, last_active_at, ended_at, deleted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, NULL)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL)
     `, [
       input.sessionId,
       input.transcriptSessionId,
@@ -1610,6 +1725,7 @@ export class DirectConnectStore {
       input.assistantName ?? null,
       input.source ?? null,
       input.channelChatId ?? null,
+      clientMetadata,
       ts,
       ts,
     ])
@@ -2215,37 +2331,85 @@ export class DirectConnectStore {
     }
   }
 
-  async getEnterprise(): Promise<EnterpriseRecord> {
+  /**
+   * Return an organization's enterprise configuration.  The historical
+   * `default` row remains the deployment-wide fallback for unauthenticated
+   * clients and organizations which have not saved their own configuration yet.
+   */
+  async getEnterprise(orgId?: string): Promise<EnterpriseRecord> {
+    const id = orgId?.trim() || 'default'
     const row = await this.driver.get<SqlRow>(`
-      SELECT * FROM enterprises WHERE id = 'default' LIMIT 1
-    `)
+      SELECT * FROM enterprises WHERE id = ? LIMIT 1
+    `, [id])
 
-    if (!row) {
+    // Do not eagerly copy the legacy row on read.  That avoids turning a
+    // deployment-wide default into permanent tenant data until the tenant
+    // actually customizes its branding.
+    let resolvedRow = row
+    if (!resolvedRow && id !== 'default') {
+      resolvedRow = await this.driver.get<SqlRow>(
+        `SELECT * FROM enterprises WHERE id = 'default' LIMIT 1`,
+      )
+    }
+
+    if (!resolvedRow) {
       throw new Error('Default enterprise record not found')
     }
 
     return {
-      id: String(row.id),
-      logo: typeof row.logo === 'string' ? row.logo : null,
-      app_name: typeof row.app_name === 'string' ? row.app_name : null,
-      top_name: typeof row.top_name === 'string' ? row.top_name : null,
-      about_name: typeof row.about_name === 'string' ? row.about_name : null,
-      app_company_name: typeof row.app_company_name === 'string' ? row.app_company_name : null,
-      login_desp: typeof row.login_desp === 'string' ? row.login_desp : null,
+      id: String(resolvedRow.id),
+      logo: typeof resolvedRow.logo === 'string' ? resolvedRow.logo : null,
+      app_name: typeof resolvedRow.app_name === 'string' ? resolvedRow.app_name : null,
+      top_name: typeof resolvedRow.top_name === 'string' ? resolvedRow.top_name : null,
+      about_name: typeof resolvedRow.about_name === 'string' ? resolvedRow.about_name : null,
+      app_company_name: typeof resolvedRow.app_company_name === 'string' ? resolvedRow.app_company_name : null,
+      login_desp: typeof resolvedRow.login_desp === 'string' ? resolvedRow.login_desp : null,
       // null (column never set) is preserved so the client applies its
       // default-on behaviour; 0/1 map to false/true.
       client_cron_enabled:
-        row.client_cron_enabled === null || row.client_cron_enabled === undefined
+        resolvedRow.client_cron_enabled === null || resolvedRow.client_cron_enabled === undefined
           ? null
-          : Number(row.client_cron_enabled) !== 0,
-      created_at: Number(row.created_at),
-      updated_at: Number(row.updated_at),
+          : Number(resolvedRow.client_cron_enabled) !== 0,
+      client_show_tool_calls:
+        resolvedRow.client_show_tool_calls === null || resolvedRow.client_show_tool_calls === undefined
+          ? null
+          : Number(resolvedRow.client_show_tool_calls) !== 0,
+      workspace_upload_limit_bytes:
+        resolvedRow.workspace_upload_limit_bytes === null || resolvedRow.workspace_upload_limit_bytes === undefined
+          ? null
+          : Number(resolvedRow.workspace_upload_limit_bytes),
+      created_at: Number(resolvedRow.created_at),
+      updated_at: Number(resolvedRow.updated_at),
     }
   }
 
-  async updateEnterprise(patch: Partial<Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>>): Promise<void> {
+  async updateEnterprise(
+    orgId: string,
+    patch: Partial<Omit<EnterpriseRecord, 'id' | 'created_at' | 'updated_at'>>,
+  ): Promise<void> {
     const entries = Object.entries(patch)
     if (entries.length === 0) return
+
+    const id = orgId.trim()
+    if (!id) throw new Error('Organization id is required for enterprise configuration')
+
+    // Lazily seed a tenant from the historical deployment-level row.  This is
+    // a non-destructive migration: existing installations keep their current
+    // appearance, while later writes are isolated to the active organization.
+    const ts = now()
+    await this.driver.run(`
+      INSERT INTO enterprises (
+        id, logo, app_name, top_name, about_name, app_company_name,
+        login_desp, client_cron_enabled, client_show_tool_calls,
+        workspace_upload_limit_bytes, created_at, updated_at
+      )
+      SELECT ?, logo, app_name, top_name, about_name, app_company_name,
+        login_desp, client_cron_enabled, client_show_tool_calls,
+        workspace_upload_limit_bytes, ?, ?
+      FROM enterprises
+      WHERE id = 'default'
+      ON CONFLICT(id) DO NOTHING
+    `, [id, ts, ts])
 
     const sets = entries.map(([key]) => `${key} = ?`).join(', ')
     // SQLite has no boolean type — coerce booleans to 0/1 so INTEGER columns
@@ -2253,13 +2417,11 @@ export class DirectConnectStore {
     const values = entries.map(([, value]) =>
       typeof value === 'boolean' ? (value ? 1 : 0) : value ?? null,
     )
-    const ts = now()
-
     await this.driver.run(`
       UPDATE enterprises
       SET ${sets}, updated_at = ?
-      WHERE id = 'default'
-    `, [...values, ts])
+      WHERE id = ?
+    `, [...values, ts, id])
   }
 
   // ==================== Channel Plugins ====================
@@ -2740,22 +2902,22 @@ export class DirectConnectStore {
   // ==================== Tenant Skills ====================
 
   async listTenantSkills(status?: string, orgId?: string): Promise<SqlRow[]> {
-    const conds: string[] = []
+    const conds: string[] = ["source_type = 'tenant'"]
     const params: unknown[] = []
     if (status) { conds.push('status = ?'); params.push(status) }
-    // Org isolation: a NULL org_id row is legacy/global and stays visible.
-    if (orgId) { conds.push('(org_id = ? OR org_id IS NULL)'); params.push(orgId) }
+    // Legacy rows without ownership are not implicitly public.
+    if (orgId) { conds.push('org_id = ?'); params.push(orgId) }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
     return this.driver.all<SqlRow>(`SELECT * FROM tenant_skills ${where} ORDER BY created_at DESC`, params as SqlParam[])
   }
 
-  async getTenantSkill(id: string): Promise<SqlRow | null> {
-    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE id = ?`, [id])) ?? null
+  async getTenantSkill(id: string, orgId?: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE id = ?${orgId ? " AND org_id = ? AND source_type = 'tenant'" : ''}`, orgId ? [id, orgId] : [id])) ?? null
   }
 
   async getTenantSkillByName(name: string, orgId?: string): Promise<SqlRow | null> {
     if (orgId) {
-      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE name = ? AND (org_id = ? OR org_id IS NULL)`, [name, orgId])) ?? null
+      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE name = ? AND org_id = ?`, [name, orgId])) ?? null
     }
     return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_skills WHERE name = ?`, [name])) ?? null
   }
@@ -2851,21 +3013,21 @@ export class DirectConnectStore {
   // ==================== Tenant Assistants ====================
 
   async listTenantAssistants(status?: string, orgId?: string): Promise<SqlRow[]> {
-    const conds: string[] = []
+    const conds: string[] = ["source_type = 'tenant'"]
     const params: unknown[] = []
     if (status) { conds.push('status = ?'); params.push(status) }
-    if (orgId) { conds.push('(org_id = ? OR org_id IS NULL)'); params.push(orgId) }
+    if (orgId) { conds.push('org_id = ?'); params.push(orgId) }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
     return this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`, params as SqlParam[])
   }
 
-  async getTenantAssistant(id: string): Promise<SqlRow | null> {
-    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?`, [id])) ?? null
+  async getTenantAssistant(id: string, orgId?: string): Promise<SqlRow | null> {
+    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?${orgId ? " AND org_id = ? AND source_type = 'tenant'" : ''}`, orgId ? [id, orgId] : [id])) ?? null
   }
 
   async getTenantAssistantByName(name: string, orgId?: string): Promise<SqlRow | null> {
     if (orgId) {
-      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ? AND (org_id = ? OR org_id IS NULL)`, [name, orgId])) ?? null
+      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ? AND org_id = ?`, [name, orgId])) ?? null
     }
     return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ?`, [name])) ?? null
   }
@@ -4684,6 +4846,7 @@ export async function openStoreAsync(config: ServerConfig): Promise<DirectConnec
 export function toSessionSummary(session: SessionRecord): SessionSummary {
   return {
     sessionId: session.sessionId,
+    taskId: session.taskId,
     transcriptSessionId: session.transcriptSessionId,
     workDir: session.cwd,
     userId: session.userId,
@@ -4693,9 +4856,11 @@ export function toSessionSummary(session: SessionRecord): SessionSummary {
     runtime: session.runtime,
     status: session.status,
     desiredState: session.desiredState,
+    currentAttemptId: session.currentAttemptId,
     assistantName: session.assistantName,
     source: session.source,
     channelChatId: session.channelChatId,
+    clientMetadata: session.clientMetadata,
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
     endedAt: session.endedAt,

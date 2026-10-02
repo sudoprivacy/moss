@@ -1,6 +1,7 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http'
 import { getRequestListener } from '@hono/node-server'
 import { createCompatibilityRouteMatcher } from './routeInventory.js'
+import { QMS_CLIENT_ROUTES } from './qmsRoutes.js'
 import {
   mapMossOperationsPath,
   MOSS_OPERATIONS_LEGACY_ROUTES,
@@ -36,11 +37,16 @@ export function createHostDispatch(options: HostDispatchOptions): RequestListene
     : null
   const isSudoworkRoute = createCompatibilityRouteMatcher(options.sudoworkRoutes ?? [])
   const isMossOperationsRoute = createCompatibilityRouteMatcher(MOSS_OPERATIONS_LEGACY_ROUTES)
+  const isQmsClientRoute = createCompatibilityRouteMatcher(QMS_CLIENT_ROUTES.map(([method, path]) => ({ method, path })))
   return (request, response) => {
     const hostname = canonicalHostname(request.headers.host)
     const url = new URL(request.url ?? '/', 'http://localhost')
     const pathname = url.pathname
     const mappedOperationsPath = mapMossOperationsPath(pathname)
+    if (mossOperationsHandler && isQmsClientRoute(request.method, pathname)) {
+      void mossOperationsHandler(request, response)
+      return
+    }
     if (
       mappedOperationsPath
       && mossOperationsHandler

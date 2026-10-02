@@ -1,3 +1,4 @@
+import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { execFile, spawn } from 'child_process'
 import { mkdir, readFile } from 'fs/promises'
 import { join, posix as posixPath } from 'path'
@@ -17,7 +18,13 @@ import {
   buildAvailableSkillSnapshot,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
+import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
+import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
+import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
+import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
+import { NexusSpawnHandle, type AcpChildProcessLike } from './nexusSpawnHandle.js'
 import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
+import { getWorkspaceAgentsMdPath } from '../sharedAgentMemory.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -91,6 +98,26 @@ async function readScodeSessionId(filePath: string): Promise<string | undefined>
   }
 }
 
+/** Deliver the workspace instructions across the control-plane/pod filesystem boundary. */
+export async function buildWorkspaceInstructionsSecret(workspace: string, isRequired = false): Promise<{
+  data: Record<string, string>
+  mounts: Array<{ key: string; mountPath: string }>
+}> {
+  const filePath = getWorkspaceAgentsMdPath(workspace)
+  try {
+    const body = await readFile(filePath, 'utf8')
+    return {
+      data: { 'AGENTS.md': body },
+      mounts: [{ key: 'AGENTS.md', mountPath: posixPath.join(workspace, 'AGENTS.md') }],
+    }
+  } catch (error) {
+    if (!isRequired && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { data: {}, mounts: [] }
+    }
+    throw new Error(`Unable to deliver assistant instructions from ${filePath}`, { cause: error })
+  }
+}
+
 /**
  * SessionBackend that runs each session's scode inside a gvisor-isolated
  * Kubernetes pod. Correct for the real multi-node topology: moss (control
@@ -143,7 +170,7 @@ export class K8sBackend implements SessionBackend {
     // Read the assistant config (same as the docker/scode backend).
     const assistantConfig = await getAssistantRuntimeConfig(options.assistantName)
     const enabledSkills = options.assistantName
-      ? assistantConfig.enabledSkills
+      ? [...new Set([...assistantConfig.enabledSkills, ...(options.enabledSkillNames ?? [])])]
       : (options.enabledSkillNames ?? assistantConfig.enabledSkills)
 
     // memory mode: assistant memory_mode wins, else 'session'
@@ -172,6 +199,7 @@ export class K8sBackend implements SessionBackend {
       workspaceSkillLinks = await syncWorkspaceSkills(safeCwd, enabledSkills, options.visibilityFilter)
       process.stderr.write(`[K8sBackend] Enumerated ${workspaceSkillLinks.length} skills for session ${options.sessionId}\n`)
     } catch (err) {
+      if (getOrganizationResourceScope()) throw err
       process.stderr.write(`[K8sBackend] Workspace skills sync warning: ${err}\n`)
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)
@@ -190,8 +218,11 @@ export class K8sBackend implements SessionBackend {
     // Keys map 1:1 to files mounted read-only at the paths scode reads. This is
     // the ONLY channel that carries the sudorouter proxy auth token to the
     // (remote) pod — hence a Secret, not a ConfigMap or hostPath.
-    const secretData: Record<string, string> = {}
-    const secretMounts: Array<{ key: string; mountPath: string }> = []
+    // RuntimeService writes AGENTS.md on the control plane. The pod's emptyDir
+    // does not contain that file until we explicitly deliver it, just like skills.
+    const instructions = await buildWorkspaceInstructionsSecret(safeCwd, Boolean(options.assistantName))
+    const secretData: Record<string, string> = { ...instructions.data }
+    const secretMounts = [...instructions.mounts]
 
     // sudocode.json — preloaded auth + models, exactly like docker backend.
     try {
@@ -200,6 +231,9 @@ export class K8sBackend implements SessionBackend {
       const allModels = ensureOpenAIModelConfig(
         await buildAllModelsConfig(baseUrl),
         env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview',
+        env.MOSS_MODEL_PROVIDER_PROTOCOL === 'openai-responses' || env.MOSS_MODEL_PROVIDER_PROTOCOL === 'anthropic-messages'
+          ? env.MOSS_MODEL_PROVIDER_PROTOCOL
+          : 'openai-completions',
       )
       const scodeConfig = {
         auth_modes: { proxy: { 'moss-proxy': { baseUrl, apiKey } } },
@@ -259,6 +293,12 @@ export class K8sBackend implements SessionBackend {
     podEnv.HOME = configDir
     podEnv.MOSS_HOME = MOSS_HOME
     podEnv.SUDO_CODE_CONFIG_HOME = scodeHomeDir
+    // moss authors this config fresh for every session and mounts
+    // sudocode.json / settings.json into it as read-only Secret files, so
+    // scode's config migration can only fail there: rewriting a Secret mount
+    // in place returns EBUSY, and every k8s session logs
+    // "left the config alone (Resource busy (os error 16))" on startup.
+    podEnv.SCODE_SKIP_CONFIG_MIGRATION = '1'
     podEnv.CLAUDE_CONFIG_DIR = configDir
     podEnv.CLAUDE_CODE_REMOTE_MEMORY_DIR = configDir
     podEnv.MOSS_SESSION_ID = options.sessionId
@@ -354,7 +394,18 @@ export class K8sBackend implements SessionBackend {
       '--model', model,
     ]
 
-    const child = spawn('kubectl', execArgs, {
+    // With MOSS_SPAWN_VIA_NEXUS on, nexus runs that same kubectl and owns the
+    // process record; otherwise this process does, exactly as before.
+    const viaNexus = await maybeStartViaNexus({
+      execArgs,
+      env,
+      cwd: safeCwd,
+      agentId: options.assistantName || 'scode-standard',
+      model,
+      ownerId: options.userId,
+    })
+
+    const child: AcpChildProcessLike = viaNexus ?? spawn('kubectl', execArgs, {
       cwd: safeCwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -384,6 +435,7 @@ export class K8sBackend implements SessionBackend {
       sessionId: options.sessionId,
       cwd: safeCwd,
       model,
+      modelProviderId: env.MOSS_MODEL_PROVIDER_ID,
       transcriptPath: options.transcriptPath,
       resumeSessionId,
       scodeSessionIdPath,
@@ -424,6 +476,106 @@ export class K8sBackend implements SessionBackend {
 
     return handle
   }
+}
+
+/**
+ * Nexus owns the agent process by default; `MOSS_SPAWN_VIA_NEXUS=0|false|off`
+ * is the escape hatch back to spawning it here.
+ *
+ * Default-on so a deployment cannot quietly fall back to the direct launch and
+ * end up with agents that exist nowhere outside this process. A deployment that
+ * has no external nexus is still handled — {@link maybeStartViaNexus} returns
+ * null for embedded mode and the local path runs unchanged.
+ */
+function isSpawnViaNexusEnabled(): boolean {
+  const raw = process.env.MOSS_SPAWN_VIA_NEXUS
+  if (raw === undefined) return true
+  const value = raw.trim().toLowerCase()
+  return !(value === '0' || value === 'false' || value === 'off' || value === '')
+}
+
+/** A SpawnSpec env is a string map; ProcessEnv allows undefined values. */
+function toStringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === 'string') out[key] = value
+  }
+  return out
+}
+
+/**
+ * Hand the launch to nexus rather than running it here.
+ *
+ * The pod and its Secret are still created by moss above — nexus executes a
+ * subprocess and has no Kubernetes concept of its own. What moves is only the
+ * final step: `kubectl exec` runs on the nexus host, so the agent gets a real
+ * `/proc/{pid}` record, a mailbox and a kernel-owned identity, while scode
+ * itself keeps running inside the gvisor pod.
+ *
+ * Returns null whenever the flag is off or nexus is not in external mode, so
+ * the local-spawn path stays exactly what it was.
+ */
+async function maybeStartViaNexus(input: {
+  execArgs: string[]
+  env: NodeJS.ProcessEnv
+  cwd: string
+  agentId: string
+  model: string
+  ownerId?: string
+}): Promise<NexusSpawnHandle | null> {
+  if (!isSpawnViaNexusEnabled()) return null
+
+  const config = resolveNexusConfigFromEnv()
+  if (config.mode !== 'external') {
+    process.stderr.write(
+      '[K8sBackend] MOSS_SPAWN_VIA_NEXUS is set but nexus mode is embedded — spawning locally\n',
+    )
+    return null
+  }
+
+  const asMoss = () =>
+    config.tls
+      ? NexusVfsClient.withMtls(config.endpoint, config.tls)
+      : new NexusVfsClient(config.endpoint)
+
+  // Prove who the session is for instead of stating it. The call that plants
+  // the session is made as a credential minted for this user and carries no
+  // `owner_id`, so nexus reads the owner off the certificate. `null` means
+  // there was nothing to mint with, and then the body still stands — which is
+  // what lets this take effect per credential instead of as a flag day.
+  const identity = await mintSessionIdentity(config.endpoint, config.tls, input.ownerId)
+  const starter = identity ? NexusVfsClient.withMtls(config.endpoint, identity.tls) : asMoss()
+
+  let sessionId: string
+  let osPid: number | null
+  try {
+    ;({ sessionId, osPid } = await new ManagedAgentClient(starter, config.authToken).startSession({
+      agentId: input.agentId,
+      model: input.model,
+      ...ownerField(identity, input.ownerId),
+      spawnSpec: {
+        cmd: 'kubectl',
+        args: input.execArgs,
+        env: toStringEnv(input.env),
+        cwd: input.cwd,
+      },
+    }))
+  } catch (error) {
+    starter.close()
+    throw error
+  }
+  // The credential's job ended with that call; the owner is in the session's
+  // process record now. The byte tunnel goes back to moss's own identity,
+  // which is what it has always used, so the credential can stay short-lived
+  // instead of having to outlive the longest session anyone might run.
+  if (identity) starter.close()
+
+  process.stderr.write(
+    `[K8sBackend] nexus start_session ok (session=${sessionId}, os_pid=${osPid ?? 'n/a'}` +
+      `${identity ? `, owner proven by ${identity.subjectId}` : ''})\n`,
+  )
+  const agent = new ManagedAgentClient(identity ? asMoss() : starter, config.authToken)
+  return new NexusSpawnHandle(agent, sessionId, osPid)
 }
 
 export function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] {

@@ -3,9 +3,11 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { migrationCommandContext, onlineCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { CatalogRepository } from '../catalog/catalogRepository.js'
-import { DifyRepository } from '../dify/difyRepository.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
+import {
+  createCatalogTestRepository,
+  createDifyTestRepository,
+  createIdentityTestRepository,
+} from '../testing/compatibilityRepositories.js'
 import { P4DifyMigrationBlockedError, P4DifyMigrationService } from './p4DifyMigrationService.js'
 import type { SudoworkP4Snapshot } from './sudoworkP4SourceReader.js'
 
@@ -48,35 +50,17 @@ async function setup(options: {
     departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
     createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
   })
-  db.exec(`
-    CREATE TABLE tenant_assistants (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      default_init_prompt TEXT, prompts_i18n TEXT, categories TEXT, avatar TEXT, skills TEXT,
-      prompt_file TEXT, sort_order INTEGER DEFAULT 0, version TEXT, author_id TEXT NOT NULL,
-      author_name TEXT, status TEXT DEFAULT 'pending', source_url TEXT, checksum TEXT, file_path TEXT,
-      enabled_skills TEXT, publish_note TEXT, review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE tenant_skills (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT,
-      version TEXT, author_id TEXT NOT NULL, author_name TEXT, status TEXT DEFAULT 'pending',
-      source_url TEXT, checksum TEXT, file_path TEXT, publish_note TEXT,
-      review_note TEXT, reviewed_by TEXT, reviewed_at INTEGER,
-      enabled INTEGER DEFAULT 1, visible_to TEXT, org_id TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-  `)
-  const identities = new IdentityRepository(db)
-  identities.putOrganizationProfile({ orgId: 'org-a', code: 'ENT-A', loginMethod: 'password', localEnabled: true, cloudEnabled: true })
-  identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a' })
-  identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-17', orgId: 'org-a' })
-  const catalog = new CatalogRepository(db)
-  catalog.createAgent({ id: 'agent-app', orgId: 'org-a', name: 'App', authorId: 'user-17', status: 'approved' })
-  catalog.createAgent({ id: 'agent-rag', orgId: 'org-a', name: 'Rag', authorId: 'user-17', status: 'approved' })
-  const dify = new DifyRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
+  await identities.putOrganizationProfile({ orgId: 'org-a', code: 'ENT-A', loginMethod: 'password', localEnabled: true, cloudEnabled: true })
+  await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a' })
+  await identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-17', orgId: 'org-a' })
+  const catalog = createCatalogTestRepository(db, auth.driver)
+  await catalog.createAgent({ id: 'agent-app', orgId: 'org-a', name: 'App', authorId: 'user-17', status: 'approved' })
+  await catalog.createAgent({ id: 'agent-rag', orgId: 'org-a', name: 'Rag', authorId: 'user-17', status: 'approved' })
+  const dify = createDifyTestRepository(db, auth.driver)
   const secretWrites: Array<{ namespace: string; key: string; value: string }> = []
   const service = new P4DifyMigrationService({
-    db, auth, identities, catalog, dify,
+    db: auth.driver, auth, identities, catalog, dify,
     source: { readSnapshot: () => options.source ?? snapshot() },
     secrets: {
       async putSecret(namespace: string, key: string, value: string) {
@@ -95,28 +79,28 @@ async function setup(options: {
 void describe('P4 Dify 迁移', () => {
   void test('统一迁移连接、App、Dataset、ACL 和元数据且不调用 Dify', async () => {
     const { db, identities, catalog, dify, service, secretWrites } = await setup()
-    const plan = service.plan()
+    const plan = await service.plan()
     assert.equal(plan.status, 'ready')
     const first = await service.execute(plan, migrationCommandContext('p4-run', 'p4:execute'))
-    const second = await service.execute(service.plan(), migrationCommandContext('p4-rerun', 'p4:execute:rerun'))
+    const second = await service.execute(await service.plan(), migrationCommandContext('p4-rerun', 'p4:execute:rerun'))
 
     assert.equal(first.connections, 1)
     assert.equal(first.apps, 1)
     assert.equal(first.datasets, 1)
     assert.equal(first.deliverableExternalOutboxCount, 0)
     assert.equal(second.apps, 1)
-    assert.deepEqual(identities.listIntegrationConnections('org-a', 'dify')[0]?.secretRef,
+    assert.deepEqual((await identities.listIntegrationConnections('org-a', 'dify'))[0]?.secretRef,
       'nexus://org:org-a:dify/service-api-key')
-    assert.equal(JSON.stringify(identities.listIntegrationConnections('org-a', 'dify')).includes('service-secret'), false)
-    const app = catalog.getAgent('agent-app', 'org-a')
+    assert.equal(JSON.stringify(await identities.listIntegrationConnections('org-a', 'dify')).includes('service-secret'), false)
+    const app = await catalog.getAgent('agent-app', 'org-a')
     assert.deepEqual(app?.visibleTo, { user_ids: ['user-17'], role_ids: null, department_ids: null })
     assert.equal(app?.name, '历史助手')
     assert.equal(app?.providerBinding?.appSecretRef, 'nexus://org:org-a:dify/apps/app-1-api-key')
-    assert.deepEqual(catalog.getAgent('agent-rag', 'org-a')?.providerBinding?.datasetIds, ['dataset-1'])
-    assert.equal(dify.getResourceByExternalId('org-a', 'dify:org-a', 'dataset', 'dataset-1')?.externalId, 'dataset-1')
+    assert.deepEqual((await catalog.getAgent('agent-rag', 'org-a'))?.providerBinding?.datasetIds, ['dataset-1'])
+    assert.equal((await dify.getResourceByExternalId('org-a', 'dify:org-a', 'dataset', 'dataset-1'))?.externalId, 'dataset-1')
     assert(secretWrites.some(item => item.value === 'service-secret'))
     assert(secretWrites.some(item => item.value === 'app-secret'))
-    assert.equal(dify.getOperationByIdempotencyKey('p4:execute'), null)
+    assert.equal(await dify.getOperationByIdempotencyKey('p4:execute'), null)
     assert.equal((await service.verify()).status, 'matched')
     db.close()
   })
@@ -124,7 +108,7 @@ void describe('P4 Dify 迁移', () => {
   void test('缺失企业或 Agent 映射时预检阻断且不写 Nexus', async () => {
     const { db, identities, service, secretWrites } = await setup()
     db.prepare("DELETE FROM resource_numeric_aliases WHERE namespace = 'enterprise'").run()
-    const plan = service.plan()
+    const plan = await service.plan()
     assert.equal(plan.status, 'blocked')
     assert(plan.issues.some(issue => issue.code === 'ORGANIZATION_MAPPING_MISSING'))
     await assert.rejects(
@@ -132,27 +116,27 @@ void describe('P4 Dify 迁移', () => {
       P4DifyMigrationBlockedError,
     )
     assert.equal(secretWrites.length, 0)
-    identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a' })
+    await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-a', orgId: 'org-a' })
     db.prepare("DELETE FROM tenant_assistants WHERE id = 'agent-app'").run()
-    assert(service.plan().issues.some(issue => issue.code === 'AGENT_MAPPING_MISSING'))
+    assert((await service.plan()).issues.some(issue => issue.code === 'AGENT_MAPPING_MISSING'))
     db.close()
   })
 
   void test('拒绝在线上下文执行迁移', async () => {
     const { db, service } = await setup()
-    await assert.rejects(service.execute(service.plan(), onlineCommandContext('bad')), /迁移上下文/)
+    await assert.rejects(service.execute(await service.plan(), onlineCommandContext('bad')), /迁移上下文/)
     db.close()
   })
 
   void test('预检阻断已被其他 Agent 占用的 Dify App 外部别名', async () => {
     const { db, catalog, service } = await setup()
-    catalog.createAgent({ id: 'agent-other', orgId: 'org-a', name: 'Other', authorId: 'user-17', status: 'approved' })
-    catalog.bindExternalIdentity({
+    await catalog.createAgent({ id: 'agent-other', orgId: 'org-a', name: 'Other', authorId: 'user-17', status: 'approved' })
+    await catalog.bindExternalIdentity({
       id: 'alias-conflict', orgId: 'org-a', resourceType: 'agent', resourceId: 'agent-other',
       providerType: 'dify', providerId: 'dify:org-a', externalId: 'app-1',
     })
 
-    const plan = service.plan()
+    const plan = await service.plan()
     assert.equal(plan.status, 'blocked')
     assert(plan.issues.some(issue => issue.code === 'TARGET_CONFLICT' && issue.source === 'app:1'))
     db.close()
@@ -163,7 +147,7 @@ void describe('P4 Dify 迁移', () => {
     source.apps[0] = { ...source.apps[0]!, appApiKey: null }
     const { db, service } = await setup({ source })
 
-    const plan = service.plan()
+    const plan = await service.plan()
     assert.equal(plan.status, 'blocked')
     assert(plan.issues.some(issue => issue.code === 'CREDENTIAL_MISSING' && issue.source === 'app:1'))
     db.close()
@@ -179,20 +163,20 @@ void describe('P4 Dify 迁移', () => {
     })
 
     await assert.rejects(
-      service.execute(service.plan(), migrationCommandContext('p4-nexus-fail', 'p4:nexus-fail')),
+      service.execute(await service.plan(), migrationCommandContext('p4-nexus-fail', 'p4:nexus-fail')),
       /nexus unavailable/,
     )
-    assert.equal(identities.listIntegrationConnections('org-a', 'dify').length, 0)
-    assert.equal(catalog.getAgent('agent-app', 'org-a')?.providerType, 'moss_runtime')
-    assert.equal(dify.listResources('org-a', 'dataset').length, 0)
+    assert.equal((await identities.listIntegrationConnections('org-a', 'dify')).length, 0)
+    assert.equal((await catalog.getAgent('agent-app', 'org-a'))?.providerType, 'moss_runtime')
+    assert.equal((await dify.listResources('org-a', 'dataset')).length, 0)
     db.close()
   })
 
   void test('校验覆盖 Nexus 密钥、ACL 和元数据', async () => {
     const { db, catalog, service, secretWrites } = await setup()
-    await service.execute(service.plan(), migrationCommandContext('p4-verify', 'p4:verify'))
+    await service.execute(await service.plan(), migrationCommandContext('p4-verify', 'p4:verify'))
     secretWrites.splice(secretWrites.findIndex(item => item.key === 'service-api-key'), 1)
-    catalog.updateAgentConfiguration('agent-app', 'org-a', {
+    await catalog.updateAgentConfiguration('agent-app', 'org-a', {
       name: '被篡改', visibleTo: null,
     })
 

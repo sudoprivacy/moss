@@ -3,9 +3,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { onlineCommandContext } from '../application/commandContext.js'
 import { AuthCenterDb } from '../authCenter/db.js'
-import { IdentityRepository } from '../identity/identityRepository.js'
-import { BillingRepository } from './billingRepository.js'
-import { ensureBillingSchema } from './billingSchema.js'
+import type { DbDriver } from '../db/driver.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
+import type { BillingRepository } from './billingRepository.js'
 import { RechargeService } from './rechargeService.js'
 import { BillingDomainError } from './types.js'
 import type { VerifiedPaymentEvent } from './fuiouAdapter.js'
@@ -28,6 +28,7 @@ class CallbackSudorouter implements SudorouterPort {
 
 async function setup(): Promise<{
   db: DatabaseSync
+  driver: DbDriver
   repository: BillingRepository
   service: RechargeService
   setNow(value: number): void
@@ -35,7 +36,7 @@ async function setup(): Promise<{
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
   await auth.createOrganization('org1', 'Org 1', 1)
   for (const id of ['u1', 'u2']) {
     await auth.createUser({
@@ -43,12 +44,11 @@ async function setup(): Promise<{
       departmentId: null, role: 'user', status: 'active', localAuth: true, tokenLimit: null,
       createdAt: 1, passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
     })
-    identities.createWallet('user', id, 0)
+    await identities.createWallet('user', id, 0)
   }
-  ensureBillingSchema(db)
-  const repository = new BillingRepository(db)
+  const repository = createBillingTestRepository(db, auth.driver)
   let now = Date.parse('2026-09-07T10:00:00.000Z')
-  const service = new RechargeService(db, repository, {
+  const service = new RechargeService(auth.driver, repository, {
     clock: () => now,
     idGenerator: (() => {
       let sequence = 0
@@ -57,7 +57,7 @@ async function setup(): Promise<{
     suffixGenerator: () => 'ABC123',
     numericAliasAllocator: (orderId, orgId) => identities.allocateNumericAlias('billing_order', orderId, orgId),
   })
-  return { db, repository, service, setNow(value) { now = value } }
+  return { db, driver: auth.driver, repository, service, setNow(value) { now = value } }
 }
 
 void describe('RechargeService 套餐与订单', () => {
@@ -80,8 +80,8 @@ void describe('RechargeService 套餐与订单', () => {
       amountUsd: 5, paymentMethod: 'ALIPAY' as const,
     }
     const context = onlineCommandContext('create-order-1')
-    const first = service.createOrder(input, context)
-    const replay = service.createOrder(input, context)
+    const first = await service.createOrder(input, context)
+    const replay = await service.createOrder(input, context)
 
     assert.deepEqual(replay, first)
     assert.equal(first.orderNo, 'USR17NO1788775200000ABC123')
@@ -90,8 +90,8 @@ void describe('RechargeService 套餐与订单', () => {
     assert.equal(first.pointsUnits, 5500)
     assert.equal(first.bonusUnits, 500)
     assert.equal(first.quotaUnits, 2_750_000)
-    assert.equal(repository.countOrders(), 1)
-    assert.equal(repository.getOrderByOrderNo(first.orderNo)?.legacyId, 2_000_000_000)
+    assert.equal(await repository.countOrders(), 1)
+    assert.equal((await repository.getOrderByOrderNo(first.orderNo))?.legacyId, 2_000_000_000)
     db.close()
   })
 
@@ -102,9 +102,9 @@ void describe('RechargeService 套餐与订单', () => {
       userId: 'u1', legacyUserId: 17, orgId: 'org1', userPhone: null,
       paymentMethod: 'WECHAT' as const,
     }
-    service.createOrder({ ...base, amountUsd: 1 }, context)
-    assert.throws(
-      () => service.createOrder({ ...base, amountUsd: 10 }, context),
+    await service.createOrder({ ...base, amountUsd: 1 }, context)
+    await assert.rejects(
+      service.createOrder({ ...base, amountUsd: 10 }, context),
       (error: unknown) => error instanceof BillingDomainError && error.code === 'IDEMPOTENCY_CONFLICT',
     )
     db.close()
@@ -112,29 +112,29 @@ void describe('RechargeService 套餐与订单', () => {
 
   void test('过期订单转为取消且其他用户不能准备支付', async () => {
     const { db, repository, service, setNow } = await setup()
-    const order = service.createOrder({
+    const order = await service.createOrder({
       userId: 'u1', legacyUserId: 17, orgId: 'org1', userPhone: null,
       amountUsd: 1, paymentMethod: 'ALIPAY',
     }, onlineCommandContext('create-expiring'))
 
-    assert.throws(
-      () => service.preparePayment(order.orderNo, 'u2', onlineCommandContext('pay-other')),
+    await assert.rejects(
+      service.preparePayment(order.orderNo, 'u2', onlineCommandContext('pay-other')),
       (error: unknown) => error instanceof BillingDomainError && error.code === 'ORDER_NOT_FOUND',
     )
     setNow(order.expiredAt + 1)
-    assert.throws(
-      () => service.preparePayment(order.orderNo, 'u1', onlineCommandContext('pay-expired')),
+    await assert.rejects(
+      service.preparePayment(order.orderNo, 'u1', onlineCommandContext('pay-expired')),
       (error: unknown) => error instanceof BillingDomainError && error.code === 'ORDER_EXPIRED',
     )
-    assert.equal(repository.getOrderByOrderNo(order.orderNo)?.status, 'CANCELLED')
-    assert.equal(repository.countPaymentAttempts(), 0)
+    assert.equal((await repository.getOrderByOrderNo(order.orderNo))?.status, 'CANCELLED')
+    assert.equal(await repository.countPaymentAttempts(), 0)
     db.close()
   })
 
   void test('合法支付回调重复处理只入账一次，金额不符零写入', async () => {
-    const { db, repository, service } = await setup()
-    const wallet = new WalletService(db, repository)
-    const order = service.createOrder({
+    const { db, driver, repository, service } = await setup()
+    const wallet = new WalletService(driver, repository)
+    const order = await service.createOrder({
       userId: 'u1', legacyUserId: 17, orgId: 'org1', userPhone: null,
       amountUsd: 1, paymentMethod: 'ALIPAY',
     }, onlineCommandContext('create-callback-order'))
@@ -144,36 +144,36 @@ void describe('RechargeService 套餐与订单', () => {
       raw: { order_id: order.orderNo, order_st: '1', order_amt: '730', order_date: '20260907' },
     }
 
-    assert.throws(() => service.acceptVerifiedCallback({ ...event, providerEventId: 'fuiou:bad', amountCents: 731 }, wallet),
+    await assert.rejects(service.acceptVerifiedCallback({ ...event, providerEventId: 'fuiou:bad', amountCents: 731 }, wallet),
       (error: unknown) => error instanceof BillingDomainError && error.code === 'PAYMENT_AMOUNT_MISMATCH')
-    assert.equal(repository.countProviderEvents(), 0)
+    assert.equal(await repository.countProviderEvents(), 0)
 
     for (let index = 0; index < 10; index += 1) {
-      const result = service.acceptVerifiedCallback(index === 0 ? event : {
+      const result = await service.acceptVerifiedCallback(index === 0 ? event : {
         ...event,
         raw: { order_date: '20260907', order_amt: '730', order_st: '1', order_id: order.orderNo },
       }, wallet)
       assert.deepEqual(result, { success: true, orderNo: order.orderNo, alreadyProcessed: index > 0 })
     }
-    assert.equal(repository.countProviderEvents(), 1)
-    assert.equal(repository.countLedgerEntries(`wallet:payment:${order.orderNo}`), 1)
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 1000)
-    assert.equal(repository.getOrderByOrderNo(order.orderNo)?.status, 'SUCCESS')
-    assert.equal(repository.getOrderByOrderNo(order.orderNo)?.callbackAmountCents, 730)
-    assert.equal(repository.listRechargeActivities({ activityType: 'CLIENT', limit: 20, offset: 0 }).total, 1)
+    assert.equal(await repository.countProviderEvents(), 1)
+    assert.equal(await repository.countLedgerEntries(`wallet:payment:${order.orderNo}`), 1)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 1000)
+    assert.equal((await repository.getOrderByOrderNo(order.orderNo))?.status, 'SUCCESS')
+    assert.equal((await repository.getOrderByOrderNo(order.orderNo))?.callbackAmountCents, 730)
+    assert.equal((await repository.listRechargeActivities({ activityType: 'CLIENT', limit: 20, offset: 0 })).total, 1)
     db.close()
   })
 
   void test('生产回调通过统一 Saga 同时发放钱包积分和 Sudorouter 额度', async () => {
-    const { db, repository, service } = await setup()
-    const wallet = new WalletService(db, repository)
+    const { db, driver, repository, service } = await setup()
+    const wallet = new WalletService(driver, repository)
     const router = new CallbackSudorouter()
-    const coordinator = new BillingCoordinator(db, repository, wallet, router)
-    repository.upsertExternalAccount({
+    const coordinator = new BillingCoordinator(driver, repository, wallet, router)
+    await repository.upsertExternalAccount({
       provider: 'sudorouter', ownerType: 'user', ownerId: 'u1', externalAccountId: '91',
       quotaUnits: 0, usedQuotaUnits: 0, updatedAt: 1,
     })
-    const order = service.createOrder({
+    const order = await service.createOrder({
       userId: 'u1', legacyUserId: 17, orgId: 'org1', userPhone: null,
       amountUsd: 1, paymentMethod: 'ALIPAY',
     }, onlineCommandContext('create-saga-callback-order'))
@@ -188,12 +188,12 @@ void describe('RechargeService 套餐与订单', () => {
 
     assert.deepEqual(first, { success: true, orderNo: order.orderNo, alreadyProcessed: false })
     assert.deepEqual(repeated, { success: true, orderNo: order.orderNo, alreadyProcessed: true })
-    assert.equal(repository.getWallet('user', 'u1')?.balanceUnits, 1000)
+    assert.equal((await repository.getWallet('user', 'u1'))?.balanceUnits, 1000)
     assert.equal(router.quota, 500_000)
     assert.equal(router.calls, 1)
-    assert.equal(repository.getOrderByOrderNo(order.orderNo)?.status, 'SUCCESS')
-    assert.equal(repository.countProviderEvents(), 1)
-    assert.equal(repository.listRechargeActivities({ activityType: 'CLIENT', limit: 20, offset: 0 }).total, 1)
+    assert.equal((await repository.getOrderByOrderNo(order.orderNo))?.status, 'SUCCESS')
+    assert.equal(await repository.countProviderEvents(), 1)
+    assert.equal((await repository.listRechargeActivities({ activityType: 'CLIENT', limit: 20, offset: 0 })).total, 1)
     db.close()
   })
 })

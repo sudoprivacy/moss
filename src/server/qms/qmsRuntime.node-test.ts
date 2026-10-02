@@ -1,110 +1,75 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-
-import type { QmsRuntimeConfig } from './config.js'
-import type { QmsSqlPort } from './qmsSchema.js'
+import { resolveQmsConfig } from './config.js'
+import type { DbDriver } from '../db/driver.js'
 import { PostgresSourceMapRepository, startQmsRuntime } from './qmsRuntime.js'
 
-function config(overrides: Partial<QmsRuntimeConfig['secrets']> = {}): QmsRuntimeConfig {
+function setup() {
+  const statements: string[] = []
+  let closes = 0
+  let fail = false
+  const driver = {
+    kind: 'postgres',
+    get: async () => ({ main_schema: 'public', has_schema: false, can_use_schema: false, has_prefixed_tables: false, can_create_schema: true }),
+    exec: async (sql: string) => { statements.push(sql); if (fail) throw new Error('postgres unavailable') },
+    all: async (sql: string, params: unknown[]) => {
+      statements.push(sql)
+      if (fail) throw new Error('postgres unavailable')
+      return sql.includes('INSERT INTO "moss_qms"."qms_ingest_receipts"') ? [{ ingest_id: params[0] }] : []
+    },
+    transaction: async (operation: () => Promise<unknown>) => operation(),
+    tryRunExclusive: async (_key: string, operation: () => Promise<unknown>) => operation(),
+    close: async () => { closes++ },
+  } as unknown as DbDriver
+  const config = resolveQmsConfig({ enabled: true, queueFlushIntervalMs: 10000, queueDrainTimeoutMs: 10, queueRetryIntervalMs: 1 }, { QMS_API_KEY: 'secret' })
   return {
-    enabled: true,
-    apiKeyHeader: 'X-QMS-Key',
-    queue: { flushIntervalMs: 10_000, batchSize: 20, visibilityTimeoutMs: 60_000 },
-    retention: { perfDays: 90, conversationDays: 180, crashDays: 90, aggregateDays: 365 },
-    encryptionRequired: false,
-    secrets: { postgresUrl: 'postgres://user:pass@db/qms', redisUrl: 'redis://cache', apiKey: 'secret', ...overrides },
+    statements, closes: () => closes, fail: () => { fail = true },
+    options: { config, driver, ownerId: 'instance-1', organizations: { getCode: async () => 'tenant-a', hasCode: async () => true }, secrets: { get: () => undefined, put: async () => {} } },
   }
 }
 
-class FakeStore {
-  starts = 0
-  stops = 0
-  async start() { this.starts += 1; return { timescaleAvailable: false, continuousAggregates: false } }
-  async stop() { this.stops += 1 }
-  async execute(sql: string): Promise<readonly Record<string, unknown>[]> {
-    if (sql.includes('continuous_aggregates')) return []
-    return []
-  }
-  async transaction<T>(operation: (client: QmsSqlPort) => Promise<T>) { return operation(this) }
-}
-
-class FakeRedis {
-  connects = 0
-  pings = 0
-  quits = 0
-  failPing = false
-  async connect() { this.connects += 1 }
-  async ping() { this.pings += 1; if (this.failPing) throw new Error('redis unavailable'); return 'PONG' }
-  async quit() { this.quits += 1; return 'OK' }
-  async eval() { return [] }
-  async llen() { return 0 }
-  async hlen() { return 0 }
-  async rpush() { return 1 }
-}
-
-void describe('QMS runtime lifecycle', () => {
-  void it('prefers tenant source maps and falls back to migrated global source maps', async () => {
+void describe('QMS shared-store runtime lifecycle', () => {
+  void it('prefers tenant source maps', async () => {
     const statements: string[] = []
-    const repository = new PostgresSourceMapRepository({
-      execute: async sql => { statements.push(sql); return [{ map_content: '{}' }] },
-    })
-
-    assert.equal(await repository.find('ENT-A', '1.0.0', 'darwin', 'main.js'), '{}')
-    assert.match(statements[0]!, /tenant_id = \$1 OR tenant_id IS NULL/)
+    const repository = new PostgresSourceMapRepository({ execute: async sql => { statements.push(sql); return [{ map_content: '{}' }] } })
+    assert.equal(await repository.find('ENT-A', '1', 'darwin', 'main.js'), '{}')
     assert.match(statements[0]!, /ORDER BY tenant_id NULLS LAST/)
   })
 
-  void it('does not create external resources while QMS is disabled', async () => {
-    let created = false
-    const result = await startQmsRuntime({
-      config: { ...config(), enabled: false }, ownerId: 'instance-1',
-      organizations: { getCode: () => null, hasCode: () => false },
-      secrets: { get: () => undefined, put: async () => undefined },
-      dependencies: {
-        createStore: () => { created = true; return new FakeStore() },
-        createRedis: () => { created = true; return new FakeRedis() },
-      },
-    })
-    assert.equal(result, undefined)
-    assert.equal(created, false)
+  void it('does not use storage while disabled', async () => {
+    const value = setup()
+    const runtime = await startQmsRuntime({ ...value.options, config: { ...value.options.config, enabled: false } })
+    assert.equal(runtime, undefined)
+    assert.equal(value.statements.length, 0)
   })
 
-  void it('starts one unified service graph and stops external resources idempotently', async () => {
-    const store = new FakeStore()
-    const redis = new FakeRedis()
-    const runtime = await startQmsRuntime({
-      config: config(), ownerId: 'instance-1',
-      organizations: { getCode: orgId => orgId === 'org-a' ? 'tenant-a' : null, hasCode: code => code === 'tenant-a' },
-      secrets: { get: () => undefined, put: async () => undefined },
-      dependencies: { createStore: () => store, createRedis: () => redis },
-    })
-
-    assert.ok(runtime)
-    assert.equal(store.starts, 1)
-    assert.equal(redis.connects, 1)
-    assert.equal(redis.pings, 1)
-    assert.equal(runtime.apiKeyHeader, 'X-QMS-Key')
-    assert.equal(runtime.operations.supports('GET /api/v1/qms/system/health'), true)
-
-    await runtime.stop()
-    await runtime.stop()
-    assert.equal(redis.quits, 1)
-    assert.equal(store.stops, 1)
+  void it('flushes volatile telemetry on shutdown and never closes the borrowed Moss driver', async () => {
+    const value = setup()
+    const runtime = await startQmsRuntime(value.options)
+    assert(runtime)
+    await runtime.operations.execute({ key: 'POST /api/v1/telemetry/batch', params: {}, query: {}, body: { events: [{ id: 'event', type: 'perf', timestamp: 1, version: '1', platform: 'darwin', tenant_id: 'tenant-a', data: { metric: 'startup', value_ms: 1 } }] } })
+    assert.equal(value.statements.some(sql => sql.includes('INSERT INTO "moss_qms"."telemetry_perf_raw"')), false)
+    await Promise.all([runtime.stop(), runtime.stop()])
+    assert.equal(value.statements.filter(sql => sql.includes('INSERT INTO "moss_qms"."telemetry_perf_raw"')).length, 1)
+    assert.equal(value.closes(), 0)
   })
 
-  void it('closes PostgreSQL and Redis when startup fails after connecting', async () => {
-    const store = new FakeStore()
-    const redis = new FakeRedis()
-    redis.failPing = true
+  void it('does not close shared storage if schema initialization fails', async () => {
+    const value = setup()
+    value.fail()
+    await assert.rejects(startQmsRuntime(value.options), /postgres unavailable/)
+    assert.equal(value.closes(), 0)
+  })
 
-    await assert.rejects(() => startQmsRuntime({
-      config: config(), ownerId: 'instance-1',
-      organizations: { getCode: () => null, hasCode: () => false },
-      secrets: { get: () => undefined, put: async () => undefined },
-      dependencies: { createStore: () => store, createRedis: () => redis },
-    }), /redis unavailable/)
-
-    assert.equal(redis.quits, 1)
-    assert.equal(store.stops, 1)
+  void it('reports unsaved memory events on drain timeout while preserving shared storage ownership', async () => {
+    const value = setup()
+    const warnings: string[] = []
+    const runtime = await startQmsRuntime({ ...value.options, warn: message => warnings.push(message) })
+    assert(runtime)
+    await runtime.operations.execute({ key: 'POST /api/v1/telemetry/batch', params: {}, query: {}, body: { events: [{ id: 'event', type: 'perf', timestamp: 1, version: '1', platform: 'darwin', tenant_id: 'tenant-a', data: { metric: 'startup', value_ms: 1 } }] } })
+    value.fail()
+    await runtime.stop()
+    assert.match(warnings[0]!, /1 telemetry events remain in volatile memory/)
+    assert.equal(value.closes(), 0)
   })
 })

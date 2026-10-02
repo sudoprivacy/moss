@@ -108,13 +108,15 @@ export function getDefaultServerConfig(): ServerFileConfig {
       },
     },
     qms: {
-      enabled: false,
       apiKeyHeader: 'X-API-Key',
       queueFlushIntervalMs: 3_000,
       queueBatchSize: 50,
+      queueMaxItems: 10_000,
+      queueMaxBytes: 16 * 1024 * 1024,
+      queueRetryIntervalMs: 1_000,
+      queueDrainTimeoutMs: 15_000,
       perfRetentionDays: 90,
       conversationRetentionDays: 180,
-      encryptionRequired: false,
     },
     wikiIndex: {
       enabled: true,
@@ -165,7 +167,7 @@ export function getDefaultServerConfig(): ServerFileConfig {
       resendCooldownSec: 60,
       maxSendsPerHour: 5,
       maxVerifyAttempts: 5,
-      autoCreateOrg: true,
+      autoCreateOrg: false,
     },
     systemConfig: {
       loginMethod: 1,
@@ -227,6 +229,11 @@ function assertLbTokenValue(name: string, value: string): void {
 
 function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
   const defaultStorage = getDefaultStoragePaths()
+  const dbBackend = raw.storage.dbBackend
+      || ((process.env.MOSS_DB_BACKEND?.trim() === 'postgres'
+        || (process.env.MOSS_DATABASE_URL?.trim() ? true : false))
+        ? 'postgres'
+        : 'sqlite')
   return {
     host: raw.server.host,
     port: raw.server.port,
@@ -305,11 +312,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     // Shared DB backend: file config wins; else env (MOSS_DB_BACKEND=postgres or
     // presence of MOSS_DATABASE_URL) selects postgres; default sqlite (unchanged
     // single-host path).
-    dbBackend: raw.storage.dbBackend
-      || ((process.env.MOSS_DB_BACKEND?.trim() === 'postgres'
-        || (process.env.MOSS_DATABASE_URL?.trim() ? true : false))
-        ? 'postgres'
-        : 'sqlite'),
+    dbBackend,
     databaseUrl: process.env.MOSS_DATABASE_URL?.trim() || raw.storage.databaseUrl,
     // Auth-proxy URL: env preferred, else file, else null (= not explicitly
     // set). The consumer (runtimeService spawnAttempt) derives the URL from
@@ -372,6 +375,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       legacyJwtSecret: process.env.SUDOWORK_LEGACY_JWT_SECRET || undefined,
       redisUrl: process.env.SUDOWORK_REDIS_URL || undefined,
       dify: {
+        timeoutMs: raw.sudoworkCompatibility.dify.timeoutMs,
         baseUrl: (process.env.DIFY_BASE_URL || raw.sudoworkCompatibility.dify.baseUrl).replace(/\/+$/, ''),
         systemToken: process.env.DIFY_SYSTEM_TOKEN || undefined,
         provisionSecret: process.env.DIFY_SYSTEM_SECRET || undefined,
@@ -383,7 +387,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         secretKey: process.env.SUDOWORK_TENCENT_SECRET_KEY || undefined,
       },
     },
-    qms: resolveQmsConfig(raw.qms, process.env as QmsSecretEnvironment, { validateSecrets: false }),
+    qms: resolveQmsConfig(raw.qms, process.env as QmsSecretEnvironment, { validateSecrets: false, dbBackend }),
     wikiIndex: {
       enabled: raw.wikiIndex.enabled && process.env.MOSS_WIKI_INDEX_DISABLED !== '1',
       modelId: raw.wikiIndex.modelId,
@@ -491,8 +495,16 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
           : process.env.MOSS_LOGIN_METHOD === '1' ? 1
             : process.env.MOSS_LOGIN_METHOD === '2' ? 2
               : raw.systemConfig.loginMethod,
+      authMethods: parseAuthMethods(process.env.MOSS_AUTH_METHODS) ?? raw.systemConfig.authMethods,
     },
   }
+}
+
+function parseAuthMethods(value: string | undefined): Array<'phone' | 'password' | 'api_key' | 'sso'> | undefined {
+  if (!value?.trim()) return undefined
+  const allowed = new Set(['phone', 'password', 'api_key', 'sso'])
+  const methods = [...new Set(value.split(',').map(item => item.trim()).filter(item => allowed.has(item)))]
+  return methods.length > 0 ? methods as Array<'phone' | 'password' | 'api_key' | 'sso'> : undefined
 }
 
 export async function readServerConfig(

@@ -46,15 +46,16 @@ void describe('CrashService', () => {
 
   void it('locks by tenant and fingerprint, creates one issue and inserts an idempotent event', async () => {
     const db = new CrashSql()
-    const service = new CrashService({ db, tenants: { hasCode: code => code === 'tenant-a' } })
+    const service = new CrashService({ db, tenants: { async hasCode(code) { return code === 'tenant-a' } } })
 
     const result = await service.ingest(event, 'event-1')
 
     assert.deepEqual(result, { issueId: 41, duplicate: false })
     assert.match(db.statements[0]!.sql, /pg_advisory_xact_lock/)
-    assert.match(db.statements.at(-1)!.sql, /INSERT INTO crash_events/)
+    assert.match(db.statements.at(-2)!.sql, /INSERT INTO crash_events/)
+    assert.match(db.statements.at(-1)!.sql, /UPDATE crash_issues SET user_count/)
     assert.ok(db.statements.some(item => item.sql.includes('INSERT INTO qms_ingest_receipts')))
-    assert.equal(db.statements.at(-1)!.parameters[0], 'event-1')
+    assert.equal(db.statements.at(-2)!.parameters[0], 'event-1')
   })
 
   void it('stores a symbolicated stack resolved for the event tenant and release', async () => {
@@ -62,7 +63,7 @@ void describe('CrashService', () => {
     const calls: unknown[] = []
     const service = new CrashService({
       db,
-      tenants: { hasCode: () => true },
+      tenants: { async hasCode() { return true } },
       sourceMaps: {
         symbolicate: async input => {
           calls.push(input)
@@ -84,7 +85,7 @@ void describe('CrashService', () => {
   void it('returns the existing issue without incrementing when ingest id is replayed', async () => {
     const db = new CrashSql()
     db.existingEvent = { issue_id: 9 }
-    const service = new CrashService({ db, tenants: { hasCode: () => true } })
+    const service = new CrashService({ db, tenants: { async hasCode() { return true } } })
 
     assert.deepEqual(await service.ingest(event, 'event-1'), { issueId: 9, duplicate: true })
     assert.equal(db.statements.some(item => item.sql.includes('UPDATE crash_issues')), false)
@@ -93,7 +94,7 @@ void describe('CrashService', () => {
 
   void it('rejects missing required fields and unknown tenants before opening a transaction', async () => {
     const db = new CrashSql()
-    const service = new CrashService({ db, tenants: { hasCode: () => false } })
+    const service = new CrashService({ db, tenants: { async hasCode() { return false } } })
 
     await assert.rejects(() => service.ingest({ ...event, tenant_id: '' }, 'x'), /tenant_id/)
     await assert.rejects(() => service.ingest(event, 'x'), /Unknown QMS tenant/)
@@ -102,7 +103,7 @@ void describe('CrashService', () => {
 
   void it('validates the entire batch before writing any event', async () => {
     const db = new CrashSql()
-    const service = new CrashService({ db, tenants: { hasCode: code => code === 'tenant-a' } })
+    const service = new CrashService({ db, tenants: { async hasCode(code) { return code === 'tenant-a' } } })
 
     await assert.rejects(async () => {
       await service.ingestBatch([event, { ...event, tenant_id: 'unknown' }])
@@ -119,7 +120,7 @@ void describe('CrashService', () => {
 
   void it('keeps legacy partial batch handling for malformed events after tenant validation', async () => {
     const db = new CrashSql()
-    const service = new CrashService({ db, tenants: { hasCode: () => true } })
+    const service = new CrashService({ db, tenants: { async hasCode() { return true } } })
 
     const result = await service.ingestBatch([event, { ...event, type: '' as CrashEvent['type'] }])
 
@@ -129,7 +130,7 @@ void describe('CrashService', () => {
 
   void it('scopes issue and event queries to the authorized tenant', async () => {
     const db = new CrashSql()
-    const service = new CrashService({ db, tenants: { hasCode: () => true } })
+    const service = new CrashService({ db, tenants: { async hasCode() { return true } } })
 
     await service.listIssues({ tenantId: 'tenant-a', status: 'unresolved', limit: 20, offset: 5 })
     await service.listEvents({ tenantId: 'tenant-a', issueId: 2, limit: 10, offset: 0 })
@@ -142,7 +143,7 @@ void describe('CrashService', () => {
 
   void it('restricts distribution dimensions to the legacy allowlist', async () => {
     const db = new CrashSql()
-    const service = new CrashService({ db, tenants: { hasCode: () => true } })
+    const service = new CrashService({ db, tenants: { async hasCode() { return true } } })
     await assert.rejects(() => service.distribution('tenant-a', 'tenant_id' as 'type'), /Invalid 'by' parameter/)
     assert.equal(db.statements.length, 0)
   })
@@ -154,7 +155,7 @@ void describe('CrashService', () => {
       if (sql.includes('FROM crash_daily_stats')) return [{ date: new Date('2026-09-06T00:00:00Z'), type: 'js_exception', count: '2' }]
       return []
     }
-    const service = new CrashService({ db, tenants: { hasCode: () => true } })
+    const service = new CrashService({ db, tenants: { async hasCode() { return true } } })
 
     const result = await service.trend(7, 'tenant-a', new Date('2026-09-07T00:00:00Z'))
 

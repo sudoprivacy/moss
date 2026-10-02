@@ -131,7 +131,7 @@ void describe('P5 QMS 数据迁移', () => {
     const service = new P5QmsMigrationService({
       source,
       target,
-      organizations: { hasCode: code => code === 'ENT-A' },
+      organizations: { async hasCode(code) { return code === 'ENT-A' } },
       batchSize: 1,
     })
 
@@ -160,7 +160,7 @@ void describe('P5 QMS 数据迁移', () => {
     }
     rows.telemetry_perf_daily = [aggregate, { ...aggregate, id: 2 }]
     const target = new FakeTarget()
-    const service = new P5QmsMigrationService({ source: new FakeSource(rows), target, organizations: { hasCode: () => false } })
+    const service = new P5QmsMigrationService({ source: new FakeSource(rows), target, organizations: { async hasCode() { return false } } })
 
     const plan = await service.plan()
     assert.equal(plan.status, 'blocked')
@@ -179,7 +179,7 @@ void describe('P5 QMS 数据迁移', () => {
     const service = new P5QmsMigrationService({
       source,
       target: new FakeTarget(),
-      organizations: { hasCode: () => true },
+      organizations: { async hasCode() { return true } },
     })
     const plan = await service.plan()
     await assert.rejects(service.execute(plan, onlineCommandContext('bad')), /迁移上下文/)
@@ -196,7 +196,7 @@ void describe('P5 QMS 数据迁移', () => {
     const service = new P5QmsMigrationService({
       source: new FakeSource(validRows()),
       target,
-      organizations: { hasCode: () => true },
+      organizations: { async hasCode() { return true } },
     })
 
     const plan = await service.plan()
@@ -214,7 +214,7 @@ void describe('P5 QMS 数据迁移', () => {
       migratedRows: 1,
       status: 'running',
     })
-    const service = new P5QmsMigrationService({ source, target, organizations: { hasCode: () => true } })
+    const service = new P5QmsMigrationService({ source, target, organizations: { async hasCode() { return true } } })
 
     const plan = await service.plan()
 

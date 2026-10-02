@@ -17,7 +17,7 @@ interface LegacyAliasResolution {
 interface DifyDatasetRouteOptions {
   dataset: DifyDatasetService
   getActor: (authorization: string | undefined) => Promise<IdentityActor | null> | IdentityActor | null
-  resolveEnterpriseAlias: (legacyId: number) => LegacyAliasResolution | null
+  resolveEnterpriseAlias: (legacyId: number) => Promise<LegacyAliasResolution | null>
   idempotencyKey?: (context: Context) => string
 }
 
@@ -29,7 +29,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
   )
 
   app.get('/api/v1/admin/datasets', async context => withAdmin(context, options, async actor => {
-    const orgId = resolveFromQuery(context, actor, options)
+    const orgId = await resolveFromQuery(context, actor, options)
     if (orgId instanceof Response) return orgId
     const page = Number(context.req.query('page') ?? '1') || 1
     const limit = Math.min(100, Number(context.req.query('limit') ?? '30') || 30)
@@ -41,7 +41,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
   app.post('/api/v1/admin/datasets', async context => withAdmin(context, options, async actor => {
     const body = await context.req.json<JsonObject>().catch(() => null)
     if (!body || !body.name) return failure(context, 400, 'name is required')
-    const orgId = resolveFromBody(context, actor, options, body.enterprise_id)
+    const orgId = await resolveFromBody(context, actor, options, body.enterprise_id)
     if (orgId instanceof Response) return orgId
     return await jsonOperation(context, () => options.dataset.create(orgId, {
       name: String(body.name),
@@ -52,7 +52,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
   }))
 
   app.get('/api/v1/admin/datasets/:datasetId', async context => withAdmin(context, options, async actor => {
-    const orgId = resolveFromQuery(context, actor, options)
+    const orgId = await resolveFromQuery(context, actor, options)
     if (orgId instanceof Response) return orgId
     return await jsonOperation(context, () => options.dataset.get(orgId, context.req.param('datasetId')))
   }))
@@ -60,7 +60,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
   app.patch('/api/v1/admin/datasets/:datasetId', async context => withAdmin(context, options, async actor => {
     const body = await context.req.json<JsonObject>().catch(() => null)
     if (!body) return failure(context, 400, 'body required')
-    const orgId = resolveFromBody(context, actor, options, body.enterprise_id)
+    const orgId = await resolveFromBody(context, actor, options, body.enterprise_id)
     if (orgId instanceof Response) return orgId
     return await jsonOperation(context, () => options.dataset.update(orgId, context.req.param('datasetId'), {
       name: optionalString(body.name), description: optionalString(body.description),
@@ -69,7 +69,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
   }))
 
   app.delete('/api/v1/admin/datasets/:datasetId', async context => withAdmin(context, options, async actor => {
-    const orgId = resolveFromQuery(context, actor, options)
+    const orgId = await resolveFromQuery(context, actor, options)
     if (orgId instanceof Response) return orgId
     return await successOperation(context, () => options.dataset.delete(
       orgId, context.req.param('datasetId'), operationContext(context),
@@ -77,7 +77,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
   }))
 
   app.get('/api/v1/admin/datasets/:datasetId/documents', async context => withAdmin(context, options, async actor => {
-    const orgId = resolveFromQuery(context, actor, options)
+    const orgId = await resolveFromQuery(context, actor, options)
     if (orgId instanceof Response) return orgId
     const page = Number(context.req.query('page') ?? '1') || 1
     const limit = Math.min(100, Number(context.req.query('limit') ?? '50') || 50)
@@ -91,7 +91,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
     if ((context.req.header('content-type') ?? '').includes('multipart/form-data')) {
       const form = await context.req.formData().catch(() => null)
       if (!form) return failure(context, 400, 'expected multipart/form-data')
-      const orgId = resolveFromBody(context, actor, options, form.get('enterprise_id'))
+      const orgId = await resolveFromBody(context, actor, options, form.get('enterprise_id'))
       if (orgId instanceof Response) return orgId
       const file = form.get('file')
       if (!(file instanceof File)) return failure(context, 400, 'file field missing or not a file')
@@ -103,7 +103,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
 
     const body = await context.req.json<JsonObject>().catch(() => null)
     if (!body || !body.name || !body.text) return failure(context, 400, 'name and text are required')
-    const orgId = resolveFromBody(context, actor, options, body.enterprise_id)
+    const orgId = await resolveFromBody(context, actor, options, body.enterprise_id)
     if (orgId instanceof Response) return orgId
     return await jsonOperation(context, () => options.dataset.createDocumentByText(orgId, datasetId, {
       name: String(body.name), text: String(body.text),
@@ -113,7 +113,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
 
   app.delete('/api/v1/admin/datasets/:datasetId/documents/:documentId', async context => withAdmin(
     context, options, async actor => {
-      const orgId = resolveFromQuery(context, actor, options)
+      const orgId = await resolveFromQuery(context, actor, options)
       if (orgId instanceof Response) return orgId
       return await successOperation(context, () => options.dataset.deleteDocument(
         orgId, context.req.param('datasetId'), context.req.param('documentId'), operationContext(context),
@@ -124,7 +124,7 @@ export function registerSudoworkDifyDatasetRoutes(app: Hono, options: DifyDatase
   app.post('/api/v1/admin/datasets/:datasetId/retrieve', async context => withAdmin(context, options, async actor => {
     const body = await context.req.json<JsonObject>().catch(() => null)
     if (!body || !body.query) return failure(context, 400, 'query required')
-    const orgId = resolveFromBody(context, actor, options, body.enterprise_id)
+    const orgId = await resolveFromBody(context, actor, options, body.enterprise_id)
     if (orgId instanceof Response) return orgId
     return await jsonOperation(context, () => options.dataset.retrieve(orgId, context.req.param('datasetId'), {
       query: String(body.query), retrievalModel: objectOrUndefined(body.retrieval_model),
@@ -143,7 +143,7 @@ async function withAdmin(
   return await operation(actor)
 }
 
-function resolveFromQuery(context: Context, actor: IdentityActor, options: DifyDatasetRouteOptions): string | Response {
+function resolveFromQuery(context: Context, actor: IdentityActor, options: DifyDatasetRouteOptions): Promise<string | Response> {
   return resolveOrganization(context, actor, options, context.req.query('enterprise_id'))
 }
 
@@ -152,25 +152,25 @@ function resolveFromBody(
   actor: IdentityActor,
   options: DifyDatasetRouteOptions,
   raw: unknown,
-): string | Response {
+): Promise<string | Response> {
   return resolveOrganization(context, actor, options, raw)
 }
 
-function resolveOrganization(
+async function resolveOrganization(
   context: Context,
   actor: IdentityActor,
   options: DifyDatasetRouteOptions,
   raw: unknown,
-): string | Response {
+): Promise<string | Response> {
   const legacyId = parseEnterpriseId(raw)
   if (hasGlobalOrganizationAccess(actor)) {
     if (legacyId === null) return failure(context, 400, 'super admin must specify enterprise_id')
-    const resolved = options.resolveEnterpriseAlias(legacyId)
+    const resolved = await options.resolveEnterpriseAlias(legacyId)
     if (!resolved) return failure(context, 400, `enterprise ${legacyId} not found`)
     return resolved.resourceId
   }
   if (legacyId !== null) {
-    const resolved = options.resolveEnterpriseAlias(legacyId)
+    const resolved = await options.resolveEnterpriseAlias(legacyId)
     if (!resolved || resolved.resourceId !== actor.orgId) {
       return failure(context, 403, 'cannot operate on another enterprise')
     }

@@ -1,3 +1,5 @@
+import { getOrganizationResourceScope, listOrganizationResources, requireOrganizationResource } from '../catalog/organizationResources.js'
+import { ResourceAccessError } from '../catalog/resourceError.js'
 import { spawn, type ChildProcess } from 'child_process'
 import { createInterface } from 'readline'
 import fs from 'fs'
@@ -316,6 +318,19 @@ export async function getAssistantRuntimeConfig(
   memoryMode: 'session' | 'user'
   enabledSkills: string[]
 }> {
+  if (getOrganizationResourceScope()) {
+    const skills = (await listOrganizationResources('skill') ?? []).filter(skill => skill.meta.enabled !== false)
+    if (!assistantName) return { memoryMode: 'session', enabledSkills: skills.map(skill => skill.name) }
+    const agent = await requireOrganizationResource('agent', assistantName)
+    if (agent.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
+    const selected = Array.isArray(agent.meta.enabledSkills) ? agent.meta.enabledSkills as string[] : skills.map(skill => skill.id)
+    const enabledSkills = selected.map(ref => {
+      const matches = skills.filter(skill => skill.id === ref || skill.name === ref)
+      if (matches.length !== 1) throw new ResourceAccessError(404, 'Bound skill not available')
+      return matches[0]!.name
+    })
+    return { memoryMode: agent.meta.memory_mode === 'user' ? 'user' : 'session', enabledSkills }
+  }
   // 未指定智能体时，返回所有可用 skills
   if (!assistantName) {
     const allSkills = await getAllAvailableSkillNames()
@@ -437,11 +452,21 @@ export async function createSkillSymlinks(
   configDir: string,
   enabledSkills: string[],
 ): Promise<void> {
-  if (!enabledSkills.length) {
+  const commandsDir = path.join(configDir, '.claude', 'commands')
+  if (getOrganizationResourceScope()) {
+    // This directory contains only generated command links. Reconcile it on reuse.
+    const { rm } = await import('node:fs/promises')
+    await rm(commandsDir, { recursive: true, force: true })
+    await mkdir(commandsDir, { recursive: true })
+    for (const reference of enabledSkills) {
+      const skill = await requireOrganizationResource('skill', reference)
+      if (skill.name !== path.basename(skill.name) || skill.name === '..') throw new ResourceAccessError(400, 'Invalid skill name')
+      await symlink(path.join(skill.path, 'SKILL.md'), path.join(commandsDir, `${skill.name}.md`))
+    }
     return
   }
 
-  const commandsDir = path.join(configDir, '.claude', 'commands')
+  if (!enabledSkills.length) return
 
   // 确保 commands 目录存在
   await mkdir(commandsDir, { recursive: true })

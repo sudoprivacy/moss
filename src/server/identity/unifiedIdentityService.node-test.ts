@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../authCenter/db.js'
 import { migrationCommandContext, onlineCommandContext, replayCommandContext } from '../application/commandContext.js'
+import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { IdentityRepository } from './identityRepository.js'
 import { UnifiedIdentityService } from './unifiedIdentityService.js'
 
@@ -14,12 +15,12 @@ async function setup(): Promise<{
 }> {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
-  const repository = new IdentityRepository(db)
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
   await authDb.createOrganization('org-a', 'Organization A', 1)
-  repository.putOrganizationProfile({
+  await repository.putOrganizationProfile({
     orgId: 'org-a', code: 'acme', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
   })
-  const service = new UnifiedIdentityService(db, authDb, repository)
+  const service = new UnifiedIdentityService(authDb, repository)
   return { db, authDb, repository, service }
 }
 
@@ -40,13 +41,13 @@ void describe('UnifiedIdentityService.createUser', () => {
     }, onlineCommandContext('create-with-initial-credit'))
 
     assert.equal((await authDb.getUserById(created.userId))?.status, 'active')
-    assert.equal(repository.getWallet('user', created.userId)?.balanceUnits, 100_000)
+    assert.equal((await repository.getWallet('user', created.userId))?.balanceUnits, 100_000)
     db.close()
   })
 
   void test('atomically creates user, identity, numeric alias, wallet, invitation use and pending outbox', async () => {
     const { db, authDb, repository, service } = await setup()
-    repository.createInvitation({ id: 'invite-1', orgId: 'org-a', code: 'JOINME', initialCreditUnits: 500 })
+    await repository.createInvitation({ id: 'invite-1', orgId: 'org-a', code: 'JOINME', initialCreditUnits: 500 })
 
     const result = await service.createUser({
       orgId: 'org-a',
@@ -60,12 +61,12 @@ void describe('UnifiedIdentityService.createUser', () => {
 
     assert.equal((await authDb.getUserById(result.userId))?.name, 'alice')
     assert.equal((await authDb.getUserById(result.userId))?.localAuth, true)
-    assert.equal(repository.findAuthIdentity('password', 'moss', 'alice')?.userId, result.userId)
-    assert.equal(repository.findAuthIdentity('phone', 'sudowork', '+8613800000000')?.userId, result.userId)
-    assert.equal(repository.resolveNumericAlias('user', result.legacyUserId, 'org-a'), result.userId)
-    assert.deepEqual(repository.getWallet('user', result.userId), { balanceUnits: 500, version: 0 })
-    assert.equal(repository.getInvitationByCode('JOINME')?.status, 'used')
-    assert.equal(repository.getOutboxEvent('welcome:create-user-alice')?.status, 'pending')
+    assert.equal((await repository.findAuthIdentity('password', 'moss', 'alice'))?.userId, result.userId)
+    assert.equal((await repository.findAuthIdentity('phone', 'sudowork', '+8613800000000'))?.userId, result.userId)
+    assert.equal(await repository.resolveNumericAlias('user', result.legacyUserId, 'org-a'), result.userId)
+    assert.deepEqual(await repository.getWallet('user', result.userId), { balanceUnits: 500, version: 0 })
+    assert.equal((await repository.getInvitationByCode('JOINME'))?.status, 'used')
+    assert.equal((await repository.getOutboxEvent('welcome:create-user-alice'))?.status, 'pending')
 
     const repeated = await service.createUser({
       orgId: 'org-a', username: 'alice', displayName: 'Alice', password: 'StrongPass123',
@@ -83,14 +84,14 @@ void describe('UnifiedIdentityService.createUser', () => {
       role: 'user', status: 'locked', legacyUserId: 73,
     }, migrationCommandContext('run-7', 'import-user-73'))
     assert.equal(migrated.legacyUserId, 73)
-    assert.equal(repository.getOutboxEvent('welcome:import-user-73')?.status, 'suppressed')
-    assert.match(repository.getOutboxEvent('welcome:import-user-73')?.suppressReason ?? '', /migration/)
+    assert.equal((await repository.getOutboxEvent('welcome:import-user-73'))?.status, 'suppressed')
+    assert.match((await repository.getOutboxEvent('welcome:import-user-73'))?.suppressReason ?? '', /migration/)
 
     const replayed = await service.createUser({
       orgId: 'org-a', username: 'replayed', passwordHash: 'legacy-hash', phone: '13800000002',
       role: 'user', status: 'active',
     }, replayCommandContext('legacy-event-9', 'replay-user-9'))
-    assert.equal(repository.getOutboxEvent('welcome:replay-user-9')?.status, 'suppressed')
+    assert.equal((await repository.getOutboxEvent('welcome:replay-user-9'))?.status, 'suppressed')
     assert(replayed.legacyUserId > 73)
     db.close()
   })
@@ -107,8 +108,8 @@ void describe('UnifiedIdentityService.createUser', () => {
       role: 'user', legacyUserId: 9,
     }, onlineCommandContext('second')), /UNIQUE constraint failed/)
     assert.equal((await authDb.listUsersByName('second')).length, 0)
-    assert.equal(repository.findAuthIdentity('phone', 'sudowork', '13800000004'), null)
-    assert.equal(repository.getOutboxEvent('welcome:second'), null)
+    assert.equal(await repository.findAuthIdentity('phone', 'sudowork', '13800000004'), null)
+    assert.equal(await repository.getOutboxEvent('welcome:second'), null)
     db.close()
   })
 
@@ -131,9 +132,9 @@ void describe('UnifiedIdentityService.createUser', () => {
     const user = await authDb.getUserById(result.userId)
     assert.equal(user?.passwordHash, null)
     assert.equal(user?.localAuth, false)
-    assert.equal(repository.findAuthIdentity('oauth2', 'moss-script', 'external-42')?.userId, result.userId)
-    assert.equal(repository.getNumericAlias('user', result.userId), result.legacyUserId)
-    assert.deepEqual(repository.getWallet('user', result.userId), { balanceUnits: 0, version: 0 })
+    assert.equal((await repository.findAuthIdentity('oauth2', 'moss-script', 'external-42'))?.userId, result.userId)
+    assert.equal(await repository.getNumericAlias('user', result.userId), result.legacyUserId)
+    assert.deepEqual(await repository.getWallet('user', result.userId), { balanceUnits: 0, version: 0 })
     db.close()
   })
 })

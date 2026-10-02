@@ -30,7 +30,7 @@ type IdentityServices = Pick<IdentityMigrationService, 'plan' | 'executeOrganiza
 export interface SudoworkMigrationRegistryOptions {
   identity: IdentityServices
   identityResolutions?: readonly ManualResolution[]
-  onIdentityPlanned?: (plan: ReturnType<IdentityServices['plan']>) => void
+  onIdentityPlanned?: (plan: Awaited<ReturnType<IdentityServices['plan']>>) => void
   beforeIdentityExecute?: () => void
   governance: Pick<GovernanceMigrationService, 'plan' | 'execute' | 'verify'>
   governanceResolutions?: GovernanceMigrationResolutions

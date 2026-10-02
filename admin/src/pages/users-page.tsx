@@ -1,12 +1,11 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Link } from 'react-router-dom'
 import {
-  Building2,
   Copy,
   ExternalLink,
   KeyRound,
@@ -18,16 +17,24 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Shield,
   Coins,
   Trash2,
   UserCheck,
   UserCog,
   UserRoundPlus,
   UserX,
-  Users,
 } from 'lucide-react'
+import { copyToClipboard } from '@/lib/clipboard'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import {
+  ListEmptyState,
+  ListError,
+  ListSkeleton,
+  ListStatusBadge,
+  ListSummary,
+  ListSurface,
+  ListToolbar,
+} from '@/components/list-page'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -100,6 +107,7 @@ import {
   createDepartment,
   createOrganization,
   createUser,
+  copyUserSudorouterKey,
   deleteDepartment,
   deleteOrganization,
   getApiKeys,
@@ -290,6 +298,16 @@ function getRoleBadgeVariant(role: UserRole): 'default' | 'secondary' | 'outline
   }
 }
 
+function getStatusTone(status: AuthUser['status']): 'positive' | 'neutral' | 'danger' {
+  if (status === 'active') {
+    return 'positive'
+  }
+  if (status === 'disabled' || status === 'locked') {
+    return 'danger'
+  }
+  return 'neutral'
+}
+
 function buildDepartmentTree(departments: AuthDepartment[]): DepartmentTreeNode[] {
   const sortedDepartments = [...departments].sort((left, right) => {
     if (left.parentId === right.parentId) {
@@ -366,35 +384,6 @@ function collectDescendantDepartmentIds(
   }
 
   return collected
-}
-
-function SummaryCard({
-  title,
-  value,
-  description,
-  icon: Icon,
-}: {
-  title: string
-  value: string
-  description: string
-  icon: typeof Users
-}) {
-  return (
-    <Card>
-      <CardHeader className="flex flex-row items-start justify-between space-y-0">
-        <div className="space-y-1">
-          <CardTitle className="text-sm font-medium text-muted-foreground">
-            {title}
-          </CardTitle>
-          <div className="text-2xl font-semibold tracking-tight">{value}</div>
-        </div>
-        <Icon className="size-4 text-muted-foreground" />
-      </CardHeader>
-      <CardContent>
-        <p className="text-xs text-muted-foreground">{description}</p>
-      </CardContent>
-    </Card>
-  )
 }
 
 function DepartmentTree({
@@ -505,6 +494,8 @@ function DepartmentTreeRow({
   )
 }
 
+const MANAGEMENT_TAB_CLASS = 'h-10 rounded-none border-0 border-b-2 border-transparent bg-transparent px-3 py-2 text-sm shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none dark:data-[state=active]:border-primary dark:data-[state=active]:bg-transparent dark:data-[state=active]:text-primary'
+
 export default function UsersPage() {
   const { user: currentUser, scopes, activeOrgId } = useAuth()
   const canManageUsers = hasScope(scopes, 'admin:users')
@@ -533,6 +524,8 @@ export default function UsersPage() {
   const [organizationToDelete, setOrganizationToDelete] = useState<AuthOrgWithCounts | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [hasLoadedData, setHasLoadedData] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [isLoadingSessions, setIsLoadingSessions] = useState(false)
   const [userDialog, setUserDialog] = useState<{
     open: boolean
@@ -578,6 +571,20 @@ export default function UsersPage() {
   } | null>(null)
   const [pendingDepartmentActionId, setPendingDepartmentActionId] = useState<string | null>(null)
   const [pendingApiKeyActionId, setPendingApiKeyActionId] = useState<string | null>(null)
+  const [copyingSudorouterUserId, setCopyingSudorouterUserId] = useState<string | null>(null)
+
+  async function handleCopySudorouterKey(userId: string) {
+    setCopyingSudorouterUserId(userId)
+    try {
+      const { key } = await copyUserSudorouterKey(userId)
+      await copyToClipboard(key)
+      toast.success('Sudorouter API Key 已复制')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '复制失败，请重试')
+    } finally {
+      setCopyingSudorouterUserId(null)
+    }
+  }
 
   const userForm = useForm<UserFormData>({
     resolver: zodResolver(userFormSchema),
@@ -663,6 +670,8 @@ export default function UsersPage() {
       setApiKeys(apiKeysRes.api_keys)
       setRoles(rolesRes.roles)
       setOrganizations(organizationsRes.organizations)
+      setHasLoadedData(true)
+      setLoadError(null)
       setSelectedUser(previousSelectedUser => {
         if (!previousSelectedUser) {
           return null
@@ -671,6 +680,7 @@ export default function UsersPage() {
       })
     } catch (error) {
       console.error('Failed to fetch auth management data:', error)
+      setLoadError('无法加载用户与组织数据。请检查网络或权限后重试。')
       toast.error('获取用户与组织数据失败')
     } finally {
       setIsLoading(false)
@@ -804,6 +814,13 @@ export default function UsersPage() {
   const activeUsers = users.filter(user => user.status === 'active').length
   const deptAdminCount = users.filter(user => user.role === 'dept_admin').length
   const unassignedUsers = users.filter(user => !user.departmentId).length
+  const hasActiveUserFilters = searchQuery.trim() !== '' || roleFilter !== 'all' || statusFilter !== 'all'
+
+  const clearUserFilters = () => {
+    setSearchQuery('')
+    setRoleFilter('all')
+    setStatusFilter('all')
+  }
 
   const getUserApiKeys = (userId: string) =>
     apiKeys.filter(apiKey => apiKey.userId === userId)
@@ -834,6 +851,7 @@ export default function UsersPage() {
     }
   }
 
+  const createUserRequest = useRef<{ identity: string; key: string } | null>(null)
   const handleSubmitUser = async (values: UserFormData) => {
     if (userDialog.mode === 'create' && !values.password) {
       userForm.setError('password', {
@@ -846,6 +864,10 @@ export default function UsersPage() {
     try {
       const extUserId = values.extUserId?.trim() || null
       if (userDialog.mode === 'create') {
+        const identity = JSON.stringify([values.orgId, values.name.trim()])
+        if (createUserRequest.current?.identity !== identity) {
+          createUserRequest.current = { identity, key: crypto.randomUUID() }
+        }
         await createUser({
           name: values.name,
           email: values.email || undefined,
@@ -854,7 +876,8 @@ export default function UsersPage() {
           role: values.role,
           password: values.password || '',
           ext_user_id: extUserId,
-        })
+        }, createUserRequest.current.key)
+        createUserRequest.current = null
         toast.success('用户创建成功')
       } else if (userDialog.user) {
         // Organization is immutable (req 3) — never send target_org_id on edit.
@@ -1066,54 +1089,11 @@ export default function UsersPage() {
   }
 
   const copyApiKey = async (value: string) => {
-    // Fallback for non-HTTPS environments (navigator.clipboard requires secure context)
-    // For Radix Dialog, we need to append textarea inside the dialog to avoid focus trap issues
-    const fallbackCopy = (text: string): boolean => {
-      // Try to find the dialog content element
-      const dialogContent = document.querySelector('[role="dialog"]')
-      const textarea = document.createElement('textarea')
-      textarea.value = text
-      textarea.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;opacity:0;z-index:9999;'
-      textarea.setAttribute('readonly', '')
-
-      // Append to dialog if inside one, otherwise to body
-      const container = dialogContent || document.body
-      container.appendChild(textarea)
-
-      // Create a range and select the text
-      textarea.focus()
-      textarea.select()
-
-      let success = false
-      try {
-        success = document.execCommand('copy')
-      } catch {
-        success = false
-      }
-
-      container.removeChild(textarea)
-      return success
-    }
-
     try {
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(value)
-        toast.success('API Key 已复制')
-      } else {
-        const success = fallbackCopy(value)
-        if (success) {
-          toast.success('API Key 已复制')
-        } else {
-          toast.error('复制失败')
-        }
-      }
+      await copyToClipboard(value)
+      toast.success('API Key 已复制')
     } catch {
-      const success = fallbackCopy(value)
-      if (success) {
-        toast.success('API Key 已复制')
-      } else {
-        toast.error('复制失败')
-      }
+      toast.error('复制失败')
     }
   }
 
@@ -1148,9 +1128,23 @@ export default function UsersPage() {
         title="用户与组织管理"
         description="管理部门、用户、角色及 API Key。"
       >
-        <div className="flex min-h-[320px] items-center justify-center">
-          <Loader2 className="size-8 animate-spin text-muted-foreground" />
-        </div>
+        <ListSkeleton label="正在加载用户与组织数据" rows={7} />
+      </DashboardLayout>
+    )
+  }
+
+  if (!hasLoadedData && loadError) {
+    return (
+      <DashboardLayout
+        title="用户与组织管理"
+        description="统一维护部门树、用户账号、角色分配与 API Key。"
+      >
+        <ListError
+          title="用户与组织数据加载失败"
+          description={loadError}
+          onRetry={handleRefresh}
+          retrying={isRefreshing}
+        />
       </DashboardLayout>
     )
   }
@@ -1160,50 +1154,42 @@ export default function UsersPage() {
       title="用户与组织管理"
       description="统一维护部门树、用户账号、角色分配与 API Key。"
     >
-      <div className="space-y-6">
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <SummaryCard
-            title="组织用户数"
-            value={String(totalUsers)}
-            description={`未分配部门 ${unassignedUsers} 人`}
-            icon={Users}
+      <div className="space-y-4">
+        {loadError ? (
+          <ListError
+            title="显示的数据可能不是最新结果"
+            description={loadError}
+            onRetry={handleRefresh}
+            retrying={isRefreshing}
           />
-          <SummaryCard
-            title="启用中用户"
-            value={String(activeUsers)}
-            description={`禁用 ${totalUsers - activeUsers} 人`}
-            icon={UserCheck}
-          />
-          <SummaryCard
-            title="部门数量"
-            value={String(departments.length)}
-            description="支持树形层级管理"
-            icon={Building2}
-          />
-          <SummaryCard
-            title="部门管理员"
-            value={String(deptAdminCount)}
-            description="已分配 dept_admin 角色人数"
-            icon={Shield}
-          />
-        </div>
+        ) : null}
+
+        <ListSummary aria-label="用户与组织汇总">
+          <span>用户 <strong className="font-medium text-foreground">{totalUsers}</strong></span>
+          <span>启用 <strong className="font-medium text-foreground">{activeUsers}</strong></span>
+          <span>未启用 <strong className="font-medium text-foreground">{totalUsers - activeUsers}</strong></span>
+          <span>未分配部门 <strong className="font-medium text-foreground">{unassignedUsers}</strong></span>
+          <span>部门 <strong className="font-medium text-foreground">{departments.length}</strong></span>
+          <span>部门管理员 <strong className="font-medium text-foreground">{deptAdminCount}</strong></span>
+        </ListSummary>
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <TabsList>
-              <TabsTrigger value="users">用户管理</TabsTrigger>
-              {isOrgAdmin ? <TabsTrigger value="departments">部门管理</TabsTrigger> : null}
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <TabsList className="h-auto w-full justify-start gap-1 rounded-none border-b bg-transparent p-0 lg:w-auto">
+              <TabsTrigger value="users" className={MANAGEMENT_TAB_CLASS}>用户管理</TabsTrigger>
+              {isOrgAdmin ? <TabsTrigger value="departments" className={MANAGEMENT_TAB_CLASS}>部门管理</TabsTrigger> : null}
               {/* Org management is cross-org → super_admin only (backend enforces too). */}
-              {isSuperAdmin ? <TabsTrigger value="organizations">组织管理</TabsTrigger> : null}
-              {isOrgAdmin ? <TabsTrigger value="roles">角色管理</TabsTrigger> : null}
+              {isSuperAdmin ? <TabsTrigger value="organizations" className={MANAGEMENT_TAB_CLASS}>组织管理</TabsTrigger> : null}
+              {isOrgAdmin ? <TabsTrigger value="roles" className={MANAGEMENT_TAB_CLASS}>角色管理</TabsTrigger> : null}
             </TabsList>
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" onClick={handleRefresh} disabled={isRefreshing}>
+              <Button variant="outline" size="sm" onClick={handleRefresh} disabled={isRefreshing}>
                 <RefreshCw className={cn('mr-2 size-4', isRefreshing && 'animate-spin')} />
                 刷新
               </Button>
               {activeTab === 'users' ? (
                 <Button
+                  size="sm"
                   onClick={() =>
                     setUserDialog({
                       open: true,
@@ -1218,6 +1204,7 @@ export default function UsersPage() {
               ) : null}
               {activeTab === 'departments' && isOrgAdmin ? (
                 <Button
+                  size="sm"
                   onClick={() =>
                     setDepartmentDialog({
                       open: true,
@@ -1233,6 +1220,7 @@ export default function UsersPage() {
               ) : null}
               {activeTab === 'organizations' && isSuperAdmin ? (
                 <Button
+                  size="sm"
                   onClick={() =>
                     setOrganizationDialog({ open: true, mode: 'create', organization: null })
                   }
@@ -1244,63 +1232,62 @@ export default function UsersPage() {
             </div>
           </div>
 
-          <TabsContent value="users" className="space-y-6">
-            <Card>
-              <CardHeader className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <div className="space-y-1">
-                  <CardTitle>用户列表</CardTitle>
-                  <CardDescription>
-                    新增、禁用、重置密码、分配部门与角色，并为用户生成 API Key。
-                  </CardDescription>
+          <TabsContent value="users" className="mt-4">
+            <div className="space-y-3">
+              <ListToolbar>
+                <div className="relative min-w-0 flex-1 basis-52">
+                  <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+                  <Input
+                    aria-label="搜索用户名、邮箱或部门"
+                    placeholder="搜索用户名、部门或邮箱"
+                    className="pl-9"
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                  />
                 </div>
-                <div className="flex flex-col gap-3 md:flex-row md:items-center">
-                  <div className="relative min-w-[240px]">
-                    <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                    <Input
-                      placeholder="搜索用户名、部门或邮箱"
-                      className="pl-9"
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                    />
-                  </div>
-                  <Select value={roleFilter} onValueChange={setRoleFilter}>
-                    <SelectTrigger className="w-[160px]">
-                      <SelectValue placeholder="角色筛选" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">全部角色</SelectItem>
-                      {roleCatalog.map(role => (
-                        <SelectItem key={role.id} value={role.id}>
-                          {ROLE_LABELS[role.id]}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Select value={statusFilter} onValueChange={setStatusFilter}>
-                    <SelectTrigger className="w-[140px]">
-                      <SelectValue placeholder="状态筛选" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">全部状态</SelectItem>
-                      <SelectItem value="active">启用</SelectItem>
-                      <SelectItem value="pending">待审批</SelectItem>
-                      <SelectItem value="locked">锁定</SelectItem>
-                      <SelectItem value="disabled">禁用</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <div className="overflow-hidden rounded-xl border">
-                  <Table>
+                <Select value={roleFilter} onValueChange={setRoleFilter}>
+                  <SelectTrigger aria-label="按角色筛选" className="w-[148px] max-w-full">
+                    <SelectValue placeholder="角色筛选" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部角色</SelectItem>
+                    {roleCatalog.map(role => (
+                      <SelectItem key={role.id} value={role.id}>
+                        {ROLE_LABELS[role.id]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={statusFilter} onValueChange={setStatusFilter}>
+                  <SelectTrigger aria-label="按状态筛选" className="w-[132px] max-w-full">
+                    <SelectValue placeholder="状态筛选" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部状态</SelectItem>
+                    <SelectItem value="active">启用</SelectItem>
+                    <SelectItem value="pending">待审批</SelectItem>
+                    <SelectItem value="locked">锁定</SelectItem>
+                    <SelectItem value="disabled">禁用</SelectItem>
+                  </SelectContent>
+                </Select>
+                {hasActiveUserFilters ? (
+                  <Button type="button" variant="ghost" size="sm" onClick={clearUserFilters}>
+                    清除筛选
+                  </Button>
+                ) : null}
+              </ListToolbar>
+              {filteredUsers.length > 0 ? (
+                <ListSurface aria-label="用户列表" aria-busy={isRefreshing} footer={<ListSummary>显示 {filteredUsers.length} / {totalUsers} 位用户</ListSummary>}>
+                  <Table className="min-w-[960px]">
                     <TableHeader>
                       <TableRow>
                         <TableHead>用户名</TableHead>
                         <TableHead>所属组织</TableHead>
                         <TableHead>所属部门</TableHead>
                         <TableHead>角色</TableHead>
-                        <TableHead>积分余额</TableHead>
-                        <TableHead>API Keys</TableHead>
+                        <TableHead className="text-right">积分余额</TableHead>
+                        <TableHead>Moss API Keys</TableHead>
+                        <TableHead>Sudorouter API Key</TableHead>
                         <TableHead>状态</TableHead>
                         <TableHead>最后登录</TableHead>
                         <TableHead className="text-right">操作</TableHead>
@@ -1315,25 +1302,29 @@ export default function UsersPage() {
                             <TableCell className="font-medium">
                               <button
                                 type="button"
-                                className="text-left hover:text-primary"
+                                className="block max-w-48 truncate text-left hover:text-primary"
+                                title={userLabel(user)}
                                 onClick={() => void handleViewUser(user)}
                               >
                                 {userLabel(user)}
                               </button>
+                              {user.displayName && user.displayName !== user.name ? (
+                                <div className="text-xs text-muted-foreground">{user.name}</div>
+                              ) : null}
                               {user.extUserId ? (
-                                <div className="text-xs text-muted-foreground font-mono">{user.extUserId}</div>
+                                <div className="max-w-48 truncate font-mono text-xs text-muted-foreground" title={user.extUserId}>{user.extUserId}</div>
                               ) : null}
                             </TableCell>
-                            <TableCell>
+                            <TableCell className="max-w-40 truncate" title={organizations.find(o => o.id === user.orgId)?.name ?? '—'}>
                               {organizations.find(o => o.id === user.orgId)?.name ?? '—'}
                             </TableCell>
-                            <TableCell>{getDepartmentName(user.departmentId)}</TableCell>
+                            <TableCell className="max-w-40 truncate" title={getDepartmentName(user.departmentId)}>{getDepartmentName(user.departmentId)}</TableCell>
                             <TableCell>
                               <Badge variant={getRoleBadgeVariant(user.role)}>
                                 {ROLE_LABELS[user.role]}
                               </Badge>
                             </TableCell>
-                            <TableCell>{(user.balanceUnits ?? 0).toLocaleString()}</TableCell>
+                            <TableCell className="text-right tabular-nums">{(user.balanceUnits ?? 0).toLocaleString()}</TableCell>
                             <TableCell>
                               {userKeys.length > 0 ? (
                                 <div className="flex flex-wrap gap-1">
@@ -1353,17 +1344,40 @@ export default function UsersPage() {
                               )}
                             </TableCell>
                             <TableCell>
-                              <Badge
-                                variant={user.status === 'active' ? 'default' : 'secondary'}
-                              >
+                              {user.sudorouterApiKeyMasked ? (
+                                <div className="flex items-center gap-2">
+                                  <code className="whitespace-nowrap text-xs">{user.sudorouterApiKeyMasked}</code>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label={`复制 ${user.name} 的 Sudorouter API Key`}
+                                    title="复制完整 Sudorouter API Key"
+                                    disabled={copyingSudorouterUserId !== null}
+                                    onClick={() => void handleCopySudorouterKey(user.id)}
+                                  >
+                                    {copyingSudorouterUserId === user.id ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />}
+                                  </Button>
+                                </div>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">{user.sudorouterCredentialStatus === 'unavailable' ? '读取失败，请刷新' : '尚未分配'}</span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <ListStatusBadge tone={getStatusTone(user.status)}>
                                 {accountStatusLabel(user.status)}
-                              </Badge>
+                              </ListStatusBadge>
                             </TableCell>
                             <TableCell>{formatTimestamp(user.lastLoginAt)}</TableCell>
                             <TableCell className="text-right">
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
-                                  <Button variant="ghost" size="icon" disabled={isPending}>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label={`${userLabel(user)} 的更多操作`}
+                                    title={`${userLabel(user)} 的更多操作`}
+                                    disabled={isPending}
+                                  >
                                     {isPending ? (
                                       <Loader2 className="size-4 animate-spin" />
                                     ) : (
@@ -1415,8 +1429,8 @@ export default function UsersPage() {
                                     <Coins className="mr-2 size-4" />
                                     设置 Token 限额
                                   </DropdownMenuItem>
-                                  <DropdownMenuItem onClick={() => setLocalAuthTarget({ userId: user.id, userName: user.name, currentAuth: user.localAuth ?? false })}>
-                                    {user.localAuth ? (
+                                  <DropdownMenuItem onClick={() => setLocalAuthTarget({ userId: user.id, userName: user.name, currentAuth: user.localExecutionAllowed ?? user.localAuth })}>
+                                    {(user.localExecutionAllowed ?? user.localAuth) ? (
                                       <>
                                         <MonitorSmartphone className="mr-2 size-4" />
                                         取消Local授权
@@ -1447,30 +1461,33 @@ export default function UsersPage() {
                           </TableRow>
                         )
                       })}
-                      {filteredUsers.length === 0 ? (
-                        <TableRow>
-                          <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
-                            没有匹配的用户。
-                          </TableCell>
-                        </TableRow>
-                      ) : null}
                     </TableBody>
                   </Table>
-                </div>
-              </CardContent>
-            </Card>
+              </ListSurface>
+            ) : (
+              <ListSurface>
+                <ListEmptyState
+                  title={users.length === 0 ? '还没有用户' : '没有匹配的用户'}
+                  description={users.length === 0 ? '创建第一个用户以开始管理组织成员。' : '尝试调整搜索条件或筛选项。'}
+                  action={hasActiveUserFilters ? (
+                    <Button type="button" variant="outline" size="sm" onClick={clearUserFilters}>清除筛选</Button>
+                  ) : undefined}
+                />
+              </ListSurface>
+            )}
+          </div>
           </TabsContent>
 
           {isOrgAdmin ? (
-            <TabsContent value="departments" className="space-y-6">
-              <Card>
-                <CardHeader className="space-y-1">
-                  <CardTitle>部门树</CardTitle>
+            <TabsContent value="departments" className="mt-4">
+              <Card className="rounded-lg">
+                <CardHeader className="space-y-1 p-4 pb-2">
+                  <CardTitle className="text-base">部门树</CardTitle>
                   <CardDescription>
                     支持新增、编辑、删除部门，并通过树形结构维护层级关系。
                   </CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="p-4 pt-2">
                   <DepartmentTree
                     nodes={departmentTree}
                     onEdit={(department) =>
@@ -1498,16 +1515,12 @@ export default function UsersPage() {
           ) : null}
 
           {isSuperAdmin ? (
-            <TabsContent value="organizations" className="space-y-6">
-              <Card>
-                <CardHeader>
-                  <CardTitle>组织管理</CardTitle>
-                  <CardDescription>
-                    管理 moss 内的组织（租户）。OAuth2 登录会按外部组织 ID 自动创建新的组织。
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <Table>
+            <TabsContent value="organizations" className="mt-4">
+              <div className="space-y-3">
+                <ListSummary>共 {organizations.length} 个组织（租户）</ListSummary>
+                {organizations.length > 0 ? (
+                  <ListSurface footer={<ListSummary>显示全部 {organizations.length} 个组织</ListSummary>}>
+                    <Table className="min-w-[720px]">
                     <TableHeader>
                       <TableRow>
                         <TableHead>名称</TableHead>
@@ -1521,7 +1534,7 @@ export default function UsersPage() {
                     <TableBody>
                       {organizations.map(org => (
                         <TableRow key={org.id}>
-                          <TableCell className="font-medium">{org.name}</TableCell>
+                          <TableCell className="max-w-48 truncate font-medium" title={org.name}>{org.name}</TableCell>
                           <TableCell className="text-xs text-muted-foreground">
                             <code>{org.code}</code>
                             <div>旧 ID #{org.legacyId}</div>
@@ -1562,28 +1575,29 @@ export default function UsersPage() {
                           </TableCell>
                         </TableRow>
                       ))}
-                      {organizations.length === 0 ? (
-                        <TableRow>
-                          <TableCell colSpan={6} className="text-center text-muted-foreground">
-                            暂无组织
-                          </TableCell>
-                        </TableRow>
-                      ) : null}
                     </TableBody>
                   </Table>
-                </CardContent>
-              </Card>
+              </ListSurface>
+            ) : (
+              <ListSurface>
+                <ListEmptyState
+                  title="还没有组织"
+                  description="创建一个组织（租户）以开始维护独立的用户与部门空间。"
+                />
+              </ListSurface>
+            )}
+          </div>
             </TabsContent>
           ) : null}
 
           {isOrgAdmin ? (
-            <TabsContent value="roles" className="space-y-6">
-              <div className="grid gap-4 xl:grid-cols-3">
+            <TabsContent value="roles" className="mt-4">
+              <div className="grid gap-3 xl:grid-cols-3">
                 {roleCatalog.map(role => {
                   const assignedCount = users.filter(user => user.role === role.id).length
                   return (
-                    <Card key={role.id} className="border-l-4 border-l-primary/60">
-                      <CardHeader className="space-y-2">
+                    <Card key={role.id} className="rounded-lg border-l-4 border-l-primary/60">
+                      <CardHeader className="space-y-2 p-4 pb-2">
                         <div className="flex items-center justify-between gap-3">
                           <CardTitle className="text-base">{role.name}</CardTitle>
                           <Badge variant={getRoleBadgeVariant(role.id)}>
@@ -1592,7 +1606,7 @@ export default function UsersPage() {
                         </div>
                         <CardDescription>{role.description}</CardDescription>
                       </CardHeader>
-                      <CardContent className="space-y-4">
+                      <CardContent className="space-y-3 p-4 pt-2">
                         <div className="rounded-lg bg-muted/60 p-3 text-sm text-muted-foreground">
                           {ROLE_DESCRIPTIONS[role.id]}
                         </div>
@@ -1653,6 +1667,9 @@ export default function UsersPage() {
                     <FormControl>
                       <Input {...field} placeholder="请输入用户名" />
                     </FormControl>
+                    {userDialog.mode === 'create' ? (
+                      <FormDescription>Sudorouter 初始密码为账户名，不足 8 位在末尾补 1。</FormDescription>
+                    ) : null}
                     <FormMessage />
                   </FormItem>
                 )}

@@ -3,14 +3,12 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { AuthCenterDb } from '../../../authCenter/db.js'
 import { BillingCoordinator } from '../../../billing/billingCoordinator.js'
-import { BillingRepository } from '../../../billing/billingRepository.js'
-import { ensureBillingSchema } from '../../../billing/billingSchema.js'
 import { CreditApplicationService } from '../../../billing/creditApplicationService.js'
 import { RechargeService } from '../../../billing/rechargeService.js'
 import { RefundService } from '../../../billing/refundService.js'
 import type { QuotaSnapshot, SudorouterPort } from '../../../billing/sudorouterAdapter.js'
 import { WalletService } from '../../../billing/walletService.js'
-import { IdentityRepository } from '../../../identity/identityRepository.js'
+import { createBillingTestRepository, createIdentityTestRepository } from '../../../testing/compatibilityRepositories.js'
 import { SudoworkBillingService, type BillingPaymentPort } from './billingService.js'
 
 class FakeRouter implements SudorouterPort {
@@ -26,16 +24,16 @@ class FakeRouter implements SudorouterPort {
   }
 }
 
-async function setup() {
+async function setup(paymentEnabled = true) {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   const auth = new AuthCenterDb(db)
-  const identities = new IdentityRepository(db)
+  const identities = createIdentityTestRepository(db, {}, auth.driver)
   await auth.createOrganization('org-1', '企业一', 1)
-  identities.putOrganizationProfile({
+  await identities.putOrganizationProfile({
     orgId: 'org-1', code: 'ENT-1', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
   })
-  identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-1', orgId: 'org-1' })
+  await identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 9, resourceId: 'org-1', orgId: 'org-1' })
   for (const [id, role] of [['user-1', 'user'], ['admin-1', 'admin'], ['root-1', 'super_admin']] as const) {
     await auth.createUser({
       id, orgId: 'org-1', email: `${id}@example.test`, name: id,
@@ -43,34 +41,33 @@ async function setup() {
       status: 'active', localAuth: true, tokenLimit: null, createdAt: 1,
       passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null,
     })
-    identities.ensureWallet('user', id)
+    await identities.ensureWallet('user', id)
   }
-  identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-1', orgId: 'org-1' })
-  identities.createAuthIdentity({
+  await identities.assignNumericAlias({ namespace: 'user', legacyId: 17, resourceId: 'user-1', orgId: 'org-1' })
+  await identities.createAuthIdentity({
     id: 'phone-user-1', orgId: 'org-1', userId: 'user-1', provider: 'phone', issuer: 'sudowork',
     normalizedSubject: '13800000000', metadata: {},
   })
-  ensureBillingSchema(db)
-  const repository = new BillingRepository(db)
-  repository.upsertExternalAccount({
+  const repository = createBillingTestRepository(db, auth.driver)
+  await repository.upsertExternalAccount({
     provider: 'sudorouter', ownerType: 'user', ownerId: 'user-1', externalAccountId: '91',
     quotaUnits: 0, usedQuotaUnits: 0, updatedAt: 1,
   })
   let now = Date.parse('2026-09-07T10:00:00.000Z')
-  const wallet = new WalletService(db, repository, () => now)
+  const wallet = new WalletService(auth.driver, repository, () => now)
   const router = new FakeRouter()
-  const coordinator = new BillingCoordinator(db, repository, wallet, router, {
+  const coordinator = new BillingCoordinator(auth.driver, repository, wallet, router, {
     clock: () => now, idGenerator: (() => { let id = 0; return () => `quota-${++id}` })(),
   })
-  const recharge = new RechargeService(db, repository, {
+  const recharge = new RechargeService(auth.driver, repository, {
     clock: () => now, idGenerator: (() => { let id = 0; return () => `order-${++id}` })(),
     suffixGenerator: () => 'ABC123',
     numericAliasAllocator: (id, orgId) => identities.allocateNumericAlias('billing_order', id, orgId),
   })
-  const credit = new CreditApplicationService(db, repository, identities, coordinator, {
+  const credit = new CreditApplicationService(auth.driver, repository, identities, coordinator, {
     getPolicy: () => ({ rechargeMode: 'approve', minPoints: 1, maxPoints: 100_000, allowDuplicatePending: false }),
   }, { clock: () => now, idGenerator: () => 'credit-1', suffixGenerator: () => 'ABC123' })
-  const refund = new RefundService(db, repository, identities, wallet, coordinator, {
+  const refund = new RefundService(auth.driver, repository, identities, wallet, coordinator, {
     async refund(input) { return { success: true, providerRefundNo: input.refundNo } },
   }, { clock: () => now })
   const payment: BillingPaymentPort = {
@@ -80,7 +77,8 @@ async function setup() {
     simulationEnabled: false,
   }
   const service = new SudoworkBillingService({
-    db, auth, identities, repository, wallet, recharge, coordinator, credit, refund, payment,
+    db: auth.driver, auth, identities, repository, wallet, recharge, coordinator, credit,
+    refund: paymentEnabled ? refund : undefined, payment: paymentEnabled ? payment : undefined,
     clock: () => now,
   })
   return { db, auth, identities, repository, router, service, setNow(value: number) { now = value } }
@@ -90,6 +88,45 @@ const userActor = { userId: 'user-1', orgId: 'org-1', role: 'user' }
 const adminActor = { userId: 'admin-1', orgId: 'org-1', role: 'admin' }
 
 void describe('SudoworkBillingService', () => {
+  void test('未配置在线支付仍可充值、调整和同步，支付操作在创建订单前明确失败', async () => {
+    const { db, repository, service, router } = await setup(false)
+    const actor = { userId: 'root-1', orgId: 'org-1', role: 'super_admin' }
+    const input = { actor, legacyUserId: 17, points: 10, idempotencyKey: 'offline-recharge' }
+    await service.rechargeUser(input)
+    await service.rechargeUser(input)
+    assert.equal(router.calls, 1)
+    assert.equal((await repository.listRechargeActivities({ limit: 20, offset: 0 })).total, 1)
+    await service.adjustUserPoints({ actor, legacyUserId: 17, amount: 2, operation: 'subtract', syncSudorouter: true, idempotencyKey: 'offline-adjust' })
+    assert.deepEqual(await service.syncUserQuota({ actor, legacyUserId: 17 }), { quota: 4000, used_quota: 0, balance: 8, total_points: 8 })
+    const ledger = await repository.listLedgerEntries({ userId: 'user-1', excludeEntryType: 'OPENING', limit: 10, offset: 0 })
+    assert.deepEqual(ledger.list.map(entry => [entry.entryType, entry.deltaUnits]).sort(), [['DEDUCT', -2], ['RECHARGE', 10]])
+    await assert.rejects(service.createOrder({ actor: userActor, amount: 5, paymentMethod: 'ALIPAY' }), /在线支付未配置/)
+    await assert.rejects(service.payOrder({ actor: userActor, orderNo: 'absent' }), /在线支付未配置/)
+    await assert.rejects(service.syncPendingOrders({ actor }), /在线支付未配置/)
+    assert.equal((await repository.listOrders({ limit: 10, offset: 0 })).total, 0)
+    db.close()
+  })
+
+  void test('在线支付已配置时仍可正常创建支付请求', async () => {
+    const { db, service } = await setup()
+    const order = await service.createOrder({ actor: userActor, amount: 5, paymentMethod: 'ALIPAY', idempotencyKey: 'online-order' }) as { order_no: string }
+    const result = await service.payOrder({ actor: userActor, orderNo: order.order_no, idempotencyKey: 'online-payment' }) as { qr_code_url: string }
+    assert.equal(result.qr_code_url, 'https://pay.test/qr')
+    db.close()
+  })
+
+  void test('非法积分或操作类型不产生额度和账本变动', async () => {
+    const { db, service, router } = await setup(false)
+    const actor = { userId: 'root-1', orgId: 'org-1', role: 'super_admin' }
+    for (const points of [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER]) {
+      await assert.rejects(service.rechargeUser({ actor, legacyUserId: 17, points }), /积分/)
+      await assert.rejects(service.adjustUserPoints({ actor, legacyUserId: 17, amount: points, operation: 'subtract', syncSudorouter: true }), /积分/)
+    }
+    await assert.rejects(service.adjustUserPoints({ actor, legacyUserId: 17, amount: 1, operation: 'invalid', syncSudorouter: true }), /操作/)
+    assert.equal(router.calls, 0)
+    db.close()
+  })
+
   void test('新 Moss 用户可立即创建并通过旧接口查询永久数字 ID 订单', async () => {
     const { db, repository, service } = await setup()
     const created = await service.createOrder({
@@ -98,7 +135,7 @@ void describe('SudoworkBillingService', () => {
 
     assert.equal(created.order_no, 'USR17NO1788775200000ABC123')
     assert.equal(created.points, 5_500)
-    assert.equal(repository.getOrderByOrderNo(String(created.order_no))?.legacyId, 2_000_000_000)
+    assert.equal((await repository.getOrderByOrderNo(String(created.order_no)))?.legacyId, 2_000_000_000)
     assert.equal((await service.queryOrder(userActor, String(created.order_no)) as any).status, 0)
     assert.equal((await service.listUserOrders({ actor: userActor, page: 1, pageSize: 20 }) as any).total, 1)
     db.close()
@@ -113,10 +150,10 @@ void describe('SudoworkBillingService', () => {
 
     assert.equal(result.new_balance, 100)
     assert.equal(result.quota_delta, 50_000)
-    assert.equal(repository.getWallet('user', 'user-1')?.balanceUnits, 100)
+    assert.equal((await repository.getWallet('user', 'user-1'))?.balanceUnits, 100)
     assert.equal(router.quota, 50_000)
     assert.equal(router.calls, 1)
-    assert.equal(repository.listRechargeActivities({ limit: 20, offset: 0 }).total, 0)
+    assert.equal((await repository.listRechargeActivities({ limit: 20, offset: 0 })).total, 0)
     db.close()
   })
 
@@ -128,7 +165,7 @@ void describe('SudoworkBillingService', () => {
       paymentReference: 'PAY-1', idempotencyKey: 'compat-recharge-1',
     })
 
-    const activities = repository.listRechargeActivities({ limit: 20, offset: 0 })
+    const activities = await repository.listRechargeActivities({ limit: 20, offset: 0 })
     assert.equal(activities.total, 1)
     assert.equal(activities.list[0]?.activityType, 'ADMIN')
     assert.equal(activities.list[0]?.pointsUnits, 100)
@@ -138,7 +175,7 @@ void describe('SudoworkBillingService', () => {
 
   void test('充值记录列表从统一活动模型返回旧字段和数字 ID', async () => {
     const { db, repository, service } = await setup()
-    repository.insertActivityRecord({
+    await repository.insertActivityRecord({
       id: 'activity-client', legacyId: 8, activityType: 'CLIENT', userId: 'user-1', orgId: 'org-1',
       orderId: null, actorUserId: null, applicationId: null, pointsUnits: 1000, quotaUnits: 500000,
       amountCents: 730, paymentMethod: 'ALIPAY', reason: null, paymentReference: null,
@@ -146,7 +183,7 @@ void describe('SudoworkBillingService', () => {
       idempotencyKey: 'activity-client', createdAt: Date.parse('2026-09-07T09:00:00Z'),
       processedAt: Date.parse('2026-09-07T09:01:00Z'),
     })
-    repository.insertActivityRecord({
+    await repository.insertActivityRecord({
       id: 'activity-admin', legacyId: 9, activityType: 'ADMIN', userId: 'user-1', orgId: 'org-1',
       orderId: null, actorUserId: 'admin-1', applicationId: null, pointsUnits: 20, quotaUnits: 10000,
       amountCents: null, paymentMethod: null, reason: '补发', paymentReference: 'R1',
@@ -175,19 +212,19 @@ void describe('SudoworkBillingService', () => {
   void test('Moss 组织作用域下的超级管理员只能查看和操作当前组织计费数据', async () => {
     const context = await setup()
     await context.auth.createOrganization('org-2', '企业二', 2)
-    context.identities.putOrganizationProfile({
+    await context.identities.putOrganizationProfile({
       orgId: 'org-2', code: 'ENT-2', loginMethod: 'password', localEnabled: true, cloudEnabled: true,
     })
-    context.identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 10, resourceId: 'org-2', orgId: 'org-2' })
+    await context.identities.assignNumericAlias({ namespace: 'enterprise', legacyId: 10, resourceId: 'org-2', orgId: 'org-2' })
     await context.auth.createUser({
       id: 'user-2', orgId: 'org-2', email: 'user-2@example.test', name: 'user-2',
       displayName: '企业二用户', departmentId: null, role: 'user', status: 'active', localAuth: true,
       tokenLimit: null, createdAt: 2, passwordHash: null, passwordUpdatedAt: null,
       lastLoginAt: null, extUserId: null,
     })
-    context.identities.ensureWallet('user', 'user-2')
-    context.identities.assignNumericAlias({ namespace: 'user', legacyId: 18, resourceId: 'user-2', orgId: 'org-2' })
-    context.repository.upsertExternalAccount({
+    await context.identities.ensureWallet('user', 'user-2')
+    await context.identities.assignNumericAlias({ namespace: 'user', legacyId: 18, resourceId: 'user-2', orgId: 'org-2' })
+    await context.repository.upsertExternalAccount({
       provider: 'sudorouter', ownerType: 'user', ownerId: 'user-2', externalAccountId: '92',
       quotaUnits: 0, usedQuotaUnits: 0, updatedAt: 2,
     })
@@ -248,7 +285,7 @@ void describe('SudoworkBillingService', () => {
       adminComment: '通过', idempotencyKey: 'compat-credit-approve',
     }) as any
     assert.equal(approved.status, 'APPROVED')
-    assert.equal(repository.getWallet('user', 'user-1')?.balanceUnits, 180)
+    assert.equal((await repository.getWallet('user', 'user-1'))?.balanceUnits, 180)
     db.close()
   })
 })

@@ -148,7 +148,7 @@ RUN chmod +x /usr/local/bin/scode \
 # --- Stage 5: runtime image --------------------------------------------------
 # Keep the existing Node 22 trixie server runtime. The scode bundle is
 # static-pie and no longer depends on this image's glibc version.
-FROM node:22-trixie-slim AS server-runtime
+FROM node:22.22.1-trixie-slim AS server-runtime
 # Let apt auto-retry transient mirror failures and download serially so a flaky
 # proxy doesn't fail the whole layer.
 RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
@@ -159,7 +159,7 @@ RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https
 # which surfaces as apt "Ign:" on the InRelease files and a failed update; plain
 # http avoids that path and the deb822 Signed-By keyring still authenticates the
 # release. If aliyun can't refresh the index, fall back to the original
-# deb.debian.org. node:22-trixie-slim uses the deb822 format at
+# deb.debian.org. node:22.22.1-trixie-slim uses the deb822 format at
 # /etc/apt/sources.list.d/debian.sources.
 RUN cp -a /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.orig 2>/dev/null || true; \
     sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org|http://mirrors.aliyun.com|g' \
@@ -206,7 +206,7 @@ RUN apt-get update \
          && break || { echo "apt install attempt $i failed; retrying in 10s..."; sleep 10; }; \
        done \
     && command -v jq >/dev/null || (echo "jq not installed after retries" && exit 1) \
-    # node:22-trixie-slim ships WITHOUT /etc/ssl/certs/ca-certificates.crt, and
+    # node:22.22.1-trixie-slim ships WITHOUT /etc/ssl/certs/ca-certificates.crt, and
     # installing ca-certificates with --no-install-recommends does not always run
     # its postinst trigger, so curl in the later docker-cli stage fails with
     # "curl: (77) error setting certificate file". Materialize the bundle now.
@@ -258,6 +258,7 @@ WORKDIR /app
 # Built JS/TS artifacts + admin frontend + assistants/skills (from js-builder).
 COPY --from=js-builder /src/bin/moss-server.mjs ./bin/
 COPY --from=js-builder /src/bin/direct-connect-session-runner.mjs ./bin/
+COPY --from=js-builder /src/bin/artifact-mcp.mjs ./bin/
 # 会话存档 pull child: forked by MsgAuditWorker so a crash inside the native
 # WeCom SDK kills only that process. Spawned by path, so it needs its own bundle.
 COPY --from=js-builder /src/bin/msgaudit-pull-child.js ./bin/
@@ -353,6 +354,7 @@ RUN apt-get update \
 WORKDIR /out/moss-server
 COPY --from=host-node-runtime /opt/node ./node
 COPY --from=js-builder /src/bin/moss-server.mjs /src/bin/direct-connect-session-runner.mjs ./app/bin/
+COPY --from=js-builder /src/bin/artifact-mcp.mjs ./app/bin/
 COPY --from=js-builder /src/admin/dist ./app/admin/dist
 COPY --from=js-builder /src/assistants ./app/assistants
 COPY --from=js-builder /src/skills ./app/skills
@@ -366,6 +368,7 @@ COPY deploy/server.json ./server.json.template
 RUN chmod +x node/bin/node app/bin/wiki app/bin/corpapp app/bin/nexus/nexusd app/bin/scode app/bin/nexus/plugins/libnexus_vault.so \
     && printf '%s\n' "$RELEASE_VERSION" > VERSION \
     && node/bin/node --check app/bin/moss-server.mjs \
+    && node/bin/node --check app/bin/artifact-mcp.mjs \
     && node/bin/node -e "require('node:sqlite'); Promise.all([import('./app/node_modules/@xenova/transformers/src/transformers.js'), import('./app/node_modules/sharp/lib/index.js')]).then(() => console.log('host runtime ok'))" \
     && app/bin/nexus/nexusd --version
 

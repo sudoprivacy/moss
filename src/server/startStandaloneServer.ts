@@ -1,3 +1,6 @@
+import { PlatformConfigService } from './configuration/platformConfigService.js'
+import { PlatformIntegrationSettingsRepository } from './configuration/platformIntegrationSettingsRepository.js'
+import { legacyPlatformSnapshots, applyPlatformRuntime, platformInfrastructure, platformEnvironment, smsReadiness, resolveNativeSmsCredentials } from './configuration/platformConfigRuntime.js'
 import type { ServerConfig } from './types.js'
 import { startServer } from './server.js'
 import { printBanner } from './serverBanner.js'
@@ -6,6 +9,8 @@ import { ensureServerDirectories } from './config.js'
 import { openStoreAsync } from './db.js'
 import { RuntimeService } from './runtimeService.js'
 import { createAuthService } from './auth/service.js'
+import { repairConfigAvailability } from './configuration/configAvailabilitySchema.js'
+import { ensureCompatibilityCoreSchema, ensureSqliteCompatibilityDomainSchemas } from './db/compatibilitySchema.js'
 import { enableConfigs } from '../utils/config.js'
 import { initHubConfig } from './hubConfig.js'
 import { NexusManager } from './nexus/nexusManager.js'
@@ -27,6 +32,7 @@ import { readFileSync } from 'node:fs'
 import { createSudoworkCompatibilityApp } from './api/compat/sudowork/app.js'
 import { createRedisLegacyTokenStore, type RedisLegacyTokenStore } from './api/compat/sudowork/redisLegacyStore.js'
 import { SmsVerificationService } from './identity/smsVerification.js'
+import { logPhoneVerificationCode } from './auth/phoneAuth.js'
 import { createTencentSmsSender } from './identity/tencentSmsSender.js'
 import { ManagedImageStore } from './configuration/managedImageStore.js'
 import { SudorouterAdapter } from './billing/sudorouterAdapter.js'
@@ -37,8 +43,13 @@ import {
   type BillingRuntimeConfig,
 } from './billing/billingRuntimeConfig.js'
 import { startQmsRuntime, type StartedQmsRuntime } from './qms/qmsRuntime.js'
+import { ensureQmsApiKey, initializeQmsWithDeadline, createDeferredQmsRoutes } from './qms/qmsBootstrap.js'
 import { QmsNexusSecretAdapter } from './qms/qmsSecretAdapter.js'
 import { getAvailableModels } from './modelListCache.js'
+import { getSystemSettings } from './systemSettings.js'
+import { migrateLegacyModelSettings } from './configuration/migrateLegacyModelSettings.js'
+import { migrateLegacyEnterpriseCronPolicy } from './migration/legacyEnterpriseCronPolicy.js'
+import { migrateLegacySudorouterCredentials } from './migration/legacySudorouterCredentials.js'
 import type { LegacyKeyValueStore } from './identity/legacyToken.js'
 import type { NexusClient as NexusClientType } from './nexus/nexusClient.js'
 import { assertSafeInstanceIdentity } from './startupGuards.js'
@@ -149,7 +160,24 @@ async function finishStandaloneServerStartup(
 
   // Initialize store and ensure default config items exist before Auth Proxy starts
   const store = await openStoreAsync(config)
+  await store.driver.exec(`CREATE TABLE IF NOT EXISTS platform_integration_settings (
+    setting_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_by TEXT NOT NULL,
+    created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+  )`)
+  const platformConfig = new PlatformConfigService({
+    driver: store.driver, vault: nexusClient, instanceId: config.instanceId || `standalone-${process.pid}`,
+    legacy: providers => legacyPlatformSnapshots(config, configStore, nexusClient, new PlatformIntegrationSettingsRepository(store.driver), process.env, providers),
+  })
+  await platformConfig.initialize()
+  applyPlatformRuntime(platformConfig, config, configStore)
+
+  const sqliteDb = store.db
+  if (sqliteDb) {
+    ensureSqliteCompatibilityDomainSchemas(sqliteDb, { legacyClientCronEnabled: getSystemSettings().clientCronEnabled })
+    ensureCompatibilityCoreSchema(sqliteDb)
+  }
   await store.ensureDefaultConfigItems()
+  await repairConfigAvailability(store.driver)
 
   // E-5: a live peer without MOSS_INSTANCE_ID → refuse to start.
   // The container-name suffix, docker label filter and wiki claim column all
@@ -244,7 +272,9 @@ async function finishStandaloneServerStartup(
   const defaultOrgId = (await authService.listAllOrganizations()).organizations[0]?.id
   if (defaultOrgId) {
     await store.backfillOrgScoping(defaultOrgId)
+    await migrateLegacyModelSettings(store.driver, defaultOrgId)
   }
+  await migrateLegacyEnterpriseCronPolicy(store.driver)
 
   // Token minter for login-type 凭据 (mints + caches a per-user access_token
   // from the user's stored credential), backed by the encrypted
@@ -290,6 +320,8 @@ async function finishStandaloneServerStartup(
   const logger = createServerLogger()
   let closeSudoworkRedis: (() => Promise<void>) | undefined
   let qmsRuntime: StartedQmsRuntime | undefined
+  let qmsStartup: Promise<void> | undefined
+  const qmsStartupController = new AbortController()
 
   const disabledTokenStore: LegacyKeyValueStore = {
     async setex(): Promise<void> { throw new Error('Sudowork legacy sessions are disabled') },
@@ -322,10 +354,13 @@ async function finishStandaloneServerStartup(
     artifactsRoot: join(config.runtimeDir, 'catalog-artifacts'),
     publicBaseUrl,
   })
-  const configuration = authService.createSudoworkConfigService(store, managedImages)
   const systemConfiguration = authService.createSudoworkSystemConfigService({
     secrets: configStore,
-    loginMethod: config.sudoworkCompatibility.loginMethod,
+    loginMethod: config.systemConfig.loginMethod === 0 ? 'sms' : config.systemConfig.loginMethod === 2 ? 'cas' : 'password',
+    platformConfigPage: true,
+    productImprovementAvailable: platformConfig.isManaged('qms') ? config.qms?.enabled === true : undefined,
+    getSmsReadiness: () => smsReadiness(platformConfig, config, configStore, nexusClient),
+    resolveInfrastructure: legacy => platformInfrastructure(platformConfig, legacy),
     skillhubBaseUrl: publicBaseUrl,
     sudorouterBaseUrl: process.env.SUDOROUTER_BASE_URL,
     smsRuntimeAvailable: config.sudoworkCompatibility.enabled,
@@ -353,15 +388,26 @@ async function finishStandaloneServerStartup(
         modelsApiUrl: process.env.SUDOROUTER_MODELS_API_URL || 'https://hk.sudorouter.ai/api/specific_pricing',
       },
     },
-    productImprovementEncryptionRequired: process.env.QMS_TELEMETRY_ENCRYPTION_REQUIRED === 'true',
+    productImprovementRuntime: config.qms.enabled ? async () => {
+      // Only reporting credentials wait for QMS; login and other HTTP endpoints remain available.
+      await qmsStartup
+      return { apiKey: config.qms.secrets.apiKey }
+    } : undefined,
   })
-  const infrastructure = systemConfiguration.getInfrastructureConfig()
-  const sudorouterRuntime = resolveSudorouterRuntimeConfig({
+  const configuration = authService.createSudoworkConfigService(store, managedImages, systemConfiguration)
+  const infrastructure = await systemConfiguration.getInfrastructureConfig()
+  const sudorouterRuntime = platformConfig.isManaged('sudorouter') && !platformConfig.getActive('sudorouter').config.enabled ? null : resolveSudorouterRuntimeConfig({
     infrastructure: infrastructure.billing.sudorouter,
-    environment: process.env,
+    environment: platformEnvironment(platformConfig),
     getSecret: key => configStore.get(key),
   })
   const sudorouter = sudorouterRuntime ? new SudorouterAdapter(sudorouterRuntime) : undefined
+  if (sudorouter) {
+    // Use the resolved platform adapter; a disabled integration skips adoption too.
+    const migrated = await migrateLegacySudorouterCredentials(store.driver, sudorouter, nexusClient)
+    if (migrated.imported > 0) console.info(`[Startup] Adopted ${migrated.imported} existing Sudorouter credentials`)
+  }
+  authService.configureSudorouterCredentialReader(nexusClient)
   const accountProvisioner = sudorouter
     ? authService.createSudorouterAccountService({ provider: sudorouter, secrets: nexusClient })
     : undefined
@@ -375,20 +421,21 @@ async function finishStandaloneServerStartup(
     tokenStore: legacyTokenStore,
     legacyJwtSecret: config.sudoworkCompatibility.legacyJwtSecret ?? 'moss-operations-only',
     accountProvisioner,
+    getLoginMethod: orgId => systemConfiguration.getLoginMethod(orgId),
   })
   const administration = authService.createSudoworkAdministrationService({
     accountProvisioner,
     defaultInitialQuota: sudorouterRuntime?.initialQuota,
   })
-  const cas = config.sudoworkCompatibility.enabled
-    ? authService.createSudoworkCasService({
+  const cas = authService.createSudoworkCasService({
         identity,
         tokenStore: legacyTokenStore,
         accountProvisioner,
         initialQuotaUnits: sudorouterRuntime?.initialQuota,
+        getLoginMethod: orgId => systemConfiguration.getLoginMethod(orgId),
       })
-    : undefined
-  const dify = authService.createSudoworkDifyServices({
+  const dify = platformConfig.isManaged('dify') && !platformConfig.getActive('dify').config.enabled ? undefined : authService.createSudoworkDifyServices({
+    timeoutMs: config.sudoworkCompatibility.dify.timeoutMs,
     baseUrl: config.sudoworkCompatibility.dify.baseUrl,
     systemToken: config.sudoworkCompatibility.dify.systemToken,
     provisionSecret: config.sudoworkCompatibility.dify.provisionSecret,
@@ -398,10 +445,12 @@ async function finishStandaloneServerStartup(
     secrets: nexusClient,
   })
   const smsConfig = infrastructure.sms
-  const sms = systemConfiguration.isSmsConfigured() && redisLegacyTokenStore
+  const sms = await systemConfiguration.isSmsConfigured() && redisLegacyTokenStore
     ? new SmsVerificationService({
         store: redisLegacyTokenStore,
-        sender: createTencentSmsSender({
+        sender: config.phoneAuth.enabled && config.phoneAuth.delivery === 'log'
+          ? { send: async input => logPhoneVerificationCode(input.phone, input.code) }
+          : smsSender ? { send: input => smsSender(input.phone, input.code) } : createTencentSmsSender({
           secretId: config.sudoworkCompatibility.sms.secretId ?? '',
           secretKey: config.sudoworkCompatibility.sms.secretKey ?? '',
           sdkAppId: smsConfig.sdkAppId,
@@ -411,47 +460,35 @@ async function finishStandaloneServerStartup(
           region: smsConfig.region,
         }),
         codeLength: smsConfig.codeLength,
-        expireMinutes: smsConfig.expireMinutes,
-        sendIntervalSeconds: smsConfig.sendIntervalSeconds,
+        expireMinutes: smsSender ? Math.max(1, Math.round(config.phoneAuth.codeTtlSec / 60)) : smsConfig.expireMinutes,
+        sendIntervalSeconds: smsSender ? config.phoneAuth.resendCooldownSec : smsConfig.sendIntervalSeconds,
         maxPerDay: smsConfig.maxPerDay,
       })
     : undefined
-  const billingRuntime = resolveBillingRuntimeConfig({
-    infrastructure: infrastructure.billing,
-    environment: process.env,
+  const billingRuntime = !sudorouter ? null : resolveBillingRuntimeConfig({
+    infrastructure: platformConfig.isManaged('fuiou') && platformConfig.getActive('fuiou').secrets.merchantPrivateKey ? { ...infrastructure.billing, enabled: true } : infrastructure.billing,
+    environment: platformEnvironment(platformConfig),
     getSecret: key => configStore.get(key),
     readFile: path => readFileSync(path, 'utf8'),
   })
-  const billing = billingRuntime && sudorouter
-    ? createBillingCompatibilityService(authService, systemConfiguration, publicBaseUrl, billingRuntime, sudorouter)
+  const billing = sudorouter
+    ? createBillingCompatibilityService(authService, systemConfiguration, config.systemConfig.recharge.fuiou.callbackBaseUrl || publicBaseUrl, billingRuntime, sudorouter, infrastructure.billing.enabled)
     : undefined
+  const listOrganizationModels = async (orgId?: string) => {
+    const settings = orgId
+      ? await authService.getOrganizationSystemSettings(orgId)
+      : getSystemSettings()
+    return getAvailableModels({ settings, orgId })
+  }
   const legacyUsage = authService.createSudoworkLegacyUsageService({
-    listModels: getAvailableModels,
+    listModels: listOrganizationModels,
     sudorouter,
   })
   const userProjection = authService.createSudoworkUserProjectionService({
     secrets: nexusClient,
-    listModels: getAvailableModels,
+    listModels: listOrganizationModels,
     quotaReader: sudorouter,
-    getRuntimeConfig: () => ({
-      modelServiceUrl: systemConfiguration.getInfrastructureConfig().billing.sudorouter.modelServiceUrl,
-      scodeAutoModel: String(systemConfiguration.getPublicConfig().scode_auto_model ?? ''),
-    }),
-  })
-  qmsRuntime = await startQmsRuntime({
-    config: config.qms,
-    ownerId: instance.instanceId,
-    organizations: authService.createQmsOrganizationDirectory(),
-    secrets: new QmsNexusSecretAdapter(config.qms, {
-      get: key => configStore.get(key),
-      put: (key, value) => configStore.put(key, value, config),
-    }),
-    environment: {
-      NODE_ENV: process.env.NODE_ENV ?? 'production',
-      PORT: config.port,
-      HOST: config.host,
-      LOG_LEVEL: config.logLevel,
-    },
+    getScodeAutoModel: async orgId => String((await systemConfiguration.getPublicConfig(orgId)).scode_auto_model ?? ''),
   })
   const compatibilityAppOptions: Parameters<typeof createSudoworkCompatibilityApp>[0] = {
     identity,
@@ -465,23 +502,18 @@ async function finishStandaloneServerStartup(
     legacyUsage,
     getUserProjection: user => userProjection.project(user),
     rateLimit: config.sudoworkCompatibility.enabled ? redisLegacyTokenStore : undefined,
-    difyRuntime: dify.runtime,
-    difyEnhancement: dify.enhancement,
-    difyDataset: dify.dataset,
-    difyAdministration: dify.administration,
-    resolveEnterpriseAlias: dify.resolveEnterpriseAlias,
-    buildVisibility: dify.buildVisibility,
+    difyRuntime: dify?.runtime,
+    difyEnhancement: dify?.enhancement,
+    difyDataset: dify?.dataset,
+    difyAdministration: dify?.administration,
+    resolveEnterpriseAlias: dify?.resolveEnterpriseAlias,
+    buildVisibility: dify?.buildVisibility,
     difyUpstreamBaseUrl: config.sudoworkCompatibility.dify.baseUrl,
     cas,
     loginMethod: config.sudoworkCompatibility.loginMethod,
     sms,
     systemConfig: { skillhubBaseUrl: publicBaseUrl },
-    qms: qmsRuntime ? {
-      apiKeyHeader: qmsRuntime.apiKeyHeader,
-      authorization: qmsRuntime.authorization,
-      encryption: qmsRuntime.encryption,
-      operations: qmsRuntime.operations,
-    } : undefined,
+    qms: createDeferredQmsRoutes(() => qmsRuntime, config.qms.apiKeyHeader),
   }
   const mossOperationsApp = createSudoworkCompatibilityApp({
     ...compatibilityAppOptions,
@@ -505,9 +537,55 @@ async function finishStandaloneServerStartup(
     logger,
     nexusClient,
     sudoworkCompatibility,
-    { fetch: mossOperationsApp.fetch },
+    { fetch: mossOperationsApp.fetch, clientReporting: systemConfiguration },
+    platformConfig,
+    cas,
   )
+  const platformVersionTimer = setInterval(() => { void platformConfig.reportVersions().catch(() => {}) }, 30_000)
+  platformVersionTimer.unref()
   const actualPort = (await server.ready) ?? config.port
+  // QMS is optional: listen first, then initialize it without awaiting it on the startup path.
+  qmsStartup = initializeQmsWithDeadline({
+    enabled: config.qms.enabled,
+    signal: qmsStartupController.signal,
+    initialize: async signal => {
+      await ensureQmsApiKey({
+        config: config.qms,
+        driver: store.driver,
+        signal,
+        secrets: {
+          get: key => configStore.get(key),
+          refreshKey: key => configStore.refreshKey(key),
+          put: (key, value) => configStore.put(key, value, config),
+        },
+      })
+      await platformConfig.refreshUnmanaged('qms')
+      return startQmsRuntime({
+        config: config.qms,
+        driver: store.driver,
+        signal,
+        warn: message => logger.warn(message),
+        ownerId: instance.instanceId,
+        organizations: authService.createQmsOrganizationDirectory(),
+        secrets: new QmsNexusSecretAdapter(config.qms, {
+          get: key => configStore.get(key),
+          put: (key, value) => configStore.put(key, value, config),
+        }),
+        environment: {
+          NODE_ENV: process.env.NODE_ENV ?? 'production',
+          PORT: config.port,
+          HOST: config.host,
+          LOG_LEVEL: config.logLevel,
+        },
+      })
+    },
+    onError: error => {
+      logger.error(`[QMS] Initialization failed (${error instanceof Error ? error.name : 'unknown error'}). Quality APIs are unavailable; check QMS credentials and storage, then restart.`)
+    },
+  }).then(ready => {
+    qmsRuntime = ready
+    if (ready) logger.info('[QMS] Background initialization completed')
+  })
   const connectHost =
     config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host
   const httpUrl = `http://${connectHost}:${actualPort}`
@@ -622,6 +700,8 @@ async function finishStandaloneServerStartup(
   const stop = async () => {
     if (stopped) return
     stopped = true
+    qmsStartupController.abort()
+    await qmsStartup
     // Graceful drain (multi-instance LB): flip /readyz to 503 so the LB stops
     // routing new traffic, then keep serving existing WS/SSE — and keep
     // heartbeating (we still own our attempts) — until connections drain or
@@ -649,6 +729,7 @@ async function finishStandaloneServerStartup(
       }
     }
     await server.stop()
+    clearInterval(platformVersionTimer)
     await qmsRuntime?.stop()
     await closeSudoworkRedis?.()
     await authProxy.stop()
@@ -683,10 +764,11 @@ function createBillingCompatibilityService(
   authService: Awaited<ReturnType<typeof createAuthService>>['service'],
   systemConfiguration: ReturnType<typeof authService.createSudoworkSystemConfigService>,
   publicBaseUrl: string,
-  runtime: BillingRuntimeConfig,
+  runtime: BillingRuntimeConfig | null,
   sudorouter: SudorouterAdapter,
+  paymentsEnabled = true,
 ) {
-  const payment = new FuiouAdapter({
+  const payment = runtime ? new FuiouAdapter({
     merchantCode: runtime.merchantCode,
     merchantPrivateKey: runtime.merchantPrivateKey,
     fuiouPublicKey: runtime.fuiouPublicKey,
@@ -695,12 +777,13 @@ function createBillingCompatibilityService(
     refundUrl: runtime.refundUrl,
     timeoutMs: runtime.timeoutMs,
     testMode: runtime.testMode,
-  })
+  }) : undefined
   return authService.createSudoworkBillingService({
     sudorouter,
     payment,
-    getCreditPolicy: () => systemConfiguration.getCreditApplicationPolicy(),
-    testPaymentAmountCents: runtime.testMode ? 1 : undefined,
+    paymentsEnabled,
+    getCreditPolicy: orgId => systemConfiguration.getCreditApplicationPolicy(orgId),
+    testPaymentAmountCents: runtime?.testMode ? 1 : undefined,
   })
 }
 
@@ -722,25 +805,7 @@ function buildSmsSender(
   }
 
   return async (phone: string, code: string) => {
-    // Credentials page first, vault second.
-    //
-    // The vault pair works but nothing can write it: no API or admin screen
-    // puts a value at an arbitrary vault namespace, so these credentials were
-    // placed there out of band and could never be rotated through the product.
-    // The credentials page is the supported path; the vault stays as the
-    // fallback so deployments already holding a pair there keep sending without
-    // a migration step.
-    const store = getConfigStore()
-    let secretId = store.get('server.sms-secret-id')
-    let secretKey = store.get('server.sms-secret-key')
-    if (!secretId || !secretKey) {
-      const [id, key] = await Promise.all([
-        nexus.getSecret(tencent.vaultNamespace, tencent.secretIdKey),
-        nexus.getSecret(tencent.vaultNamespace, tencent.secretKeyKey),
-      ])
-      secretId = secretId || id?.value || ''
-      secretKey = secretKey || key?.value || ''
-    }
+    const { secretId, secretKey } = await resolveNativeSmsCredentials(config, getConfigStore(), nexus)
     if (!secretId || !secretKey) {
       throw new Error(
         'SMS credentials are not configured. Set them on the server credentials '

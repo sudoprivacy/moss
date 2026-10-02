@@ -27,7 +27,7 @@ function setup(role = 'admin', organizationScoped = false) {
   registerSudoworkDifyAdministrationRoutes(app, {
     administration: administration as never,
     getActor: () => ({ userId: 'admin-a', orgId: 'org-a', role, organizationScoped }),
-    resolveEnterpriseAlias: id => id === 9 ? { resourceId: 'org-a', orgId: 'org-a' } : null,
+    resolveEnterpriseAlias: async id => id === 9 ? { resourceId: 'org-a', orgId: 'org-a' } : null,
     idempotencyKey: () => 'request-key',
   })
   return { app, calls }

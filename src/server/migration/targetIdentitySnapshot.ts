@@ -22,15 +22,15 @@ type SqlUser = {
   display_name: string | null
 }
 
-export function readTargetIdentitySnapshot(
+export async function readTargetIdentitySnapshot(
   auth: AuthCenterDb,
   identities: IdentityRepository,
-): TargetIdentitySnapshot {
-  const providers = auth.db.prepare(`
+): Promise<TargetIdentitySnapshot> {
+  const providers = await auth.driver.all<SqlIdentity & Record<string, unknown>>(`
     SELECT user_id, provider, issuer, normalized_subject
     FROM user_auth_identities
     ORDER BY user_id, provider, issuer, normalized_subject
-  `).all() as unknown as SqlIdentity[]
+  `)
   const providersByUser = new Map<string, LegacyProviderIdentity[]>()
   for (const item of providers) {
     const current = providersByUser.get(item.user_id) ?? []
@@ -38,27 +38,27 @@ export function readTargetIdentitySnapshot(
     providersByUser.set(item.user_id, current)
   }
 
-  const organizationRows = auth.db.prepare(`
+  const organizationRows = await auth.driver.all<SqlOrganization & Record<string, unknown>>(`
     SELECT id, name
     FROM organizations
     ORDER BY created_at ASC
-  `).all() as unknown as SqlOrganization[]
-  const organizations = organizationRows.map(organization => {
-    const profile = identities.getOrganizationProfile(organization.id)
+  `)
+  const organizations = await Promise.all(organizationRows.map(async (organization) => {
+    const profile = await identities.getOrganizationProfile(organization.id)
     return {
       id: organization.id,
       name: organization.name,
       code: profile?.code ?? '',
       codeVerified: Boolean(profile?.code),
-      legacyAlias: identities.getNumericAlias('enterprise', organization.id),
+      legacyAlias: await identities.getNumericAlias('enterprise', organization.id),
     }
-  })
-  const userRows = auth.db.prepare(`
+  }))
+  const userRows = await auth.driver.all<SqlUser & Record<string, unknown>>(`
     SELECT id, org_id, email, name, display_name
     FROM users
     ORDER BY created_at ASC
-  `).all() as unknown as SqlUser[]
-  const users = userRows.map(user => {
+  `)
+  const users = await Promise.all(userRows.map(async (user) => {
     const userProviders = providersByUser.get(user.id) ?? []
     const phone = userProviders.find(item => item.provider === 'phone' && item.issuer === 'sudowork')?.subject ?? null
     return {
@@ -70,9 +70,9 @@ export function readTargetIdentitySnapshot(
       phoneVerified: phone !== null,
       username: user.name,
       displayName: user.display_name,
-      legacyAlias: identities.getNumericAlias('user', user.id),
+      legacyAlias: await identities.getNumericAlias('user', user.id),
       providerIdentities: userProviders,
     }
-  })
+  }))
   return { organizations, users }
 }

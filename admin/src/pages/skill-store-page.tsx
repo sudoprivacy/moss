@@ -724,7 +724,6 @@ export default function SkillStorePage() {
     const lookup = new Map<string, string>()
     for (const skill of installedList) {
       if (skill.isHubInstalled || skill.meta?.source_type === 'hub') {
-        lookup.set(skill.name, normalizeSkillVersion(skill.version))
         if (skill.meta?.id) {
           lookup.set(skill.meta.id, normalizeSkillVersion(skill.version))
         }
@@ -742,8 +741,7 @@ export default function SkillStorePage() {
     () =>
       skills.filter(
         skill =>
-          installedVersionLookup.has(skill.id) ||
-          installedVersionLookup.has(skill.name),
+          installedVersionLookup.has(skill.id),
       ).length,
     [skills, installedVersionLookup],
   )
@@ -1275,7 +1273,7 @@ export default function SkillStorePage() {
     const skill = pendingUninstallSkill
     try {
       await uninstallSkill({
-        skillName: skill.name,
+        skillName: skill.id,
         sourcePath: skill.source,
       })
       toast.success(`已卸载 ${skill.displayName}`)
@@ -1295,7 +1293,7 @@ export default function SkillStorePage() {
       setTogglingSkillName(skill.name)
       try {
         await setInstalledSkillEnabled({
-          skillName: skill.name,
+          skillName: skill.id,
           enabled,
           sourcePath: skill.source,
         })
@@ -1827,10 +1825,9 @@ export default function SkillStorePage() {
                     {skills.map(skill => {
                       const installedVersion =
                         installedVersionLookup.get(skill.id) ||
-                        installedVersionLookup.get(skill.name) ||
                         ''
                       const latestVersion = latestVersions.get(skill.id)
-                      const installed = Boolean(installedVersion)
+                      const installed = installedVersionLookup.has(skill.id)
                       const hasUpdate =
                         installed &&
                         !!latestVersion &&
@@ -1841,7 +1838,7 @@ export default function SkillStorePage() {
                         ? installedList.find(
                             s =>
                               (s.isHubInstalled || s.meta?.source_type === 'hub') &&
-                              (s.name === skill.name || s.meta?.id === skill.id)
+                              (s.id === skill.id || s.meta?.id === skill.id)
                           ) || null
                         : null
 

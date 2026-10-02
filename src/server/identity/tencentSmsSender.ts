@@ -11,7 +11,7 @@ interface TencentSmsSenderOptions {
   sdkAppId: string
   signName: string
   templateId: string
-  signId: string
+  signId?: string
   client: TencentSmsClient
 }
 
@@ -40,10 +40,10 @@ export function createTencentSmsSender(options: {
   sdkAppId: string
   signName: string
   templateId: string
-  signId: string
+  signId?: string
   region: string
 }): TencentSmsSender {
-  const missing = Object.entries(options).filter(([, value]) => !value.trim()).map(([key]) => key)
+  const missing = Object.entries(options).filter(([key, value]) => key !== 'signId' && !value?.trim()).map(([key]) => key)
   if (missing.length > 0) {
     throw new Error(`Tencent SMS configuration is incomplete: ${missing.join(', ')}`)
   }

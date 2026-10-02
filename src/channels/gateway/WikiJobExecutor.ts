@@ -267,11 +267,9 @@ export class WikiJobExecutor {
         scopes: ['sessions:create', 'sessions:attach:any'],
         source: 'wiki-build',
         channelChatId: job.id,
-        // Note: assistantName is forwarded by RuntimeService through to the
-        // first-message system block. The actual prompt content is provided
-        // inline via stdin below since wiki-builder is not yet a real
-        // agent on disk.
-        assistantName: 'wiki-builder',
+        // This internal job supplies its own prompt below. It must not imply a
+        // store installation or inherit the organization's optional skills.
+        enabledSkills: [],
       })
 
       // Track the session id in the in-memory state so cancelJob can

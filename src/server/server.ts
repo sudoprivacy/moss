@@ -1,8 +1,19 @@
+import { SessionStartupError } from './sessionStartup.js'
+import { artifactManifestPath, readArtifacts, projectArtifactDrafts } from './artifacts.js'
+import { SudoworkCasService, SudoworkCasError } from './api/compat/sudowork/casService.js'
+import { PlatformConfigService } from './configuration/platformConfigService.js'
+import { isPlatformProvider } from './configuration/platformConfigDefinition.js'
+import { PLATFORM_CREDENTIAL_GROUPS } from './configuration/platformConfigRuntime.js'
+import { createHash as resourceContentHash } from 'node:crypto'
+import { cp } from 'node:fs/promises'
+import { MOSS_SKILLS_HUB_DIR } from '../utils/skills/localSkillDirectories.js'
+import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrganizationSkillUnused, requireOrganizationResource, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
+import { installAndPrepareClientCatalogResource, describeClientCatalogItem } from './catalog/clientCatalogInstall.js'
 import http from 'http'
 import { randomUUID, timingSafeEqual } from 'crypto'
 import net from 'net'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
-import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir, rm } from 'fs/promises'
+import { lstat, readFile, realpath, stat, mkdir, writeFile, readdir, rm, chmod } from 'fs/promises'
 import os from 'os'
 import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
@@ -25,7 +36,8 @@ import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from
 import { HttpError, writeError, writeJson } from './httpRespond.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
-import { getSystemSettings, updateSystemSettings } from './systemSettings.js'
+import { getSystemSettings, SystemSettingsScopeError, updateSystemSettings } from './systemSettings.js'
+import { ConfigurationScopeError, resolveConfigurationActor } from './configuration/adminScope.js'
 import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
@@ -78,6 +90,7 @@ import {
 } from './backends/podWorkspace.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
 import { buildClientCredentials, sealCredentials } from './credentialsEnvelope.js'
+import { buildClientRuntime } from './clientRuntime.js'
 import type { ConfigKey } from './configStore/configStore.js'
 
 const SUDOROUTER_ADMIN_TOKEN_KEY: ConfigKey = 'server.sudorouter-admin-token'
@@ -115,11 +128,7 @@ const SERVER_CREDENTIAL_FIELDS: ReadonlyArray<{
   { key: 'server.sudorouter-api-token', group: 'billing', path: 'billing.sudorouter.apiToken' },
   { key: 'server.fuiou-merchant-private-key', group: 'billing', path: 'systemConfig.recharge.fuiou.merchantPrivateKey' },
   { key: 'server.fuiou-public-key', group: 'billing', path: 'systemConfig.recharge.fuiou.publicKey' },
-  { key: 'server.qms-postgres-url', group: 'qms', path: 'qms.postgresUrl', restartRequired: true },
-  { key: 'server.qms-redis-url', group: 'qms', path: 'qms.redisUrl', restartRequired: true },
   { key: 'server.qms-api-key', group: 'qms', path: 'qms.apiKey', restartRequired: true },
-  { key: 'server.qms-telemetry-private-key', group: 'qms', path: 'qms.privateKeyPem', restartRequired: true },
-  { key: 'server.qms-telemetry-public-key', group: 'qms', path: 'qms.publicKeyPem', restartRequired: true },
   { key: 'server.qms-lark-webhook-url', group: 'qms', path: 'qms.larkWebhookUrl' },
   { key: 'server.qms-smtp-url', group: 'qms', path: 'qms.smtpUrl' },
 ]
@@ -131,7 +140,6 @@ import {
   fetchAgentHubSkillDetailsByIds,
   getInstalledAssistants,
   resolveAssistantDisplayName,
-  getHubInstalledAssistants,
   installHubAssistant,
   type AgentHubAssistant,
   uninstallAssistant,
@@ -140,7 +148,6 @@ import {
   type AssistantStoreMeta,
   uploadCustomAssistant,
   packageAssistantZip,
-  packageAssistantZipByDir,
   readAssistantMeta,
   findAssistantDir,
   writeAssistantMeta,
@@ -151,7 +158,6 @@ import {
   fetchSkillHubSkillDetail,
   fetchSkillHubSkills,
   getInstalledSkills,
-  getHubInstalledSkills,
   importLocalSkillArchive,
   importLocalSkillDirectory,
   importTenantSkillArchive,
@@ -168,7 +174,6 @@ import {
   findInstalledSkillPath,
   readSkillMeta,
   readSkillVersion,
-  writeSkillMeta,
 } from './skillStore.js'
 import { createAdaptersApi } from './api/adapters.js'
 import {
@@ -223,14 +228,13 @@ import { loadDashboardStats } from './dashboardStats.js'
 import { loadSessionContextFromTranscript } from './transcript.js'
 import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import { isVisibleTo, type VisibleTo } from './visibilityFilter.js'
-import { MOSS_SKILLS_CUSTOM_DIR, MOSS_SKILLS_HUB_DIR, MOSS_SKILLS_TENANT_DIR, MOSS_SKILLS_TENANT_PENDING_DIR } from '../utils/skills/localSkillDirectories.js'
 import { DocumentStore } from './documentStore.js'
 import {
   getUserModelPreference,
   setUserModelPreference,
   initUserModelPreferenceStore,
 } from './userModelPreference.js'
-import { getAvailableModels, getCacheStatus, refreshModelCache } from './modelListCache.js'
+import { getAvailableModels, getCacheStatus, getModelsForSelection, refreshModelCache } from './modelListCache.js'
 import { createCabinApi } from './cabin/api.js'
 import { CabinStore } from './cabin/store.js'
 import { CabinFlightAutomation } from './cabin/automation.js'
@@ -374,6 +378,7 @@ function serializeSession(session: {
 }) {
   return {
     sessionId: session.sessionId,
+    taskId: (session as { taskId?: string }).taskId ?? session.sessionId,
     transcriptSessionId: session.transcriptSessionId,
     workDir: session.cwd,
     userId: session.userId,
@@ -383,6 +388,12 @@ function serializeSession(session: {
     runtime: session.runtime,
     status: session.status,
     desiredState: session.desiredState,
+    attemptId: (session as { currentAttemptId?: string | null }).currentAttemptId ?? null,
+    execution: {
+      requestedLocation: 'cloud',
+      runtimeType: session.runtime.type,
+      sessionStatus: session.status,
+    },
     assistantName: session.assistantName,
     title: session.title,
     source: session.source,
@@ -686,91 +697,6 @@ function parseTenantBoolean(value: unknown, fieldName: string): boolean | undefi
 function formatTenantAssistantAvatarUrl(avatar: unknown, publicBaseUrl: string): unknown {
   if (typeof avatar !== 'string' || !publicBaseUrl) return avatar
   return getTenantAssistantAvatarFilename(avatar) ? `${publicBaseUrl}${avatar}` : avatar
-}
-
-async function copySkillToTenantDir(skillName: string, sourcePathOverride?: string): Promise<void> {
-  // Prefer the record's stored file_path (a pending skill is staged in the
-  // tenant-pending dir); fall back to the custom dir by name for legacy
-  // publish-from-custom records.
-  const sourceDir = sourcePathOverride && existsSync(sourcePathOverride)
-    ? sourcePathOverride
-    : join(MOSS_SKILLS_CUSTOM_DIR, skillName)
-  const targetDir = join(MOSS_SKILLS_TENANT_DIR, skillName)
-
-  if (!existsSync(sourceDir)) {
-    throw new HttpError(404, `Skill directory not found: ${skillName}`)
-  }
-
-  // Ensure tenant directory exists
-  await mkdir(MOSS_SKILLS_TENANT_DIR, { recursive: true })
-
-  // Copy the skill directory
-  cpSync(sourceDir, targetDir, { recursive: true })
-
-  // Update metadata to set source_type to 'tenant'
-  const meta = await readSkillMeta(targetDir)
-  if (meta) {
-    meta.source_type = 'tenant'
-    await writeSkillMeta(targetDir, meta)
-  }
-}
-
-async function copyAssistantToTenantDir(assistantName: string): Promise<void> {
-  const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-  const MOSS_ASSISTANTS_DIR = join(MOSS_HOME, 'assistants')
-  const ASSISTANT_CUSTOM_DIR = join(MOSS_ASSISTANTS_DIR, 'custom')
-  const ASSISTANT_TENANT_DIR = join(MOSS_ASSISTANTS_DIR, 'tenant')
-
-  const sourceDir = join(ASSISTANT_CUSTOM_DIR, assistantName)
-  const targetDir = join(ASSISTANT_TENANT_DIR, assistantName)
-
-  if (!existsSync(sourceDir)) {
-    throw new HttpError(404, `Assistant directory not found: ${assistantName}`)
-  }
-
-  // Ensure tenant directory exists
-  await mkdir(ASSISTANT_TENANT_DIR, { recursive: true })
-
-  // Copy the agent directory
-  cpSync(sourceDir, targetDir, { recursive: true })
-
-  // Update metadata to set source_type to 'tenant'
-  const meta = await readAssistantMeta(targetDir)
-  if (meta) {
-    meta.source_type = 'tenant'
-    await writeAssistantMeta(targetDir, meta)
-  }
-}
-
-/**
- * Copy agent to tenant directory by source path
- * Used when file_path is stored in tenant_assistants table
- */
-async function copyAssistantToTenantDirByPath(sourceDir: string): Promise<void> {
-  const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-  const MOSS_ASSISTANTS_DIR = join(MOSS_HOME, 'assistants')
-  const ASSISTANT_TENANT_DIR = join(MOSS_ASSISTANTS_DIR, 'tenant')
-
-  // Use directory name from source path
-  const dirName = basename(sourceDir)
-  const targetDir = join(ASSISTANT_TENANT_DIR, dirName)
-
-  if (!existsSync(sourceDir)) {
-    throw new HttpError(404, `Assistant directory not found: ${sourceDir}`)
-  }
-
-  // Ensure tenant directory exists
-  await mkdir(ASSISTANT_TENANT_DIR, { recursive: true })
-
-  // Copy the agent directory
-  cpSync(sourceDir, targetDir, { recursive: true })
-
-  // Update metadata to set source_type to 'tenant'
-  const meta = await readAssistantMeta(targetDir)
-  if (meta) {
-    meta.source_type = 'tenant'
-    await writeAssistantMeta(targetDir, meta)
-  }
 }
 
 /**
@@ -1119,20 +1045,34 @@ async function authenticateRequest(
 
 /**
  * Attach sudocode.json fields (sudorouter_key, model_service_url, models)
- * to the login response only when the user has local authorization.
+ * to the login response using the current user's model credential.
  * Format matches sudowork-server for sudowork code reuse.
  */
-function attachSudocodeFields<T extends Record<string, unknown>>(
+async function attachSudocodeFields<T extends Record<string, unknown>>(
   tokenResult: T,
-): T {
-  const user = tokenResult.user as { localAuth?: boolean } | undefined
-  if (!user?.localAuth) return tokenResult
-  const settings = getSystemSettings()
+  authService: AuthService,
+): Promise<T> {
+  const user = tokenResult.user as { id: string; orgId: string } | undefined
+  if (!user?.id || !user.orgId) return tokenResult
   return {
     ...tokenResult,
-    sudorouter_key: settings.apiKey || null,
-    model_service_url: settings.url || 'https://hk.sudorouter.ai/v1',
-    models: [settings.model],
+    ...await buildClientRuntime(authService, user),
+  }
+}
+
+async function resolveSystemSettingsOrgScope(
+  auth: AuthContext,
+  authService: AuthService,
+  requestedScope: string | null,
+): Promise<string | undefined> {
+  const actor = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
+  if (!actor) throw new HttpError(401, 'User is invalid')
+  try {
+    const scoped = resolveConfigurationActor({ userId: auth.userId, orgId: auth.orgId, role: actor.role }, requestedScope)
+    return scoped.organizationScoped ? auth.orgId : undefined
+  } catch (error) {
+    if (error instanceof ConfigurationScopeError) throw new HttpError(error.statusCode, error.message)
+    throw error
   }
 }
 
@@ -1549,14 +1489,16 @@ async function readWorkspaceTreeIn(
  * quietly bills everyone's consumption to one account, which is exactly the
  * behaviour the per-user key exists to end.
  *
- * Never throws. A gateway that is down must not stop someone signing in; they
- * simply get another attempt next time.
+ * Configured account-service failures propagate so callers do not report a
+ * successful login without the user's gateway credential. The legacy fallback
+ * retains its existing best-effort behavior.
  */
 async function ensureGatewayAccount(
   authService: AuthService,
   config: ServerConfig,
   input: { userId: string; username: string; displayName?: string },
 ): Promise<void> {
+  if (await authService.ensureUserSudorouterAccount(input.userId)) return
   if (await authService.getUserModelCredential(input.userId)) return
   const client = buildSudorouterClient(config)
   if (!client) return
@@ -1587,6 +1529,7 @@ async function ensureGatewayAccount(
  * so a leaked config file cannot move anyone's balance.
  */
 function buildSudorouterClient(config: ServerConfig): SudorouterClient | null {
+  if (config.systemConfig.sudorouterEnabled === false) return null
   // Resolved exactly as the public system-config resolves it — explicit
   // override first, otherwise derived from the model service URL the
   // deployment already uses. Requiring a separate setting here would have made
@@ -1601,6 +1544,8 @@ function buildSudorouterClient(config: ServerConfig): SudorouterClient | null {
   return createSudorouterClient({
     baseUrl,
     getAdminToken: async () => getConfigStore().get(SUDOROUTER_ADMIN_TOKEN_KEY) ?? '',
+    adminUserId: config.systemConfig.sudorouterAdminUserId,
+    timeoutMs: config.systemConfig.sudorouterTimeoutMs,
   })
 }
 
@@ -1858,7 +1803,8 @@ async function readWorkspaceTree(
  */
 async function writeWorkspaceFileTo(
   workspaceRoot: string,
-  params: { path: string | null; contentBase64: string | null },
+  params: { path: string | null; contentBase64: string | null; mode?: number },
+  uploadLimitBytes?: number,
 ): Promise<{ relativePath: string; size: number }> {
   const relativePath = normalizeWorkspaceRelativePath(params.path ?? '')
   if (!relativePath) throw new HttpError(400, 'Missing path')
@@ -1872,10 +1818,10 @@ async function writeWorkspaceFileTo(
   } catch {
     throw new HttpError(400, 'Invalid base64 content')
   }
-  // Admin-configurable cap (settings.json: workspaceUploadLimitBytes), read per
-  // request so changes take effect without a restart. Falls back to 20MB if the
-  // setting is missing/invalid.
-  const configuredLimit = getSystemSettings().workspaceUploadLimitBytes
+  // Admin-configurable cap, read per request so changes take effect without a
+  // restart. Callers may pass an org-scoped value; otherwise settings.json is
+  // the deployment fallback.
+  const configuredLimit = uploadLimitBytes ?? getSystemSettings().workspaceUploadLimitBytes
   const uploadLimit =
     Number.isFinite(configuredLimit) && configuredLimit > 0
       ? configuredLimit
@@ -1901,6 +1847,7 @@ async function writeWorkspaceFileTo(
 
   await mkdir(dirname(candidate), { recursive: true })
   await writeFile(candidate, buffer)
+  if (params.mode !== undefined) await chmod(candidate, params.mode & 0o777)
   return {
     relativePath: toWorkspaceRelativePath(rootRealPath, candidate),
     size: buffer.length,
@@ -1909,10 +1856,11 @@ async function writeWorkspaceFileTo(
 
 async function writeWorkspaceFile(
   session: SessionRecord,
-  params: { path: string | null; contentBase64: string | null },
+  params: { path: string | null; contentBase64: string | null; mode?: number },
   remote: WorkspaceFileAccess | null,
+  uploadLimitBytes?: number,
 ): Promise<{ relativePath: string; size: number }> {
-  if (!remote) return writeWorkspaceFileTo(session.cwd, params)
+  if (!remote) return writeWorkspaceFileTo(session.cwd, params, uploadLimitBytes)
 
   // Same validation as the direct-fs path, applied before the upload leaves
   // moss: an oversized or malformed body should be rejected here rather than
@@ -1928,7 +1876,7 @@ async function writeWorkspaceFile(
   } catch {
     throw new HttpError(400, 'Invalid base64 content')
   }
-  const configuredLimit = getSystemSettings().workspaceUploadLimitBytes
+  const configuredLimit = uploadLimitBytes ?? getSystemSettings().workspaceUploadLimitBytes
   const uploadLimit =
     Number.isFinite(configuredLimit) && configuredLimit > 0
       ? configuredLimit
@@ -1938,8 +1886,16 @@ async function writeWorkspaceFile(
     throw new HttpError(413, `Uploaded file exceeds size limit (${limitMb}MB)`)
   }
 
-  await remote.writeFile(relativePath, buffer)
+  await remote.writeFile(relativePath, buffer, params.mode)
   return { relativePath, size: buffer.length }
+}
+
+function resolveWorkspaceUploadLimitBytes(value: unknown): number {
+  const configured = Number.parseInt(String(value), 10)
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.min(configured, 1024 * 1024 * 1024)
+  }
+  return getSystemSettings().workspaceUploadLimitBytes
 }
 
 function normalizeAvailableSkills(value: unknown): MossSessionAvailableSkill[] {
@@ -2080,7 +2036,13 @@ export function startServer(
   },
   mossOperations?: {
     fetch: HonoFetch
+    clientReporting?: {
+      getClientReportingConfig(orgId?: string): Promise<Record<string, unknown>>
+      getCredentialData(orgId?: string): Promise<Record<string, unknown>>
+    }
   },
+  platformConfig?: PlatformConfigService,
+  cas?: SudoworkCasService,
 ): {
   port: number | null
   ready: Promise<number | null>
@@ -2094,6 +2056,10 @@ export function startServer(
   const wss = new WebSocketServer({ noServer: true })
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
     cabinEnabled: config.cabin.enabled,
+    getClientCronEnabled: orgId => authService.isOrganizationClientCronEnabled(orgId),
+    setClientCronEnabled: (orgId, enabled) => authService.setOrganizationClientCronEnabled(orgId, enabled),
+    getClientPolicy: orgId => authService.getOrganizationClientPolicy(orgId),
+    putClientPolicy: (orgId, patch, updatedBy) => authService.putOrganizationClientPolicy(orgId, patch, updatedBy),
   })
   const configItemsApi = createConfigItemsApi(runtime.store)
   const secretsApi = nexusClient ? createSecretsApi(runtime.store, nexusClient, async (userId: string) => {
@@ -2126,10 +2092,12 @@ export function startServer(
     dockerContainerMode: config.docker?.containerMode ?? 'session',
     workspace: config.workspace,
     countLiveOtherInstances: () => runtime.countLiveOtherInstances(),
+    getClientCronEnabled: async orgId =>
+      (await enterpriseApi.getEffectivePolicy(orgId)).clientCronEnabled,
     getUserAuth: async (userId: string, orgId: string) => {
       try {
         const user = await authService.getUserOrNull(userId, orgId)
-        if (!user) return null
+        if (!user || user.status !== 'active') return null
         return {
           role: user.role,
           scopes: user.scopes || [],
@@ -2153,6 +2121,8 @@ export function startServer(
     // A user may be a co-owner/executor only if they belong to the job's org.
     // getUserOrNull (no auth arg) resolves org membership without a viewer check.
     isOrgUser: async (userId: string, orgId: string) => (await authService.getUserOrNull(userId, orgId)) != null,
+    getClientCronEnabled: async orgId =>
+      (await enterpriseApi.getEffectivePolicy(orgId)).clientCronEnabled,
   })
 
   // Event Triggers - external systems POST an event to start an agent run.
@@ -2167,7 +2137,7 @@ export function startServer(
     getUserAuth: async (userId: string, orgId: string) => {
       try {
         const user = await authService.getUserOrNull(userId, orgId)
-        if (!user) return null
+        if (!user || user.status !== 'active') return null
         return { role: user.role, scopes: user.scopes || [] }
       } catch {
         return null
@@ -2464,7 +2434,7 @@ export function startServer(
         jti: '',
         exp: 0,
       })
-      const installed = await getInstalledAssistants()
+      const installed = await withOrganizationResources({ orgId: ownerOrgId, userId: ownerUserId, driver: runtime.store.driver, visibility: filter }, getInstalledAssistants)
       return installed
         .filter((a) => {
           if (a.meta?.feature === 'cabin' && !config.cabin.enabled) return false
@@ -2542,6 +2512,7 @@ export function startServer(
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
       const pathname = url.pathname
+      if (pathname.startsWith('/api/v1/auth/') || pathname === '/api/v1/client/local-runtime') res.setHeader('Cache-Control', 'no-store')
       const isHead = req.method === 'HEAD'
 
       // Sticky-routing cookie (no-op unless MOSS_INSTANCE_ID is configured).
@@ -2603,9 +2574,17 @@ export function startServer(
       // it while logged out, to learn which login method this deployment uses.
       // Public payload only — see publicSystemConfig.ts for what may go in it.
       if ((req.method === 'GET' || isHead) && pathname === '/api/v1/system-config') {
+        const token = getBearerToken(req)
+        const actor = token ? await authService.verifyAccessToken(token) : null
+        const organizationCode = url.searchParams.get('organization_code')?.trim()
+        const discovery = await authService.getClientPublicConfig(organizationCode)
+        // Discovery follows the requested organization; authenticated reporting follows the actual actor.
+        const reporting = actor || !organizationCode
+          ? await mossOperations?.clientReporting?.getClientReportingConfig(actor?.orgId)
+          : undefined
         writeJson(res, 200, {
           success: true,
-          data: buildPublicSystemConfig(config, getSystemSettings().url),
+          data: { ...buildPublicSystemConfig(config, getSystemSettings().url), ...discovery, ...reporting },
         })
         return
       }
@@ -2647,6 +2626,75 @@ export function startServer(
 
       // Self-service signup, step 1: mint and deliver a verification code.
       // Unauthenticated by necessity — the caller has no account yet.
+      if (pathname.startsWith('/api/v1/auth/third-party/cas/')) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (!cas) throw new HttpError(503, 'CAS 服务未初始化')
+        try {
+          if (req.method === 'POST' && ['/api/v1/auth/third-party/cas/login', '/api/v1/auth/third-party/cas/exchange'].includes(pathname)) {
+            const body = await readJsonBody(req)
+            const providerId = typeof body.provider === 'string' ? body.provider.trim() : ''
+            const ticket = typeof body.ticket === 'string' ? body.ticket.trim() : ''
+            const service = typeof body.service === 'string' ? body.service.trim() : ''
+            const code = typeof body.code === 'string' ? body.code.trim() : ''
+            const isExchange = pathname.endsWith('/exchange')
+            if (!providerId || (isExchange ? !code : !ticket || !service)) throw new HttpError(400, 'CAS 参数不完整')
+            const userId = isExchange ? await cas.exchangeNative({ providerId, code }) : await cas.loginNative({ providerId, ticket, service })
+            const result = await authService.issueTokenFromVerifiedCasUser(userId)
+            writeJson(res, 200, { success: true, data: await attachSudocodeFields(result, authService) })
+            return
+          }
+          const callback = pathname.match(/^\/api\/v1\/auth\/third-party\/cas\/(logout\/)?callback\/([^/]+)$/)
+          if (req.method === 'GET' && callback) {
+            const providerId = decodeURIComponent(callback[2]!)
+            if (callback[1]) redirect(res, await cas.logoutCallbackUrl(providerId))
+            else {
+              const ticket = url.searchParams.get('ticket') || ''
+              if (!ticket) throw new HttpError(400, 'CAS ticket 缺失')
+              redirect(res, (await cas.createHandoff({ providerId, ticket })).redirectUrl)
+            }
+            return
+          }
+          throw new HttpError(404, 'CAS 接口不存在')
+        } catch (error) {
+          if (error instanceof SudoworkCasError) throw new HttpError(error.statusCode, error.message)
+          throw error
+        }
+      }
+
+      // The consumer client posts here rather than sending a grant_type to
+      // /auth/token, so the path exists as its own entry to the same refresh.
+      if (req.method === 'POST' && pathname === '/api/v1/auth/refresh') {
+        const body = await readJsonBody(req)
+        const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token.trim() : ''
+        if (!refreshToken) {
+          writeJson(res, 400, { success: false, msg: 'refresh_token is required' })
+          return
+        }
+        try {
+          const data = await attachSudocodeFields(await authService.refreshToken(refreshToken), authService)
+          res.setHeader('Cache-Control', 'no-store')
+          writeJson(res, 200, { success: true, ...data, data })
+        } catch (err) {
+          // A dead refresh token is the normal end of a long absence, not a
+          // server fault; the client needs a 401 to know to show the login
+          // screen rather than an empty page.
+          const status = err instanceof AuthServiceError ? err.statusCode : 401
+          writeJson(res, status, { success: false, msg: 'refresh_token is invalid or expired' })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/moss/auth/login') {
+        const body = await readJsonBody(req)
+        const result = await authService.issueMossTokenFromPassword({
+          username: typeof body.username === 'string' ? body.username : '',
+          password: typeof body.password === 'string' ? body.password : '',
+        })
+        res.setHeader('Cache-Control', 'no-store')
+        writeJson(res, 200, result)
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/auth/send-code') {
         const body = await readJsonBody(req)
         const phoneAuth = authService.phoneAuth
@@ -2687,11 +2735,11 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/auth/login-by-config') {
         const body = await readJsonBody(req)
         try {
-          const result = authService.issueTokenFromPassword({
+          const result = await authService.issueTokenFromPassword({
             username: typeof body.phone === 'string' ? body.phone : (typeof body.username === 'string' ? body.username : ''),
             password: typeof body.password === 'string' ? body.password : '',
           })
-          writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+          writeJson(res, 200, { success: true, data: await attachSudocodeFields(result, authService) })
         } catch (err) {
           const status = err instanceof AuthServiceError ? err.statusCode : 401
           // Deliberately the same message for an unknown account and a wrong
@@ -2709,25 +2757,28 @@ export function startServer(
         const username = typeof body.phone === 'string' ? body.phone.trim() : ''
         const password = typeof body.password === 'string' ? body.password : ''
         const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
-        if (!username || !password || !nickname) {
-          writeJson(res, 400, { success: false, msg: 'phone, password and nickname are required' })
-          return
-        }
-        // The same gate the phone flow uses, so turning invitations on or off
-        // applies to both rather than leaving one door open.
-        if (!authService.phoneAuth.checkInvitationCode(body.invitation_code)) {
-          writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
+        const invitationCode = typeof body.invitation_code === 'string'
+          ? body.invitation_code.trim()
+          : ''
+        if (!username || !password || !nickname || !invitationCode) {
+          writeJson(res, 400, {
+            success: false,
+            msg: 'phone, password, nickname and invitation_code are required',
+          })
           return
         }
         if (await authService.findUserByPhone(username)) {
           writeJson(res, 409, { success: false, msg: 'This account already exists' })
           return
         }
-        const { user } = await authService.provisionPhoneUser({
+        const registered = await authService.registerWithPhone({
           phone: username,
           nickname,
-          autoCreateOrg: authService.phoneAuth.autoCreateOrg,
+          invitationCode,
+          loginMethod: 'password',
+          password,
         })
+        const user = registered.user
         await authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
         await ensureGatewayAccount(authService, config, {
           userId: user.id,
@@ -2736,7 +2787,10 @@ export function startServer(
         })
         writeJson(res, 200, {
           success: true,
-          data: attachSudocodeFields(authService.issueTokenFromPhone(username)),
+          data: await attachSudocodeFields(await authService.issueTokenFromPassword({
+            username,
+            password,
+          }), authService),
         })
         return
       }
@@ -2747,27 +2801,55 @@ export function startServer(
         if (!phoneAuth.enabled) {
           throw new HttpError(404, 'Phone login is not enabled on this server')
         }
-        const phone = phoneAuth.verifyRegisterToken(body.register_token)
-        if (!phone) {
-          writeJson(res, 400, { success: false, msg: 'Registration token is invalid or expired' })
+        const phone = normalizePhone(body.phone)
+        const code = typeof body.code === 'string' ? body.code : ''
+        const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
+        const invitationCode = typeof body.invitation_code === 'string'
+          ? body.invitation_code.trim()
+          : ''
+        if (!phone || !code || !nickname || !invitationCode) {
+          writeJson(res, 400, {
+            success: false,
+            msg: 'phone, code, nickname and invitation_code are required',
+          })
           return
         }
-        if (!phoneAuth.checkInvitationCode(body.invitation_code)) {
-          writeJson(res, 403, { success: false, msg: 'Invalid invitation code' })
+        if (await authService.findUserByPhone(phone)) {
+          writeJson(res, 409, { success: false, msg: 'This phone number is already registered' })
           return
         }
-        const nickname = typeof body.nickname === 'string' ? body.nickname : undefined
+        let verified: boolean
+        try {
+          verified = await phoneAuth.verifyCode(phone, code)
+        } catch (error) {
+          if (error instanceof PhoneAuthError) {
+            writeJson(res, error.status, { success: false, msg: error.message })
+            return
+          }
+          throw error
+        }
+        if (!verified) {
+          writeJson(res, 401, {
+            success: false,
+            msg: 'Verification code is incorrect or expired',
+          })
+          return
+        }
         const result = await authService.registerWithPhone({
           phone,
           nickname,
-          autoCreateOrg: phoneAuth.autoCreateOrg,
+          invitationCode,
+          idempotencyKey:
+            typeof req.headers['idempotency-key'] === 'string'
+              ? req.headers['idempotency-key']
+              : undefined,
         })
         await ensureGatewayAccount(authService, config, {
           userId: result.user.id,
           username: phone,
           displayName: nickname,
         })
-        writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+        writeJson(res, 200, { success: true, data: await attachSudocodeFields(result, authService) })
         return
       }
 
@@ -2808,16 +2890,12 @@ export function startServer(
 
           const existing = await authService.findUserByPhone(phone)
           if (!existing) {
-            // Not an error: a first-time number is the normal start of signup.
-            // The client shows its register form and comes back to
-            // /api/v1/auth/register with this token, so the code is checked
-            // exactly once even though registration is a second request.
-            writeJson(res, 200, {
+            // Login and registration are separate entry points. An unknown
+            // number must use /api/v1/auth/register with an enterprise invite.
+            writeJson(res, 404, {
               success: false,
-              need_register: true,
-              register_token: phoneAuth.issueRegisterToken(phone),
-              phone,
-              msg: 'No account for this number yet, please register',
+              code: 'phone_not_registered',
+              msg: 'This phone number is not registered',
             })
             return
           }
@@ -2829,7 +2907,7 @@ export function startServer(
             userId: result.user.id,
             username: phone,
           })
-          writeJson(res, 200, { success: true, data: attachSudocodeFields(result) })
+          writeJson(res, 200, { success: true, data: await attachSudocodeFields(result, authService) })
           return
         }
 
@@ -2843,7 +2921,7 @@ export function startServer(
           const result = await authService.issueTokenFromApiKey(
             typeof body.api_key === 'string' ? body.api_key : '',
           )
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -2853,7 +2931,7 @@ export function startServer(
             email: typeof body.email === 'string' ? body.email : '',
             password: typeof body.password === 'string' ? body.password : '',
           })
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -2866,7 +2944,7 @@ export function startServer(
             throw new HttpError(400, 'Missing refresh_token')
           }
           const result = await authService.refreshToken(refreshToken)
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -2876,7 +2954,7 @@ export function startServer(
             throw new HttpError(400, 'Missing oauth2 params')
           }
           const result = await authService.issueTokenFromOAuth2({ params })
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -2886,7 +2964,7 @@ export function startServer(
             throw new HttpError(400, 'Missing oauth2 params')
           }
           const result = await authService.refreshOAuth2Token({ params })
-          writeJson(res, 200, attachSudocodeFields(result))
+          writeJson(res, 200, await attachSudocodeFields(result, authService))
           return
         }
 
@@ -3418,7 +3496,14 @@ export function startServer(
       }
 
       if ((req.method === 'GET' || isHead) && pathname === '/api/v1/tenant/config') {
-        writeJson(res, 200, await enterpriseApi.getConfig())
+        // Login screens may still fetch the deployment-level default without a
+        // token. Once authenticated, the current token's org is the only
+        // trusted tenant selector; never accept an organization id from the
+        // request itself.
+        const token = getBearerToken(req)
+        const auth = token ? await authenticateRequest(req, authService) : null
+        if (token && !auth) throw new HttpError(401, 'Unauthorized')
+        writeJson(res, 200, await enterpriseApi.getConfig(auth?.orgId))
         return
       }
 
@@ -3766,6 +3851,14 @@ export function startServer(
         throw new HttpError(401, 'Unauthorized')
       }
 
+      const resourceAuth = auth
+      return await withOrganizationResources({ orgId: auth.orgId, userId: auth.userId, driver: runtime.store.driver, visibility: await authService.buildVisibilityFilter(auth) }, async () => {
+      const auth = resourceAuth
+      if (req.method === 'GET' && pathname === '/api/v1/client/local-runtime') {
+        res.setHeader('Cache-Control', 'no-store')
+        writeJson(res, 200, await buildClientRuntime(authService, { id: auth.userId, orgId: auth.orgId }))
+        return
+      }
       const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || undefined
 
       // Internal (HA): token-revoke forward target. Terminate is a REST op
@@ -6398,6 +6491,13 @@ export function startServer(
         return
       }
 
+      const userSudorouterKeyMatch = pathname.match(/^\/api\/v1\/users\/([^/]+)\/sudorouter-key\/copy$/)
+      if (req.method === 'POST' && userSudorouterKeyMatch) {
+        res.setHeader('Cache-Control', 'no-store')
+        writeJson(res, 200, await authService.copyUserSudorouterKey(userSudorouterKeyMatch[1]!, auth))
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/users') {
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req)
@@ -6407,7 +6507,7 @@ export function startServer(
         writeJson(
           res,
           200,
-          await authService.createUser({
+          await authService.createProvisionedUser({
             orgId: auth.orgId,
             email: typeof body.email === 'string' ? body.email : '',
             name: typeof body.name === 'string' ? body.name : '',
@@ -6421,6 +6521,9 @@ export function startServer(
                 : undefined,
             role: typeof body.role === 'string' ? body.role : 'user',
             password: typeof body.password === 'string' ? body.password : '',
+            idempotencyKey: typeof req.headers['idempotency-key'] === 'string'
+              ? req.headers['idempotency-key']
+              : undefined,
             extUserId:
               body.ext_user_id === null || typeof body.ext_user_id === 'string'
                 ? body.ext_user_id
@@ -6437,33 +6540,12 @@ export function startServer(
         writeJson(res, 200, {
           success: true,
           ...sealCredentials(
-            buildClientCredentials(getConfigStore().get('server.hub-authorization')),
+            {
+              ...buildClientCredentials(getConfigStore().get('server.hub-authorization')),
+              ...await mossOperations?.clientReporting?.getCredentialData(auth.orgId),
+            },
           ),
         })
-        return
-      }
-
-      // The consumer client posts here rather than sending a grant_type to
-      // /auth/token, so the path exists as its own entry to the same refresh.
-      if (req.method === 'POST' && pathname === '/api/v1/auth/refresh') {
-        const body = await readJsonBody(req)
-        const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token.trim() : ''
-        if (!refreshToken) {
-          writeJson(res, 400, { success: false, msg: 'refresh_token is required' })
-          return
-        }
-        try {
-          writeJson(res, 200, {
-            success: true,
-            data: attachSudocodeFields(authService.refreshToken(refreshToken)),
-          })
-        } catch (err) {
-          // A dead refresh token is the normal end of a long absence, not a
-          // server fault; the client needs a 401 to know to show the login
-          // screen rather than an empty page.
-          const status = err instanceof AuthServiceError ? err.statusCode : 401
-          writeJson(res, status, { success: false, msg: 'refresh_token is invalid or expired' })
-        }
         return
       }
 
@@ -6493,7 +6575,7 @@ export function startServer(
       // binding that only the previous server had. Claiming otherwise would
       // have the client wrap chats with something that does not exist here.
       if (req.method === 'GET' && pathname === '/api/v1/agents/visible') {
-        const filter = authService.buildVisibilityFilter(auth)
+        const filter = await authService.buildVisibilityFilter(auth)
         const installed = await getInstalledAssistants()
         writeJson(res, 200, {
           success: true,
@@ -6509,33 +6591,13 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/auth/change-password') {
+      if (req.method === 'POST' && (pathname === '/api/v1/auth/change-password' || pathname === '/api/v1/moss/auth/change-password')) {
+        if (pathname.startsWith('/api/v1/moss/') && auth.authApp !== 'moss') throw new HttpError(403, '请使用 Moss 账户密码登录后修改密码')
         const body = await readJsonBody(req)
-        const oldPassword = typeof body.oldPassword === 'string' ? body.oldPassword : ''
-        const newPassword = typeof body.newPassword === 'string' ? body.newPassword : ''
-        if (!newPassword) {
-          writeJson(res, 400, { success: false, msg: 'newPassword is required' })
-          return
-        }
-        const actor = authService.getUserById(auth.userId)
-        if (!actor) {
-          writeJson(res, 404, { success: false, msg: 'Unknown user' })
-          return
-        }
-        // The current password is re-checked here even though the caller is
-        // already authenticated: a token left behind on a shared machine must
-        // not be enough to take the account over.
-        try {
-          await authService.issueTokenFromPassword({
-            username: (await authService.getUserName(auth.userId)) ?? '',
-            password: oldPassword,
-          })
-        } catch {
-          writeJson(res, 403, { success: false, msg: 'Current password is incorrect' })
-          return
-        }
-        await authService.setUserPassword({ orgId: auth.orgId, userId: auth.userId, password: newPassword })
-        writeJson(res, 200, { success: true, msg: 'password updated' })
+        await authService.changeOwnPassword(auth,
+          typeof body.oldPassword === 'string' ? body.oldPassword : '',
+          typeof body.newPassword === 'string' ? body.newPassword : '')
+        writeJson(res, 200, { success: true, msg: '密码已修改' })
         return
       }
 
@@ -6553,7 +6615,7 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/recharge/create') {
-        if (config.systemConfig.rechargeMode !== 'pay') {
+        if (config.systemConfig.rechargeMode !== 'pay' || config.systemConfig.recharge.fuiou.enabled === false || config.systemConfig.sudorouterEnabled === false) {
           writeJson(res, 403, { success: false, msg: '充值功能未开启' })
           return
         }
@@ -6587,7 +6649,7 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/recharge/pay') {
-        if (config.systemConfig.rechargeMode !== 'pay') {
+        if (config.systemConfig.rechargeMode !== 'pay' || config.systemConfig.recharge.fuiou.enabled === false || config.systemConfig.sudorouterEnabled === false) {
           writeJson(res, 403, { success: false, msg: '充值功能未开启' })
           return
         }
@@ -6780,7 +6842,7 @@ export function startServer(
         writeJson(res, 200, {
           success: true,
           data: {
-            list: result.list.map(order => toAdminOrderPayload(order, authService.getUserName(order.userId))),
+            list: await Promise.all(result.list.map(async order => toAdminOrderPayload(order, await authService.getUserName(order.userId)))),
             total: result.total,
             page,
             pageSize,
@@ -6951,7 +7013,7 @@ export function startServer(
         }
         writeJson(res, 200, {
           success: true,
-          data: toAdminOrderPayload(order, authService.getUserName(order.userId)),
+          data: toAdminOrderPayload(order, await authService.getUserName(order.userId)),
         })
         return
       }
@@ -7244,13 +7306,13 @@ export function startServer(
 
         if (req.method === 'GET') {
           const preference = await getUserModelPreference(userId)
-          const systemSettings = getSystemSettings()
+          const systemSettings = await authService.getOrganizationSystemSettings(auth.orgId)
           console.log(`[ModelPreference] GET /api/v1/users/${userId}/model - userPref: ${JSON.stringify(preference)}, systemDefault: ${systemSettings.model}`)
           writeJson(res, 200, {
             success: true,
             data: preference,
             // Include system default model for frontend to display when user has no preference
-            systemDefaultModel: systemSettings.model || process.env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview',
+            systemDefaultModel: `${systemSettings.defaultModelProviderId}:${systemSettings.model || process.env.MOSS_DEFAULT_MODEL || 'gemini-3-flash-preview'}`,
           })
           return
         }
@@ -7262,11 +7324,28 @@ export function startServer(
           if (!modelId) {
             throw new HttpError(400, 'modelId is required')
           }
-          await setUserModelPreference(userId, modelId)
-          console.log(`[ModelPreference] Saved preference for user ${userId}: ${modelId}`)
+          if (!(await authService.getUserOrNull(userId, auth.orgId))) {
+            throw new HttpError(404, 'Unknown user_id')
+          }
+          let resolvedModelId: string
+          try {
+            const systemSettings = await authService.getOrganizationSystemSettings(auth.orgId)
+            resolvedModelId = (await getModelsForSelection(modelId, {
+              settings: systemSettings,
+              orgId: auth.orgId,
+              userApiKey: (await authService.getUserModelCredential(userId))?.sudorouterKey,
+            })).selection.selectionId
+          } catch (error) {
+            throw new HttpError(
+              400,
+              error instanceof Error ? error.message : 'Selected model is unavailable',
+            )
+          }
+          await setUserModelPreference(userId, resolvedModelId)
+          console.log(`[ModelPreference] Saved preference for user ${userId}: ${resolvedModelId}`)
           writeJson(res, 200, {
             success: true,
-            data: { modelId, updatedAt: Date.now() },
+            data: { modelId: resolvedModelId, updatedAt: Date.now() },
           })
           return
         }
@@ -7274,7 +7353,12 @@ export function startServer(
 
       // Available models endpoint
       if (req.method === 'GET' && pathname === '/api/v1/models/available') {
-        const models = await getAvailableModels()
+        const systemSettings = await authService.getOrganizationSystemSettings(auth.orgId)
+        const models = await getAvailableModels({
+          settings: systemSettings,
+          orgId: auth.orgId,
+          userApiKey: (await authService.getUserModelCredential(auth.userId))?.sudorouterKey,
+        })
         writeJson(res, 200, {
           success: true,
           data: models,
@@ -7296,7 +7380,15 @@ export function startServer(
       // Model cache refresh endpoint (admin only)
       if (req.method === 'POST' && pathname === '/api/v1/models/refresh-cache') {
         authService.requireScope(auth, 'admin:settings')
-        const models = await refreshModelCache()
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
+        const systemSettings = await authService.getOrganizationSystemSettings(settingsOrgId)
+        const models = await refreshModelCache({
+          settings: systemSettings,
+          orgId: settingsOrgId,
+          userApiKey: settingsOrgId === auth.orgId
+            ? (await authService.getUserModelCredential(auth.userId))?.sudorouterKey
+            : undefined,
+        })
         writeJson(res, 200, {
           success: true,
           data: models,
@@ -8095,12 +8187,14 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
-        writeJson(res, 200, getSystemSettings())
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
+        writeJson(res, 200, await authService.getOrganizationSystemSettings(settingsOrgId, { redactSecrets: true }))
         return
       }
 
       // Non-secret store config for the skills/agents pages. GET /settings/system
-      // requires admin:settings (it returns model API keys); dept_admins/users
+      // requires admin:settings (it returns full model/provider metadata);
+      // dept_admins/users
       // with store:read need only skillStore.tenantId to fetch hub content, so
       // expose that slim, secret-free subset behind store:read (admins too).
       if (req.method === 'GET' && pathname === '/api/v1/store/config') {
@@ -8113,7 +8207,18 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/system') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, await updateSystemSettings(body))
+        const settingsOrgId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
+        try {
+          writeJson(res, 200, await authService.updateOrganizationSystemSettings(
+            settingsOrgId,
+            body,
+            auth.userId,
+            { redactSecrets: true },
+          ))
+        } catch (error) {
+          if (error instanceof SystemSettingsScopeError) throw new HttpError(400, error.message)
+          throw error
+        }
         return
       }
 
@@ -8122,8 +8227,38 @@ export function startServer(
       // GET 脱敏返回；PUT 单字段编辑——同步回写内存 config 快照（就地赋值）并按需
       // 重调 initHubConfig，保存即时生效。前端仅提交实际被修改的字段；服务端忽略
       // 与脱敏占位格式相同的提交值。
+      if (pathname === '/api/v1/platform-config' || pathname.startsWith('/api/v1/platform-config/')) {
+        await authService.requireSuperAdmin(auth)
+        if (!platformConfig) throw new HttpError(503, '平台配置服务未初始化')
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method === 'GET' && pathname === '/api/v1/platform-config') {
+          writeJson(res, 200, await platformConfig.list())
+          return
+        }
+        if (pathname === '/api/v1/platform-config/password-migration' && (req.method === 'GET' || req.method === 'POST')) {
+          const body = req.method === 'POST' ? await readJsonBody(req) : {}
+          const result = await authService.migratePhonePasswords({
+            apply: req.method === 'POST', fingerprint: typeof body.fingerprint === 'string' ? body.fingerprint : undefined, actorId: auth.userId,
+          })
+          writeJson(res, 200, result)
+          return
+        }
+        const segments = pathname.slice('/api/v1/platform-config/'.length).split('/')
+        const id = segments[0] ?? ''
+        if (!isPlatformProvider(id)) throw new HttpError(404, '平台配置分组不存在')
+        if (req.method === 'POST' && segments.length === 2 && segments[1] === 'check') {
+          writeJson(res, 200, await platformConfig.check(id, await readJsonBody(req)))
+          return
+        }
+        if (req.method === 'PUT' && segments.length === 1) {
+          writeJson(res, 200, await platformConfig.save(id, await readJsonBody(req), auth.userId))
+          return
+        }
+        throw new HttpError(405, 'Method not allowed')
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/server-credentials') {
-        authService.requireScope(auth, 'admin:settings')
+        await authService.requireSuperAdmin(auth)
         const store = getConfigStore()
         const items = SERVER_CREDENTIAL_FIELDS.map(field => {
           const value = store.get(field.key)
@@ -8141,12 +8276,14 @@ export function startServer(
       }
 
       if (req.method === 'PUT' && pathname === '/api/v1/server-credentials') {
-        authService.requireScope(auth, 'admin:settings')
+        await authService.requireSuperAdmin(auth)
         const body = await readJsonBody(req)
         const key = typeof body?.key === 'string' ? body.key : ''
         if (!SERVER_CREDENTIAL_FIELDS.some(field => field.key === key)) {
           throw new HttpError(400, `Unknown credential key: ${key}`)
         }
+        const provider = PLATFORM_CREDENTIAL_GROUPS[key as ConfigKey]
+        if (provider && platformConfig && await platformConfig.hasSaved(provider)) throw new HttpError(409, '该凭据已由平台配置接管，请在平台配置页修改')
         const value = typeof body?.value === 'string' ? body.value.trim() : ''
         if (value.startsWith('****')) {
           // 脱敏占位值原样提交 = 未实际修改，忽略以防覆盖真实凭据
@@ -8179,7 +8316,8 @@ export function startServer(
       if (req.method === 'PATCH' && pathname === '/api/v1/settings/enterprise') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
-        writeJson(res, 200, await enterpriseApi.updateConfig(body))
+        const result = await enterpriseApi.updateConfig(auth.orgId, body, auth.userId)
+        writeJson(res, result.success ? 200 : 400, result)
         return
       }
 
@@ -8241,13 +8379,15 @@ export function startServer(
         }
         if (req.method === 'POST') {
           const body = await readJsonBody(req)
+          const uploadLimit = (await enterpriseApi.getEffectivePolicy(auth.orgId))
+            .workspaceUploadLimitBytes
           // Same name overwrites: re-uploading a corrected spreadsheet is the
           // common case, and leaving the stale one in place would let the job
           // keep running against it.
           const result = await writeWorkspaceFileTo(resolved.workspace, {
             path: typeof body.path === 'string' ? body.path : null,
             contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
-          })
+          }, uploadLimit)
           writeJson(res, 200, { success: true, ...result })
           return
         }
@@ -8445,7 +8585,12 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/upload/logo') {
         authService.requireScope(auth, 'admin:settings')
         const buffer = await readRawBody(req)
-        const uploadDir = join(config.runtimeDir, 'uploads', 'enterprise')
+        const uploadDir = join(
+          config.runtimeDir,
+          'uploads',
+          'enterprise',
+          encodeURIComponent(auth.orgId),
+        )
         await mkdir(uploadDir, { recursive: true })
 
         const contentType = req.headers['content-type']
@@ -8480,6 +8625,35 @@ export function startServer(
         return
       }
 
+      if (req.method === 'POST' && pathname === '/api/v1/client/catalog/install') {
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
+        const body = await readJsonBody(req)
+        if ((body.kind !== 'skills' && body.kind !== 'agents') || typeof body.id !== 'string' || !body.id.trim() || (body.source !== 'hub' && body.source !== 'tenant')) {
+          throw new HttpError(400, 'Invalid catalog installation request')
+        }
+        writeJson(res, 200, await installAndPrepareClientCatalogResource({ kind: body.kind, id: body.id, source: body.source }))
+        return
+      }
+
+      const preparationMatch = pathname.match(/^\/api\/v1\/client\/catalog\/preparations\/([a-f0-9]{64})$/)
+      if (req.method === 'GET' && preparationMatch) {
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
+        const { getClientPreparation } = await import('./catalog/clientCatalogPreparation.js')
+        writeJson(res, 200, await getClientPreparation(preparationMatch[1]!))
+        return
+      }
+
+      const preparationDownload = pathname.match(/^\/api\/v1\/client\/catalog\/preparations\/([a-f0-9]{64})\/(agents|skills)\/([^/]+)\/download$/)
+      if (req.method === 'GET' && preparationDownload) {
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
+        const { downloadClientPreparation } = await import('./catalog/clientCatalogPreparation.js')
+        const artifact = await downloadClientPreparation(preparationDownload[1]!, preparationDownload[2] as 'agents' | 'skills', decodeURIComponent(preparationDownload[3]!))
+        res.setHeader('Content-Type', 'application/zip')
+        res.setHeader('X-Content-SHA256', artifact.digest)
+        res.end(artifact.bytes)
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/agent-hub/categories') {
         authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         writeJson(res, 200, await fetchAgentHubCategories())
@@ -8502,7 +8676,7 @@ export function startServer(
             limit: Number.isFinite(limit) ? limit : undefined,
             query: url.searchParams.get('query') || undefined,
             category: url.searchParams.get('category') || undefined,
-          }),
+          }).then(result => ({ ...result, assistants: result.assistants.map(item => describeClientCatalogItem(item)) })),
         )
         return
       }
@@ -8513,7 +8687,7 @@ export function startServer(
       if (req.method === 'GET' && agentHubDetailMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const assistantId = decodeURIComponent(agentHubDetailMatch[1] || '')
-        writeJson(res, 200, await fetchAgentHubAssistantDetail(assistantId))
+        writeJson(res, 200, await fetchAgentHubAssistantDetail(assistantId).then(item => item ? describeClientCatalogItem(item) : null))
         return
       }
 
@@ -8886,6 +9060,9 @@ export function startServer(
           }
           return {
             ...row,
+            sourceType: 'tenant',
+            catalogVersion: String(row.updated_at ?? ''),
+            isAvailable: row.status === 'approved' && Number(row.enabled) === 1 && isVisibleTo(typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null, filter),
             avatar: formatTenantAssistantAvatarUrl(row.avatar, config.publicBaseUrl),
             default_init_prompt: typeof row.default_init_prompt === 'string' ? row.default_init_prompt : '',
             prompts_i18n: parseObject(row.prompts_i18n, { 'zh-CN': [] }),
@@ -8916,9 +9093,10 @@ export function startServer(
             throw new HttpError(404, `Assistant not found: ${assistantId}`)
           }
           // Use agent name for packaging (directory lookup)
-          const zipBuffer = await packageAssistantZip(assistant.name)
+          const zipBuffer = await packageAssistantZip(assistant.id)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(assistantId)
+          res.setHeader('X-Content-SHA256', resourceContentHash('sha256').update(zipBuffer).digest('hex'))
           res.setHeader('Content-Type', 'application/zip')
           res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}.zip"; filename*=UTF-8''${encodedFilename}.zip`)
           res.end(zipBuffer)
@@ -8943,6 +9121,9 @@ export function startServer(
         const avatarFile = request.avatar
         for (const fieldName of ['skills', 'enabled_skills', 'enabled_wikis', 'enabled_corp_apps']) {
           if (body[fieldName] !== undefined) body[fieldName] = parseTenantStringArray(body[fieldName], fieldName)
+        }
+        for (const fieldName of ['skills', 'enabled_skills', 'enabledSkills']) {
+          if (Array.isArray(body[fieldName])) body[fieldName] = await resolveOrganizationSkillIds(body[fieldName] as string[])
         }
         for (const fieldName of ['visible_to', 'workflow']) {
           if (body[fieldName] !== undefined) body[fieldName] = parseTenantObject(body[fieldName], fieldName)
@@ -8980,12 +9161,8 @@ export function startServer(
         const authorUser = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
         const authorName = authorUser?.name || undefined
 
-        // Admin → tenant dir (live now). Non-admin → tenant-pending staging dir
-        // (invisible to the scan; moved to tenant on approval).
-        const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-        const ASSISTANT_TENANT_DIR = join(MOSS_HOME, 'assistants', 'tenant')
-        const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
-        const assistantDir = join(storeAdmin ? ASSISTANT_TENANT_DIR : ASSISTANT_TENANT_PENDING_DIR, name)
+        // Stable object identity; approval and visibility are database state.
+        const assistantDir = newPrivateResourcePath('agent', assistantId)
 
         if (avatarFile) validateTenantAssistantAvatar(avatarFile)
         await mkdir(assistantDir, { recursive: true })
@@ -9082,7 +9259,7 @@ export function startServer(
           throw error
         }
 
-        const result = await runtime.store.getTenantAssistant(assistantId)
+        const result = await runtime.store.getTenantAssistant(assistantId, auth.orgId)
         writeJson(res, 200, {
           success: true,
           data: result
@@ -9107,9 +9284,9 @@ export function startServer(
         // admin:settings protected nothing and only desynced the UI). Editing
         // stays owner/subtree-only — enforced by PATCH, and signalled here via
         // `can_edit` so the client can render read-only instead of guessing.
-        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(tenantAgentRulesMatch[1] || '')
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!tenantAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
@@ -9140,13 +9317,14 @@ export function startServer(
         const filePath = typeof tenantAssistant.file_path === 'string' ? tenantAssistant.file_path : ''
         const assistantDir = filePath && existsSync(filePath)
           ? filePath
-          : join(process.env.MOSS_HOME || join(os.homedir(), '.moss'), 'assistants', 'tenant', tenantAssistant.name as string)
+          : ''
         if (!existsSync(assistantDir)) {
           throw new HttpError(404, `Tenant assistant rules not found: ${tenantAssistantId}`)
         }
         const meta = await readAssistantMeta(assistantDir)
         const rulePath = await resolveTenantAssistantRulePath(assistantDir, meta?.ruleFile || 'system.md', false)
-        const rules = await readFile(rulePath, 'utf8').catch(() => '')
+        const overlay = JSON.parse(String(tenantAssistant.config_json || '{}')) as Record<string, unknown>
+        const rules = typeof overlay.rules === 'string' ? overlay.rules : await readFile(rulePath, 'utf8').catch(() => '')
         writeJson(res, 200, { rules, can_edit: canEditRules })
         return
       }
@@ -9180,9 +9358,12 @@ export function startServer(
         // Stamp the publisher's default visibility (dept_admin → own department,
         // user → self) so it survives approval instead of defaulting to global.
         const publishVisibility = await authService.defaultTenantVisibility(auth)
-        // Create tenant agent record with UUID as id
+        const publishedId = randomUUID()
+        const publishedPath = newPrivateResourcePath('agent', publishedId)
+        await cp(assistantResult.dir, publishedPath, { recursive: true })
+        // Create a separate publication, preserving the custom original.
         await runtime.store.createTenantAssistant({
-          id: assistantId, // Use UUID as id
+          id: publishedId,
           name: actualAssistantName,
           display_name: meta?.display_name || actualAssistantName,
           description: meta?.description || undefined,
@@ -9196,10 +9377,11 @@ export function startServer(
           author_name: authorName,
           status: 'pending',
           visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
-          file_path: assistantResult.dir, // Store source directory path for approval
+          file_path: publishedPath,
           org_id: auth.orgId,
         })
-        writeJson(res, 200, { id: assistantId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
+        await updateOrganizationPrivateMetadata('agent', publishedId, meta || {})
+        writeJson(res, 200, { id: publishedId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
         return
       }
 
@@ -9212,10 +9394,12 @@ export function startServer(
         const approved = body.approved === true
         const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote : undefined
 
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!tenantAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
+
+        if (approved && (typeof tenantAssistant.file_path !== 'string' || !existsSync(tenantAssistant.file_path))) throw new HttpError(404, 'Resource package not found')
 
         if (approved) {
           // Update status to approved
@@ -9230,34 +9414,10 @@ export function startServer(
           } else if (tenantAssistant.visible_to == null) {
             await runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
           }
-          // Copy agent to tenant directory using stored file_path
-          const sourcePath = tenantAssistant.file_path as string | undefined
-          if (sourcePath && existsSync(sourcePath)) {
-            await copyAssistantToTenantDirByPath(sourcePath)
-            // Update file_path to the copied location (tenant/<dir name>).
-            const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-            const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
-            const tenantPath = join(MOSS_HOME, 'assistants', 'tenant', basename(sourcePath))
-            await runtime.store.updateTenantAssistantPath(tenantAssistantId, tenantPath)
-            // MOVE semantics for non-admin-created pending items: remove the
-            // staged source so it lives only in the tenant dir. Items published
-            // from a real custom/ item keep their custom original (copy).
-            if (isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath)) {
-              rmSync(sourcePath, { recursive: true, force: true })
-            }
-          } else {
-            throw new HttpError(404, `Source assistant directory not found: ${sourcePath}`)
-          }
         } else {
           await runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'rejected', auth.userId, reviewNote)
           await removeTenantAssistantAvatar(config.runtimeDir, tenantAssistant.avatar as string | null | undefined)
-          // Clean up staged files for a rejected non-admin submission.
-          const sourcePath = tenantAssistant.file_path as string | undefined
-          const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-          const ASSISTANT_TENANT_PENDING_DIR = join(MOSS_HOME, 'assistants', 'tenant-pending')
-          if (sourcePath && isInsideDir(ASSISTANT_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
-            rmSync(sourcePath, { recursive: true, force: true })
-          }
+
         }
 
         writeJson(res, 200, { id: tenantAssistantId, status: approved ? 'approved' : 'rejected' })
@@ -9269,7 +9429,7 @@ export function startServer(
       if (req.method === 'PATCH' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
-        const existingAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const existingAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!existingAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
@@ -9290,6 +9450,9 @@ export function startServer(
         for (const fieldName of ['skills', 'enabled_skills', 'enabled_wikis', 'enabled_corp_apps', 'enabledSkills', 'enabledWikis', 'enabledCorpApps']) {
           if (body[fieldName] !== undefined) body[fieldName] = parseTenantStringArray(body[fieldName], fieldName)
         }
+        for (const fieldName of ['skills', 'enabled_skills', 'enabledSkills']) {
+          if (Array.isArray(body[fieldName])) body[fieldName] = await resolveOrganizationSkillIds(body[fieldName] as string[])
+        }
         const enabled = parseTenantBoolean(body.enabled, 'enabled')
         if (enabled !== undefined) body.enabled = enabled
         const removeAvatar = parseTenantBoolean(body.remove_avatar, 'remove_avatar')
@@ -9297,6 +9460,9 @@ export function startServer(
         const hasAvatarField = Object.prototype.hasOwnProperty.call(body, 'avatar') || avatarFile !== null
         if (removeAvatar === true && hasAvatarField) {
           throw new HttpError(400, 'remove_avatar cannot be combined with avatar')
+        }
+        for (const fieldName of ['skills', 'enabled_skills', 'enabledSkills']) {
+          if (Array.isArray(body[fieldName])) body[fieldName] = await resolveOrganizationSkillIds(body[fieldName] as string[])
         }
         for (const fieldName of ['visible_to', 'workflow']) {
           if (body[fieldName] !== undefined) body[fieldName] = parseTenantObject(body[fieldName], fieldName)
@@ -9372,7 +9538,7 @@ export function startServer(
           updates.workflow = body.workflow ? JSON.stringify(body.workflow) : null
         }
 
-        const tenantAssistantBeforeUpdate = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistantBeforeUpdate = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         const assistantDirBeforeUpdate = tenantAssistantBeforeUpdate?.file_path as string | undefined
         const metaBeforeUpdate = assistantDirBeforeUpdate && existsSync(assistantDirBeforeUpdate)
           ? await readAssistantMeta(assistantDirBeforeUpdate)
@@ -9391,8 +9557,8 @@ export function startServer(
           throw error
         }
 
-        // Sync the metadata in the record's current approved or pending directory.
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        // Store effective metadata in this organization's database overlay.
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (tenantAssistant) {
           const assistantDir = tenantAssistant.file_path as string | undefined
           if (assistantDir && existsSync(assistantDir)) {
@@ -9419,10 +9585,10 @@ export function startServer(
               if (body.skills !== undefined) meta.skills = body.skills as string[]
               if (body.workflow !== undefined) meta.workflow = body.workflow as AssistantStoreMeta['workflow']
               if (typeof body.rules === 'string' && rulePath) {
-                await writeFile(rulePath, body.rules, 'utf8')
+                Object.assign(meta, { rules: body.rules })
                 meta.ruleFile = metaBeforeUpdate?.ruleFile || 'system.md'
               }
-              await writeAssistantMeta(assistantDir, meta)
+              await updateOrganizationPrivateMetadata('agent', tenantAssistantId, meta)
             }
           }
         }
@@ -9436,7 +9602,8 @@ export function startServer(
       if (req.method === 'DELETE' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
+        if (!tenantAssistant) throw new HttpError(404, 'Resource not found')
         // Non-admins may only delete tenant assistants authored by someone
         // currently in their scope, within their own org.
         if (tenantAssistant && !isStoreAdmin(auth)) {
@@ -9449,14 +9616,7 @@ export function startServer(
         }
         if (tenantAssistant) {
           await removeTenantAssistantAvatar(config.runtimeDir, tenantAssistant.avatar as string | null | undefined)
-          const assistantName = tenantAssistant.name as string
-          // Delete from tenant directory if exists
-          const MOSS_HOME = process.env.MOSS_HOME || join(os.homedir(), '.moss')
-          const ASSISTANT_TENANT_DIR = join(MOSS_HOME, 'assistants', 'tenant')
-          const assistantDir = join(ASSISTANT_TENANT_DIR, assistantName)
-          if (existsSync(assistantDir)) {
-            rmSync(assistantDir, { recursive: true, force: true })
-          }
+
         }
         await runtime.store.deleteTenantAssistant(tenantAssistantId)
         writeJson(res, 200, { ok: true })
@@ -9467,7 +9627,8 @@ export function startServer(
       const tenantAgentDownloadMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)\/download$/)
       if (req.method === 'GET' && tenantAgentDownloadMatch) {
         const tenantAssistantId = decodeURIComponent(tenantAgentDownloadMatch[1] || '')
-        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId)
+        await requireOrganizationResource('agent', tenantAssistantId)
+        const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!tenantAssistant || tenantAssistant.status !== 'approved') {
           throw new HttpError(404, `Tenant assistant not found or not approved: ${tenantAssistantId}`)
         }
@@ -9484,9 +9645,10 @@ export function startServer(
 
         try {
           // Package from the tenant directory
-          const zipBuffer = await packageAssistantZipByDir(tenantPath)
+          const zipBuffer = await packageAssistantZip(tenantAssistantId)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(tenantAssistantId)
+          res.setHeader('X-Content-SHA256', resourceContentHash('sha256').update(zipBuffer).digest('hex'))
           res.setHeader('Content-Type', 'application/zip')
           res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}.zip"; filename*=UTF-8''${encodedFilename}.zip`)
           res.end(zipBuffer)
@@ -9522,7 +9684,7 @@ export function startServer(
             query: url.searchParams.get('query') || undefined,
             category: category || undefined,
             tenantId: url.searchParams.get('tenant_id') || undefined,
-          }),
+          }).then(result => ({ ...result, skills: result.skills.map(item => describeClientCatalogItem(item)) })),
         )
         return
       }
@@ -9531,7 +9693,7 @@ export function startServer(
       if (req.method === 'GET' && skillHubDetailMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const skillId = decodeURIComponent(skillHubDetailMatch[1] || '')
-        writeJson(res, 200, await fetchSkillHubSkillDetail(skillId))
+        writeJson(res, 200, await fetchSkillHubSkillDetail(skillId).then(item => item ? describeClientCatalogItem(item) : null))
         return
       }
 
@@ -9772,6 +9934,9 @@ export function startServer(
           })
           .map((row: Record<string, unknown>) => ({
             ...row,
+            sourceType: 'tenant',
+            catalogVersion: String(row.updated_at ?? ''),
+            isAvailable: row.status === 'approved' && Number(row.enabled) === 1 && isVisibleTo(typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null, filter),
             // Parse visible_to so the approval page receives an object (matches
             // the /agents/tenant shape), not a raw JSON string.
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
@@ -9779,6 +9944,22 @@ export function startServer(
             can_manage: isAdmin || (canManageByAuthor.get(row.author_id as string) ?? false),
           }))
         writeJson(res, 200, rows)
+        return
+      }
+
+      const tenantSkillContentMatch = pathname.match(/^\/api\/v1\/skills\/tenant\/([^/]+)\/content$/)
+      if (req.method === 'GET' && tenantSkillContentMatch) {
+        const id = decodeURIComponent(tenantSkillContentMatch[1] || '')
+        const skill = await runtime.store.getTenantSkill(id, auth.orgId)
+        if (!skill) throw new HttpError(404, 'Tenant skill not found')
+        const canManage = isStoreAdmin(auth) || await authService.isCreatorInScope(auth.orgId, skill.author_id as string, auth)
+        const visibleTo = typeof skill.visible_to === 'string' ? JSON.parse(skill.visible_to) : null
+        if (!canManage && (skill.status !== 'approved' || !isVisibleTo(visibleTo, await authService.buildVisibilityFilter(auth)))) throw new HttpError(404, 'Tenant skill not found')
+        const directory = typeof skill.file_path === 'string' ? skill.file_path : ''
+        if (!directory) throw new HttpError(404, 'Skill instructions not found')
+        const entry = await resolveWorkspaceEntry(directory, 'SKILL.md')
+        const content = await readFile(entry.fullPath, 'utf8')
+        writeJson(res, 200, { content })
         return
       }
 
@@ -9794,9 +9975,10 @@ export function startServer(
             throw new HttpError(404, `Skill not found: ${skillId}`)
           }
           // Use skill name for packaging (directory lookup)
-          const zipBuffer = await packageSkillZip(skill.name)
+          const zipBuffer = await packageSkillZip(skill.id)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(skillId)
+          res.setHeader('X-Content-SHA256', resourceContentHash('sha256').update(zipBuffer).digest('hex'))
           res.setHeader('Content-Type', 'application/zip')
           res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}.zip"; filename*=UTF-8''${encodedFilename}.zip`)
           res.end(zipBuffer)
@@ -9933,7 +10115,9 @@ export function startServer(
         // self) at publish time so it survives approval instead of defaulting to
         // global. Admins get null (global), unchanged.
         const publishVisibility = await authService.defaultTenantVisibility(auth)
-        const id = `tenant-skill-${Date.now()}`
+        const id = randomUUID()
+        const publishedPath = newPrivateResourcePath('skill', id)
+        await cp(skillPath, publishedPath, { recursive: true })
         await runtime.store.createTenantSkill({
           id,
           name: actualSkillName,
@@ -9946,7 +10130,9 @@ export function startServer(
           status: 'pending',
           visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
           org_id: auth.orgId,
+          file_path: publishedPath,
         })
+        await updateOrganizationPrivateMetadata('skill', id, meta || {})
         writeJson(res, 200, { id, skillId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
         return
       }
@@ -9960,10 +10146,12 @@ export function startServer(
         const approved = body.approved === true
         const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote : undefined
 
-        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
         if (!tenantSkill) {
           throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
         }
+
+        if (approved && (typeof tenantSkill.file_path !== 'string' || !existsSync(tenantSkill.file_path))) throw new HttpError(404, 'Resource package not found')
 
         if (approved) {
           // Update status to approved
@@ -9979,31 +10167,9 @@ export function startServer(
           } else if (tenantSkill.visible_to == null) {
             await runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
           }
-          // Copy skill to tenant directory using the record's staged file_path
-          // (tenant-pending for non-admin submissions), falling back to the
-          // custom dir by name for legacy publish-from-custom records.
-          const skillName = tenantSkill.name as string
-          const sourcePath = typeof tenantSkill.file_path === 'string' ? tenantSkill.file_path : undefined
-          await copySkillToTenantDir(skillName, sourcePath)
-          // Point file_path at the tenant copy, and MOVE (remove the staged
-          // source) for tenant-pending items so the skill lives only in tenant.
-          const tenantSkillPath = join(MOSS_SKILLS_TENANT_DIR, skillName)
-          await runtime.store.updateTenantSkillFilePath(
-            tenantSkillId,
-            tenantSkillPath,
-            typeof tenantSkill.source_url === 'string' ? tenantSkill.source_url : '',
-            typeof tenantSkill.checksum === 'string' ? tenantSkill.checksum : '',
-          )
-          if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
-            rmSync(sourcePath, { recursive: true, force: true })
-          }
         } else {
           await runtime.store.updateTenantSkillStatus(tenantSkillId, 'rejected', auth.userId, reviewNote)
-          // Clean up staged files for a rejected non-admin submission.
-          const sourcePath = typeof tenantSkill.file_path === 'string' ? tenantSkill.file_path : undefined
-          if (sourcePath && isInsideDir(MOSS_SKILLS_TENANT_PENDING_DIR, sourcePath) && existsSync(sourcePath)) {
-            rmSync(sourcePath, { recursive: true, force: true })
-          }
+
         }
 
         writeJson(res, 200, { id: tenantSkillId, status: approved ? 'approved' : 'rejected' })
@@ -10015,7 +10181,7 @@ export function startServer(
       if (req.method === 'PATCH' && skillTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
-        const existing = await runtime.store.getTenantSkill(tenantSkillId)
+        const existing = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
         if (!existing) {
           throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
         }
@@ -10050,27 +10216,6 @@ export function startServer(
 
         await runtime.store.updateTenantSkillMeta(tenantSkillId, updates)
 
-        // Sync enabled/visible_to to file metadata
-        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
-        if (tenantSkill && tenantSkill.status === 'approved') {
-          const skillName = tenantSkill.name as string
-          const skillDir = join(MOSS_SKILLS_TENANT_DIR, skillName)
-          if (existsSync(skillDir)) {
-            const meta = await readSkillMeta(skillDir)
-            if (meta) {
-              if (updates.enabled !== undefined) {
-                meta.enabled = updates.enabled === 1
-              }
-              if (updates.visible_to !== undefined) {
-                // Use the clamped value written to the DB, not the raw request,
-                // so a non-admin can't push a wider visibility to the file meta.
-                meta.visible_to = updates.visible_to ? JSON.parse(updates.visible_to) : null
-              }
-              await writeSkillMeta(skillDir, meta)
-            }
-          }
-        }
-
         writeJson(res, 200, { ok: true })
         return
       }
@@ -10079,7 +10224,8 @@ export function startServer(
       if (req.method === 'DELETE' && skillTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
-        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
+        if (!tenantSkill) throw new HttpError(404, 'Resource not found')
         // Non-admins may only delete tenant skills authored by someone currently
         // in their scope, within their own org.
         if (tenantSkill && !isStoreAdmin(auth)) {
@@ -10090,14 +10236,7 @@ export function startServer(
             throw new HttpError(403, 'You cannot manage this tenant skill')
           }
         }
-        if (tenantSkill) {
-          const skillName = tenantSkill.name as string
-          // Delete from tenant directory if exists
-          const skillDir = join(MOSS_SKILLS_TENANT_DIR, skillName)
-          if (existsSync(skillDir)) {
-            rmSync(skillDir, { recursive: true, force: true })
-          }
-        }
+        await assertOrganizationSkillUnused(tenantSkillId, String(tenantSkill.name))
         await runtime.store.deleteTenantSkill(tenantSkillId)
         writeJson(res, 200, { ok: true })
         return
@@ -10107,20 +10246,22 @@ export function startServer(
       const tenantSkillDownloadMatch = pathname.match(/^\/api\/v1\/skills\/tenant\/([^/]+)\/download$/)
       if (req.method === 'GET' && tenantSkillDownloadMatch) {
         const tenantSkillId = decodeURIComponent(tenantSkillDownloadMatch[1] || '')
-        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId)
+        await requireOrganizationResource('skill', tenantSkillId)
+        const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
         if (!tenantSkill || tenantSkill.status !== 'approved') {
           throw new HttpError(404, `Tenant skill not found or not approved: ${tenantSkillId}`)
         }
         // name is the actual skill name (e.g., "my-skill"), use it to find the directory
         const skillName = tenantSkill.name as string
-        const skillPath = await findInstalledSkillPath(skillName)
+        const skillPath = await findInstalledSkillPath(tenantSkillId)
         if (!skillPath) {
           throw new HttpError(404, `Skill not found: ${skillName}`)
         }
         try {
-          const zipBuffer = await packageSkillZip(skillName)
+          const zipBuffer = await packageSkillZip(tenantSkillId)
           // Encode filename for Content-Disposition header (Chinese characters not allowed)
           const encodedFilename = encodeURIComponent(tenantSkillId)
+          res.setHeader('X-Content-SHA256', resourceContentHash('sha256').update(zipBuffer).digest('hex'))
           res.setHeader('Content-Type', 'application/zip')
           res.setHeader('Content-Disposition', `attachment; filename="${encodedFilename}.zip"; filename*=UTF-8''${encodedFilename}.zip`)
           res.end(zipBuffer)
@@ -10387,6 +10528,21 @@ export function startServer(
         return
       }
 
+      const sessionRuntimeMetadataMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/(startup|artifacts)$/)
+      if (req.method === 'GET' && sessionRuntimeMetadataMatch) {
+        const session = await runtime.getSession(sessionRuntimeMetadataMatch[1] || '')
+        if (!session) throw new HttpError(404, 'Session not found')
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) throw new HttpError(403, 'Forbidden')
+        if (sessionRuntimeMetadataMatch[2] === 'artifacts') {
+          writeJson(res, 200, await readArtifacts(artifactManifestPath(session.transcriptPath)))
+        } else {
+          const failure = await runtime.store.latestEvent(session.sessionId, 'startup_failed')
+          const started = await runtime.store.latestEvent(session.sessionId, 'attempt_spawned')
+          writeJson(res, 200, { startup: failure && (!started || failure.createdAt > started.createdAt) ? failure.payload : null })
+        }
+        return
+      }
+
       const sessionContextMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/context$/)
       if (req.method === 'GET' && sessionContextMatch) {
         const sessionId = sessionContextMatch[1] || ''
@@ -10467,6 +10623,7 @@ export function startServer(
           path: url.searchParams.get('path'),
           search: url.searchParams.get('search'),
         }, resolveSessionWorkspaceAccess(session, config))
+        if (session.runtime.type === 'host') await projectArtifactDrafts(root, session.cwd, await readArtifacts(artifactManifestPath(session.transcriptPath)))
         writeJson(res, 200, { root })
         return
       }
@@ -10495,11 +10652,30 @@ export function startServer(
           throw new HttpError(403, 'Forbidden')
         }
         const body = await readJsonBody(req)
+        const uploadLimit = (await enterpriseApi.getEffectivePolicy(auth.orgId))
+          .workspaceUploadLimitBytes
         const result = await writeWorkspaceFile(session, {
           path: typeof body.path === 'string' ? body.path : null,
           contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
-        }, resolveSessionWorkspaceAccess(session, config))
+        }, resolveSessionWorkspaceAccess(session, config), uploadLimit)
         writeJson(res, 200, result)
+        return
+      }
+
+      const sessionCatalogSkillsMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/catalog-skills$/)
+      if (req.method === 'POST' && sessionCatalogSkillsMatch) {
+        const session = await runtime.getSession(sessionCatalogSkillsMatch[1] || '')
+        if (!session) throw new HttpError(404, 'Session not found')
+        // Preparation references are personal; a session manager cannot substitute another identity's graph.
+        if (session.orgId !== auth.orgId || session.userId !== auth.userId) throw new HttpError(403, 'Forbidden')
+        const body = await readJsonBody(req)
+        if (!Array.isArray(body.skills) || body.skills.length > 100 || !body.skills.every((ref: unknown) => typeof ref === 'string')) throw new HttpError(400, 'Invalid skills')
+        const { materializeClientSkills } = await import('./catalog/clientCatalogPreparation.js')
+        const assistant = session.assistantName?.startsWith('moss-prepared:') ? session.assistantName : undefined
+        const skills = await materializeClientSkills(body.skills as string[], assistant, async (path, bytes, mode) => {
+          await writeWorkspaceFile(session, { path, contentBase64: bytes.toString('base64'), mode }, resolveSessionWorkspaceAccess(session, config), 50 * 1024 * 1024)
+        })
+        writeJson(res, 200, { skills })
         return
       }
 
@@ -10564,6 +10740,9 @@ export function startServer(
         if (body.client_metadata && typeof body.client_metadata === 'object' && !Array.isArray(body.client_metadata)) {
           const patch: Record<string, unknown> = {}
           for (const [key, value] of Object.entries(body.client_metadata as Record<string, unknown>)) {
+            if (key === 'implicit_task_id' || key === 'task_contract' || key === 'requested_execution') {
+              throw new HttpError(400, `Reserved client_metadata key: ${key}`)
+            }
             patch[key] = value === null ? undefined : value
           }
           await runtime.store.updateSessionClientMetadata(sessionId, patch)
@@ -10606,7 +10785,7 @@ export function startServer(
           role: auth.role,
           scopes: auth.scopes,
           runtime: runtimeOptions,
-          assistantName: assistantDisplayName,
+          assistantName: rawAssistantName,
           // P1a R5.3：payload zone 提示（bridge 内与 binding policy 比对，仅一致时接受）
           zoneHint: typeof body.zone_id === 'string' && body.zone_id.trim() ? body.zone_id.trim() : undefined,
           // 新增: 从请求体获取 enabled_skills
@@ -10622,6 +10801,13 @@ export function startServer(
           : { ownerInstanceId: null, ownerLive: false }
         writeJson(res, 200, {
           session_id: created.sessionId,
+          task_id: created.taskId,
+          attempt_id: created.currentAttemptId,
+          execution: {
+            requested_location: 'cloud',
+            runtime_type: created.runtime.type,
+            session_status: created.status,
+          },
           ws_url: buildWsUrl(server, config, created.sessionId, wsRouteHint(config, owner)),
           work_dir: created.cwd,
           runtime: created.runtime,
@@ -10633,6 +10819,7 @@ export function startServer(
       }
 
       throw new HttpError(404, 'Not found')
+      })
     } catch (error) {
       writeError(logger, res, error)
     }
@@ -10938,6 +11125,11 @@ export function startServer(
         })
       } catch (error) {
         logger.error(error instanceof Error ? error.message : String(error))
+        if (error instanceof SessionStartupError) {
+          const body = JSON.stringify({ error: error.message, startup: error.failure })
+          socket.end(`HTTP/1.1 ${error.statusCode} Startup Failed\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`)
+          return
+        }
         // Takeover in progress: fail the handshake with 503 (retryable) so
         // LB-side consumers and clients converge once fencing completes.
         if (error instanceof AttemptTakeoverPendingError) {

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, migrationCommandContext, type CommandContext } from '../application/commandContext.js'
 import type { AuthCenterDb, AuthCenterUser } from '../authCenter/db.js'
 import type { IdentityRepository } from '../identity/identityRepository.js'
 import type { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
+import type { DbDriver } from '../db/driver.js'
 import {
   type IdentityMergePlan,
   type IdentityMergePlanner,
@@ -65,19 +65,19 @@ export class IdentityMigrationBlockedError extends Error {
 
 export class IdentityMigrationService {
   constructor(private readonly options: {
-    db: DatabaseSync
+    db: DbDriver
     auth: AuthCenterDb
     identities: IdentityRepository
     unified: UnifiedIdentityService
     runs: MigrationRunStore
     source: IdentityMigrationSource
     planner: IdentityMergePlanner
-    createPlanner?: () => IdentityMergePlanner
+    createPlanner?: () => IdentityMergePlanner | Promise<IdentityMergePlanner>
   }) {}
 
-  plan(resolutions: readonly ManualResolution[]): IdentityMigrationPlan {
+  async plan(resolutions: readonly ManualResolution[]): Promise<IdentityMigrationPlan> {
     const source = this.options.source.readSnapshot()
-    const planner = this.options.createPlanner?.() ?? this.options.planner
+    const planner = this.options.createPlanner ? await this.options.createPlanner() : this.options.planner
     return {
       ...planner.plan(source, resolutions),
       sourceChecksum: checksum(source),
@@ -136,12 +136,12 @@ export class IdentityMigrationService {
     let suppressedExternalEffects = 0
     for (const decision of plan.users) {
       const source = requiredById(plan.source.users, decision.legacyId, 'User')
-      const orgId = this.options.identities.resolveNumericAliasGlobal('enterprise', source.enterpriseId)?.resourceId
+      const orgId = (await this.options.identities.resolveNumericAliasGlobal('enterprise', source.enterpriseId))?.resourceId
       if (!orgId) throw new Error(`旧用户 ${source.legacyId} 缺少 Organization 映射`)
       const targetId = decision.action === 'reuse'
         ? await this.assertReusableAlias('user', source.legacyId, decision.targetId!, orgId)
         : await this.createUser(source, orgId, runId, decision.targetId!)
-      this.ensureProviderIdentities(source, targetId, orgId)
+      await this.ensureProviderIdentities(source, targetId, orgId)
       this.options.runs.putMapping({
         runId,
         namespace: 'user',
@@ -151,7 +151,7 @@ export class IdentityMigrationService {
       })
       if (decision.action === 'create') {
         const idempotencyKey = `welcome:migration:identity:user:${source.legacyId}`
-        const outbox = this.options.identities.getOutboxEvent(idempotencyKey)
+        const outbox = await this.options.identities.getOutboxEvent(idempotencyKey)
         if (!outbox || outbox.status !== 'suppressed' || outbox.contextSource !== 'migration') {
           throw new Error(`迁移用户 ${source.legacyId} 的欢迎事件未被正确抑制`)
         }
@@ -173,25 +173,25 @@ export class IdentityMigrationService {
       usersCreated: plan.users.filter(item => item.action === 'create').length,
       usersReused: plan.users.filter(item => item.action === 'reuse').length,
       suppressedExternalEffects,
-      deliverableExternalOutboxCount: this.pendingMigrationOutboxCount(),
+      deliverableExternalOutboxCount: await this.pendingMigrationOutboxCount(),
     }
   }
 
-  verify(plan: IdentityMigrationPlan): IdentityMigrationVerification {
+  async verify(plan: IdentityMigrationPlan): Promise<IdentityMigrationVerification> {
     const issues: string[] = []
     for (const organization of plan.source.organizations) {
-      const mapped = this.options.identities.resolveNumericAliasGlobal('enterprise', organization.legacyId)
+      const mapped = await this.options.identities.resolveNumericAliasGlobal('enterprise', organization.legacyId)
       if (!mapped) issues.push(`旧企业 ${organization.legacyId} 未映射`)
     }
     for (const user of plan.source.users) {
-      const mapped = this.options.identities.resolveNumericAliasGlobal('user', user.legacyId)
-      const organization = this.options.identities.resolveNumericAliasGlobal('enterprise', user.enterpriseId)
+      const mapped = await this.options.identities.resolveNumericAliasGlobal('user', user.legacyId)
+      const organization = await this.options.identities.resolveNumericAliasGlobal('enterprise', user.enterpriseId)
       if (!mapped) issues.push(`旧用户 ${user.legacyId} 未映射`)
       else if (!organization || mapped.orgId !== organization.resourceId) {
         issues.push(`旧用户 ${user.legacyId} 的 Organization 映射不一致`)
       }
     }
-    if (this.pendingMigrationOutboxCount() > 0) issues.push('存在 migration 来源的待投递 Outbox')
+    if (await this.pendingMigrationOutboxCount() > 0) issues.push('存在 migration 来源的待投递 Outbox')
     return { status: issues.length === 0 ? 'matched' : 'mismatch', issues }
   }
 
@@ -230,17 +230,17 @@ export class IdentityMigrationService {
     return context.migrationRunId
   }
 
-  private ensureProviderIdentities(source: LegacyUserIdentity, userId: string, orgId: string): void {
+  private async ensureProviderIdentities(source: LegacyUserIdentity, userId: string, orgId: string): Promise<void> {
     const providers = source.providerIdentities ?? (source.providerIdentity ? [source.providerIdentity] : [])
     for (const provider of providers) {
-      const existing = this.options.identities.findAuthIdentity(provider.provider, provider.issuer, provider.subject)
+      const existing = await this.options.identities.findAuthIdentity(provider.provider, provider.issuer, provider.subject)
       if (existing) {
         if (existing.userId !== userId || existing.orgId !== orgId) {
           throw new Error(`三方身份 ${provider.issuer}:${provider.subject} 已绑定其他用户`)
         }
         continue
       }
-      this.options.identities.createAuthIdentity({
+      await this.options.identities.createAuthIdentity({
         id: randomUUID(),
         orgId,
         userId,
@@ -258,11 +258,11 @@ export class IdentityMigrationService {
     targetId: string,
     expectedOrgId?: string,
   ): Promise<string> {
-    const byLegacy = this.options.identities.resolveNumericAliasGlobal(namespace, legacyId)
+    const byLegacy = await this.options.identities.resolveNumericAliasGlobal(namespace, legacyId)
     if (byLegacy && byLegacy.resourceId !== targetId) {
       throw new Error(`${namespace} 旧 ID ${legacyId} 已映射到其他资源`)
     }
-    const existingAlias = this.options.identities.getNumericAlias(namespace, targetId)
+    const existingAlias = await this.options.identities.getNumericAlias(namespace, targetId)
     if (existingAlias !== null && existingAlias !== legacyId) {
       throw new Error(`${namespace} 目标资源已有不同数字别名 ${existingAlias}`)
     }
@@ -274,7 +274,7 @@ export class IdentityMigrationService {
       if (expectedOrgId && user.orgId !== expectedOrgId) throw new Error(`User ${targetId} 不属于目标 Organization`)
     }
     if (!byLegacy) {
-      this.options.identities.assignNumericAlias({
+      await this.options.identities.assignNumericAlias({
         namespace,
         legacyId,
         resourceId: targetId,
@@ -284,13 +284,15 @@ export class IdentityMigrationService {
     return targetId
   }
 
-  private pendingMigrationOutboxCount(): number {
-    const exists = this.options.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outbox_events'").get()
-    if (!exists) return 0
-    return Number((this.options.db.prepare(`
+  private async pendingMigrationOutboxCount(): Promise<number> {
+    const result = this.options.db.kind === 'postgres'
+      ? await this.options.db.get<{ table_exists: boolean }>("SELECT to_regclass('outbox_events') IS NOT NULL AS table_exists")
+      : await this.options.db.get<{ table_exists: number }>("SELECT 1 AS table_exists FROM sqlite_master WHERE type='table' AND name='outbox_events'")
+    if (!result?.table_exists) return 0
+    return Number((await this.options.db.get<{ count: number }>(`
       SELECT COUNT(*) AS count FROM outbox_events
       WHERE context_source = 'migration' AND status = 'pending'
-    `).get() as { count: number }).count)
+    `))?.count ?? 0)
   }
 }
 

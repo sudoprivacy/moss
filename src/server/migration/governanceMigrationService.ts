@@ -1,8 +1,6 @@
-import type { DatabaseSync } from 'node:sqlite'
 import { assertTrustedCommandContext, type CommandContext } from '../application/commandContext.js'
 import { type IdentityRepository, type InvitationRecord, type OperationAuditRecord } from '../identity/identityRepository.js'
 import { sudoworkQuotaToCreditUnits, sudoworkUsdToCreditUnits } from '../identity/sudoworkCreditConversion.js'
-import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 import type { MigrationRunStore } from './migrationRunStore.js'
 import type {
   SudoworkGovernanceSnapshot,
@@ -81,14 +79,13 @@ export class GovernanceMigrationBlockedError extends Error {
 
 export class GovernanceMigrationService {
   constructor(private readonly options: {
-    db: DatabaseSync
     identities: IdentityRepository
     runs: MigrationRunStore
     source: GovernanceSource
     defaultInitialQuota: number
   }) {}
 
-  plan(resolutions: GovernanceMigrationResolutions = {}): GovernanceMigrationPlan {
+  async plan(resolutions: GovernanceMigrationResolutions = {}): Promise<GovernanceMigrationPlan> {
     const source = this.options.source.readSnapshot()
     const issues: GovernanceMigrationIssue[] = []
     const invitations: PlannedInvitation[] = []
@@ -96,14 +93,14 @@ export class GovernanceMigrationService {
     this.assertUniqueSource(source, issues)
 
     for (const invitation of source.invitations) {
-      const org = this.options.identities.resolveNumericAliasGlobal('enterprise', invitation.enterpriseId)
+      const org = await this.options.identities.resolveNumericAliasGlobal('enterprise', invitation.enterpriseId)
       if (!org) {
         addIssue(issues, 'IDENTITY_MAPPING_MISSING', 'invitation', invitation.id, `旧企业 ${invitation.enterpriseId} 尚未映射`)
         continue
       }
       let usedByUserId: string | null = null
       if (invitation.usedByUserId !== null) {
-        const user = this.options.identities.resolveNumericAliasGlobal('user', invitation.usedByUserId)
+        const user = await this.options.identities.resolveNumericAliasGlobal('user', invitation.usedByUserId)
         if (!user) {
           addIssue(issues, 'IDENTITY_MAPPING_MISSING', 'invitation', invitation.id, `旧用户 ${invitation.usedByUserId} 尚未映射`)
           continue
@@ -117,15 +114,15 @@ export class GovernanceMigrationService {
       const initialCreditUnits = invitation.initialQuotaUsd === null
         ? sudoworkQuotaToCreditUnits(this.options.defaultInitialQuota)
         : sudoworkUsdToCreditUnits(invitation.initialQuotaUsd)
-      const alias = this.options.identities.resolveNumericAliasGlobal('invitation', invitation.id)
+      const alias = await this.options.identities.resolveNumericAliasGlobal('invitation', invitation.id)
       const targetId = alias?.resourceId ?? invitationTargetId(invitation.id)
       if (alias && alias.orgId !== org.resourceId) {
         addIssue(issues, 'TARGET_CONFLICT', 'invitation', invitation.id, '邀请码数字别名已指向其他组织')
         continue
       }
       const expected = invitationRecord(invitation, targetId, org.resourceId, usedByUserId, initialCreditUnits)
-      const existingById = this.options.identities.getInvitationById(targetId)
-      const existingByCode = this.options.identities.getInvitationByCode(invitation.code)
+      const existingById = await this.options.identities.getInvitationById(targetId)
+      const existingByCode = await this.options.identities.getInvitationByCode(invitation.code)
       const existing = existingById ?? existingByCode
       if (existing && (!alias || !sameInvitation(existing, expected))) {
         addIssue(issues, 'TARGET_CONFLICT', 'invitation', invitation.id, `目标邀请码 ${invitation.code} 与源数据不一致`)
@@ -146,13 +143,13 @@ export class GovernanceMigrationService {
     }
 
     for (const operation of source.operationLogs) {
-      const actor = this.resolveOperationActor(operation, issues)
+      const actor = await this.resolveOperationActor(operation, issues)
       let orgId = actor?.orgId ?? null
       if (!orgId) {
         const legacyEnterpriseId = resolutions.operationLogEnterpriseIds?.[operation.id]
         const org = legacyEnterpriseId === undefined
           ? null
-          : this.options.identities.resolveNumericAliasGlobal('enterprise', legacyEnterpriseId)
+          : await this.options.identities.resolveNumericAliasGlobal('enterprise', legacyEnterpriseId)
         if (!org) {
           addIssue(
             issues,
@@ -169,9 +166,9 @@ export class GovernanceMigrationService {
       }
       const targetId = operationTargetId(operation.id)
       const expected = operationRecord(operation, targetId, orgId, actor?.userId ?? null)
-      const existing = this.options.identities.getOperationAuditByLegacyId(operation.id)
-        ?? this.options.identities.getOperationAuditById(targetId)
-        ?? this.options.identities.getOperationAuditByIdempotencyKey(expected.idempotencyKey)
+      const existing = await this.options.identities.getOperationAuditByLegacyId(operation.id)
+        ?? await this.options.identities.getOperationAuditById(targetId)
+        ?? await this.options.identities.getOperationAuditByIdempotencyKey(expected.idempotencyKey)
       if (existing && !sameOperation(existing, expected)) {
         addIssue(issues, 'TARGET_CONFLICT', 'operation_log', operation.id, '目标审计记录与源数据不一致')
         continue
@@ -195,12 +192,12 @@ export class GovernanceMigrationService {
     }
   }
 
-  execute(plan: GovernanceMigrationPlan, context: CommandContext): GovernanceMigrationReport {
+  async execute(plan: GovernanceMigrationPlan, context: CommandContext): Promise<GovernanceMigrationReport> {
     assertMigrationContext(context)
     if (plan.status === 'blocked') throw new GovernanceMigrationBlockedError(plan)
     const current = this.options.source.readSnapshot()
     if (current.checksum !== plan.sourceChecksum) throw new Error('治理迁移源指纹已变化')
-    const previous = this.options.identities.getCommandResult<GovernanceMigrationReport>(
+    const previous = await this.options.identities.getCommandResult<GovernanceMigrationReport>(
       'governance.import', context.idempotencyKey,
     )
     if (previous) {
@@ -208,18 +205,18 @@ export class GovernanceMigrationService {
       return previous
     }
     const runId = context.migrationRunId!
-    return runInTransaction(this.options.db, () => {
-      const repeated = this.options.identities.getCommandResult<GovernanceMigrationReport>(
+    return this.options.identities.driver.transaction(async () => {
+      const repeated = await this.options.identities.getCommandResult<GovernanceMigrationReport>(
         'governance.import', context.idempotencyKey,
       )
       if (repeated) return repeated
       for (const item of plan.invitations) {
-        this.options.identities.importInvitation(invitationRecord(
+        await this.options.identities.importInvitation(invitationRecord(
           item.source, item.targetId, item.orgId, item.usedByUserId, item.initialCreditUnits,
         ))
-        const existingAlias = this.options.identities.resolveNumericAliasGlobal('invitation', item.source.id)
+        const existingAlias = await this.options.identities.resolveNumericAliasGlobal('invitation', item.source.id)
         if (!existingAlias) {
-          this.options.identities.assignNumericAlias({
+          await this.options.identities.assignNumericAlias({
             namespace: 'invitation', legacyId: item.source.id, resourceId: item.targetId,
             orgId: item.orgId, migrationRunId: runId,
           })
@@ -233,11 +230,11 @@ export class GovernanceMigrationService {
         })
       }
       for (const item of plan.operationLogs) {
-        const inserted = this.options.identities.insertOperationAudit(operationRecord(
+        const inserted = await this.options.identities.insertOperationAudit(operationRecord(
           item.source, item.targetId, item.orgId, item.actorUserId,
         ))
         if (!inserted) {
-          const existing = this.options.identities.getOperationAuditByLegacyId(item.source.id)
+          const existing = await this.options.identities.getOperationAuditByLegacyId(item.source.id)
           if (!existing || !sameOperation(existing, operationRecord(
             item.source, item.targetId, item.orgId, item.actorUserId,
           ))) throw new Error(`历史操作日志 ${item.source.id} 导入冲突`)
@@ -257,36 +254,36 @@ export class GovernanceMigrationService {
         operationLogsImported: plan.operationLogs.length,
         deliverableExternalOutboxCount: this.options.runs.countDeliverableMigrationEffects(runId),
       }
-      this.options.identities.recordCommandResult(
+      await this.options.identities.recordCommandResult(
         'governance.import', context.idempotencyKey, context.source, report,
       )
       return report
     })
   }
 
-  verify(plan: GovernanceMigrationPlan): GovernanceMigrationVerification {
+  async verify(plan: GovernanceMigrationPlan): Promise<GovernanceMigrationVerification> {
     const issues: string[] = []
     const current = this.options.source.readSnapshot()
     if (current.checksum !== plan.sourceChecksum) issues.push('治理迁移源指纹已变化')
     for (const item of plan.invitations) {
-      const actual = this.options.identities.getInvitationById(item.targetId)
+      const actual = await this.options.identities.getInvitationById(item.targetId)
       const expected = invitationRecord(item.source, item.targetId, item.orgId, item.usedByUserId, item.initialCreditUnits)
       if (!actual || !sameInvitation(actual, expected)) issues.push(`邀请码 ${item.source.id} 不一致`)
     }
     for (const item of plan.operationLogs) {
-      const actual = this.options.identities.getOperationAuditByLegacyId(item.source.id)
+      const actual = await this.options.identities.getOperationAuditByLegacyId(item.source.id)
       const expected = operationRecord(item.source, item.targetId, item.orgId, item.actorUserId)
       if (!actual || !sameOperation(actual, expected)) issues.push(`操作日志 ${item.source.id} 不一致`)
     }
     return { status: issues.length > 0 ? 'mismatch' : 'matched', sourceChecksum: plan.sourceChecksum, issues }
   }
 
-  private resolveOperationActor(
+  private async resolveOperationActor(
     operation: SudoworkOperationLogSourceRecord,
     issues: GovernanceMigrationIssue[],
-  ): { userId: string; orgId: string } | null {
+  ): Promise<{ userId: string; orgId: string } | null> {
     if (operation.userId !== null && operation.userId > 0) {
-      const user = this.options.identities.resolveNumericAliasGlobal('user', operation.userId)
+      const user = await this.options.identities.resolveNumericAliasGlobal('user', operation.userId)
       if (!user) {
         addIssue(issues, 'IDENTITY_MAPPING_MISSING', 'operation_log', operation.id, `旧用户 ${operation.userId} 尚未映射`)
         return null
@@ -294,7 +291,7 @@ export class GovernanceMigrationService {
       return { userId: user.resourceId, orgId: user.orgId }
     }
     if (operation.userPhone) {
-      const identity = this.options.identities.findAuthIdentity('phone', 'sudowork', operation.userPhone)
+      const identity = await this.options.identities.findAuthIdentity('phone', 'sudowork', operation.userPhone)
       if (identity) return { userId: identity.userId, orgId: identity.orgId }
     }
     return null

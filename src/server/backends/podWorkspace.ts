@@ -23,7 +23,7 @@ export type WorkspaceFileAccess = {
   /** Every entry under the workspace root, relative to it, `..`-free. */
   listTree(maxDepth: number): Promise<WorkspaceRemoteEntry[]>
   readFile(relativePath: string): Promise<Buffer>
-  writeFile(relativePath: string, content: Buffer): Promise<void>
+  writeFile(relativePath: string, content: Buffer, mode?: number): Promise<void>
 }
 
 export type WorkspaceRemoteEntry = {
@@ -249,11 +249,11 @@ export function createPodWorkspaceAccess(target: PodWorkspaceTarget): WorkspaceF
       return execInPod(target, ['cat', '--', joinInPod(target.cwd, relativePath)])
     },
 
-    async writeFile(relativePath: string, content: Buffer): Promise<void> {
-      const script = 'mkdir -p "$(dirname "$1")" && cat > "$1"'
+    async writeFile(relativePath: string, content: Buffer, mode?: number): Promise<void> {
+      const script = 'mkdir -p "$(dirname "$1")" && cat > "$1"' + (mode === undefined ? '' : ' && chmod "$2" "$1"')
       await execInPod(
         target,
-        ['sh', '-c', script, 'sh', joinInPod(target.cwd, relativePath)],
+        ['sh', '-c', script, 'sh', joinInPod(target.cwd, relativePath), ...mode === undefined ? [] : [(mode & 0o777).toString(8)]],
         content,
       )
     },

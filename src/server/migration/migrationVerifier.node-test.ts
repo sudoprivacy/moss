@@ -54,9 +54,12 @@ void describe('MigrationVerifier', () => {
         name,
         async verify() {
           calls.push(name)
+          const metrics: Record<string, number> = name === 'billing_reconciliation'
+            ? { differences: 1 }
+            : {}
           return name === 'billing_reconciliation'
-            ? { status: 'mismatch', issues: ['钱包差异 1'], metrics: { differences: 1 } }
-            : { status: 'matched', issues: [], metrics: {} }
+            ? { status: 'mismatch', issues: ['钱包差异 1'], metrics }
+            : { status: 'matched', issues: [], metrics }
         },
       }))
       const report = await new MigrationVerifier(fixture.runs, checks).verify('run-verify', source)

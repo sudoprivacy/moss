@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto'
-import type { NexusClient } from '../nexus/nexusClient.js'
+import type { NexusClient, SecretListMetadata } from '../nexus/nexusClient.js'
 import {
   secretSubject,
   SYSTEM_SECRET_SUBJECT,
@@ -31,6 +31,18 @@ function mapConfigEntry(row: SqlRow) {
     required: row.required as number,
     created_at: row.created_at as number,
     updated_at: row.updated_at as number,
+  }
+}
+
+// Explicit response allowlist: list endpoints must never serialize secret values,
+// even if the storage facade gains additional fields in the future.
+function mapSecretListEntry(secret: SecretListMetadata) {
+  return {
+    namespace: secret.namespace,
+    key: secret.key,
+    status: secret.status,
+    version: secret.version,
+    enabled: secret.status === 'enabled',
   }
 }
 
@@ -108,14 +120,14 @@ export function createSecretsApi(db: {
     async listEnterpriseSecrets(orgId: string, userId: string) {
       try {
         // Enterprise secrets are org-bound: list only this org's namespace.
-        const secrets = await nexus.listSecrets(`${orgNamespacePrefix(orgId)}system`)
+        const secrets = await nexus.listSecretMetadata(`${orgNamespacePrefix(orgId)}system`)
         // Enrich with config item data
         const enriched = secrets.map(s => {
           const pinyin = stripOrgPrefix(s.namespace).replace('system:', '')
           // We don't look up config items here for performance, frontend handles it
           // Expose a normalized `enabled` boolean alongside the raw `status` so
           // clients don't have to know the internal 'enabled'/'disabled' string.
-          return { ...s, enabled: s.status === 'enabled', config_item: { pinyin } }
+          return { ...mapSecretListEntry(s), config_item: { pinyin } }
         })
         return { success: true, data: enriched }
       } catch {
@@ -128,14 +140,14 @@ export function createSecretsApi(db: {
     async listDepartmentSecrets(orgId: string, userId: string) {
       try {
         // Department secrets are org-bound: list only this org's namespace.
-        const secrets = await nexus.listSecrets(`${orgNamespacePrefix(orgId)}role`)
+        const secrets = await nexus.listSecretMetadata(`${orgNamespacePrefix(orgId)}role`)
         const enriched = secrets.map(s => {
           // Handles both legacy `role:{pinyin}` and per-dept
           // `role:@{deptId}:{pinyin}`; surface the deptId when present so the
           // admin UI can group values by department.
           const pinyin = deptNamespacePinyin(s.namespace) ?? stripOrgPrefix(s.namespace).replace('role:', '')
           const deptId = namespaceDeptId(s.namespace)
-          return { ...s, enabled: s.status === 'enabled', department_id: deptId, config_item: { pinyin } }
+          return { ...mapSecretListEntry(s), department_id: deptId, config_item: { pinyin } }
         })
         return { success: true, data: enriched }
       } catch {
@@ -143,21 +155,17 @@ export function createSecretsApi(db: {
       }
     },
 
-    /**
-     * List a specific department's secret values (per-dept namespace only).
-     * Used by the department-credentials editor so a dept_admin sees the values
-     * they set for a department in their subtree.
-     */
+    /** List a department's saved records, not their values (per-dept namespace only). */
     async listDepartmentSecretsForDept(orgId: string, userId: string, deptId: string) {
       try {
-        // Prefix WITHOUT a trailing colon: nexus.listSecrets matches
+        // Prefix WITHOUT a trailing colon: listSecretMetadata matches
         // `namespace = prefix OR namespace LIKE prefix:%`, so `role:@{deptId}`
-        // catches every `role:@{deptId}:{pinyin}` value for this department.
+        // catches every `role:@{deptId}:{pinyin}` record for this department.
         const prefix = orgScopedNamespace(`role:${DEPT_NAMESPACE_MARKER}${deptId}`, orgId)
-        const secrets = await nexus.listSecrets(prefix)
+        const secrets = await nexus.listSecretMetadata(prefix)
         const enriched = secrets.map(s => {
           const pinyin = deptNamespacePinyin(s.namespace) ?? ''
-          return { ...s, enabled: s.status === 'enabled', department_id: deptId, config_item: { pinyin } }
+          return { ...mapSecretListEntry(s), department_id: deptId, config_item: { pinyin } }
         })
         return { success: true, data: enriched }
       } catch {

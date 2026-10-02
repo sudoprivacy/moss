@@ -32,6 +32,8 @@
  */
 import type { ServerConfig } from './types.js'
 
+export type PublicAuthMethod = 'phone' | 'password' | 'api_key' | 'sso'
+
 /** Third-party (CAS) provider, as the sudowork client parses it. */
 export type PublicThirdPartyProvider = {
   id: string
@@ -51,6 +53,13 @@ export type PublicThirdPartyProvider = {
 
 export type PublicSystemConfig = {
   login_method: 0 | 1 | 2
+  /** Additive replacement for the legacy single preferred login method. */
+  auth_methods: PublicAuthMethod[]
+  registration: {
+    phone_enabled: boolean
+    invitation_required: boolean
+    auto_create_org: boolean
+  }
   third_party_auth?: {
     enabled: boolean
     default_provider?: string
@@ -67,7 +76,7 @@ export type PublicSystemConfig = {
   }
   log_report?: { enabled: number; baseurl?: string }
   version_update?: { enabled: number; cos_domain?: string }
-  product_improvement?: { enabled: number; encryption_required?: boolean }
+  product_improvement?: { enabled: number; encryption_required?: false; baseurl?: string }
 }
 
 /**
@@ -104,9 +113,16 @@ export function buildPublicSystemConfig(
   modelServiceUrl?: string,
 ): PublicSystemConfig {
   const sc = config.systemConfig
+  const isPhoneEnabled = config.phoneAuth?.enabled ?? sc.loginMethod === 0
 
   const payload: PublicSystemConfig = {
     login_method: sc.loginMethod,
+    auth_methods: resolveAuthMethods(config),
+    registration: {
+      phone_enabled: isPhoneEnabled,
+      invitation_required: isPhoneEnabled,
+      auto_create_org: false,
+    },
     recharge_mode: sc.rechargeMode,
   }
 
@@ -165,10 +181,25 @@ export function buildPublicSystemConfig(
   }
   payload.product_improvement = {
     enabled: switchValue(sc.productImprovement?.enabled ?? false),
-    ...(sc.productImprovement?.encryptionRequired !== undefined
-      ? { encryption_required: sc.productImprovement.encryptionRequired }
-      : {}),
+    // Older clients default to hybrid encryption unless explicitly disabled.
+    encryption_required: false,
   }
 
   return payload
+}
+
+function resolveAuthMethods(config: ServerConfig): PublicAuthMethod[] {
+  const configured = config.systemConfig.authMethods
+  if (configured?.length) return [...new Set(configured)]
+
+  const methods: PublicAuthMethod[] = ['password', 'api_key']
+  if (config.systemConfig.loginMethod === 0 || config.phoneAuth?.enabled) methods.unshift('phone')
+  if (
+    config.systemConfig.loginMethod === 2
+    || (config.systemConfig.thirdPartyAuth?.enabled
+      && config.systemConfig.thirdPartyAuth.providers.length > 0)
+  ) {
+    methods.push('sso')
+  }
+  return methods
 }
