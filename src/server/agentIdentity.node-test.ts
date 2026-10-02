@@ -12,7 +12,7 @@ import {
   type OrganizationResourceScope,
 } from './catalog/organizationResources.js'
 import { getAssistantRuntimeConfig } from './backends/backendUtils.js'
-import { defaultAgentName, isDefaultAgentName } from './agentIdentity.js'
+import { defaultAgentName, isDefaultAgentName, sessionAgentName } from './agentIdentity.js'
 
 void test('a user agent is named from the id, not from anything renameable', () => {
   const name = defaultAgentName('0ffa2afc-41a6-4a94-b1b6-ef6eb6e7ed1e')
@@ -109,4 +109,46 @@ void test('nothing to say writes nothing at all', async () => {
   } finally {
     await rm(workspace, { recursive: true, force: true })
   }
+})
+
+void test('two users who pick the same template are not the same agent', () => {
+  const alice = '0ffa2afc-41a6-4a94-b1b6-ef6eb6e7ed1e'
+  const bob = '7c3e1a02-9b11-4d55-8f20-aa1b2c3d4e5f'
+  const template = '0427fe1b-9fbb-4afa-a857-28f8313a4db9'
+  // `/agents/{name}` is zone-wide and a zone is a tenant, so naming the runtime
+  // after the template put every user in an organization into one agent home.
+  assert.notEqual(sessionAgentName(alice, template), sessionAgentName(bob, template))
+  // Stable: the same pair always names the same agent, or its home moves and
+  // its conversations are orphaned.
+  assert.equal(sessionAgentName(alice, template), sessionAgentName(alice, template))
+})
+
+void test('a session with no template is the user own agent, not a pair', () => {
+  const uid = 'u1'
+  assert.equal(sessionAgentName(uid, undefined), defaultAgentName(uid))
+  assert.equal(sessionAgentName(uid, null), defaultAgentName(uid))
+  // Already resolved to the default agent upstream — do not pair it with itself.
+  assert.equal(sessionAgentName(uid, defaultAgentName(uid)), defaultAgentName(uid))
+})
+
+void test('every real assistant_name in production survives being a path segment', () => {
+  // Taken from `SELECT DISTINCT assistant_name FROM sessions` on the deployment.
+  // Each of these has been going into `/agents/{name}` verbatim.
+  const seen = [
+    'AI 学习辅导',
+    '企业知识中枢Agent',
+    '政策',
+    'Remote Agent',
+    'scode-standard',
+    'o9cq80x9bRuaQBmup91yI7geEAMM@im.wechat',
+    '0427fe1b-9fbb-4afa-a857-28f8313a4db9',
+  ]
+  const names = seen.map(ref => sessionAgentName('u1', ref))
+  for (const name of names) {
+    assert.match(name, /^[A-Za-z0-9._-]+$/, `${name} is not safe as a path segment`)
+    assert.ok(!name.includes('/'))
+  }
+  // Distinct inputs stay distinct, including the two that slugify to nothing
+  // readable and are carried entirely by the digest.
+  assert.equal(new Set(names).size, seen.length)
 })
