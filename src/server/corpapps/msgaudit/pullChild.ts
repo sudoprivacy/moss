@@ -17,18 +17,28 @@
  */
 
 import { pullOnce, type PullConfig } from './puller.js'
+import type { RosterInfo } from './members.js'
 
 type RosterRequest = { kind: 'roster'; id: number; roomId: string }
-type RosterReply = { kind: 'rosterResult'; id: number; members: string[] | null }
+/**
+ * `members` is whatever the parent's lookup returned: the original bare id
+ * list, or a RosterInfo that also carries the names seen in the same call.
+ * Passed through untouched — the puller normalises the two shapes.
+ */
+type RosterReply = {
+  kind: 'rosterResult'
+  id: number
+  members: string[] | RosterInfo | null
+}
 
 /** Pending roster lookups, keyed by the request id we sent. */
-const pending = new Map<number, (members: string[] | null) => void>()
+const pending = new Map<number, (members: string[] | RosterInfo | null) => void>()
 let nextRequestId = 1
 
 /** Give up rather than stall the pull behind a wedged parent. */
 const ROSTER_TIMEOUT_MS = 30_000
 
-function askParentForRoster(roomId: string): Promise<string[] | null> {
+function askParentForRoster(roomId: string): Promise<string[] | RosterInfo | null> {
   if (!process.send) return Promise.resolve(null)
   return new Promise((resolve) => {
     const id = nextRequestId++

@@ -112,6 +112,8 @@ func Run(args []string, c *Client, opts RunOptions) int {
 		err = runCreateInternalGroup(rest, c, opts)
 	case "internal-group":
 		err = runInternalGroup(rest, c, opts)
+	case "update-internal-group":
+		err = runUpdateInternalGroup(rest, c, opts)
 	case "send-internal-group":
 		err = runSendInternalGroup(rest, c, opts)
 	case "group-msg-queue":
@@ -178,6 +180,40 @@ func runCreateInternalGroup(args []string, c *Client, opts RunOptions) error {
 	// list or search internal groups — so print it prominently.
 	fmt.Fprintf(opts.Stdout, "created  chatid=%s  name=%s\n", r.ChatID, *name)
 	fmt.Fprintln(opts.Stdout, "记下这个 chatid：企微无法枚举内部群，丢了就再也找不回这个群。")
+	return nil
+}
+
+func runUpdateInternalGroup(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("update-internal-group", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	chatID := fs.String("chatid", "", "chat id")
+	name := fs.String("name", "", "new group name")
+	owner := fs.String("owner", "", "new owner userid")
+	members := fs.String("members", "", "REPLACE the roster with these userids, comma separated")
+	add := fs.String("add", "", "userids to add, comma separated")
+	del := fs.String("del", "", "userids to remove, comma separated")
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *chatID == "" {
+		return errors.New("usage: corpapp update-internal-group --app <name> --chatid <id> [--name <群名>] [--owner <userid>] [--add <a,b>] [--del <c>] [--members <a,b>]")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	r, err := c.UpdateInternalGroup(
+		resolved.ID, *chatID, *name, *owner,
+		splitCSV(*members), splitCSV(*add), splitCSV(*del),
+	)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return FormatRawJSON(opts.Stdout, mustJSON(r))
+	}
+	fmt.Fprintf(opts.Stdout, "updated  chatid=%s\n", *chatID)
 	return nil
 }
 

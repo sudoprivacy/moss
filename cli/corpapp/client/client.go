@@ -59,6 +59,16 @@ func (c *Client) get(path string, out any) error {
 }
 
 func (c *Client) post(path string, body any, out any) error {
+	return c.sendJSON(http.MethodPost, path, body, out)
+}
+
+// patch is post with a different verb: the server distinguishes creating a
+// thing from amending one by method, on the same path.
+func (c *Client) patch(path string, body any, out any) error {
+	return c.sendJSON(http.MethodPatch, path, body, out)
+}
+
+func (c *Client) sendJSON(method, path string, body any, out any) error {
 	var buf io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -67,7 +77,7 @@ func (c *Client) post(path string, body any, out any) error {
 		}
 		buf = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(http.MethodPost, c.BaseURL+path, buf)
+	req, err := http.NewRequest(method, c.BaseURL+path, buf)
 	if err != nil {
 		return err
 	}

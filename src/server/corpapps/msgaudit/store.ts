@@ -14,8 +14,8 @@
  * ------
  *   $MOSS_HOME/msgaudit/<corpAppId>/
  *     cursor.json                       { seq, updatedAt }
- *     rooms.json                        roomId -> { name, lastSeen, count }
- *     chat/<roomId>/<YYYY-MM-DD>.jsonl  one JSON message per line
+ *     rooms.json                        roomId -> { name?, dir, lastSeen, count }
+ *     chats/<roomId>/<YYYY-MM-DD>.jsonl one JSON message per line
  *
  * Partitioning by room then by day means an agent asking "summarise this
  * group last week" reads exactly 7 small files, and an agent asking for
@@ -235,6 +235,16 @@ export type RoomMeta = {
   dir: string
   count: number
   lastSeen: number
+  /**
+   * The group's display name, once something has supplied one.
+   *
+   * Optional because the archive stream never carries it: messages have a
+   * `roomid` and nothing else. It arrives from the daily roster snapshot,
+   * which calls `groupchat/get` anyway. Having it here is what lets a
+   * caller go from a group's name to its roomid without scanning every
+   * group in the tenant for a match.
+   */
+  name?: string
 }
 
 /**
@@ -242,6 +252,45 @@ export type RoomMeta = {
  * and humans: without it, discovering which rooms exist means walking a
  * directory of opaque hashed names.
  */
+/**
+ * Record a room's display name, leaving its counters alone.
+ *
+ * Separate from `updateRooms` because names arrive from the roster
+ * snapshot, not from the message stream — different phase, different
+ * trigger. Writing the whole file each time is fine at this cadence: it is
+ * one small JSON per corp app, touched once per room per day.
+ */
+export async function updateRoomNames(
+  corpAppId: string,
+  names: Record<string, string>,
+): Promise<void> {
+  const entries = Object.entries(names).filter(([id, nm]) => id && nm)
+  if (entries.length === 0) return
+  const file = path.join(appDir(corpAppId), 'rooms.json')
+  let rooms: Record<string, RoomMeta> = {}
+  try {
+    rooms = JSON.parse(await fsp.readFile(file, 'utf8')) as Record<string, RoomMeta>
+  } catch {
+    // No index yet; nothing to annotate — the puller writes it first.
+    return
+  }
+  let changed = false
+  for (const [roomid, name] of entries) {
+    const cur = rooms[roomid]
+    // Only annotate rooms the transcript already knows about, and only
+    // when the name actually changed — a renamed group should update, but
+    // an unchanged one should not rewrite the file.
+    if (!cur || cur.name === name) continue
+    cur.name = name
+    changed = true
+  }
+  if (!changed) return
+  await fsp.mkdir(path.dirname(file), { recursive: true })
+  const tmp = `${file}.tmp`
+  await fsp.writeFile(tmp, JSON.stringify(rooms, null, 2), 'utf8')
+  await fsp.rename(tmp, file)
+}
+
 export async function updateRooms(corpAppId: string, records: ChatRecord[]): Promise<void> {
   if (records.length === 0) return
   const file = path.join(appDir(corpAppId), 'rooms.json')

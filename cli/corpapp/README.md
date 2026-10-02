@@ -320,6 +320,10 @@ corpapp create-internal-group --app 数牍 --name '追货内部群' \
 # 查群
 corpapp internal-group --app 数牍 --chatid chase001
 
+# 改群：加人 / 减人 / 改名 / 换群主（WeCom 无法解散 appchat 群，所以建错了只能改）
+corpapp update-internal-group --app 数牍 --chatid chase001 --add zhaoliu,sunqi
+corpapp update-internal-group --app 数牍 --chatid chase001 --name '追货内部群(新)'
+
 # 发消息 / 发文件（文件会先上传再发，可重复 --file）
 corpapp send-internal-group --app 数牍 --chatid chase001 \
   --text '今日待办 3 条' --mention zhangsan,lisi --file ./明细.xlsx
