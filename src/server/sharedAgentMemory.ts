@@ -227,6 +227,8 @@ export async function writeAssistantOverrideAgentsMd(params: {
   // still gets the memory section below: that is how its memory reaches it.
   // The test is the agent's kind, not whether a display name happens to be
   // supplied — a catalog assistant without one is still named by its own name.
+  // Only the implicit default has no persona. An agent the user made has a name
+  // they chose, and it should introduce itself by it.
   const hasRole = !isDefaultAgentName(params.assistantName)
   const identityName = params.assistantDisplayName?.trim() || params.assistantName
   const lines = [AGENTS_MD_HEADER, '']

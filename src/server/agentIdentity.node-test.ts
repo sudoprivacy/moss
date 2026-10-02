@@ -12,7 +12,21 @@ import {
   type OrganizationResourceScope,
 } from './catalog/organizationResources.js'
 import { getAssistantRuntimeConfig } from './backends/backendUtils.js'
-import { defaultAgentName, isDefaultAgentName, sessionAgentName } from './agentIdentity.js'
+import {
+  defaultAgentName,
+  isDefaultAgentName,
+  isUserCreatedAgentName,
+  isUserOwnedAgentName,
+  sessionAgentName,
+  userCreatedAgentName,
+} from './agentIdentity.js'
+import {
+  InvalidAgentNameError,
+  createUserAgent,
+  getUserAgent,
+  listUserAgents,
+  resetUserAgentStoreForTests,
+} from './userAgentStore.js'
 
 void test('a user agent is named from the id, not from anything renameable', () => {
   const name = defaultAgentName('0ffa2afc-41a6-4a94-b1b6-ef6eb6e7ed1e')
@@ -151,4 +165,55 @@ void test('every real assistant_name in production survives being a path segment
   // Distinct inputs stay distinct, including the two that slugify to nothing
   // readable and are carried entirely by the digest.
   assert.equal(new Set(names).size, seen.length)
+})
+
+void test('a user can have a second agent of their own, distinct from any template', () => {
+  const uid = 'u1'
+  const mine = userCreatedAgentName('5f1c2a9e-0b44-4c77-9a3e-11d2e3f4a5b6')
+  assert.equal(isUserCreatedAgentName(mine), true)
+  // Both kinds are the user's own: neither is in the organization catalog, so
+  // every caller that would look one up there has to skip both.
+  assert.equal(isUserOwnedAgentName(mine), true)
+  assert.equal(isUserOwnedAgentName(defaultAgentName(uid)), true)
+  assert.equal(isUserOwnedAgentName('recruitment_expert'), false)
+  // It is a different principal from the user's implicit default — that is the
+  // whole point: a second context with its own memory.
+  assert.notEqual(sessionAgentName(uid, mine), sessionAgentName(uid, undefined))
+})
+
+void test('an agent id that leaks cannot be used to address another user agent', () => {
+  const mine = userCreatedAgentName('5f1c2a9e-0b44-4c77-9a3e-11d2e3f4a5b6')
+  assert.notEqual(sessionAgentName('alice', mine), sessionAgentName('bob', mine))
+})
+
+void test('agents a user made are theirs alone, and are named not numbered', async () => {
+  resetUserAgentStoreForTests()
+  const a = await createUserAgent({ orgId: 'o1', userId: 'alice', displayName: ' 项目 A ' })
+  const b = await createUserAgent({ orgId: 'o1', userId: 'alice', displayName: '项目 B' })
+  assert.equal(a.displayName, '项目 A', 'the name is trimmed, not stored as typed')
+  assert.notEqual(a.id, b.id)
+
+  // Ownership is part of the lookup, not a check afterwards: an agent id is the
+  // key to someone's memory and conversations.
+  assert.deepEqual((await listUserAgents('o1', 'bob')), [])
+  assert.equal(await getUserAgent('o1', 'bob', a.id), null)
+  assert.equal((await getUserAgent('o1', 'alice', a.id))?.displayName, '项目 A')
+
+  // Same user id under another organization is another person.
+  assert.deepEqual(await listUserAgents('o2', 'alice'), [])
+
+  // Oldest first, so the list does not reshuffle under the user.
+  assert.deepEqual((await listUserAgents('o1', 'alice')).map(x => x.displayName), ['项目 A', '项目 B'])
+})
+
+void test('an agent has to be called something', async () => {
+  resetUserAgentStoreForTests()
+  await assert.rejects(
+    () => createUserAgent({ orgId: 'o1', userId: 'alice', displayName: '   ' }),
+    InvalidAgentNameError,
+  )
+  await assert.rejects(
+    () => createUserAgent({ orgId: 'o1', userId: 'alice', displayName: 'x'.repeat(61) }),
+    InvalidAgentNameError,
+  )
 })

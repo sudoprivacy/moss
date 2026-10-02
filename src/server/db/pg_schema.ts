@@ -2014,6 +2014,17 @@ const MIGRATIONS: PgMigration[] = [
     ALTER TABLE users ALTER COLUMN local_execution_allowed SET DEFAULT 1;
     ALTER TABLE users ALTER COLUMN local_execution_allowed SET NOT NULL;
   ` },
+  { version: 10, name: 'user-created-agents', sql: `
+    CREATE TABLE IF NOT EXISTS user_agents (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_agents_owner
+      ON user_agents (org_id, user_id, created_at);
+  ` },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */
