@@ -4,6 +4,8 @@ import {
   isPodNotReadyExecError,
   joinInPod,
   parseStatLines,
+  PodExecError,
+  withPodReadinessRetry,
 } from '../backends/podWorkspace.js'
 import { bytesLookLikeText } from '../workspaceText.js'
 
@@ -21,6 +23,53 @@ const POLICY = { skipDirs: new Set(['.git', 'node_modules']), maxEntriesPerDir: 
  */
 
 const ROOT = '/workspace/session-1'
+
+describe('persistent workspace recovery', () => {
+  it('restores a missing pod and returns the retained file bytes', async () => {
+    let isRestored = false
+    let restores = 0
+    const bytes = Buffer.from('retained video bytes')
+    const result = await withPodReadinessRetry(async () => {
+      if (!isRestored) throw new PodExecError('exec failed', 1, 'pods "scode-test" not found')
+      return bytes
+    }, async () => { restores++; isRestored = true })
+    expect(result).toEqual(bytes)
+    expect(restores).toBe(1)
+  })
+
+  it('restores a completed pod once while waiting for its replacement container', async () => {
+    let calls = 0
+    let restores = 0
+    await withPodReadinessRetry(async () => {
+      calls++
+      if (calls === 1) throw new PodExecError('exec failed', 1, 'cannot exec into a container in a completed pod; current phase is Succeeded')
+      if (calls === 2) throw new PodExecError('exec failed', 1, 'container not found ("scode")')
+      return Buffer.from('ok')
+    }, async () => { restores++ })
+    expect(restores).toBe(1)
+    expect(calls).toBe(3)
+  })
+
+  it('does not restart a healthy runtime or retry a missing file or permission denial', async () => {
+    let restores = 0
+    const onPodUnavailable = async () => { restores++ }
+    await withPodReadinessRetry(async () => Buffer.from('ok'), onPodUnavailable)
+    for (const stderr of ['cat: missing.mp4: No such file or directory', 'Error from server (Forbidden): pods is forbidden']) {
+      const failure = new PodExecError('exec failed', 1, stderr)
+      let calls = 0
+      await expect(withPodReadinessRetry(async () => { calls++; throw failure }, onPodUnavailable)).rejects.toBe(failure)
+      expect(calls).toBe(1)
+    }
+    expect(restores).toBe(0)
+  })
+
+  it('surfaces recovery errors instead of returning an empty workspace', async () => {
+    const failure = new Error('PVC ownership mismatch')
+    await expect(withPodReadinessRetry(async () => {
+      throw new PodExecError('exec failed', 1, 'pods "scode-test" not found')
+    }, async () => { throw failure })).rejects.toBe(failure)
+  })
+})
 
 describe('pod exec readiness', () => {
   it('retries the failures that mean the container is not up yet', () => {

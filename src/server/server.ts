@@ -1656,6 +1656,7 @@ async function readUserCredits(
 function resolveSessionWorkspaceAccess(
   session: SessionRecord,
   config: ServerConfig,
+  runtime: RuntimeService,
 ): WorkspaceFileAccess | null {
   if (session.runtime?.type !== 'k8s') return null
   return createPodWorkspaceAccess({
@@ -1665,6 +1666,11 @@ function resolveSessionWorkspaceAccess(
     ),
     podName: buildResourceNames(session.sessionId).podName,
     cwd: session.cwd,
+    onPodUnavailable: config.k8s?.workspaceStorageClass
+      ? async () => {
+          await runtime.ensureSessionReady(session.sessionId)
+        }
+      : undefined,
   })
 }
 
@@ -10361,7 +10367,7 @@ export function startServer(
         const root = await readWorkspaceTree(session, {
           path: url.searchParams.get('path'),
           search: url.searchParams.get('search'),
-        }, resolveSessionWorkspaceAccess(session, config))
+        }, resolveSessionWorkspaceAccess(session, config, runtime))
         if (session.runtime.type === 'host') await projectArtifactDrafts(root, session.cwd, await readArtifacts(artifactManifestPath(session.transcriptPath)))
         writeJson(res, 200, { root })
         return
@@ -10378,7 +10384,7 @@ export function startServer(
         writeJson(res, 200, await readWorkspaceFilePreview(
           session,
           url.searchParams.get('path'),
-          resolveSessionWorkspaceAccess(session, config),
+          resolveSessionWorkspaceAccess(session, config, runtime),
         ))
         return
       }
@@ -10396,7 +10402,7 @@ export function startServer(
         const result = await writeWorkspaceFile(session, {
           path: typeof body.path === 'string' ? body.path : null,
           contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
-        }, resolveSessionWorkspaceAccess(session, config), uploadLimit)
+        }, resolveSessionWorkspaceAccess(session, config, runtime), uploadLimit)
         writeJson(res, 200, result)
         return
       }
@@ -10412,7 +10418,7 @@ export function startServer(
         const { materializeClientSkills } = await import('./catalog/clientCatalogPreparation.js')
         const assistant = session.assistantName?.startsWith('moss-prepared:') ? session.assistantName : undefined
         const skills = await materializeClientSkills(body.skills as string[], assistant, async (path, bytes, mode) => {
-          await writeWorkspaceFile(session, { path, contentBase64: bytes.toString('base64'), mode }, resolveSessionWorkspaceAccess(session, config), 50 * 1024 * 1024)
+          await writeWorkspaceFile(session, { path, contentBase64: bytes.toString('base64'), mode }, resolveSessionWorkspaceAccess(session, config, runtime), 50 * 1024 * 1024)
         })
         writeJson(res, 200, { skills })
         return
