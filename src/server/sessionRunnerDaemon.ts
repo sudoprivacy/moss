@@ -140,6 +140,8 @@ export class SessionRunnerDaemon {
         kubeconfig: manifest.session.runtime.k8sKubeconfig || manifest.config.k8s?.kubeconfig,
         imagePullPolicy: manifest.config.k8s?.imagePullPolicy,
         imagePullSecrets: manifest.config.k8s?.imagePullSecrets,
+        workspaceStorageClass: manifest.config.k8s?.workspaceStorageClass,
+        workspaceStorageSize: manifest.config.k8s?.workspaceStorageSize,
         cpuLimit: manifest.config.k8s?.cpuLimit,
         memoryLimit: manifest.config.k8s?.memoryLimit,
         podReadyTimeoutSec: manifest.config.k8s?.podReadyTimeoutSec,

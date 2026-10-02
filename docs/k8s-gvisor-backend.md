@@ -6,6 +6,31 @@ subprocess (`ScodeBackend`) or a local docker container (`DockerBackend`). It
 plugs into the same `SessionBackend` seam and is selected by
 `runtime.type === 'k8s'`.
 
+## Retaining workspace files across runtime restarts
+
+Set `MOSS_K8S_WORKSPACE_STORAGE_CLASS=local-path` for the bundled k3s storage
+provisioner, or set it to the StorageClass used by your cluster. Optionally set
+`MOSS_K8S_WORKSPACE_STORAGE_SIZE=10Gi` (the default requested capacity). The
+equivalent server configuration fields are `k8s.workspaceStorageClass` and
+`k8s.workspaceStorageSize`.
+
+Each session gets its own PersistentVolumeClaim. Runtime cleanup deletes the pod
+and credential Secret, but retains this claim so reconnecting can recover the
+workspace. Existing claims keep their original class and capacity. HOME and
+scode configuration remain temporary. Without this setting, workspace files
+use `emptyDir` and disappear when the pod is deleted.
+
+The server's namespace Role needs `get`, `create`, and `patch` permissions for
+`persistentvolumeclaims`; the compute installer now includes these. Claims are
+retained even after a session is deleted. Operators must apply their own backup
+and retention policy before explicitly removing claims labelled
+`app=moss-scode` and `moss.sudo.dev/session-id=<session-id>`.
+
+Enabling persistence does not migrate files from existing temporary pods. Back
+up active workspaces before replacing those pods. `local-path` preserves data
+on its selected node; surviving node or disk loss requires a storage provider
+and backup policy that support that failure mode.
+
 ## Topology: moss and the kubelet are on DIFFERENT hosts
 
 This backend targets the real deployment: **moss (control plane) runs on one

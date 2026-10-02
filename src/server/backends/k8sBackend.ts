@@ -1,6 +1,7 @@
 import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { isDefaultAgentName } from '../agentIdentity.js'
 import { execFile, spawn } from 'child_process'
+import { createHash } from 'node:crypto'
 import { mkdir, readFile } from 'fs/promises'
 import { join, posix as posixPath } from 'path'
 import { promisify } from 'util'
@@ -58,6 +59,10 @@ export type K8sBackendDefaults = {
    * (comma-separated). Empty → none.
    */
   imagePullSecrets?: string[]
+  /** Opt in to a retained per-session workspace PVC using this StorageClass. */
+  workspaceStorageClass?: string
+  /** Requested capacity for new workspace claims. Existing claims keep their capacity. */
+  workspaceStorageSize?: string
   /** Path to the kubeconfig that reaches the k3s API server. `MOSS_K8S_KUBECONFIG`. */
   kubeconfig?: string
   /** CPU limit for the pod (k8s quantity). Defaults to `2`. */
@@ -77,6 +82,43 @@ type PodVolumeMount = {
   mountPath: string
   subPath?: string
   readOnly?: boolean
+}
+
+/** Keep the same workspace claim across runtime attempts without sharing it between sessions. */
+export function buildWorkspaceStorage(sessionId: string, namespace: string, storageClass?: string, storageSize = '10Gi') {
+  if (!storageClass) return { volume: { name: 'workspace', emptyDir: {} } as PodVolume, claim: undefined }
+  const claimName = `scode-workspace-${createHash('sha256').update(sessionId).digest('hex').slice(0, 40)}`
+  return {
+    volume: { name: 'workspace', persistentVolumeClaim: { claimName } } as PodVolume,
+    claim: {
+      apiVersion: 'v1',
+      kind: 'PersistentVolumeClaim',
+      metadata: {
+        name: claimName,
+        namespace,
+        // No pod ownerReference: runtime cleanup must preserve user files.
+        labels: { app: MOSS_POD_APP_LABEL, [MOSS_POD_SESSION_LABEL]: sessionId },
+      },
+      spec: {
+        accessModes: ['ReadWriteOnce'],
+        storageClassName: storageClass,
+        resources: { requests: { storage: storageSize } },
+      },
+    },
+  }
+}
+
+/** Reuse an owned claim; never resize or replace user storage while starting a runtime. */
+async function ensureWorkspaceClaim(kubectlBase: string[], claim: NonNullable<ReturnType<typeof buildWorkspaceStorage>['claim']>): Promise<void> {
+  const { stdout } = await execFileAsync('kubectl', [...kubectlBase, 'get', 'pvc', claim.metadata.name, '--ignore-not-found', '-o', 'json'], { windowsHide: true })
+  if (stdout.trim()) {
+    const existing = JSON.parse(stdout)
+    if (existing.metadata?.labels?.[MOSS_POD_SESSION_LABEL] !== claim.metadata.labels[MOSS_POD_SESSION_LABEL]) {
+      throw new Error(`Workspace claim belongs to a different session: ${claim.metadata.name}`)
+    }
+    return
+  }
+  await kubectlApply(kubectlBase, claim)
 }
 
 /** Drop mounts that would collide on the same in-pod path (first wins). */
@@ -151,10 +193,9 @@ export async function buildWorkspaceInstructionsSecret(workspace: string, assist
  *    per-session {@link https://kubernetes.io/docs/concepts/configuration/secret Secret}
  *    `scode-cfg-<sid>` and mounted read-only at the exact in-container paths
  *    scode reads (`SUDO_CODE_CONFIG_HOME` and the workspace skills dir).
- *  - HOME / `CLAUDE_CONFIG_DIR` and the session workspace/cwd are pod-local
- *    `emptyDir`s (scode writes there; moss reads results back over the ACP
- *    stream, and the transcript is written moss-side by {@link createAcpBridgeHandle},
- *    so a pod-local workspace is correct).
+ *  - HOME / `CLAUDE_CONFIG_DIR` are pod-local `emptyDir`s. The session workspace
+ *    uses a retained per-session PVC when workspaceStorageClass is configured;
+ *    otherwise it is also temporary. Workspace HTTP access uses kubectl exec.
  *  - scode itself ships INSIDE the runtime image, so pods need nothing staged on
  *    the node — a standard k3s + gvisor node is enough.
  *
@@ -328,12 +369,13 @@ export class K8sBackend implements SessionBackend {
     const kubectlBase = buildKubectlBaseArgs(namespace, kubeconfig)
 
     // ---- Volumes / mounts (cross-node correct) ----
-    // emptyDir: pod-local writable HOME / workspace / scode config dir.
+    // HOME and scode config remain ephemeral; an opted-in workspace survives pod cleanup.
     // secret:   read-only config + skill files delivered from moss.
     // (scode itself ships in the image — no node-local hostPath.)
+    const workspaceStorage = buildWorkspaceStorage(options.sessionId, namespace, this.defaults.workspaceStorageClass, this.defaults.workspaceStorageSize)
     const volumes: PodVolume[] = [
       { name: 'home', emptyDir: {} },
-      { name: 'workspace', emptyDir: {} },
+      workspaceStorage.volume,
       { name: 'scode-cfg', emptyDir: {} },
       { name: 'scode-secret', secret: { secretName } },
     ]
@@ -376,7 +418,7 @@ export class K8sBackend implements SessionBackend {
     process.stderr.write(`\n[K8sBackend] Creating gvisor pod for session ${options.sessionId}:\n`)
     process.stderr.write(`  pod: ${podName}  secret: ${secretName}  ns: ${namespace}  runtimeClass: ${runtimeClassName}\n`)
     process.stderr.write(`  image: ${image}  (scode baked in)\n`)
-    process.stderr.write(`  cwd (emptyDir): ${safeCwd}\n`)
+    process.stderr.write(`  cwd (${workspaceStorage.claim ? 'persistentVolumeClaim' : 'emptyDir'}): ${safeCwd}\n`)
     process.stderr.write(`  HOME (emptyDir): ${configDir}\n`)
     process.stderr.write(`  SUDO_CODE_CONFIG_HOME (emptyDir + secret): ${scodeHomeDir}\n`)
     process.stderr.write(`  secret files: ${secretMounts.map(m => m.mountPath).join(', ')}\n`)
@@ -385,6 +427,7 @@ export class K8sBackend implements SessionBackend {
     // Namespace first — on a customer cluster the target ns may not exist yet
     // (our k3s installer pre-creates it, so this is a no-op there).
     await ensureNamespace(kubeconfig, namespace)
+    if (workspaceStorage.claim) await ensureWorkspaceClaim(kubectlBase, workspaceStorage.claim)
     // Secret next — the pod mounts it, so it must exist before the pod starts.
     // (Secrets are mutable, so a plain apply is correct there; the pod is not.)
     await kubectlApply(kubectlBase, secretManifest)
@@ -483,7 +526,7 @@ export class K8sBackend implements SessionBackend {
     const cleanup = () => {
       if (cleanedUp) return
       cleanedUp = true
-      // Delete the pod (emptyDir workspace/config go with it) and the Secret.
+      // Delete the pod and Secret. A workspace PVC is intentionally retained.
       // Best-effort, detached. Mirrors docker `rm -f`.
       deletePod(kubectlBase, podName).catch(err => {
         process.stderr.write(`[K8sBackend] pod delete failed (${podName}): ${err}\n`)
