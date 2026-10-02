@@ -7,6 +7,11 @@ import { SqliteDriver, type DbDriver, type SqlParam } from '../db/driver.js'
 import type { DirectConnectStore } from '../db.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import type { RechargeOrder, RechargeSyncStatus, RefundRecord } from '../credits/recharge.js'
+import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
+import { ZONE_BINDING_TABLES_DDL } from '../zones/binding/schema.js'
+import { resolveZoneBindingConfig, type ZoneBindingConfig } from '../zones/binding/config.js'
+import { insertDefaultBindingIntent } from '../zones/binding/bindingRepository.js'
+import { tryDefaultZoneIdCandidate } from '../zones/binding/zoneIdPolicy.js'
 
 export type AuthCenterOrganization = {
   id: string
@@ -39,6 +44,8 @@ export type AuthCenterUser = {
   departmentId: string | null
   role: string
   status: AuthCenterUserStatus
+  /** Monotonic authorization-membership version; changes only with role/status. */
+  membershipRevision: number
   localAuth: boolean
   /** Desktop execution permission, independent of password authentication. */
   localExecutionAllowed?: boolean
@@ -115,7 +122,7 @@ export type AuthCenterStore = {
 
 export type SanitizedAuthCenterUser = Omit<
   AuthCenterUser,
-  'passwordHash' | 'email'
+  'passwordHash' | 'email' | 'membershipRevision'
 > & {
   email: string | null
 }
@@ -190,6 +197,7 @@ function mapUser(row: SqlRow): AuthCenterUser {
     departmentId: row.department_id == null ? null : String(row.department_id),
     role: String(row.role),
     status: String(row.status) as AuthCenterUserStatus,
+    membershipRevision: Number(row.membership_revision ?? 0),
     localAuth: Boolean(row.local_auth),
     localExecutionAllowed: row.local_execution_allowed == null ? Boolean(row.local_auth) : Boolean(row.local_execution_allowed),
     tokenLimit: row.token_limit == null ? null : Number(row.token_limit),
@@ -314,6 +322,10 @@ export class AuthCenterDb {
   // immutable value. Populated by loadSecretCache() and kept fresh by setConfig.
   #jwtSecret: string | null = null
   #issuer: string | null = null
+  // Zone binding intent 走 env-resolved 配置（nexus_deployment_id 等）；
+  // 未配置 /v2 endpoint 时 binding 仍写入并保持 pending（§8.7 验收语义），
+  // 由 reconciler 在配置可用后收敛。
+  readonly #zoneBindingConfig: ZoneBindingConfig = resolveZoneBindingConfig()
 
   constructor(dbOrPath: string | DatabaseSync | DirectConnectStore, dbPath?: string) {
     // Shared-store form (the production path): shares the store's driver so
@@ -391,6 +403,7 @@ export class AuthCenterDb {
         department_id TEXT REFERENCES departments(id),
         role TEXT NOT NULL DEFAULT 'user',
         status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending', 'active', 'locked', 'disabled')),
+        membership_revision INTEGER NOT NULL DEFAULT 0,
         password_hash TEXT,
         password_updated_at INTEGER,
         last_login_at INTEGER,
@@ -675,6 +688,13 @@ export class AuthCenterDb {
       'ALTER TABLE users ADD COLUMN sudorouter_key TEXT',
     )
     this.ensureUserStatusCompatibility()
+    // Independent from the legacy status-table rebuild above: databases that
+    // already support pending/locked still need the monotonic membership column.
+    this.ensureColumn(
+      'users',
+      'membership_revision',
+      'ALTER TABLE users ADD COLUMN membership_revision INTEGER NOT NULL DEFAULT 0',
+    )
     // Preserve existing Local grants once; new accounts default to allowed.
     this.ensureColumn('users', 'local_execution_allowed', `
       SAVEPOINT local_execution_migration;
@@ -723,6 +743,28 @@ export class AuthCenterDb {
         WHERE true
         ON CONFLICT(key) DO NOTHING
       `)
+    }
+
+    // Zone binding 三表（§8.7；SQLite 路径。PG 路径由 pg_schema.ts 提供）
+    this.db.exec(ZONE_BINDING_TABLES_DDL)
+    this.ensureColumn(
+      'zone_binding_outbox',
+      'grant_source_id',
+      'ALTER TABLE zone_binding_outbox ADD COLUMN grant_source_id TEXT',
+    )
+    // B-3 expand-only：org_zone_bindings 的 observed 快照列（老库补齐；fresh
+    // install 由上方 DDL 直接带列，ensureColumn 幂等跳过）。时间戳遵循约定：
+    // 落库 BIGINT 毫秒，wire RFC 3339 由出参转换。
+    for (const [column, ddl] of [
+      ['observed_display_name', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_display_name TEXT'],
+      ['observed_zone_status', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_zone_status TEXT'],
+      ['observed_revision', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_revision TEXT'],
+      ['observed_grant_status', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_grant_status TEXT'],
+      ['observed_grant_source', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_grant_source TEXT'],
+      ['grant_expires_at', 'ALTER TABLE org_zone_bindings ADD COLUMN grant_expires_at BIGINT'],
+      ['observed_at', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_at BIGINT'],
+    ] as const) {
+      this.ensureColumn('org_zone_bindings', column, ddl)
     }
   }
 
@@ -805,15 +847,35 @@ export class AuthCenterDb {
   }
 
   // Organization operations
+  // §8.7 事务规则：insert organization → insert binding intent → insert
+  // outbox → commit，同一本地事务；事务内不调用 Nexus（reconciler 异步收敛）。
+  // 本方法是全部 7 个 Org 创建入口（bootstrap / phone signup / OAuth 首登 /
+  // admin create / phone import / legacy import / backfill 脚本）的汇聚点，
+  // binding 接入只落在这里——外层已有事务时 driver.transaction 为 join 语义。
   async createOrganization(
     id: string,
     name: string,
     createdAt: number,
     extOrgId: string | null = null,
+    options: { skipZoneBinding?: boolean } = {},
   ): Promise<void> {
-    await this.driver.run(`
-      INSERT INTO organizations (id, name, ext_org_id, created_at) VALUES (?, ?, ?, ?)
-    `, [id, name, extOrgId, createdAt])
+    const now = Date.now()
+    await this.driver.transaction(async () => {
+      await this.driver.run(`
+        INSERT INTO organizations (id, name, ext_org_id, created_at) VALUES (?, ?, ?, ?)
+      `, [id, name, extOrgId, createdAt])
+      // 低-15②：skipZoneBinding 仅供存量迁移（migrateFromJson）使用——org id
+      // 含 zone-id 非法字符的历史数据跳过 binding 写入（org 行照插，binding
+      // 由 backfill 补），不再让 defaultZoneIdCandidate 的 throw 连 org INSERT
+      // 一并回滚。其余 6 个入口不传该参数，行为不变。
+      if (!options.skipZoneBinding) {
+        await insertDefaultBindingIntent(this.driver, {
+          orgId: id,
+          nexusDeploymentId: this.#zoneBindingConfig.nexusDeploymentId,
+          now,
+        })
+      }
+    })
   }
 
   async getOrganization(id: string): Promise<AuthCenterOrganization | null> {
@@ -976,7 +1038,9 @@ export class AuthCenterDb {
   }
 
   // User operations
-  async createUser(user: AuthCenterUser): Promise<void> {
+  async createUser(
+    user: Omit<AuthCenterUser, 'membershipRevision'> & { membershipRevision?: number },
+  ): Promise<void> {
     await this.driver.run(`
       INSERT INTO users (id, org_id, email, name, display_name, department_id, role, status, local_auth,
                          token_limit, password_hash, password_updated_at, last_login_at, created_at,
@@ -1523,45 +1587,59 @@ export class AuthCenterDb {
       extUserId?: string | null
     },
   ): Promise<void> {
-    const user = await this.getUserById(id)
-    if (!user) {
-      return
+    const assignments: string[] = []
+    const params: SqlParam[] = []
+    const add = (column: string, value: SqlParam): void => {
+      assignments.push(`${column} = ?`)
+      params.push(value)
     }
 
-    await this.driver.run(`
-      UPDATE users
-      SET name = ?,
-          display_name = ?,
-          email = ?,
-          org_id = ?,
-          department_id = ?,
-          role = ?,
-          status = ?,
-          ext_user_id = ?
-      WHERE id = ?
-    `, [
-      patch.name ?? user.name,
-      patch.displayName === undefined ? user.displayName : patch.displayName,
-      patch.email ?? user.email,
-      patch.orgId ?? user.orgId,
-      patch.departmentId === undefined ? user.departmentId : patch.departmentId,
-      patch.role ?? user.role,
-      patch.status ?? user.status,
-      patch.extUserId === undefined ? user.extUserId : patch.extUserId,
-      id,
-    ])
+    if (patch.name !== undefined) add('name', patch.name)
+    if (patch.displayName !== undefined) add('display_name', patch.displayName)
+    if (patch.email !== undefined) add('email', patch.email)
+    if (patch.orgId !== undefined) add('org_id', patch.orgId)
+    if (patch.departmentId !== undefined) add('department_id', patch.departmentId)
+    if (patch.role !== undefined) add('role', patch.role)
+    if (patch.status !== undefined) add('status', patch.status)
+    if (patch.extUserId !== undefined) add('ext_user_id', patch.extUserId)
+
+    const membershipComparisons: string[] = []
+    if (patch.role !== undefined) {
+      membershipComparisons.push('role <> ?')
+      params.push(patch.role)
+    }
+    if (patch.status !== undefined) {
+      membershipComparisons.push('status <> ?')
+      params.push(patch.status)
+    }
+    // Org moves change membership semantics just like role/status, so they
+    // must bump membership_revision too (§5.4). Defense in depth: even
+    // without the bump, a moved user's old delegation is refused because
+    // delegationService's membership query filters by org_id and Nexus
+    // re-checks membership (user+org must match) — the bump makes the
+    // revocation immediate instead of relying on that lookup path.
+    if (patch.orgId !== undefined) {
+      membershipComparisons.push('org_id <> ?')
+      params.push(patch.orgId)
+    }
+    if (membershipComparisons.length > 0) {
+      assignments.push(
+        `membership_revision = membership_revision + CASE WHEN ${membershipComparisons.join(' OR ')} THEN 1 ELSE 0 END`,
+      )
+    }
+    if (assignments.length === 0) return
+
+    params.push(id)
+    await this.driver.run(
+      `UPDATE users SET ${assignments.join(', ')} WHERE id = ?`,
+      params,
+    )
   }
 
   async updateUserLastLogin(id: string): Promise<void> {
     await this.driver.run(`
       UPDATE users SET last_login_at = ? WHERE id = ?
     `, [now(), id])
-  }
-
-  async updateUserOrg(id: string, orgId: string): Promise<void> {
-    await this.driver.run(`
-      UPDATE users SET org_id = ? WHERE id = ?
-    `, [orgId, id])
   }
 
   async setUserTokenLimit(id: string, tokenLimit: number | null): Promise<void> {
@@ -1959,8 +2037,15 @@ export class AuthCenterDb {
   async migrateFromJson(jsonStore: AuthCenterStore): Promise<void> {
     await this.driver.transaction(async () => {
       // Migrate organizations
+      // 低-15②：org id 含 zone-id 非法字符的历史数据（非 UUID）预判跳过
+      // binding 写入（org 行照插，binding 由 backfill 补）——不再回滚整个
+      // 迁移（与 backfill 的 invalid 语义对齐）。
       for (const org of jsonStore.organizations) {
-        await this.createOrganization(org.id, org.name, org.createdAt)
+        const zoneIdCandidate = tryDefaultZoneIdCandidate(org.id)
+        if (!zoneIdCandidate.ok) {
+          console.warn(`[migrateFromJson] org ${org.id} 的 zone-id 候选非法（${zoneIdCandidate.refusal.kind}），跳过 default binding 写入——由 zone-backfill 补齐`)
+        }
+        await this.createOrganization(org.id, org.name, org.createdAt, null, { skipZoneBinding: !zoneIdCandidate.ok })
       }
 
       // Migrate departments
@@ -2155,7 +2240,7 @@ export function sanitizeApiKey(apiKey: AuthCenterApiKey): Omit<
 export function sanitizeUser(
   user: AuthCenterUser,
 ): SanitizedAuthCenterUser {
-  const { passwordHash: _passwordHash, email, ...rest } = user
+  const { passwordHash: _passwordHash, membershipRevision: _membershipRevision, email, ...rest } = user
   return {
     ...rest,
     email: sanitizePublicEmail(email),

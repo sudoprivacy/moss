@@ -277,6 +277,7 @@ export default function SessionsPage() {
                   <TableRow>
                     <TableHead>会话</TableHead>
                     <TableHead>用户</TableHead>
+                    <TableHead>Zone</TableHead>
                     <TableHead>运行时</TableHead>
                     <TableHead>模式</TableHead>
                     <TableHead>创建时间</TableHead>
@@ -299,6 +300,13 @@ export default function SessionsPage() {
                           {session.assistantName ? <div className="mt-1 max-w-48 truncate text-xs text-muted-foreground" title={agent?.displayName || session.assistantName}>{agent?.displayName || session.assistantName}</div> : null}
                         </TableCell>
                         <TableCell><span className="block max-w-40 truncate" title={userName}>{userName}</span></TableCell>
+                        <TableCell>
+                          {session.homeZoneId ? (
+                            <span className="font-mono text-xs" title={session.homeZoneId}>{session.homeZoneId.slice(0, 16)}…</span>
+                          ) : (
+                            <Badge variant="outline" className="font-normal">无 Zone · 仅本地</Badge>
+                          )}
+                        </TableCell>
                         <TableCell>
                           <div className="flex flex-col gap-1.5">
                             <div className="flex items-center gap-1">

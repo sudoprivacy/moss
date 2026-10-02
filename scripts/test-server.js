@@ -23,7 +23,14 @@ import { spawnSync } from 'node:child_process'
  * Suites this gates, by directory. Adding a directory here is what makes its
  * tests run in CI at all — a test outside these is not protecting anything.
  */
-const SUITES = ['src/server/__tests__', 'src/channels/__tests__', 'src/server/nexus/__tests__', 'src/server/configStore']
+const SUITES = [
+  'src/server/__tests__',
+  'src/channels/__tests__',
+  'src/server/nexus/__tests__',
+  'src/server/zones/__tests__',
+  'src/server/zones/__tests__/e2e',
+  'src/server/configStore',
+]
 
 // Module-level HOME mocks and ConfigStore singletons must not share a Bun process
 // with other suites, which may have already imported systemSettings.
@@ -33,6 +40,8 @@ const BUN = [
   // src/server/nexus/__tests__
   'nexusClient.test.ts',
   'nexusManager.test.ts',
+  // src/server/zones/__tests__ (iam/v1 owner-local contract; ajv only, no node:sqlite)
+  'orgZoneBindingContract.test.ts',
   // src/channels/__tests__
   'connectionScope.test.ts',
   'crashSeedRecovery.test.ts',
@@ -71,6 +80,7 @@ const BUN = [
  * node:sqlite or the driver seam — verified green under `npx tsx --test` on
  * that branch. */
 const NODE = [
+  'authCenterMembershipRevision.test.ts',
   'claimAttempt.test.ts',
   'creditApplicationsDb.test.ts',
   'enterpriseConfig.test.ts',
@@ -83,6 +93,7 @@ const NODE = [
   'phoneInvitationRegistration.test.ts',
   'phoneImport.test.ts',
   'rechargeDb.test.ts',
+  'zoneBinding.test.ts',
   'tokenQuota.test.ts',
   'transcriptGuard.test.ts',
   // LB/HA branch suites (node:sqlite / driver seam reach-through)
@@ -108,6 +119,11 @@ const NODE = [
   'syncWorkerInflight.test.ts',
   'userContainerName.test.ts',
 ]
+
+// Real-process Zone suites share the nexus kernel's local control port and
+// therefore must run serially. Keeping them in a separate registered bucket
+// preserves UNLISTED coverage without introducing cross-file port races.
+const NODE_SERIAL = ['p0E2e.test.ts', 'p1aE2e.test.ts']
 
 const EXTRA_NODE_PATHS = [
   'src/server/configuration/modelSettings.node-test.ts',
@@ -153,17 +169,17 @@ const present = SUITES.flatMap(dir =>
   acc.set(name, dir)
   return acc
 }, new Map())
-const accounted = new Set([...BUN, ...BUN_ISOLATED, ...NODE, ...Object.keys(EXCLUDED)])
+const accounted = new Set([...BUN, ...BUN_ISOLATED, ...NODE, ...NODE_SERIAL, ...Object.keys(EXCLUDED)])
 const unlisted = [...present.keys()].filter(name => !accounted.has(name))
 if (unlisted.length > 0) {
   console.error(
     `Unlisted test files in ${SUITES.join(' / ')}:\n  ${unlisted.join('\n  ')}\n` +
-      'Add each to BUN, BUN_ISOLATED or NODE in scripts/test-server.js so it actually runs.',
+      'Add each to BUN, BUN_ISOLATED, NODE or NODE_SERIAL in scripts/test-server.js so it actually runs.',
   )
   process.exit(1)
 }
 
-const missing = [...BUN, ...BUN_ISOLATED, ...NODE].filter(name => !present.has(name))
+const missing = [...BUN, ...BUN_ISOLATED, ...NODE, ...NODE_SERIAL].filter(name => !present.has(name))
 if (missing.length > 0) {
   console.error(`Listed but absent from ${SUITES.join(' / ')}:\n  ${missing.join('\n  ')}`)
   process.exit(1)
@@ -206,6 +222,12 @@ for (const name of BUN_ISOLATED) {
 }
 const nodeOk = run('node:test', 'npx', ['tsx', '--test'], NODE)
 const extraNodeOk = runPaths('node:test (server api)', 'npx', ['tsx', '--test'], EXTRA_NODE_PATHS)
+const nodeSerialOk = run(
+  'node:test real-process',
+  'npx',
+  ['tsx', '--test', '--test-concurrency=1'],
+  NODE_SERIAL,
+)
 
 const skipped = Object.entries(EXCLUDED)
 if (skipped.length > 0) {
@@ -213,5 +235,5 @@ if (skipped.length > 0) {
   for (const [name, reason] of skipped) console.log(`  ${name} — ${reason}`)
 }
 
-if (!bunOk || !isolatedBunOk || !nodeOk || !extraNodeOk) process.exit(1)
+if (!bunOk || !isolatedBunOk || !nodeOk || !nodeSerialOk || !extraNodeOk) process.exit(1)
 console.log('\nserver suite: both runners passed')

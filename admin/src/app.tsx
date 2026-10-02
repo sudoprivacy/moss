@@ -12,6 +12,7 @@ const CabinConversationsPage = lazy(() => import('./pages/cabin-conversations-pa
 const UsersPage = lazy(() => import('./pages/users-page'))
 const OperationsBillingPage = lazy(() => import('./pages/operations-billing-page'))
 const ApiKeysPage = lazy(() => import('./pages/api-keys-page'))
+const ZonesPage = lazy(() => import('./pages/zones-page'))
 const SystemSettingsPage = lazy(() => import('./pages/system-settings-page'))
 const PlatformConfigPage = lazy(() => import('./pages/platform-config-page'))
 const AccountSecurityPage = lazy(() => import('./pages/account-security-page'))
@@ -145,6 +146,14 @@ export default function App() {
           element={
             <SuspendedRoute>
               <ApiKeysPage />
+            </SuspendedRoute>
+          }
+        />
+        <Route
+          path="/zones"
+          element={
+            <SuspendedRoute>
+              <ZonesPage />
             </SuspendedRoute>
           }
         />

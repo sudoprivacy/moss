@@ -31,3 +31,6 @@ jobs:
 
       - name: Lint src/server
         run: npx eslint src/server
+
+      - name: Check generated IAM contract adapter
+        run: node contracts/generate/gen-adapter.mjs --check

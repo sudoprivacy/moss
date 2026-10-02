@@ -13,6 +13,15 @@
  * `bun scripts/fetch-nexus-runtime.js` 独立运行（便于单独验证与手动重取）。
  *
  * 版本来源：src/server/nexus/runtime-versions.json；升级版本时必须同步更新下方 SHA256 表。
+ *
+ * 本地构建约定（zone-v1 mixed-version 收敛，未上线）：当前 pin
+ * nexusd-cluster 0.1.6 / nexus-vault 0.1.4 是从各仓 feat/contract-zone HEAD
+ * 本地构建的产物版本（构建注入 NEXUSD_BUILD_VERSION=0.1.6；vault 为 crate
+ * 版本标记），不经任何外部发布源分发。产物直接放置在 bin/nexus/ 下并由
+ * .nexusd-version / plugins/.vault-version marker 记录版本——marker 与 pin
+ * 一致即跳过下载。下方 SHA256 表保留官方 0.1.5/0.5.44 条目仅作历史记录：
+ * 0.1.6/0.1.4 在 COS/GitHub 上不存在，即使 marker 丢失触发下载也会 404
+ * 回退（non-fatal warn），不会落盘覆盖本地产物。
  */
 import { execFileSync } from 'child_process'
 import { createHash } from 'crypto'

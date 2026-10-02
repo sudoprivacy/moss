@@ -8,6 +8,7 @@ import {
   type OrganizationProfile,
 } from './identityRepository.js'
 import { UnifiedIdentityService, type CreateUnifiedUserInput } from './unifiedIdentityService.js'
+import { detachAllBindingsForOrg } from '../zones/binding/bindingRepository.js'
 
 export class IdentityDomainError extends Error {
   constructor(readonly code: string, message: string) {
@@ -38,6 +39,13 @@ export class OrganizationIdentityService {
     private readonly authDb: AuthCenterDb,
     private readonly repository: IdentityRepository,
     private readonly unifiedIdentity: UnifiedIdentityService,
+    /**
+     * 低-6：跨 org 移动的 membership revoke 钩子（可选——authService 组装处
+     * 注入，测试可省）。用户被移动到新 org 后，旧 org 前缀下的 delegation
+     * 主动 revoke（best-effort；安全兜底是 nexus verify 的 membership 复查，
+     * 此处只加速收敛）。
+     */
+    private readonly onUserOrgChanged?: (fromOrgId: string, userId: string) => void,
   ) {}
 
   createOrganization(input: {
@@ -246,6 +254,10 @@ export class OrganizationIdentityService {
       })
       if (patch.orgId && patch.orgId !== user.orgId) {
         await this.repository.moveUserOrganization(userId, patch.orgId)
+        // 低-6：跨 org 移动后旧 org 名下的 delegation 主动 revoke（钩子在
+        // 事务提交后调用方不感知——revoke 是 best-effort 网络调用，失败
+        // 由 nexus verify 复查兜底）。
+        this.onUserOrgChanged?.(user.orgId, userId)
       }
       if (patch.password) {
         await this.authDb.updateUserPassword(userId, hashPassword(patch.password), Date.now())
@@ -283,6 +295,11 @@ export class OrganizationIdentityService {
       throw new IdentityDomainError('ORGANIZATION_NOT_EMPTY', 'Organization is not empty')
     }
     await this.authDb.driver.transaction(async () => {
+      // 低-4/N-1：binding detach 与 org 删除同事务（与 authService 删除入口
+      // 共用同一辅助）——此前该路径完全不触碰 org_zone_bindings，org 删除后
+      // binding 僵尸 bound、Nexus grant 泄漏且无收敛路径。非空预检在上，
+      // detach 只在删除必然成功的路径上执行。
+      await detachAllBindingsForOrg(this.authDb.driver, { orgId, now: Date.now() })
       await this.repository.deleteOrganizationRecords(orgId)
       await this.authDb.deleteOrganization(orgId)
     })

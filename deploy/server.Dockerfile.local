@@ -76,6 +76,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /dl
 COPY src/server/nexus/runtime-versions.json /runtime-versions.json
+# 低-15① 注意：当前 pin nexusd-cluster 0.1.6 / nexus-vault 0.1.4 是仅存在于
+# 本地的 zone-v1 构建产物版本（scripts/fetch-nexus-runtime.js 头注释：未发布
+# 到 COS/GitHub）——本 stage 的 curl 对这两个 tag 会 404 直接失败，且下方
+# 内联 SHA256 仍是旧版本（0.1.5/0.5.44）产物的值。在 nexus 正式发布并回填
+# SHA 前，联网构建此镜像不可用；发布后的跟进项 = 更新 pin 对应产物的 SHA。
 # nexusd-cluster (Rust nexus daemon).
 RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)" \
     && case "$TARGETARCH" in \

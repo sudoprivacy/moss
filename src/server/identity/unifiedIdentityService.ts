@@ -158,6 +158,7 @@ export class UnifiedIdentityService {
         departmentId: input.departmentId ?? null,
         role: input.role,
         status: input.status ?? 'active',
+        membershipRevision: 0,
         localAuth: hasLocalPassword,
         tokenLimit: null,
         createdAt: timestamp,
