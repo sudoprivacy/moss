@@ -25,7 +25,7 @@ import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
 import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
-import { NexusSpawnHandle, type AcpChildProcessLike } from './nexusSpawnHandle.js'
+import { NexusAcpTransport } from './nexusAcpTransport.js'
 
 import { getWorkspaceAgentsMdPath } from '../sharedAgentMemory.js'
 import { collectSkillAssets } from './skillAssets.js'
@@ -205,15 +205,18 @@ export async function buildWorkspaceInstructionsSecret(workspace: string, assist
  *  - scode itself ships INSIDE the runtime image, so pods need nothing staged on
  *    the node — a standard k3s + gvisor node is enough.
  *
- * The ACP bridge is reused UNCHANGED: `spawn('kubectl', ['exec','-i', …])`'s
- * stdio ARE the pod's exec stdio, interchangeable with a docker `exec` child.
- * The container command is `sleep infinity` so moss can `kubectl exec` scode per
- * turn. Teardown deletes the pod + Secret; {@link gcOrphanedPods} reaps leaks.
+ * Nexus owns the kubectl exec subprocess and exposes its session mailbox.
+ * The pod sleeps until that adapter starts scode. Teardown deletes the pod
+ * and Secret; gcOrphanedPods reaps abandoned resources.
  */
 export class K8sBackend implements SessionBackend {
   constructor(private readonly defaults: K8sBackendDefaults = {}) {}
 
   async spawn(options: BackendSpawnOptions): Promise<BackendHandle> {
+    if (resolveNexusConfigFromEnv().mode !== 'external') {
+      throw new Error('Kubernetes sessions require an external Nexus daemon with acp-mailbox/1')
+    }
+    const agentId = requireAgentId(options)
     const runtime = options.runtime
     const image = runtime?.k8sImage || this.defaults.image
     if (!image) {
@@ -462,33 +465,23 @@ export class K8sBackend implements SessionBackend {
       'scode',
       'acp',
       '--output-format', 'json',
-      '--permission-mode', 'danger-full-access',
+      '--permission-mode', options.dangerouslySkipPermissions ? 'danger-full-access' : 'prompt',
       '--auth', 'proxy',
       '--model', model,
     ]
 
-    // With MOSS_SPAWN_VIA_NEXUS on, nexus runs that same kubectl and owns the
-    // process record; otherwise this process does, exactly as before.
-    const viaNexus = await maybeStartViaNexus({
+    // Nexus owns this kubectl process and exposes its ACP session mailbox.
+    const transport = await startViaNexus({
       execArgs,
       env,
       cwd: safeCwd,
-      // Every session carries the agent it belongs to, so there is nothing left
-      // to fall back to. The old `scode-standard` default leaked an internal
-      // constant into a field callers read as the session's agent, and the
-      // sidebar rendered it as the conversation's name. If it is ever missing,
-      // that is an upstream bug worth hearing about rather than papering over
-      // with a constant that looks like an agent and is not one.
-      agentId: requireAgentId(options),
+      agentId,
       model,
       ownerId: options.userId,
-    })
-
-    const child: AcpChildProcessLike = viaNexus ?? spawn('kubectl', execArgs, {
-      cwd: safeCwd,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
+    }).catch(async error => {
+      await deletePod(kubectlBase, podName).catch(() => {})
+      await deleteSecret(kubectlBase, secretName).catch(() => {})
+      throw error
     })
 
     const runtimeInfo: SessionRuntimeInfo = {
@@ -510,7 +503,7 @@ export class K8sBackend implements SessionBackend {
       : undefined
 
     const handle = createAcpBridgeHandle({
-      child,
+      transport,
       sessionId: options.sessionId,
       cwd: safeCwd,
       model,
@@ -542,7 +535,7 @@ export class K8sBackend implements SessionBackend {
       })
     }
 
-    child.once('close', () => cleanup())
+    handle.onExit(() => cleanup())
 
     const originalDestroy = handle.destroy.bind(handle)
     handle.destroy = async (force = false) => {
@@ -557,23 +550,6 @@ export class K8sBackend implements SessionBackend {
   }
 }
 
-/**
- * Nexus owns the agent process by default; `MOSS_SPAWN_VIA_NEXUS=0|false|off`
- * is the escape hatch back to spawning it here.
- *
- * Default-on so a deployment cannot quietly fall back to the direct launch and
- * end up with agents that exist nowhere outside this process. A deployment that
- * has no external nexus is still handled — {@link maybeStartViaNexus} returns
- * null for embedded mode and the local path runs unchanged.
- */
-function isSpawnViaNexusEnabled(): boolean {
-  const raw = process.env.MOSS_SPAWN_VIA_NEXUS
-  if (raw === undefined) return true
-  const value = raw.trim().toLowerCase()
-  return !(value === '0' || value === 'false' || value === 'off' || value === '')
-}
-
-/** A SpawnSpec env is a string map; ProcessEnv allows undefined values. */
 function toStringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(env)) {
@@ -582,34 +558,18 @@ function toStringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   return out
 }
 
-/**
- * Hand the launch to nexus rather than running it here.
- *
- * The pod and its Secret are still created by moss above — nexus executes a
- * subprocess and has no Kubernetes concept of its own. What moves is only the
- * final step: `kubectl exec` runs on the nexus host, so the agent gets a real
- * `/proc/{pid}` record, a mailbox and a kernel-owned identity, while scode
- * itself keeps running inside the gvisor pod.
- *
- * Returns null whenever the flag is off or nexus is not in external mode, so
- * the local-spawn path stays exactly what it was.
- */
-async function maybeStartViaNexus(input: {
+/** Start one managed session using its authenticated controller identity. */
+async function startViaNexus(input: {
   execArgs: string[]
   env: NodeJS.ProcessEnv
   cwd: string
   agentId: string
   model: string
   ownerId?: string
-}): Promise<NexusSpawnHandle | null> {
-  if (!isSpawnViaNexusEnabled()) return null
-
+}): Promise<NexusAcpTransport> {
   const config = resolveNexusConfigFromEnv()
   if (config.mode !== 'external') {
-    process.stderr.write(
-      '[K8sBackend] MOSS_SPAWN_VIA_NEXUS is set but nexus mode is embedded — spawning locally\n',
-    )
-    return null
+    throw new Error('Kubernetes sessions require an external Nexus daemon with acp-mailbox/1')
   }
 
   const asMoss = () =>
@@ -625,10 +585,10 @@ async function maybeStartViaNexus(input: {
   const identity = await mintSessionIdentity(config.endpoint, config.tls, input.ownerId)
   const starter = identity ? NexusVfsClient.withMtls(config.endpoint, identity.tls) : asMoss()
 
-  let sessionId: string
-  let osPid: number | null
+  const agent = new ManagedAgentClient(starter, config.authToken)
+  let session: Awaited<ReturnType<ManagedAgentClient['startSession']>>
   try {
-    ;({ sessionId, osPid } = await new ManagedAgentClient(starter, config.authToken).startSession({
+    session = await agent.startSession({
       agentId: input.agentId,
       model: input.model,
       ...ownerField(identity, input.ownerId),
@@ -638,23 +598,14 @@ async function maybeStartViaNexus(input: {
         env: toStringEnv(input.env),
         cwd: input.cwd,
       },
-    }))
+    })
   } catch (error) {
     starter.close()
     throw error
   }
-  // The credential's job ended with that call; the owner is in the session's
-  // process record now. The byte tunnel goes back to moss's own identity,
-  // which is what it has always used, so the credential can stay short-lived
-  // instead of having to outlive the longest session anyone might run.
-  if (identity) starter.close()
-
-  process.stderr.write(
-    `[K8sBackend] nexus start_session ok (session=${sessionId}, os_pid=${osPid ?? 'n/a'}` +
-      `${identity ? `, owner proven by ${identity.subjectId}` : ''})\n`,
-  )
-  const agent = new ManagedAgentClient(identity ? asMoss() : starter, config.authToken)
-  return new NexusSpawnHandle(agent, sessionId, osPid)
+  // The same authenticated actor owns control-plane creation and all session
+  // frames. Switching back to moss's principal would forge a different sender.
+  return new NexusAcpTransport(agent, session)
 }
 
 export function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] {
