@@ -1,7 +1,7 @@
 /**
  * Workspace file access for pod-hosted sessions, over `kubectl exec`.
  *
- * A pod's workspace is an emptyDir: it exists only inside the pod, on whatever
+ * A pod's workspace is mounted inside the pod, on whatever
  * node the pod landed on. moss cannot reach it through its own filesystem — the
  * host path of the same name is a different, empty directory. Every workspace
  * read and write for such a session therefore has to go through the pod.
@@ -59,9 +59,11 @@ export type PodWorkspaceTarget = {
   podName: string
   /** The workspace root *inside the pod*. */
   cwd: string
+  /** Restore a persistent workspace's runtime after it exits or is reclaimed. */
+  onPodUnavailable?: () => Promise<void>
 }
 
-class PodExecError extends Error {
+export class PodExecError extends Error {
   constructor(
     message: string,
     readonly exitCode: number | null,
@@ -87,6 +89,7 @@ export function isPodNotReadyExecError(exitCode: number | null, stderr: string):
     text.includes('container not found') ||
     text.includes('error dialing backend') ||
     text.includes('is not created or running') ||
+    text.includes('cannot exec into a container in a completed pod') ||
     POD_OBJECT_MISSING.test(text)
   )
 }
@@ -127,13 +130,26 @@ async function execInPod(
   argv: string[],
   stdin?: Buffer,
 ): Promise<Buffer> {
+  return withPodReadinessRetry(() => execInPodOnce(target, argv, stdin), target.onPodUnavailable)
+}
+
+/** Retry transport readiness failures, restoring an opted-in persistent runtime once. */
+export async function withPodReadinessRetry(
+  execute: () => Promise<Buffer>,
+  onPodUnavailable?: () => Promise<void>,
+): Promise<Buffer> {
+  let isRecoveryAttempted = false
   for (let attempt = 0; ; attempt++) {
     try {
-      return await execInPodOnce(target, argv, stdin)
+      return await execute()
     } catch (error) {
       const notReady =
         error instanceof PodExecError && isPodNotReadyExecError(error.exitCode, error.stderr)
       if (!notReady || attempt >= EXEC_RETRY_DELAYS_MS.length) throw error
+      if (onPodUnavailable && !isRecoveryAttempted) {
+        isRecoveryAttempted = true
+        await onPodUnavailable()
+      }
       await sleep(EXEC_RETRY_DELAYS_MS[attempt]!)
     }
   }
