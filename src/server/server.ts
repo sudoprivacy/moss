@@ -36,7 +36,7 @@ import { ConfigurationScopeError, resolveConfigurationActor } from './configurat
 import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
-import { buildKubectlBaseArgs, buildResourceNames } from './backends/k8sBackend.js'
+import { resolveSessionWorkspaceAccess } from './sessionWorkspace.js'
 import { bytesLookLikeText } from './workspaceText.js'
 import {
   createSudorouterClient,
@@ -80,7 +80,6 @@ import {
 } from './credits/recharge.js'
 import {
   buildRemoteWorkspaceTree,
-  createPodWorkspaceAccess,
   type WorkspaceFileAccess,
 } from './backends/podWorkspace.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
@@ -1641,37 +1640,6 @@ async function readUserCredits(
     }
   }
   return result
-}
-
-/**
- * Workspace access for a session whose files do not live on moss's filesystem.
- *
- * Null when they do — host and docker sessions write straight to `session.cwd`,
- * docker by bind-mounting it — and the direct-fs path applies unchanged.
- *
- * Derived from the session id rather than read off a backend handle: the handle
- * lives in the runner process, and the HTTP server answering these requests is
- * a different process, so it can only re-derive the pod's name.
- */
-function resolveSessionWorkspaceAccess(
-  session: SessionRecord,
-  config: ServerConfig,
-  runtime: RuntimeService,
-): WorkspaceFileAccess | null {
-  if (session.runtime?.type !== 'k8s') return null
-  return createPodWorkspaceAccess({
-    kubectlBase: buildKubectlBaseArgs(
-      config.k8s?.namespace || 'moss-sessions',
-      config.k8s?.kubeconfig,
-    ),
-    podName: buildResourceNames(session.sessionId).podName,
-    cwd: session.cwd,
-    onPodUnavailable: config.k8s?.workspaceStorageClass
-      ? async () => {
-          await runtime.ensureSessionReady(session.sessionId)
-        }
-      : undefined,
-  })
 }
 
 async function readWorkspaceFilePreview(
