@@ -111,7 +111,6 @@ const NODE = [
 ]
 
 const EXTRA_NODE_PATHS = [
-  'src/server/privateAgentArchives.node-test.ts',
   'src/server/configuration/modelSettings.node-test.ts',
   'src/server/identity/loginPolicy.node-test.ts',
   'src/server/identity/organizationAutomationPolicy.node-test.ts',
