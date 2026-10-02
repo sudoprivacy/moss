@@ -22,6 +22,8 @@
 //	corpapp names --app <name> --rooms <roomid,...>           # resolve roomids -> group names
 //	corpapp groups --app <name> [--owner <userid,...>]        # list customer groups (客户群)
 //	corpapp group --app <name> --chat-id <id>                 # one group's detail + members
+//	corpapp update-internal-group --app <name> --chatid <id> [--add <ids>]
+//	                                                          # change an internal group's name/owner/members
 //	corpapp send-group --app <name> --sender <userid> --chat-id <id> --text <msg>
 //	                                                          # create a 群发 task (needs human confirmation)
 //	corpapp group-msg-result --app <name> --msgid <id> --userid <userid>
@@ -79,6 +81,8 @@ Usage:
   corpapp create-internal-group --app <name> --name <群名> --owner <userid>
                      [--members <a,b,c>] [--chatid <id>]
   corpapp internal-group --app <name> --chatid <id>
+  corpapp update-internal-group --app <name> --chatid <id> [--name <群名>]
+                                [--owner <userid>] [--add <a,b>] [--del <c>]
   corpapp send-internal-group --app <name> --chatid <id> [--text <msg>]
                      [--format text|markdown] [--file <path>...]
                      [--mention <userid,...>] [--mention-all]

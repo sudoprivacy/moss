@@ -2643,12 +2643,32 @@ export function startServer(
               const appConn = createCorpApp(String(appRow.type))
               await appConn.init(appCfg, appCreds)
               if (!appConn.getCustomerGroup) return null
-              const r = await appConn.getCustomerGroup(roomId, false)
+              // `needName` on: the same response then carries the group's
+              // name and each member's display name. Nothing else can supply
+              // them cheaply — `groupchat/list` omits names, and an internal
+              // userid is not resolvable by this app through the directory
+              // (`/cgi-bin/user/get` answers 48002). Asking later would cost
+              // one detail call per room per report; asking here is free,
+              // because this call already happens once per room per day.
+              const r = await appConn.getCustomerGroup(roomId, true)
               const g = (r.group_chat ?? r) as Record<string, unknown>
               const list = (g.member_list as Record<string, unknown>[] | undefined) ?? []
-              return list
-                .map((m) => (typeof m.userid === 'string' ? m.userid : ''))
-                .filter((id) => id.length > 0)
+              const members: string[] = []
+              const memberNames: Record<string, string> = {}
+              for (const m of list) {
+                // type 1 members carry `userid`, type 2 an opaque
+                // `external_userid`; the archive records both as `from`.
+                const id =
+                  (typeof m.userid === 'string' && m.userid) ||
+                  (typeof m.external_userid === 'string' && m.external_userid) ||
+                  ''
+                if (!id) continue
+                members.push(id)
+                if (typeof m.name === 'string' && m.name) memberNames[id] = m.name
+              }
+              if (members.length === 0) return null
+              const roomName = typeof g.name === 'string' && g.name ? g.name : undefined
+              return { members, roomName, memberNames }
             } catch {
               // Internal groups answer 90501 here; no roster, no snapshot.
               return null
@@ -5989,6 +6009,37 @@ export function startServer(
         writeJson(res, 200, await connector.getInternalGroup(
           decodeURIComponent(agentCorpAppInternalGroupMatch[2] || ''),
         ))
+        return
+      }
+
+      // PATCH the same path that GETs the group: change its name, owner or
+      // members. Without it a group's roster was whatever it was created
+      // with, and WeCom cannot dissolve an appchat group.
+      if (req.method === 'PATCH' && agentCorpAppInternalGroupMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppInternalGroupMatch[1] || '')
+        if (!row) return
+        const body = await readJsonBody(req)
+        const connector = await initCorpAppConnector(row)
+        if (!connector.updateInternalGroup) {
+          writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot update internal groups' } })
+          return
+        }
+        const ids = (v: unknown): string[] | undefined =>
+          Array.isArray(v)
+            ? v.map((u: unknown) => String(u || '').trim()).filter(Boolean)
+            : undefined
+        try {
+          writeJson(res, 200, await connector.updateInternalGroup({
+            chatId: decodeURIComponent(agentCorpAppInternalGroupMatch[2] || ''),
+            name: typeof body.name === 'string' && body.name ? body.name : undefined,
+            owner: typeof body.owner === 'string' && body.owner ? body.owner : undefined,
+            userList: ids(body.userList),
+            addUserList: ids(body.addUserList),
+            delUserList: ids(body.delUserList),
+          }))
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'update_failed', message: err instanceof Error ? err.message : String(err) } })
+        }
         return
       }
 

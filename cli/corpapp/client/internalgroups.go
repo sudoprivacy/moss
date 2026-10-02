@@ -70,6 +70,48 @@ func (c *Client) CreateInternalGroup(id, name, chatID, owner string, members []s
 	return &resp, nil
 }
 
+// UpdateInternalGroup changes a group's name, owner or members.
+//
+// Membership was otherwise fixed at creation: WeCom cannot dissolve an
+// appchat group, so a group created with the wrong roster could only be
+// abandoned. Pass only what should change — omitted fields are left alone.
+//
+// `userList` replaces the roster; `add`/`del` adjust it. Pick one form:
+// WeCom accepts both at once but the outcome is not worth reasoning about.
+func (c *Client) UpdateInternalGroup(
+	id, chatID, name, owner string,
+	userList, add, del []string,
+) (*InternalGroupSendResp, error) {
+	if chatID == "" {
+		return nil, errors.New("chat-id is required")
+	}
+	if name == "" && owner == "" && len(userList) == 0 && len(add) == 0 && len(del) == 0 {
+		return nil, errors.New("nothing to update: pass --name, --owner, --members, --add or --del")
+	}
+	body := map[string]any{}
+	if name != "" {
+		body["name"] = name
+	}
+	if owner != "" {
+		body["owner"] = owner
+	}
+	if len(userList) > 0 {
+		body["userList"] = userList
+	}
+	if len(add) > 0 {
+		body["addUserList"] = add
+	}
+	if len(del) > 0 {
+		body["delUserList"] = del
+	}
+	var resp InternalGroupSendResp
+	path := c.PathPrefix + "/" + url.PathEscape(id) + "/internal-groups/" + url.PathEscape(chatID)
+	if err := c.patch(path, body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // GetInternalGroup returns the group's raw detail (name, owner, userlist).
 func (c *Client) GetInternalGroup(id, chatID string) (json.RawMessage, error) {
 	if chatID == "" {

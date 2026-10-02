@@ -359,6 +359,28 @@ export interface CorpAppConnector {
   getInternalGroup?(chatId: string): Promise<Record<string, unknown>>
 
   /**
+   * Optional: change an internal group's name, owner or members
+   * (`appchat/update`).
+   *
+   * Needed because membership was otherwise fixed at creation: WeCom has no
+   * way to dissolve an appchat group, so a group created with the wrong
+   * roster could only be abandoned, and a group that outlives a staffing
+   * change could not follow it.
+   *
+   * `addUserList` / `delUserList` are incremental; `userList` replaces the
+   * roster outright. Pass only what should change — WeCom leaves omitted
+   * fields alone.
+   */
+  updateInternalGroup?(params: {
+    chatId: string
+    name?: string
+    owner?: string
+    userList?: string[]
+    addUserList?: string[]
+    delUserList?: string[]
+  }): Promise<{ ok: boolean }>
+
+  /**
    * Optional: post to an internal group (`appchat/send`).
    *
    * There is NO sender parameter — verified: WeCom rejects sender/from/userid/

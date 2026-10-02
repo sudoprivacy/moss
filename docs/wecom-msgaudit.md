@@ -105,7 +105,7 @@ openssl rsa -in msgaudit_v1_private.pem -pubout -out msgaudit_v1_public.pem
 ```
 $MOSS_HOME/msgaudit/<corpAppId>/
   cursor.json                        {"seq": 12345, "updatedAt": ...}
-  rooms.json                         roomId -> {dir, count, lastSeen}
+  rooms.json                         roomId -> {dir, count, lastSeen, name?}
   chats/<roomId>/<YYYY-MM-DD>.jsonl  每行一条消息
   members/<roomId>/<YYYY-MM-DD>.json 每日成员快照
   members/lastupdated.json           最后一次全量快照完成的日期
@@ -285,11 +285,23 @@ corpapp names --app 数牍 --rooms wr_xxx,wr_yyy
 安静的群照样会掉人），为今天还没有快照的群拍一张：
 
 ```
-members/<roomId>/2026-09-18.json   {roomid, date, members[], takenAt}
+members/<roomId>/2026-09-18.json   {roomid, date, members[], roomName?, memberNames?, takenAt}
 ```
 
 全部拍完后写 `members/lastupdated.json`。所以**中途部署也不会漏**：17:00 上线，
 部署后第一轮拉取就会补齐当天快照。
+
+快照顺带记下**群名与成员姓名**（`roomName` / `memberNames`）。这不是额外成本：
+拍快照调的 `groupchat/get` 本来就能在同一个响应里带回这些名字（`need_name=1`），
+而换别的途径都很贵 ——
+
+- `groupchat/list` 不返回群名，群名→roomid 只能逐个取详情比对（两万多个群 ≈ 2 小时）
+- 内部 userid 走通讯录 `/cgi-bin/user/get` 本应用返回 `48002 forbidden`
+
+所以阅读端（质检报表等）不必再为「把 userid 显示成人名」付任何接口调用。
+`roomName` 同时回填进 `rooms.json` 的 `name` 字段，群名→roomid 变成读文件反查。
+
+两个字段都是**可选**的：老快照没有它们照样有效，`members` 数组的含义不变。
 
 **阶段 2 —— 算离群。** 当 `lastupdated == 今天` 且 `members/leaves/<今天>.json`
 不存在时，逐群与**上一张快照**比对：

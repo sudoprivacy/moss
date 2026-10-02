@@ -568,6 +568,40 @@ export class WeComAppConnector implements CorpAppConnector {
   }
 
   /**
+   * Change an internal group's name, owner or members (doc 90247).
+   *
+   * Without this, a group's roster was whatever it was created with: WeCom
+   * offers no way to dissolve an appchat group, so getting the membership
+   * wrong once meant living with it. Callers pass only the fields they want
+   * changed; WeCom leaves the rest alone.
+   *
+   * `userList` replaces the roster, `addUserList`/`delUserList` adjust it.
+   * Sending both forms at once is accepted by WeCom but the result is not
+   * worth reasoning about, so the caller is expected to pick one.
+   */
+  async updateInternalGroup(params: {
+    chatId: string
+    name?: string
+    owner?: string
+    userList?: string[]
+    addUserList?: string[]
+    delUserList?: string[]
+  }): Promise<{ ok: boolean }> {
+    const body: Record<string, unknown> = { chatid: params.chatId }
+    if (params.name) body.name = params.name
+    if (params.owner) body.owner = params.owner
+    if (params.userList) body.userlist = [...new Set(params.userList.filter(Boolean))]
+    if (params.addUserList) {
+      body.add_user_list = [...new Set(params.addUserList.filter(Boolean))]
+    }
+    if (params.delUserList) {
+      body.del_user_list = [...new Set(params.delUserList.filter(Boolean))]
+    }
+    const json = await this.requireClient().post('/cgi-bin/appchat/update', body)
+    return { ok: Number(json.errcode ?? 0) === 0 }
+  }
+
+  /**
    * Post to an internal group (doc 90248).
    *
    * No sender parameter exists — verified: sender/from/userid/fromuser/owner are
