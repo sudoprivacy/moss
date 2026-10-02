@@ -13,6 +13,7 @@ import type {
   SessionBackend,
   SessionRuntimeInfo,
 } from '../sessionManager.js'
+import { sessionAgentName } from '../agentIdentity.js'
 import {
   buildSessionEnv,
   buildConfigDir,
@@ -123,20 +124,25 @@ async function ensureWorkspaceClaim(kubectlBase: string[], claim: NonNullable<Re
 
 /** Drop mounts that would collide on the same in-pod path (first wins). */
 /**
- * The agent this spawn belongs to.
+ * The agent this spawn belongs to, as nexus will name it.
  *
- * `RuntimeService` assigns one to every session — the chosen assistant, or the
- * user's own agent — including when relaunching a session created before that
- * was true. So a spawn without one means the assignment was bypassed, and the
- * useful response is to say so rather than invent a name.
+ * Not the chosen template: that is shared, and `/agents/{name}` is zone-wide
+ * while a zone is a tenant, so naming the runtime after the template put every
+ * user in an organization who picked it into one agent home. The runtime's
+ * agent is this user and that template together.
+ *
+ * `RuntimeService` assigns a session its agent at create, and again at launch
+ * for sessions that predate that. A spawn arriving without one, or without the
+ * user it belongs to, means the assignment was bypassed — worth saying rather
+ * than inventing a name for.
  */
 function requireAgentId(options: BackendSpawnOptions): string {
-  if (!options.assistantName) {
+  if (!options.assistantName || !options.userId) {
     throw new Error(
       `k8s spawn for session ${options.sessionId} has no agent; RuntimeService assigns one to every session`,
     )
   }
-  return options.assistantName
+  return sessionAgentName(options.userId, options.assistantName)
 }
 
 function dedupeMounts(mounts: PodVolumeMount[]): PodVolumeMount[] {
