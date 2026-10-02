@@ -202,11 +202,21 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
           SCODE_VERSION: ${{ steps.release.outputs.scode_version }}
+          # Optional. Unauthenticated Hugging Face downloads are rate-limited per
+          # IP, and a GitHub runner's IP is shared with every other build, so the
+          # model fetch answers 429 at random. The fetch retries either way; a
+          # token removes the cause instead of waiting it out.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
+          secret_args=()
+          if [ -n "${HF_TOKEN:-}" ]; then
+            secret_args+=(--secret "id=hf_token,env=HF_TOKEN")
+          fi
           docker buildx build \
             --platform linux/amd64 \
             --load \
+            "${secret_args[@]}" \
             -t "my-moss-runtime:$IMAGE_TAG" \
             -f deploy/runtime/Dockerfile .
           docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version 2>&1 | tee dist/scode-version.txt

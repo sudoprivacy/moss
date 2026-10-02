@@ -75,9 +75,13 @@ RUN apt-get update && apt-get install -y \
 # session's empty HOME. New cloud conversations work without package downloads.
 ENV SUDOWORK_SUBTITLE_PYTHON=/opt/sudowork-subtitles/bin/python \
     SUDOWORK_WHISPER_MODEL_DIR=/opt/sudowork-models/faster-whisper-small
-RUN python3 -m venv /opt/sudowork-subtitles \
+COPY deploy/runtime/fetch-whisper-model.py /tmp/fetch-whisper-model.py
+RUN --mount=type=secret,id=hf_token \
+    python3 -m venv /opt/sudowork-subtitles \
     && /opt/sudowork-subtitles/bin/python -m pip install --no-cache-dir faster-whisper==1.2.1 av==16.1.0 \
-    && /opt/sudowork-subtitles/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-small', revision='536b0662742c02347bc0e980a01041f333bce120', local_dir='/opt/sudowork-models/faster-whisper-small', allow_patterns=['config.json', 'model.bin', 'tokenizer.json', 'vocabulary.txt'])" \
+    && HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
+       /opt/sudowork-subtitles/bin/python /tmp/fetch-whisper-model.py \
+    && rm -f /tmp/fetch-whisper-model.py \
     && /opt/sudowork-subtitles/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('/opt/sudowork-models/faster-whisper-small', device='cpu', compute_type='int8', cpu_threads=2)" \
     && ffmpeg -hide_banner -filters 2>/dev/null | grep -q subtitles
 
