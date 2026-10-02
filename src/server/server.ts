@@ -10,6 +10,7 @@ import { MOSS_SKILLS_HUB_DIR } from '../utils/skills/localSkillDirectories.js'
 import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrganizationSkillUnused, requireOrganizationResource, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
 import { installAndPrepareClientCatalogResource, describeClientCatalogItem } from './catalog/clientCatalogInstall.js'
 import http from 'http'
+import { PrivateAgentArchives, handlePrivateAgentArchives } from './privateAgentArchives.js'
 import { randomUUID } from 'crypto'
 import net from 'net'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
@@ -2022,6 +2023,7 @@ export function startServer(
   getConnections: () => Promise<number>
 } {
   const adminDistDir = resolveAdminDistDir()
+  const privateAgentArchives = new PrivateAgentArchives(join(config.rootDir, 'private-agent-archives'))
   const wss = new WebSocketServer({ noServer: true })
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
     cabinEnabled: config.cabin.enabled,
@@ -3565,6 +3567,7 @@ export function startServer(
       }
 
       const resourceAuth = auth
+      if (await handlePrivateAgentArchives(req, res, pathname, auth, privateAgentArchives)) return
       return await withOrganizationResources({ orgId: auth.orgId, userId: auth.userId, driver: runtime.store.driver, visibility: await authService.buildVisibilityFilter(auth) }, async () => {
       const auth = resourceAuth
       if (req.method === 'GET' && pathname === '/api/v1/client/local-runtime') {
