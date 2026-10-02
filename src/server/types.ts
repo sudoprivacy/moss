@@ -183,6 +183,8 @@ export const serverFileConfigSchema = lazySchema(() =>
       imagePullPolicy: z.string().default('IfNotPresent'),
       // Names of pre-created dockerconfigjson pull secrets (private registries).
       imagePullSecrets: z.array(z.string()).default([]),
+      workspaceStorageClass: z.string().min(1).optional(),
+      workspaceStorageSize: z.string().min(1).optional(),
       cpuLimit: z.string().default('2'),
       memoryLimit: z.string().default('4Gi'),
       podReadyTimeoutSec: z.number().int().min(1).default(90),
@@ -701,6 +703,8 @@ export type ServerConfig = {
     kubeconfig?: string
     imagePullPolicy: string
     imagePullSecrets: string[]
+    workspaceStorageClass?: string
+    workspaceStorageSize?: string
     cpuLimit: string
     memoryLimit: string
     podReadyTimeoutSec: number

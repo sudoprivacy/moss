@@ -5,7 +5,23 @@ import { join, posix } from 'node:path'
 import { test } from 'node:test'
 import { writeAssistantOverrideAgentsMd } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
-import { buildWorkspaceInstructionsSecret } from './k8sBackend.js'
+import { buildWorkspaceInstructionsSecret, buildWorkspaceStorage } from './k8sBackend.js'
+
+void test('workspace persistence is opt-in and claims survive pod cleanup without sharing sessions', () => {
+  assert.deepEqual(buildWorkspaceStorage('first', 'moss-sessions'), { volume: { name: 'workspace', emptyDir: {} }, claim: undefined })
+  const first = buildWorkspaceStorage('same-prefix-first', 'moss-sessions', 'local-path', '5Gi')
+  const retry = buildWorkspaceStorage('same-prefix-first', 'moss-sessions', 'local-path', '5Gi')
+  const second = buildWorkspaceStorage('same-prefix-second', 'moss-sessions', 'local-path', '5Gi')
+  assert.deepEqual(retry, first)
+  assert.notEqual(first.claim!.metadata.name, second.claim!.metadata.name)
+  assert.deepEqual(first.volume.persistentVolumeClaim, { claimName: first.claim!.metadata.name })
+  assert.equal(first.claim!.metadata.namespace, 'moss-sessions')
+  assert.equal(first.claim!.metadata.labels['moss.sudo.dev/session-id'], 'same-prefix-first')
+  assert.equal('ownerReferences' in first.claim!.metadata, false)
+  assert.deepEqual(first.claim!.spec.resources.requests, { storage: '5Gi' })
+  assert.deepEqual(first.claim!.spec.accessModes, ['ReadWriteOnce'])
+  assert.match(first.claim!.metadata.name, /^[a-z0-9-]{1,63}$/)
+})
 
 void test('assistant rules reach the pod workspace and take precedence over the catalog display name', async t => {
   const root = await mkdtemp(join(tmpdir(), 'moss-k8s-instructions-'))
