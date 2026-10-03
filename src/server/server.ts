@@ -6869,7 +6869,7 @@ export function startServer(
         authService.requireScope(auth, 'admin:users')
         const userId = userMatch[1] || ''
         const body = await readJsonBody(req)
-        const result = authService.updateUser({
+        const result = await authService.updateUser({
           orgId: auth.orgId,
           userId,
           name: typeof body.name === 'string' ? body.name : undefined,
