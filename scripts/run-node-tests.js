@@ -35,6 +35,7 @@ const nodeTestFiles = [
   'src/server/api/cron.node-test.ts',
   'src/server/auth/sudorouterCredentials.node-test.ts',
   'src/server/auth/localExecution.node-test.ts',
+  'src/server/auth/userUpdateRoutes.node-test.ts',
   'src/server/backends/acpBridge.node-test.ts',
   'src/server/backends/k8sBackend.node-test.ts',
   'src/server/backends/nexusSpawnHandle.node-test.ts',
