@@ -11,7 +11,7 @@ import {
 } from '../../utils/skills/localSkillDirectories.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { findAssistantDir, readAssistantMeta } from '../agentStore.js'
-import { isDefaultAgentName } from '../agentIdentity.js'
+import { isUserOwnedAgentName } from '../agentIdentity.js'
 import type {
   BackendAvailableSkill,
   BackendHandle,
@@ -324,7 +324,7 @@ export async function getAssistantRuntimeConfig(
     // A user's own agent has no catalog entry to look up, and nothing has
     // narrowed its skills — it gets what an unattributed session used to get,
     // plus the cross-session memory that only `user` mode turns on.
-    if (isDefaultAgentName(assistantName)) {
+    if (isUserOwnedAgentName(assistantName)) {
       return { memoryMode: 'user', enabledSkills: skills.map(skill => skill.name) }
     }
     if (!assistantName) return { memoryMode: 'session', enabledSkills: skills.map(skill => skill.name) }
@@ -339,7 +339,7 @@ export async function getAssistantRuntimeConfig(
     return { memoryMode: agent.meta.memory_mode === 'user' ? 'user' : 'session', enabledSkills }
   }
   // 用户自己的 agent：没有目录项可查，技能也没被收窄 —— 给全量，并开启跨会话记忆
-  if (isDefaultAgentName(assistantName)) {
+  if (isUserOwnedAgentName(assistantName)) {
     const allSkills = await getAllAvailableSkillNames()
     return { memoryMode: 'user', enabledSkills: allSkills }
   }

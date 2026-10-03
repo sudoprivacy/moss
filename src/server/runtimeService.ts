@@ -1,6 +1,12 @@
 import { SessionStartupError } from './sessionStartup.js'
 import { withOrganizationResources, requireOrganizationResource, resolveOrganizationSkillIds, snapshotOrganizationResources, pinSessionResourceSnapshot } from './catalog/organizationResources.js'
-import { defaultAgentName, isDefaultAgentName } from './agentIdentity.js'
+import {
+  defaultAgentName,
+  isDefaultAgentName,
+  isUserCreatedAgentName,
+  isUserOwnedAgentName,
+} from './agentIdentity.js'
+import { getUserAgent } from './userAgentStore.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { randomUUID } from 'crypto'
 import { accessSync, constants, existsSync } from 'fs'
@@ -634,7 +640,7 @@ export class RuntimeService {
       if (!input.assistantName) {
         input = { ...input, assistantName: defaultAgentName(input.userId) }
       }
-      if (input.assistantName && !isDefaultAgentName(input.assistantName)) {
+      if (input.assistantName && !isUserOwnedAgentName(input.assistantName)) {
         const resource = await requireOrganizationResource('agent', input.assistantName)
         if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
         const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
@@ -1739,21 +1745,31 @@ export class RuntimeService {
       options.assistantName ?? session.assistantName ?? defaultAgentName(session.userId)
     // A user's own agent is not in the catalog — asking for it would 404 a
     // session that is perfectly valid.
-    if (effectiveAssistantName && !isDefaultAgentName(effectiveAssistantName)) {
+    if (effectiveAssistantName && !isUserOwnedAgentName(effectiveAssistantName)) {
       const resource = await requireOrganizationResource('agent', effectiveAssistantName)
       effectiveAssistantName = resource.id
       if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
     }
     let assistantDisplayName = options.assistantDisplayName
-    // Only a catalog assistant has a display name to resolve. A default agent's
-    // name is derived from a user id, so resolving it would surface `user-<uuid>`
-    // as the thing the agent calls itself.
+    // The implicit default agent has no display name to resolve: its name is
+    // derived from a user id, so resolving it would surface `user-<uuid>` as the
+    // thing the agent calls itself. An agent the user made does have one — the
+    // name they typed — but it lives in their own store, not the catalog.
     if (!assistantDisplayName && effectiveAssistantName && !isDefaultAgentName(effectiveAssistantName)) {
-      try {
-        const { resolveAssistantDisplayName } = await import('./agentStore.js')
-        assistantDisplayName = await resolveAssistantDisplayName(effectiveAssistantName)
-      } catch {
-        assistantDisplayName = effectiveAssistantName
+      if (isUserCreatedAgentName(effectiveAssistantName)) {
+        const agent = await getUserAgent(
+          session.orgId,
+          session.userId,
+          effectiveAssistantName.slice('agent-'.length),
+        ).catch(() => null)
+        assistantDisplayName = agent?.displayName
+      } else {
+        try {
+          const { resolveAssistantDisplayName } = await import('./agentStore.js')
+          assistantDisplayName = await resolveAssistantDisplayName(effectiveAssistantName)
+        } catch {
+          assistantDisplayName = effectiveAssistantName
+        }
       }
     }
 

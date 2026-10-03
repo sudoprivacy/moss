@@ -31,6 +31,37 @@ import { createHash } from 'node:crypto'
  */
 const DEFAULT_AGENT_PREFIX = 'user-'
 
+/**
+ * Marks an agent a user made for themselves — a second context of their own,
+ * with its own memory, that did not come from a template.
+ *
+ * The id is generated, not the name the user typed: a display name is meant to
+ * be changed, and the agent's home, memory and conversations all hang off this.
+ */
+const USER_CREATED_AGENT_PREFIX = 'agent-'
+
+/** The reference stored for an agent the user made. `id` is generated at creation. */
+export function userCreatedAgentName(id: string): string {
+  return `${USER_CREATED_AGENT_PREFIX}${id}`
+}
+
+export function isUserCreatedAgentName(name: string | null | undefined): boolean {
+  return typeof name === 'string' && name.startsWith(USER_CREATED_AGENT_PREFIX)
+}
+
+/**
+ * Whether this reference names one of the user's own agents — the implicit
+ * default, or one they made — rather than a template.
+ *
+ * This is the question nearly every caller is really asking. A template is
+ * looked up in the organization catalog and carries a role; a user's own agent
+ * is in neither, and asking the catalog for it answers 404 for a session that
+ * is perfectly valid.
+ */
+export function isUserOwnedAgentName(name: string | null | undefined): boolean {
+  return isDefaultAgentName(name) || isUserCreatedAgentName(name)
+}
+
 /** The agent a session belongs to when the user did not choose an assistant. */
 export function defaultAgentName(userId: string): string {
   return `${DEFAULT_AGENT_PREFIX}${userId}`
@@ -69,6 +100,9 @@ export function isDefaultAgentName(name: string | null | undefined): boolean {
  */
 export function sessionAgentName(userId: string, assistantRef?: string | null): string {
   if (!assistantRef || isDefaultAgentName(assistantRef)) return defaultAgentName(userId)
+  // An agent the user made is already theirs, but it is still paired: an id that
+  // leaked between users must not let one of them address the other's agent.
+  if (isUserCreatedAgentName(assistantRef)) return `u-${userId}--${assistantRef}`
   return `u-${userId}--${pathSafeSlug(assistantRef)}`
 }
 
