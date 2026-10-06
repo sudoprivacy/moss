@@ -114,11 +114,11 @@ describe('NexusManager', () => {
       'utf8',
     )
 
-    expect(runtimeVersions['nexusd-cluster']).toBe('0.1.5')
-    expect(runtimeVersions['nexus-vault']).toBe('0.5.44')
+    expect(runtimeVersions['nexusd-cluster']).toBe('0.8.0')
+    expect(runtimeVersions['nexus-vault']).toBe('0.5.68')
     expect(dockerfile).toContain('COPY src/server/nexus/runtime-versions.json /runtime-versions.json')
     expect(dockerfile).toContain("NEXUSD_CLUSTER_VERSION=\"$(jq -er '.\"nexusd-cluster\"' /runtime-versions.json)\"")
-    expect(dockerfile).toContain('github.com/nexi-lab/nexus/releases/download/nexusd-cluster-v${NEXUSD_CLUSTER_VERSION}')
+    expect(dockerfile).toContain('github.com/nexi-lab/nexus-vfs/releases/download/v${NEXUSD_CLUSTER_VERSION}')
     expect(dockerfile).toContain("NEXUS_VAULT_VERSION=\"$(jq -er '.\"nexus-vault\"' /runtime-versions.json)\"")
     expect(dockerfile).toContain('github.com/nexi-lab/nexus/releases/download/vault-v${NEXUS_VAULT_VERSION}')
   })

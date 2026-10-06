@@ -292,3 +292,13 @@ sudo ~/.moss/server/uninstall.sh --purge
 
 每个 Release 提供 amd64 Server 包、Runtime 镜像包、`install.sh`、k3s 计算节点脚本
 （`uninstall-k3s.sh`、`fetch-offline-deps.sh`）和 `SHA256SUMS`。
+
+### Runtime upgrade verification
+
+The embedded daemon is pinned to Nexus VFS 0.8.0 and the signed vault plugin to
+0.5.68 (plugin ABI 7), matching SDK 0.5.0. Update the platform checksums with
+the versions. CI runs `scripts/e2e/embedded-nexus-live.ts` against installed
+release artifacts on Linux, macOS and Windows: it starts the real manager,
+writes and updates a fresh value, restarts the daemon, then verifies persistence,
+deletion and restoration. The script header has the local commands. Both data
+and identity are isolated; the report contains only synthetic fixture metadata.
