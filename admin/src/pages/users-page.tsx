@@ -2116,7 +2116,10 @@ export default function UsersPage() {
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
-              onClick={handleConfirmDeleteOrganization}
+              onClick={(event) => {
+                event.preventDefault()
+                void handleConfirmDeleteOrganization()
+              }}
               disabled={pendingOrganizationActionId === organizationToDelete?.id}
             >
               {pendingOrganizationActionId === organizationToDelete?.id ? (
