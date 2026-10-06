@@ -7,6 +7,7 @@ const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
   'src/server/privateAgentArchives.node-test.ts',
   'src/server/agentIdentity.node-test.ts',
+  'src/server/myAgents.node-test.ts',
   'src/server/artifacts.node-test.ts',
   'src/server/cloudChat.node-test.ts',
   'src/server/api/compat/sudowork/adminService.node-test.ts',
