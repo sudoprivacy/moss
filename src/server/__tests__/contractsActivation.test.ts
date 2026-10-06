@@ -201,7 +201,7 @@ describe('@sudo/contracts evaluation pin', () => {
     } finally {
       rmSync(packDir, { recursive: true, force: true })
     }
-  })
+  }, 35_000) // The real npm subprocess has a 30s deadline, including Windows startup.
 
   it('applies every installed owner vector at the pre-spawn argument boundary', () => {
     const vectors = readJson<{ cases: ZoneVector[] }>(
@@ -283,14 +283,22 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
       /MOSS_NEXUS_ZONE_ID_LINE="\$\(awk '([\s\S]*?)' "\$ENV_PATH"\)"/,
     )?.[1]
     expect(assignmentExtractor).toBeDefined()
-    for (const [source, preserved] of [
-      ['MOSS_NEXUS_ZONE_ID="customer-a"\n', 'MOSS_NEXUS_ZONE_ID="customer-a"'],
-      ['MOSS_NEXUS_ZONE_ID=old-zone\nMOSS_NEXUS_ZONE_ID=new-zone\n', 'MOSS_NEXUS_ZONE_ID=new-zone'],
-      ['MOSS_NEXUS_ZONE_ID=customer-\\\na\nOTHER=value\n', 'MOSS_NEXUS_ZONE_ID=customer-\\\na'],
-    ] as const) {
-      const result = spawnSync('awk', [assignmentExtractor!], { input: source, encoding: 'utf8' })
-      expect(result.status).toBe(0)
-      expect(result.stdout).toBe(preserved)
+    const awkDir = mkdtempSync(resolve(tmpdir(), 'moss-zone-extractor-'))
+    try {
+      const program = resolve(awkDir, 'preserve-zone.awk')
+      // A file preserves regex backslashes through Windows/MSYS argument parsing.
+      writeFileSync(program, assignmentExtractor!, 'utf8')
+      for (const [source, preserved] of [
+        ['MOSS_NEXUS_ZONE_ID="customer-a"\n', 'MOSS_NEXUS_ZONE_ID="customer-a"'],
+        ['MOSS_NEXUS_ZONE_ID=old-zone\nMOSS_NEXUS_ZONE_ID=new-zone\n', 'MOSS_NEXUS_ZONE_ID=new-zone'],
+        ['MOSS_NEXUS_ZONE_ID=customer-\\\na\nOTHER=value\n', 'MOSS_NEXUS_ZONE_ID=customer-\\\na'],
+      ] as const) {
+        const result = spawnSync('awk', ['-f', program], { input: source, encoding: 'utf8' })
+        expect(result.status).toBe(0)
+        expect(result.stdout).toBe(preserved)
+      }
+    } finally {
+      rmSync(awkDir, { recursive: true, force: true })
     }
 
     expect(deploymentDocs).toContain('data.zone-id.lock.json')

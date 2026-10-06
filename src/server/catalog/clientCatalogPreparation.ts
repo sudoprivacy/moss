@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import JSZip from 'jszip'
@@ -9,6 +9,7 @@ import { isVisibleTo, type VisibleTo } from '../visibilityFilter.js'
 import { isPublishedPublicItem } from './clientCatalogInstall.js'
 import { getOrganizationResourceScope, requireOrganizationResource, type OrganizationResource } from './organizationResources.js'
 import { ResourceAccessError } from './resourceError.js'
+import { publishDirectory } from './publishDirectory.js'
 
 export interface ClientPreparedResource {
   id: string
@@ -106,8 +107,7 @@ export async function prepareClientCatalogResource(kind: 'agents' | 'skills', id
     }
     const preparation: Preparation = { protocolVersion: 1, preparationId, resources, snapshot }
     await writeFile(join(staging, 'manifest.json'), JSON.stringify(preparation), { mode: 0o600 })
-    try { await rename(staging, target) }
-    catch (error) { if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code || '')) throw error }
+    await publishDirectory(staging, target)
     return { protocolVersion: 1 as const, preparationId, resources }
   } finally { await rm(staging, { recursive: true, force: true }) }
 }

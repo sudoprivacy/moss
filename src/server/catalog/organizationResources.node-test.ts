@@ -11,6 +11,33 @@ import { getAgentSyncProgress, updateAgentSyncProgress } from '../syncProgress.j
 import { syncWorkspaceSkills, resolveWorkspaceSkillsDir } from '../../utils/scodeBridge.js'
 import { createSkillSymlinks, getAssistantRuntimeConfig } from '../backends/backendUtils.js'
 import { migrateOrganizationResources } from './organizationResourceMigration.js'
+import { publishDirectory } from './publishDirectory.js'
+
+void test('concurrent directory publishers preserve one complete artifact and reject invalid targets', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'moss-directory-publish-'))
+  try {
+    const target = join(root, 'published')
+    const writers = await Promise.all(Array.from({ length: 4 }, async (_, index) => {
+      const staging = join(root, `staging-${index}`)
+      await mkdir(staging)
+      await writeFile(join(staging, 'payload.txt'), 'complete artifact')
+      return staging
+    }))
+    const results = await Promise.all(writers.map(staging => publishDirectory(staging, target)))
+    assert.equal(results.filter(Boolean).length, 1)
+    assert.equal(await readFile(join(target, 'payload.txt'), 'utf8'), 'complete artifact')
+
+    const staging = writers[results.indexOf(false)]!
+    const file = join(root, 'file-target')
+    await writeFile(file, 'keep this file')
+    await assert.rejects(publishDirectory(staging, file))
+    assert.equal(await readFile(file, 'utf8'), 'keep this file')
+    await assert.rejects(publishDirectory(staging, join(root, 'absent-parent', 'target')))
+    assert.equal(await readFile(join(staging, 'payload.txt'), 'utf8'), 'complete artifact')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 void test('organization install state, overlays, artifacts and async jobs remain independent', async () => {
   const db = new DatabaseSync(':memory:')
@@ -200,7 +227,8 @@ void test('prepared catalogs freeze agent dependencies, materialize later skills
     assert.equal(active.length, 2)
     assert.equal(new Set(active.map(item => item.name)).size, 2, 'same names must use distinct runtime directories')
     assert.deepEqual([...writes.values()].sort(), ['#!/bin/sh\necho ready', 's1 original', 's2 original'])
-    assert.equal([...modes].find(([path]) => path.endsWith('/run.sh'))?.[1], 0o700)
+    // Windows writeFile mode cannot grant POSIX execute bits to this fixture.
+    assert.equal([...modes].find(([path]) => path.endsWith('/run.sh'))?.[1], process.platform === 'win32' ? 0o600 : 0o700)
     await assert.rejects(withOrganizationResources(scope(), () => materializeClientSkills([second.resources[0]!.runtimeRef], agent.runtimeRef, writer)), /Conflicting resource versions/)
     await assert.rejects(withOrganizationResources({ ...scope(), userId: 'peer' }, () => getClientPreparation(first.preparationId)), /not found/)
     await withOrganizationResources(scope(), () => updateOrganizationResource('skill', 's1', { enabled: false }))

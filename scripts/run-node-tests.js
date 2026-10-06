@@ -38,7 +38,7 @@ const nodeTestFiles = [
   'src/server/auth/userUpdateRoutes.node-test.ts',
   'src/server/backends/acpBridge.node-test.ts',
   'src/server/backends/k8sBackend.node-test.ts',
-  'src/server/backends/nexusSpawnHandle.node-test.ts',
+  'src/server/backends/nexusAcpTransport.node-test.ts',
   'src/server/billing/billingCoordinator.node-test.ts',
   'src/server/billing/billingOutboxWorker.node-test.ts',
   'src/server/billing/billingRuntimeConfig.node-test.ts',

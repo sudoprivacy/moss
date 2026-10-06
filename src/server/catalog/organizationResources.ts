@@ -1,11 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomUUID } from 'node:crypto'
-import { link, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { DbDriver, SqlRow } from '../db/driver.js'
 import { ResourceAccessError as HttpError } from './resourceError.js'
 import { isVisibleTo, type VisibilityFilter, type VisibleTo } from '../visibilityFilter.js'
+import { publishDirectory } from './publishDirectory.js'
 
 export type ResourceKind = 'agent' | 'skill'
 export type ResourceMetadata = Record<string, unknown>
@@ -244,9 +245,7 @@ export async function stageOrganizationArtifact(kind: ResourceKind, bytes: Buffe
   const dir = await mkdtemp(join(root, '.staging-'))
   const target = join(root, createHash('sha256').update(identity).update(bytes).digest('hex'))
   return { dir, publish: async () => {
-    try { await rename(dir, target) } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error
+    if (!await publishDirectory(dir, target)) {
       await rm(dir, { recursive: true, force: true })
     }
     return target
