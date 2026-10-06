@@ -229,6 +229,12 @@ import {
   setUserModelPreference,
   initUserModelPreferenceStore,
 } from './userModelPreference.js'
+import {
+  InvalidAgentNameError,
+  createUserAgent,
+  initUserAgentStore,
+  listUserAgents,
+} from './userAgentStore.js'
 import { getAvailableModels, getCacheStatus, getModelsForSelection, refreshModelCache } from './modelListCache.js'
 import { createCabinApi } from './cabin/api.js'
 import { CabinStore } from './cabin/store.js'
@@ -2168,6 +2174,14 @@ export function startServer(
   // where openStoreAsync throws on DDL failure).
   void initUserModelPreferenceStore(runtime.store.driver).catch(err => {
     console.error('[startup] user model preference store init failed:', err)
+    process.exit(1)
+  })
+
+  // Agents a user made for themselves. Same reasoning as above: a DDL failure
+  // here means a user cannot create a second context of their own, which must
+  // not be a silent degradation to the in-memory fallback.
+  void initUserAgentStore(runtime.store.driver).catch(err => {
+    console.error('[startup] user agent store init failed:', err)
     process.exit(1)
   })
 
@@ -7005,6 +7019,32 @@ export function startServer(
             .map(session => serializeSession(session)),
         })
         return
+      }
+
+      // Agents a user made for themselves — distinct from the assistant catalog,
+      // which holds templates everybody shares. These are the user's own
+      // principals: one memory, one conversation list, one inbox each.
+      if (pathname === '/api/v1/user-agents') {
+        if (req.method === 'GET') {
+          writeJson(res, 200, { success: true, data: await listUserAgents(auth.orgId, auth.userId) })
+          return
+        }
+        if (req.method === 'POST') {
+          const body = (await readJsonBody(req)) as { displayName?: unknown }
+          const displayName = typeof body.displayName === 'string' ? body.displayName : ''
+          try {
+            const agent = await createUserAgent({
+              orgId: auth.orgId,
+              userId: auth.userId,
+              displayName,
+            })
+            writeJson(res, 201, { success: true, data: agent })
+          } catch (err) {
+            if (err instanceof InvalidAgentNameError) throw new HttpError(400, err.message)
+            throw err
+          }
+          return
+        }
       }
 
       // User model preference endpoints
