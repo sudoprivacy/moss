@@ -5,6 +5,56 @@ import { AuthService, AuthServiceError } from '../auth/service.js'
 import { AuthCenterDb, verifyPassword } from '../authCenter/db.js'
 import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 
+void test('Moss native deletion removes an empty organization and its identity records', async () => {
+  const db = new DatabaseSync(':memory:')
+  const authDb = new AuthCenterDb(db)
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
+  const authService = new AuthService(authDb, 3600)
+  try {
+    const { organization } = await authService.createOrganization({ name: 'Empty organization' })
+    assert(await repository.getOrganizationProfile(organization.id))
+    assert(await repository.getNumericAlias('enterprise', organization.id))
+    assert(await repository.getWallet('organization', organization.id))
+
+    assert.deepEqual(await authService.deleteOrganization({ orgId: organization.id }), { ok: true })
+    assert.equal(await authDb.getOrganization(organization.id), null)
+    assert.equal(await repository.getOrganizationProfile(organization.id), null)
+    assert.equal(await repository.getNumericAlias('enterprise', organization.id), null)
+    assert.equal(await repository.getWallet('organization', organization.id), null)
+  } finally {
+    authService.destroy()
+    db.close()
+  }
+})
+
+void test('Moss native deletion rolls back identity cleanup when an organization has a user', async () => {
+  const db = new DatabaseSync(':memory:')
+  const authDb = new AuthCenterDb(db)
+  const repository = createIdentityTestRepository(db, {}, authDb.driver)
+  const authService = new AuthService(authDb, 3600)
+  try {
+    const { organization } = await authService.createOrganization({ name: 'Occupied organization' })
+    const { user } = await authService.createUser({
+      orgId: organization.id, name: 'member', password: 'Test-password', role: 'user',
+    })
+    const profile = await repository.getOrganizationProfile(organization.id)
+    const alias = await repository.getNumericAlias('enterprise', organization.id)
+    const wallet = await repository.getWallet('organization', organization.id)
+
+    await assert.rejects(authService.deleteOrganization({ orgId: organization.id }),
+      (error: unknown) => error instanceof AuthServiceError && error.statusCode === 409)
+    assert(await authDb.getOrganization(organization.id))
+    assert(await authDb.getUserById(user.id))
+    assert.deepEqual(await repository.getOrganizationProfile(organization.id), profile)
+    assert.equal(await repository.getNumericAlias('enterprise', organization.id), alias)
+    assert.deepEqual(await repository.getWallet('organization', organization.id), wallet)
+    assert(await repository.getNumericAlias('user', user.id))
+  } finally {
+    authService.destroy()
+    db.close()
+  }
+})
+
 void test('Moss native user creation uses the unified identity command', async () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)

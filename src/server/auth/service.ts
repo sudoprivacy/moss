@@ -1825,10 +1825,13 @@ export class AuthService {
       throw new AuthServiceError(404, 'Unknown organization')
     }
     try {
-      await this.db.deleteOrganization(org.id)
+      await this.db.driver.transaction(async () => {
+        await this.identityRepository.deleteOrganizationRecords(org.id)
+        await this.db.deleteOrganization(org.id)
+      })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      if (/FOREIGN KEY constraint failed/i.test(msg)) {
+      if (/FOREIGN KEY constraint failed/i.test(msg) || (err as { code?: string } | null)?.code === '23503') {
         throw new AuthServiceError(
           409,
           'Cannot delete organization: users or departments still reference it',
