@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { writeAssistantOverrideAgentsMd } from './sharedAgentMemory.js'
@@ -40,7 +41,7 @@ void test('startup failures are actionable, safe, and distinct for new attempts'
 
 void test('artifact MCP protocol rejects invalid JSON and accepts valid declarations', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'moss-mcp-'))
-  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', resolve('node_modules/tsx/dist/loader.mjs'), resolve('src/server/artifactMcp.ts')], cwd: workspace, stderr: 'pipe' })
+  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', pathToFileURL(resolve('node_modules/tsx/dist/loader.mjs')).href, resolve('src/server/artifactMcp.ts')], cwd: workspace, stderr: 'pipe' })
   const client = new Client({ name: 'regression-test', version: '1' })
   try {
     await client.connect(transport)

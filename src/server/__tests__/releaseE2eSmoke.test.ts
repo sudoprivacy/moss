@@ -105,6 +105,9 @@ exit 99
       encoding: "utf8",
       env: {
         ...process.env,
+        // Git Bash otherwise copies directories for ln -s on Windows, so the
+        // rollback test would never exercise the production symlink switch.
+        ...(process.platform === "win32" ? { MSYS: "winsymlinks:nativestrict" } : {}),
         ACTION_LOG: actionLog,
         CONFIG_BACKUP: configBackup,
         CONFIG_PATH: configPath,

@@ -35,6 +35,13 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       res.end(JSON.stringify({ data: { skills: [{ id: 'client-skill', name: 'client-skill' }], next_cursor: null, has_more: false } }))
     } else { res.writeHead(404); res.end() }
   })
+  // Register cleanup before bundling: a failed build must not leave the HTTP
+  // listener alive and hang the entire Node test runner.
+  t.after(async () => {
+    hub.closeAllConnections()
+    if (hub.listening) await new Promise<void>(resolveClose => hub.close(() => resolveClose()))
+    await rm(root, { recursive: true, force: true })
+  })
   hub.listen(0, '127.0.0.1'); await once(hub, 'listening')
   const hubUrl = `http://127.0.0.1:${(hub.address() as { port: number }).port}`
   const configPath = join(root, 'server.json')
@@ -220,7 +227,5 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
     })
   } finally {
     if (child.exitCode === null) { child.kill(); await once(child, 'exit') }
-    await new Promise<void>(resolveClose => hub.close(() => resolveClose()))
-    await rm(root, { recursive: true, force: true })
   }
 })
