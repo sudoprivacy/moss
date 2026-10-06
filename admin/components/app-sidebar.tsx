@@ -70,7 +70,7 @@ import {
 import { useAuth } from '@/lib/hooks/use-auth'
 import { useUnsavedChanges } from '@/lib/hooks/use-unsaved-changes'
 import { hasAnyScope, hasScope, setPreferredOrgId } from '@/lib/api/client'
-import { getOrganizations, switchOrg } from '@/lib/api/auth'
+import { getOrganizations, ORGANIZATIONS_CHANGED_EVENT, switchOrg } from '@/lib/api/auth'
 import { getEnterpriseConfig } from '@/lib/api/enterprise'
 import type { AuthOrgWithCounts, EnterpriseConfig } from '@/lib/api/types'
 import { cn } from '@/lib/utils'
@@ -302,15 +302,22 @@ export function AppSidebar() {
   useEffect(() => {
     if (!isSuperAdmin) return
     let cancelled = false
-    getOrganizations()
-      .then((res) => {
-        if (!cancelled) setOrganizations(res.organizations)
-      })
-      .catch(() => {
-        if (!cancelled) setOrganizations([])
-      })
+    let latestRequest = 0
+    const refreshOrganizations = () => {
+      const request = ++latestRequest
+      void getOrganizations()
+        .then((res) => {
+          if (!cancelled && request === latestRequest) setOrganizations(res.organizations)
+        })
+        .catch(() => {
+          // Keep the last usable list if a refresh fails.
+        })
+    }
+    refreshOrganizations()
+    window.addEventListener(ORGANIZATIONS_CHANGED_EVENT, refreshOrganizations)
     return () => {
       cancelled = true
+      window.removeEventListener(ORGANIZATIONS_CHANGED_EVENT, refreshOrganizations)
     }
   }, [isSuperAdmin])
 

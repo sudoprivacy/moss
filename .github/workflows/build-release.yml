@@ -105,6 +105,7 @@ jobs:
         run: |
           bun run check
           bun run test:settings
+          bun run test:organizations
 
   build:
     name: build-amd64
