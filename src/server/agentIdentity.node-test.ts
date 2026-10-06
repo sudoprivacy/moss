@@ -29,12 +29,15 @@ import {
 } from './userAgentStore.js'
 
 void test('a user agent is named from the id, not from anything renameable', () => {
-  const name = defaultAgentName('0ffa2afc-41a6-4a94-b1b6-ef6eb6e7ed1e')
-  // `/agents/{name}` is a real path segment, so the name may not carry a
-  // separator and may not change when the user renames themselves.
-  assert.equal(name, 'user-0ffa2afc-41a6-4a94-b1b6-ef6eb6e7ed1e')
-  assert.ok(!name.includes('/'))
-  assert.equal(name, defaultAgentName('0ffa2afc-41a6-4a94-b1b6-ef6eb6e7ed1e'))
+  const uid = '0ffa2afc-41a6-4a94-b1b6-ef6eb6e7ed1e'
+  // Two values, two jobs. The stored reference carries a marker so a catalog
+  // assistant cannot be mistaken for it; the agent's name has to survive being
+  // a path segment, so the marker is not part of it.
+  assert.equal(defaultAgentName(uid), `moss-agent:user:${uid}`)
+  assert.equal(sessionAgentName(uid, defaultAgentName(uid)), `user-${uid}`)
+  assert.match(sessionAgentName(uid, undefined), /^[A-Za-z0-9._-]+$/)
+  // Derived from the user id, so renaming the person cannot orphan the agent.
+  assert.equal(defaultAgentName(uid), defaultAgentName(uid))
 })
 
 void test('a user agent is told apart from a catalog assistant', () => {
@@ -139,10 +142,11 @@ void test('two users who pick the same template are not the same agent', () => {
 
 void test('a session with no template is the user own agent, not a pair', () => {
   const uid = 'u1'
-  assert.equal(sessionAgentName(uid, undefined), defaultAgentName(uid))
-  assert.equal(sessionAgentName(uid, null), defaultAgentName(uid))
+  const own = `user-${uid}`
+  assert.equal(sessionAgentName(uid, undefined), own)
+  assert.equal(sessionAgentName(uid, null), own)
   // Already resolved to the default agent upstream — do not pair it with itself.
-  assert.equal(sessionAgentName(uid, defaultAgentName(uid)), defaultAgentName(uid))
+  assert.equal(sessionAgentName(uid, defaultAgentName(uid)), own)
 })
 
 void test('every real assistant_name in production survives being a path segment', () => {
@@ -216,4 +220,26 @@ void test('an agent has to be called something', async () => {
     () => createUserAgent({ orgId: 'o1', userId: 'alice', displayName: 'x'.repeat(61) }),
     InvalidAgentNameError,
   )
+})
+
+void test('an assistant whose name looks like a marker is still an assistant', () => {
+  // An assistant's name is whatever somebody typed. A short prefix is a name,
+  // not a reservation: claiming `agent-` made `agent-one` — which a test
+  // installs, and nothing stops a customer from creating — read as one of the
+  // user's own agents, so the catalog lookup was skipped and a request that
+  // should answer 404 for another organization's assistant proceeded instead.
+  for (const name of ['agent-one', 'user-guide', 'agent-smith', 'users', 'moss-agentry']) {
+    assert.equal(isUserOwnedAgentName(name), false, `${name} must stay a catalog reference`)
+    assert.equal(isDefaultAgentName(name), false, name)
+    assert.equal(isUserCreatedAgentName(name), false, name)
+  }
+})
+
+void test('the stored marker never reaches the path', () => {
+  const ref = userCreatedAgentName('5f1c2a9e-0b44-4c77-9a3e-11d2e3f4a5b6')
+  const name = sessionAgentName('u1', ref)
+  // The marker is in-band for storage; `/agents/{name}` has to stay a legal
+  // path segment, and `:` is not one of its characters.
+  assert.match(name, /^[A-Za-z0-9._-]+$/)
+  assert.ok(name.includes('5f1c2a9e-0b44-4c77-9a3e-11d2e3f4a5b6'))
 })

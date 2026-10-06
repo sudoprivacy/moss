@@ -1760,7 +1760,7 @@ export class RuntimeService {
         const agent = await getUserAgent(
           session.orgId,
           session.userId,
-          effectiveAssistantName.slice('agent-'.length),
+          effectiveAssistantName.slice('moss-agent:own:'.length),
         ).catch(() => null)
         assistantDisplayName = agent?.displayName
       } else {

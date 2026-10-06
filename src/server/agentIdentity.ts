@@ -26,10 +26,20 @@
 import { createHash } from 'node:crypto'
 
 /**
- * Marks an agent that exists because a user does. Chosen so it cannot collide
- * with a catalog assistant id (those are uuids or slugs, never prefixed).
+ * Marks an agent that exists because a user does.
+ *
+ * The marker has to be one a catalog assistant cannot carry, and an assistant's
+ * name is whatever somebody typed — the deployment has `AI 学习辅导`,
+ * `企业知识中枢Agent`, `Remote Agent`, and a test installs one called
+ * `agent-one`. A short prefix like `user-` or `agent-` is a name, not a
+ * reservation, and claiming one silently swallows every assistant that starts
+ * with it: the catalog lookup is skipped, so a request that should answer 404
+ * for an assistant another organization owns instead proceeds.
+ *
+ * `moss-agent:` follows the convention already in this field — `moss-prepared:`
+ * marks the other kind of non-catalog reference.
  */
-const DEFAULT_AGENT_PREFIX = 'user-'
+const DEFAULT_AGENT_PREFIX = 'moss-agent:user:'
 
 /**
  * Marks an agent a user made for themselves — a second context of their own,
@@ -38,7 +48,7 @@ const DEFAULT_AGENT_PREFIX = 'user-'
  * The id is generated, not the name the user typed: a display name is meant to
  * be changed, and the agent's home, memory and conversations all hang off this.
  */
-const USER_CREATED_AGENT_PREFIX = 'agent-'
+const USER_CREATED_AGENT_PREFIX = 'moss-agent:own:'
 
 /** The reference stored for an agent the user made. `id` is generated at creation. */
 export function userCreatedAgentName(id: string): string {
@@ -99,10 +109,16 @@ export function isDefaultAgentName(name: string | null | undefined): boolean {
  * original is appended so two templates that slugify alike stay apart.
  */
 export function sessionAgentName(userId: string, assistantRef?: string | null): string {
-  if (!assistantRef || isDefaultAgentName(assistantRef)) return defaultAgentName(userId)
+  // The stored reference carries a marker so a catalog assistant cannot be
+  // mistaken for one of these; the marker is not part of the agent's name,
+  // which has to survive being a path segment.
+  if (!assistantRef || isDefaultAgentName(assistantRef)) return `user-${userId}`
   // An agent the user made is already theirs, but it is still paired: an id that
   // leaked between users must not let one of them address the other's agent.
-  if (isUserCreatedAgentName(assistantRef)) return `u-${userId}--${assistantRef}`
+  // The marker is in-band for storage only; the id alone goes into the path.
+  if (isUserCreatedAgentName(assistantRef)) {
+    return `u-${userId}--${assistantRef.slice(USER_CREATED_AGENT_PREFIX.length)}`
+  }
   return `u-${userId}--${pathSafeSlug(assistantRef)}`
 }
 
