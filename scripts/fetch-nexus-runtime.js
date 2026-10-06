@@ -48,12 +48,16 @@ const COS_LEGACY = 'https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud
 // sha256 真源（实测值）。仅列 build.js 触发平台（win/mac）所需；Linux 由
 // server.Dockerfile.local 内联 sha 各自维护。升级 runtime-versions.json 版本时必须同步此表。
 const SHA256 = {
-  'nexus-vault-macos-arm64.tar.gz': '8ad59f175c9079709ced75dabea5b90fe89ea6d133c8cb37e5153f1ab0a0e67b',
-  'nexus-vault-macos-x86_64.tar.gz': '7bce4cfa6de33f886b8bdc6ca9fd3c6f6f1cd732358d0a361179f54c2bd64111',
-  'nexus-vault-windows-x86_64.zip': '23619d44c877dbd377dca96fdef944efe14553f9e4a4580f668df29eb504c603',
-  'nexusd-cluster-macos-aarch64.tar.gz': 'be41487657e10955f37395c8c671f0c820359c148c2afb86c5d10162822f53ab',
-  'nexusd-cluster-macos-x86_64.tar.gz': 'f8e9aceed8f02192621b27a71040708d30a89b1eccde86c1a5a2190328b38d8b',
-  'nexusd-cluster-windows-x86_64.zip': '65199f632da8e75de0da4e7be6e3389891b71c1a854d096b9f604890436a9156',
+  'nexus-vault-linux-x86_64.tar.gz': '60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914',
+  'nexus-vault-linux-aarch64.tar.gz': '2954afa5a5732451188b6e84a6d143805e3afebc77f67f4a1e8feebc67648f04',
+  'nexus-vault-macos-arm64.tar.gz': '4d0a0814c94bc9dff4934331885d2d811ee51a13c9c661377fef0f9ca6f4c018',
+  'nexus-vault-macos-x86_64.tar.gz': '6380f3435ea549db9f0c7399ea402600a07efce0f73df94a1bce54b966385525',
+  'nexus-vault-windows-x86_64.zip': '2c8b0818a148a5e9d84b584ef577b62309eaff20a559b7c7c4f0a3a31a1e22cd',
+  'nexusd-cluster-macos-aarch64.tar.gz': '38a6357592dc9b26dee7853a0f2a48a4c605ebc33fc96589fae15479aa863e66',
+  'nexusd-cluster-macos-x86_64.tar.gz': '0e3ca96c4e4b3a455cfaa3109c9bb5e04c7ccf4d465c91438c4b832e937f13e6',
+  'nexusd-cluster-windows-x86_64.zip': '24c663765c5acc3d20308b78b80c9908fb880bb7d61a0d434c1989d24efdf45f',
+  'nexusd-cluster-linux-x86_64.tar.gz': '0ffb7812811a3d36bc78b7f1a4572d76758328ca1094a24468d8507cc273f182',
+  'nexusd-cluster-linux-aarch64.tar.gz': 'c102ce1e0f9d2b69284db29fafc9a7e317e60c4b9738d5cf9bea7cdd59ce716d',
 }
 
 const GITHUB = 'https://github.com/nexi-lab/nexus/releases/download'
@@ -68,6 +72,8 @@ function loadVersions() {
 // vault：arch token 用 arm64/x86_64（与 nexusd 的 aarch64 不同，勿混用）。仅列 fetch 支持三平台。
 function vaultArtifact(platform, arch) {
   return {
+    'linux-x64': 'nexus-vault-linux-x86_64.tar.gz',
+    'linux-arm64': 'nexus-vault-linux-aarch64.tar.gz',
     'darwin-arm64': 'nexus-vault-macos-arm64.tar.gz',
     'darwin-x64': 'nexus-vault-macos-x86_64.tar.gz',
     'win32-x64': 'nexus-vault-windows-x86_64.zip',
@@ -99,9 +105,9 @@ function vaultUrls(ver, artifact) {
 
 function nexusdUrls(ver, artifact) {
   return [
-    { label: 'COS Runtime', url: `${COS_RUNTIME}/nexusd-cluster/release/v${ver}/${artifact}` },
-    { label: 'Legacy COS', url: `${COS_LEGACY}/nexusd-cluster/release/v${ver}/${artifact}` },
-    { label: 'GitHub', url: `${GITHUB}/nexusd-cluster-v${ver}/${artifact}` },
+    { label: 'COS Runtime', url: `${COS_RUNTIME}/nexus-vfs/release/v${ver}/${artifact}` },
+    { label: 'Legacy COS', url: `${COS_LEGACY}/nexus-vfs/release/v${ver}/${artifact}` },
+    { label: 'GitHub', url: `https://github.com/nexi-lab/nexus-vfs/releases/download/v${ver}/${artifact}` },
   ]
 }
 
