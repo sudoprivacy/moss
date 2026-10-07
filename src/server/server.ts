@@ -230,6 +230,7 @@ import {
   setUserModelPreference,
   initUserModelPreferenceStore,
 } from './userModelPreference.js'
+import { listMyAgents } from './myAgents.js'
 import {
   InvalidAgentNameError,
   createUserAgent,
@@ -7025,6 +7026,27 @@ export function startServer(
       // Agents a user made for themselves — distinct from the assistant catalog,
       // which holds templates everybody shares. These are the user's own
       // principals: one memory, one conversation list, one inbox each.
+      // The agents this person has, as the sidebar shows them: the implicit
+      // default, the ones they made, and the templates they have actually used.
+      // Assembled here because only the server knows which of the three kinds a
+      // stored reference is and where each kind's name lives.
+      if (req.method === 'GET' && pathname === '/api/v1/agents/mine') {
+        const user = await authService.getUserOrNull(auth.userId, auth.orgId).catch(() => null)
+        const { resolveAssistantDisplayName } = await import('./agentStore.js')
+        const agents = await listMyAgents({
+          orgId: auth.orgId,
+          userId: auth.userId,
+          // The default agent is the person's own, so it is named after them.
+          // Empty when the account has no name; the client labels `kind` then,
+          // rather than being handed a placeholder that reads like a name.
+          defaultDisplayName: user?.displayName?.trim() || user?.name || '',
+          listSessionAssistants: ({ orgId, userId }) => runtime.store.listUserSessions(orgId, userId),
+          resolveTemplateName: resolveAssistantDisplayName,
+        })
+        writeJson(res, 200, { success: true, data: agents })
+        return
+      }
+
       if (pathname === '/api/v1/user-agents') {
         if (req.method === 'GET') {
           writeJson(res, 200, { success: true, data: await listUserAgents(auth.orgId, auth.userId) })
