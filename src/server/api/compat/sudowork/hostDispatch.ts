@@ -2,6 +2,7 @@ import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http
 import { getRequestListener } from '@hono/node-server'
 import { createCompatibilityRouteMatcher } from './routeInventory.js'
 import { QMS_CLIENT_ROUTES } from './qmsRoutes.js'
+import { canonicalAgentTemplatePath } from '../../agentTemplatePaths.js'
 import {
   mapMossOperationsPath,
   MOSS_OPERATIONS_LEGACY_ROUTES,
@@ -40,7 +41,8 @@ export function createHostDispatch(options: HostDispatchOptions): RequestListene
   return (request, response) => {
     const hostname = canonicalHostname(request.headers.host)
     const url = new URL(request.url ?? '/', 'http://localhost')
-    const pathname = url.pathname
+    const pathname = canonicalAgentTemplatePath(url.pathname)
+    if (pathname !== url.pathname) request.url = `${pathname}${url.search}`
     const mappedOperationsPath = mapMossOperationsPath(pathname)
     if (mossOperationsHandler && isQmsClientRoute(request.method, pathname)) {
       void mossOperationsHandler(request, response)
