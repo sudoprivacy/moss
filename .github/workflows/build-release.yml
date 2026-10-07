@@ -82,7 +82,7 @@ jobs:
           node node_modules/typescript/bin/tsc --noEmit --module nodenext --resolveJsonModule \
             --moduleResolution nodenext --target es2022 --skipLibCheck \
             scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts \
-            scripts/e2e/embedded-nexus-live.ts
+            scripts/e2e/embedded-nexus-live.ts scripts/e2e/broker-upgrade-live.ts scripts/e2e/external-broker-live.ts
 
       # Nothing in this repo has ever type-checked: bun executes TypeScript
       # without checking it, and the release artifact is produced by `bun build`,
@@ -133,6 +133,29 @@ jobs:
         run: node bin/embedded-nexus-live.mjs
         env:
           MOSS_NEXUS_LIVE_ARTIFACTS: ${{ runner.temp }}/moss-runtime-evidence
+      - name: Verify upgrade and rollback from the cloud broker version
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OLD="$RUNNER_TEMP/nexus-previous-runtime"
+          mkdir -p "$OLD"
+          curl -fsSL --max-time 90 \
+            https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com/nexus-vfs/release/v0.7.19/nexusd-cluster-linux-x86_64.tar.gz \
+            -o "$OLD/runtime.tar.gz"
+          printf '%s  %s\n' deb36ed3f2c63a5c8a53ecef60d76806edcbc3e2826628db701b36094ec0ae34 "$OLD/runtime.tar.gz" | sha256sum --check
+          tar -xzf "$OLD/runtime.tar.gz" -C "$OLD"
+          mkdir -p "$OLD/plugins"
+          curl -fsSL --max-time 90 \
+            https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com/nexus-vault/release/v0.5.67/nexus-vault-linux-x86_64.tar.gz \
+            -o "$OLD/vault.tar.gz"
+          printf '%s  %s\n' 380ad81dafaaf919acb76ec8c0f57869295b1580bfde8f9e4ccef321e1065735 "$OLD/vault.tar.gz" | sha256sum --check
+          tar -xzf "$OLD/vault.tar.gz" -C "$OLD/plugins"
+          bun build --target=node scripts/e2e/broker-upgrade-live.ts --outfile bin/broker-upgrade-live.mjs
+          node bin/broker-upgrade-live.mjs \
+            "$OLD/nexusd-cluster-linux-x86_64/nexusd-cluster" \
+            "$PWD/bin/nexus/nexusd" "$PWD/bin/nexus/plugins" \
+            "$RUNNER_TEMP/moss-runtime-evidence" "$OLD/plugins"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
