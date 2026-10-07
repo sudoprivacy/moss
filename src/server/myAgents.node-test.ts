@@ -2,10 +2,46 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { listMyAgents } from './myAgents.js'
 import { defaultAgentName, userCreatedAgentName } from './agentIdentity.js'
-import { createUserAgent, resetUserAgentStoreForTests } from './userAgentStore.js'
+import { createUserAgent, getUserAgent, initUserAgentStore, listUserAgents, resetUserAgentStoreForTests } from './userAgentStore.js'
+import { DatabaseSync } from 'node:sqlite'
+import { SqliteDriver } from './db/driver.js'
+import type { DbDriver } from './db/driver.js'
 
 const noSessions = async () => []
 const nameIs = (name: string) => async () => name
+
+void test('personal agents survive store reinitialization and remain pinned to their owner and organization', async () => {
+  resetUserAgentStoreForTests()
+  const database = new DatabaseSync(':memory:')
+  const driver = new SqliteDriver(database)
+  try {
+    await initUserAgentStore(driver)
+    const agent = await createUserAgent({ orgId: 'org', userId: 'alice', displayName: 'Project' })
+    resetUserAgentStoreForTests()
+    await initUserAgentStore(driver)
+    assert.deepEqual(await listUserAgents('org', 'alice'), [agent])
+    assert.equal(await getUserAgent('org', 'bob', agent.id), null)
+    assert.equal(await getUserAgent('other', 'alice', agent.id), null)
+  } finally {
+    resetUserAgentStoreForTests()
+    database.close()
+  }
+})
+
+void test('failed personal-agent database writes or reads cannot report ephemeral success or an empty list', async () => {
+  resetUserAgentStoreForTests()
+  await initUserAgentStore({
+    kind: 'postgres',
+    async run() { throw new Error('Database unavailable') },
+    async all() { throw new Error('Database unavailable') },
+  } as unknown as DbDriver)
+  try {
+    await assert.rejects(createUserAgent({ orgId: 'org', userId: 'alice', displayName: 'Project' }), /Database unavailable/)
+    await assert.rejects(listUserAgents('org', 'alice'), /Database unavailable/)
+  } finally {
+    resetUserAgentStoreForTests()
+  }
+})
 
 void test('a person always has at least their own agent', async () => {
   resetUserAgentStoreForTests()

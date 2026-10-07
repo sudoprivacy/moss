@@ -6,7 +6,7 @@ import {
   isUserCreatedAgentName,
   isUserOwnedAgentName,
 } from './agentIdentity.js'
-import { getUserAgent } from './userAgentStore.js'
+import { requirePersonalAgent } from './personalAgentAccess.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { randomUUID } from 'crypto'
 import { accessSync, constants, existsSync } from 'fs'
@@ -640,6 +640,7 @@ export class RuntimeService {
       if (!input.assistantName) {
         input = { ...input, assistantName: defaultAgentName(input.userId) }
       }
+      await requirePersonalAgent(input.orgId, input.userId, input.assistantName!)
       if (input.assistantName && !isUserOwnedAgentName(input.assistantName)) {
         const resource = await requireOrganizationResource('agent', input.assistantName)
         if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
@@ -1750,20 +1751,14 @@ export class RuntimeService {
       effectiveAssistantName = resource.id
       if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
     }
-    let assistantDisplayName = options.assistantDisplayName
+    const personalAgent = await requirePersonalAgent(session.orgId, session.userId, effectiveAssistantName)
+    let assistantDisplayName = personalAgent?.displayName ?? options.assistantDisplayName
     // The implicit default agent has no display name to resolve: its name is
     // derived from a user id, so resolving it would surface `user-<uuid>` as the
     // thing the agent calls itself. An agent the user made does have one — the
     // name they typed — but it lives in their own store, not the catalog.
     if (!assistantDisplayName && effectiveAssistantName && !isDefaultAgentName(effectiveAssistantName)) {
-      if (isUserCreatedAgentName(effectiveAssistantName)) {
-        const agent = await getUserAgent(
-          session.orgId,
-          session.userId,
-          effectiveAssistantName.slice('moss-agent:own:'.length),
-        ).catch(() => null)
-        assistantDisplayName = agent?.displayName
-      } else {
+      if (!isUserCreatedAgentName(effectiveAssistantName)) {
         try {
           const { resolveAssistantDisplayName } = await import('./agentStore.js')
           assistantDisplayName = await resolveAssistantDisplayName(effectiveAssistantName)

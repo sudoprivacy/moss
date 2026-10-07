@@ -6958,14 +6958,13 @@ export function startServer(
         authService.requireScope(auth, 'admin:users')
         const userId = userTokenLimitMatch[1] || ''
         const body = await readJsonBody(req)
-        const tokenLimit = body.tokenLimit === null ? null : Number(body.tokenLimit)
         writeJson(
           res,
           200,
           await authService.setUserTokenLimit({
             orgId: auth.orgId,
             userId,
-            tokenLimit: tokenLimit !== null && Number.isFinite(tokenLimit) ? tokenLimit : null,
+            tokenLimit: body.tokenLimit,
           }, auth),
         )
         return
@@ -6994,14 +6993,13 @@ export function startServer(
         authService.requireScope(auth, 'admin:users')
         const departmentId = departmentTokenLimitMatch[1] || ''
         const body = await readJsonBody(req)
-        const tokenLimit = body.tokenLimit === null ? null : Number(body.tokenLimit)
         writeJson(
           res,
           200,
           await authService.setDepartmentTokenLimit({
             orgId: auth.orgId,
             departmentId,
-            tokenLimit: tokenLimit !== null && Number.isFinite(tokenLimit) ? tokenLimit : null,
+            tokenLimit: body.tokenLimit,
           }, auth),
         )
         return
@@ -8349,7 +8347,7 @@ export function startServer(
           const body = await readJsonBody(req)
           const result = await eventTriggerApi.updateTrigger(auth, triggerId, body)
           if (!result) throw new HttpError(404, 'Trigger not found')
-          writeJson(res, 200, result)
+          writeJson(res, result.success ? 200 : 400, result)
           return
         }
         if (req.method === 'DELETE') {

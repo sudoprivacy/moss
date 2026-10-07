@@ -25,7 +25,7 @@ export type UserAgent = {
 
 type Row = { id: string; display_name: string; created_at: number }
 
-/** Used until a driver is supplied, and when one fails — same shape, no persistence. */
+/** Used only without a database, for isolated tests and standalone callers. */
 const memoryStore = new Map<string, UserAgent[]>()
 
 let driver: DbDriver | null = null
@@ -72,15 +72,11 @@ export async function createUserAgent(input: {
 
   const agent: UserAgent = { id: randomUUID(), displayName, createdAt: Date.now() }
   if (driver) {
-    try {
-      await driver.run(
-        'INSERT INTO user_agents (id, org_id, user_id, display_name, created_at) VALUES (?, ?, ?, ?, ?)',
-        [agent.id, input.orgId, input.userId, agent.displayName, agent.createdAt],
-      )
-      return agent
-    } catch (err) {
-      process.stderr.write(`[UserAgentStore] insert failed, using memory store: ${err}\n`)
-    }
+    await driver.run(
+      'INSERT INTO user_agents (id, org_id, user_id, display_name, created_at) VALUES (?, ?, ?, ?, ?)',
+      [agent.id, input.orgId, input.userId, agent.displayName, agent.createdAt],
+    )
+    return agent
   }
   const key = memoryKey(input.orgId, input.userId)
   memoryStore.set(key, [...(memoryStore.get(key) ?? []), agent])
@@ -89,19 +85,15 @@ export async function createUserAgent(input: {
 
 export async function listUserAgents(orgId: string, userId: string): Promise<UserAgent[]> {
   if (driver) {
-    try {
-      const rows = await driver.all<Row>(
-        'SELECT id, display_name, created_at FROM user_agents WHERE org_id = ? AND user_id = ? ORDER BY created_at ASC',
-        [orgId, userId],
-      )
-      return rows.map(row => ({
-        id: row.id,
-        displayName: row.display_name,
-        createdAt: Number(row.created_at),
-      }))
-    } catch (err) {
-      process.stderr.write(`[UserAgentStore] list failed, using memory store: ${err}\n`)
-    }
+    const rows = await driver.all<Row>(
+      'SELECT id, display_name, created_at FROM user_agents WHERE org_id = ? AND user_id = ? ORDER BY created_at ASC',
+      [orgId, userId],
+    )
+    return rows.map(row => ({
+      id: row.id,
+      displayName: row.display_name,
+      createdAt: Number(row.created_at),
+    }))
   }
   return [...(memoryStore.get(memoryKey(orgId, userId)) ?? [])]
 }
