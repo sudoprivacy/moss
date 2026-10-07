@@ -59,22 +59,22 @@ void describe('Sudowork Dify runtime compatibility routes', () => {
     const app = setup()
     const actual = new Set(app.routes.map(route => `${route.method} ${route.path}`))
     const expected = [
-      'POST /api/v1/agents/:assistantId/chat',
-      'POST /api/v1/agents/:assistantId/chat/:taskId/stop',
-      'GET /api/v1/agents/:assistantId/conversations',
-      'PATCH /api/v1/agents/:assistantId/conversations/:conversationId',
-      'DELETE /api/v1/agents/:assistantId/conversations/:conversationId',
-      'GET /api/v1/agents/:assistantId/conversations/:conversationId/messages',
-      'POST /api/v1/agents/:assistantId/messages/:messageId/feedback',
-      'GET /api/v1/agents/:assistantId/messages/:messageId/suggested',
-      'GET /api/v1/agents/:assistantId/parameters',
-      'GET /api/v1/agents/:assistantId/meta',
-      'POST /api/v1/agents/:assistantId/files',
-      'POST /api/v1/agents/:assistantId/audio-to-text',
-      'POST /api/v1/agents/:assistantId/text-to-audio',
-      'GET /api/v1/agents/:assistantId/enhancement',
-      'POST /api/v1/agents/:assistantId/enhancement/invoke',
-      'POST /api/v1/agents/:assistantId/enhancement/invoke-stream',
+      'POST /api/v1/agent-templates/:assistantId/chat',
+      'POST /api/v1/agent-templates/:assistantId/chat/:taskId/stop',
+      'GET /api/v1/agent-templates/:assistantId/conversations',
+      'PATCH /api/v1/agent-templates/:assistantId/conversations/:conversationId',
+      'DELETE /api/v1/agent-templates/:assistantId/conversations/:conversationId',
+      'GET /api/v1/agent-templates/:assistantId/conversations/:conversationId/messages',
+      'POST /api/v1/agent-templates/:assistantId/messages/:messageId/feedback',
+      'GET /api/v1/agent-templates/:assistantId/messages/:messageId/suggested',
+      'GET /api/v1/agent-templates/:assistantId/parameters',
+      'GET /api/v1/agent-templates/:assistantId/meta',
+      'POST /api/v1/agent-templates/:assistantId/files',
+      'POST /api/v1/agent-templates/:assistantId/audio-to-text',
+      'POST /api/v1/agent-templates/:assistantId/text-to-audio',
+      'GET /api/v1/agent-templates/:assistantId/enhancement',
+      'POST /api/v1/agent-templates/:assistantId/enhancement/invoke',
+      'POST /api/v1/agent-templates/:assistantId/enhancement/invoke-stream',
     ]
     assert.equal(expected.length, 16)
     for (const route of expected) assert(actual.has(route), `missing route: ${route}`)
@@ -83,23 +83,23 @@ void describe('Sudowork Dify runtime compatibility routes', () => {
   void test('keeps enhancement probe, blocking result and encoded SSE events', async () => {
     const app = setup()
     const headers = { authorization: 'Bearer access-token' }
-    const probe = await app.request('/api/v1/agents/agent-a/enhancement', { headers })
+    const probe = await app.request('/api/v1/agent-templates/agent-a/enhancement', { headers })
     assert.deepEqual(await probe.json(), { success: true, data: { enabled: true, mode: 'workflow' } })
 
-    const invalid = await app.request('/api/v1/agents/agent-a/enhancement/invoke', {
+    const invalid = await app.request('/api/v1/agent-templates/agent-a/enhancement/invoke', {
       method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}',
     })
     assert.equal(invalid.status, 400)
     assert.deepEqual(await invalid.json(), { success: false, msg: 'query is required' })
 
-    const blocking = await app.request('/api/v1/agents/agent-a/enhancement/invoke', {
+    const blocking = await app.request('/api/v1/agent-templates/agent-a/enhancement/invoke', {
       method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ query: 'hello' }),
     })
     assert.deepEqual(await blocking.json(), {
       success: true, data: { text: 'enhanced', mode: 'workflow', elapsedMs: 10 },
     })
 
-    const streaming = await app.request('/api/v1/agents/agent-a/enhancement/invoke-stream', {
+    const streaming = await app.request('/api/v1/agent-templates/agent-a/enhancement/invoke-stream', {
       method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ query: 'hello' }),
     })
     assert.equal(streaming.headers.get('content-type'), 'text/event-stream; charset=utf-8')
@@ -111,11 +111,11 @@ void describe('Sudowork Dify runtime compatibility routes', () => {
 
   void test('keeps Dify authentication and request validation errors', async () => {
     const app = setup()
-    const unauthorized = await app.request('/api/v1/agents/agent-a/meta')
+    const unauthorized = await app.request('/api/v1/agent-templates/agent-a/meta')
     assert.equal(unauthorized.status, 401)
     assert.deepEqual(await unauthorized.json(), { success: false, msg: '未授权，请先登录' })
 
-    const invalidChat = await app.request('/api/v1/agents/agent-a/chat', {
+    const invalidChat = await app.request('/api/v1/agent-templates/agent-a/chat', {
       method: 'POST', headers: { authorization: 'Bearer access-token', 'content-type': 'application/json' }, body: '{}',
     })
     assert.equal(invalidChat.status, 400)
@@ -130,7 +130,7 @@ void describe('Sudowork Dify runtime compatibility routes', () => {
       return upstream
     } }))
 
-    const response = await app.request('/api/v1/agents/agent-a/chat', {
+    const response = await app.request('/api/v1/agent-templates/agent-a/chat', {
       method: 'POST',
       headers: { authorization: 'Bearer access-token', 'content-type': 'application/json' },
       body: JSON.stringify({ query: 'hello', user: 'spoofed' }),
@@ -151,7 +151,7 @@ void describe('Sudowork Dify runtime compatibility routes', () => {
     const app = setup(createRuntime({
       chat: async () => new Response('rate limited', { status: 429 }),
     }))
-    const response = await app.request('/api/v1/agents/agent-a/chat', {
+    const response = await app.request('/api/v1/agent-templates/agent-a/chat', {
       method: 'POST', headers: { authorization: 'Bearer access-token', 'content-type': 'application/json' },
       body: JSON.stringify({ query: 'hello' }),
     })
@@ -170,20 +170,20 @@ void describe('Sudowork Dify runtime compatibility routes', () => {
       },
     }))
 
-    const conversations = await app.request('/api/v1/agents/agent-a/conversations?limit=5', {
+    const conversations = await app.request('/api/v1/agent-templates/agent-a/conversations?limit=5', {
       headers: { authorization: 'Bearer access-token' },
     })
     assert.deepEqual(await conversations.json(), { success: true, data: { data: [{ id: 'conv-1' }] } })
 
     const form = new FormData()
     form.set('file', new File(['abc'], 'a.txt', { type: 'text/plain' }))
-    const upload = await app.request('/api/v1/agents/agent-a/files', {
+    const upload = await app.request('/api/v1/agent-templates/agent-a/files', {
       method: 'POST', headers: { authorization: 'Bearer access-token' }, body: form,
     })
     assert.deepEqual(await upload.json(), { success: true, data: { id: 'file-1' } })
     assert.equal(calls[1]?.fileName, 'a.txt')
 
-    const audio = await app.request('/api/v1/agents/agent-a/text-to-audio', {
+    const audio = await app.request('/api/v1/agent-templates/agent-a/text-to-audio', {
       method: 'POST', headers: { authorization: 'Bearer access-token', 'content-type': 'application/json' },
       body: JSON.stringify({ text: 'hello' }),
     })

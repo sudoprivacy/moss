@@ -1,3 +1,5 @@
+import { canonicalAgentTemplatePath } from '../../agentTemplatePaths.js'
+
 export interface RegisteredRoute {
   method: string
   path: string
@@ -22,7 +24,7 @@ export const APPROVED_ADDITIONAL_SUDOWORK_ROUTES = new Set([
 ])
 
 export function routeKey(route: RegisteredRoute): string {
-  return `${route.method.toUpperCase()} ${route.path}`
+  return `${route.method.toUpperCase()} ${canonicalAgentTemplatePath(route.path)}`
 }
 
 export function compareSudoworkRouteInventory(

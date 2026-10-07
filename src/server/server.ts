@@ -11,6 +11,7 @@ import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrg
 import { installAndPrepareClientCatalogResource, describeClientCatalogItem } from './catalog/clientCatalogInstall.js'
 import http from 'http'
 import { PrivateAgentArchives, handlePrivateAgentArchives } from './privateAgentArchives.js'
+import { canonicalAgentTemplatePath } from './api/agentTemplatePaths.js'
 import { randomUUID } from 'crypto'
 import net from 'net'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
@@ -2480,7 +2481,7 @@ export function startServer(
     try {
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
-      const pathname = url.pathname
+      const pathname = canonicalAgentTemplatePath(url.pathname)
       if (pathname.startsWith('/api/v1/auth/') || pathname === '/api/v1/client/local-runtime') res.setHeader('Cache-Control', 'no-store')
       const isHead = req.method === 'HEAD'
 
@@ -6304,7 +6305,7 @@ export function startServer(
       // `enhancement` is reported disabled: it described a Dify pre-injection
       // binding that only the previous server had. Claiming otherwise would
       // have the client wrap chats with something that does not exist here.
-      if (req.method === 'GET' && pathname === '/api/v1/agents/visible') {
+      if (req.method === 'GET' && pathname === '/api/v1/agent-templates/visible') {
         const filter = await authService.buildVisibilityFilter(auth)
         const installed = await getInstalledAssistants()
         writeJson(res, 200, {
@@ -8399,11 +8400,12 @@ export function startServer(
         return
       }
 
-      const preparationDownload = pathname.match(/^\/api\/v1\/client\/catalog\/preparations\/([a-f0-9]{64})\/(agents|skills)\/([^/]+)\/download$/)
+      const preparationDownload = pathname.match(/^\/api\/v1\/client\/catalog\/preparations\/([a-f0-9]{64})\/(agent-templates|agents|skills)\/([^/]+)\/download$/)
       if (req.method === 'GET' && preparationDownload) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const { downloadClientPreparation } = await import('./catalog/clientCatalogPreparation.js')
-        const artifact = await downloadClientPreparation(preparationDownload[1]!, preparationDownload[2] as 'agents' | 'skills', decodeURIComponent(preparationDownload[3]!))
+        const kind = preparationDownload[2] === 'skills' ? 'skills' : 'agents'
+        const artifact = await downloadClientPreparation(preparationDownload[1]!, kind, decodeURIComponent(preparationDownload[3]!))
         res.setHeader('Content-Type', 'application/zip')
         res.setHeader('X-Content-SHA256', artifact.digest)
         res.end(artifact.bytes)
@@ -8459,7 +8461,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'GET' && pathname === '/api/v1/agents/installed') {
+      if (req.method === 'GET' && pathname === '/api/v1/agent-templates/installed') {
         const filter = await authService.buildVisibilityFilter(auth)
         // Return all installed assistants: hub, tenant, and custom
         const all = await getInstalledAssistants()
@@ -8474,7 +8476,7 @@ export function startServer(
         return
       }
 
-      const installedAgentRulesMatch = pathname.match(/^\/api\/v1\/agents\/installed\/([^/]+)\/rules$/)
+      const installedAgentRulesMatch = pathname.match(/^\/api\/v1\/agent-templates\/installed\/([^/]+)\/rules$/)
       if (req.method === 'GET' && installedAgentRulesMatch) {
         authService.requireScope(auth, 'admin:settings')
         const assistantName = decodeURIComponent(installedAgentRulesMatch[1] || '')
@@ -8486,7 +8488,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/agents/install') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/install') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         const assistantMeta = isJsonBody(body.assistantMeta)
@@ -8515,7 +8517,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/agents/create') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/create') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
 
@@ -8559,7 +8561,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/agents/uninstall') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/uninstall') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         await uninstallAssistant({
@@ -8572,7 +8574,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'PATCH' && pathname === '/api/v1/agents/meta') {
+      if (req.method === 'PATCH' && pathname === '/api/v1/agent-templates/meta') {
         const body = await readJsonBody(req)
         // Editing installed hub/system agents stays admin-only. CUSTOM agents
         // (created from the SudoWork client, visible only to their owner) are
@@ -8655,7 +8657,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'PATCH' && pathname === '/api/v1/agents/visibility') {
+      if (req.method === 'PATCH' && pathname === '/api/v1/agent-templates/visibility') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         await updateInstalledAssistantMeta({
@@ -8666,7 +8668,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/agents/sync-from-hub') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/sync-from-hub') {
         authService.requireScope(auth, 'admin:settings')
         if (getAgentSyncProgress().status === 'running') {
           writeJson(res, 409, { error: 'Sync already in progress' })
@@ -8696,7 +8698,7 @@ export function startServer(
       }
 
       // backward compat alias
-      if (req.method === 'POST' && pathname === '/api/v1/agents/sync') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/sync') {
         authService.requireScope(auth, 'admin:settings')
         if (getAgentSyncProgress().status === 'running') {
           writeJson(res, 409, { error: 'Sync already in progress' })
@@ -8725,14 +8727,14 @@ export function startServer(
         return
       }
 
-      if (req.method === 'GET' && pathname === '/api/v1/agents/sync-status') {
+      if (req.method === 'GET' && pathname === '/api/v1/agent-templates/sync-status') {
         authService.requireScope(auth, 'admin:settings')
         writeJson(res, 200, getAgentSyncProgress())
         return
       }
 
-      // POST /api/v1/agents/custom - Upload custom agent
-      if (req.method === 'POST' && pathname === '/api/v1/agents/custom') {
+      // POST /api/v1/agent-templates/custom - Upload custom agent
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/custom') {
         const body = await readJsonBody(req)
         console.log('[Upload Assistant] Received upload request, name:', body.name, 'id:', body.id, 'displayName:', body.displayName)
         const fileBase64 = typeof body.file === 'string' ? body.file : ''
@@ -8767,8 +8769,8 @@ export function startServer(
         return
       }
 
-      // GET /api/v1/agents/tenant - List tenant assistants
-      if (req.method === 'GET' && pathname === '/api/v1/agents/tenant') {
+      // GET /api/v1/agent-templates/tenant - List tenant assistants
+      if (req.method === 'GET' && pathname === '/api/v1/agent-templates/tenant') {
         const status = url.searchParams.get('status') || undefined
         const allRows = await runtime.store.listTenantAssistants(status, auth.orgId)
         // Filter by visibility for non-admin users
@@ -8837,8 +8839,8 @@ export function startServer(
         return
       }
 
-      // GET /api/v1/agents/installed/:id/download - Download installed agent by ID
-      const agentDownloadMatch = pathname.match(/^\/api\/v1\/agents\/installed\/([^/]+)\/download$/)
+      // GET /api/v1/agent-templates/installed/:id/download - Download installed agent by ID
+      const agentDownloadMatch = pathname.match(/^\/api\/v1\/agent-templates\/installed\/([^/]+)\/download$/)
       if (req.method === 'GET' && agentDownloadMatch) {
         const assistantId = decodeURIComponent(agentDownloadMatch[1] || '')
         try {
@@ -8863,13 +8865,13 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/agents/tenant/create - Create a tenant assistant.
+      // POST /api/v1/agent-templates/tenant/create - Create a tenant assistant.
       // Admins (admin:settings) create it directly as approved (files in the
       // tenant dir, live immediately). Non-admins (store:tenant:write) instead
       // submit it as a PENDING approval request: files are staged in the
       // tenant-pending dir (invisible to the runtime scan) and only moved into
       // the tenant dir when an admin approves.
-      if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/create') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/tenant/create') {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const storeAdmin = isStoreAdmin(auth)
         const request = await readTenantAssistantRequest(req)
@@ -9032,7 +9034,7 @@ export function startServer(
         return
       }
 
-      const tenantAgentRulesMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)\/rules$/)
+      const tenantAgentRulesMatch = pathname.match(/^\/api\/v1\/agent-templates\/tenant\/([^/]+)\/rules$/)
       if (req.method === 'GET' && tenantAgentRulesMatch) {
         // Reading the system prompt follows the same rule the tenant list uses:
         // anyone the agent is visible to may READ it (the /download endpoint
@@ -9085,8 +9087,8 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/agents/tenant/publish - Publish tenant agent request
-      if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/publish') {
+      // POST /api/v1/agent-templates/tenant/publish - Publish tenant agent request
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/tenant/publish') {
         const body = await readJsonBody(req)
         const assistantId = typeof body.assistantId === 'string' ? body.assistantId : ''
         const publishNote = typeof body.publishNote === 'string' ? body.publishNote : undefined
@@ -9141,8 +9143,8 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/admin/agents/tenant/:id/approve - Approve tenant agent
-      const agentApproveMatch = pathname.match(/^\/api\/v1\/admin\/agents\/tenant\/([^/]+)\/approve$/)
+      // POST /api/v1/admin/agent-templates/tenant/:id/approve - Approve tenant agent
+      const agentApproveMatch = pathname.match(/^\/api\/v1\/admin\/agent-templates\/tenant\/([^/]+)\/approve$/)
       if (req.method === 'POST' && agentApproveMatch) {
         authService.requireScope(auth, 'admin:settings')
         const tenantAssistantId = decodeURIComponent(agentApproveMatch[1] || '')
@@ -9180,8 +9182,8 @@ export function startServer(
         return
       }
 
-      // PATCH /api/v1/agents/tenant/:id - Update tenant agent meta
-      const agentTenantPatchMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)$/)
+      // PATCH /api/v1/agent-templates/tenant/:id - Update tenant agent meta
+      const agentTenantPatchMatch = pathname.match(/^\/api\/v1\/agent-templates\/tenant\/([^/]+)$/)
       if (req.method === 'PATCH' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
@@ -9354,7 +9356,7 @@ export function startServer(
         return
       }
 
-      // DELETE /api/v1/agents/tenant/:id - Delete tenant agent
+      // DELETE /api/v1/agent-templates/tenant/:id - Delete tenant agent
       if (req.method === 'DELETE' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
@@ -9379,8 +9381,8 @@ export function startServer(
         return
       }
 
-      // GET /api/v1/agents/tenant/:id/download - Download tenant agent
-      const tenantAgentDownloadMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)\/download$/)
+      // GET /api/v1/agent-templates/tenant/:id/download - Download tenant agent
+      const tenantAgentDownloadMatch = pathname.match(/^\/api\/v1\/agent-templates\/tenant\/([^/]+)\/download$/)
       if (req.method === 'GET' && tenantAgentDownloadMatch) {
         const tenantAssistantId = decodeURIComponent(tenantAgentDownloadMatch[1] || '')
         await requireOrganizationResource('agent', tenantAssistantId)

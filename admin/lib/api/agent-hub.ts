@@ -150,7 +150,7 @@ export function getAgentHubDetail(
 }
 
 export function getInstalledAgents(): Promise<InstalledAgentInfo[]> {
-  return authClient.get<InstalledAgentInfo[]>('/api/v1/agents/installed')
+  return authClient.get<InstalledAgentInfo[]>('/api/v1/agent-templates/installed')
 }
 
 export function installAgent(
@@ -166,21 +166,21 @@ export function installAgent(
     version: string
     installedSkills: string[]
     failedSkills: string[]
-  }>('/api/v1/agents/install', data)
+  }>('/api/v1/agent-templates/install', data)
 }
 
 export function uninstallAgent(data: {
   assistantName: string
   sourcePath?: string
 }): Promise<{ ok: boolean }> {
-  return authClient.post<{ ok: boolean }>('/api/v1/agents/uninstall', data)
+  return authClient.post<{ ok: boolean }>('/api/v1/agent-templates/uninstall', data)
 }
 
 export function createCustomAssistant(
   data: CreateAssistantRequest,
 ): Promise<{ success: boolean; data: InstalledAgentInfo }> {
   return authClient.post<{ success: boolean; data: InstalledAgentInfo }>(
-    '/api/v1/agents/create',
+    '/api/v1/agent-templates/create',
     data,
   )
 }
@@ -194,7 +194,7 @@ export function updateInstalledAgentMeta(data: {
     >
   >
 }): Promise<{ ok: boolean }> {
-  return authClient.patch<{ ok: boolean }>('/api/v1/agents/meta', data)
+  return authClient.patch<{ ok: boolean }>('/api/v1/agent-templates/meta', data)
 }
 
 export function fetchAgentHubSkillDetailsByIds(
@@ -213,7 +213,7 @@ export interface BatchSyncAgentResult {
 }
 
 export function batchSyncAgents(): Promise<{ started: boolean }> {
-  return authClient.post<{ started: boolean }>('/api/v1/agents/sync-from-hub')
+  return authClient.post<{ started: boolean }>('/api/v1/agent-templates/sync-from-hub')
 }
 
 export interface AgentSyncProgress {
@@ -229,14 +229,14 @@ export interface AgentSyncProgress {
 }
 
 export function getAgentSyncStatus(): Promise<AgentSyncProgress> {
-  return authClient.get<AgentSyncProgress>('/api/v1/agents/sync-status')
+  return authClient.get<AgentSyncProgress>('/api/v1/agent-templates/sync-status')
 }
 
 export function updateAgentVisibility(
   assistantName: string,
   visible_to: VisibleTo | null,
 ): Promise<{ ok: boolean }> {
-  return authClient.patch<{ ok: boolean }>('/api/v1/agents/visibility', {
+  return authClient.patch<{ ok: boolean }>('/api/v1/agent-templates/visibility', {
     assistantName,
     visible_to,
   })
@@ -292,7 +292,7 @@ export interface TenantAssistantInfo {
 
 export function getTenantAssistants(status?: string): Promise<TenantAssistantInfo[]> {
   const queryString = status ? `?status=${encodeURIComponent(status)}` : ''
-  return authClient.get<TenantAssistantInfo[]>(`/api/v1/agents/tenant${queryString}`)
+  return authClient.get<TenantAssistantInfo[]>(`/api/v1/agent-templates/tenant${queryString}`)
 }
 
 export function approveTenantAssistant(
@@ -304,7 +304,7 @@ export function approveTenantAssistant(
   visible_to?: VisibleTo | null,
 ): Promise<{ id: string; status: string }> {
   return authClient.post<{ id: string; status: string }>(
-    `/api/v1/admin/agents/tenant/${encodeURIComponent(id)}/approve`,
+    `/api/v1/admin/agent-templates/tenant/${encodeURIComponent(id)}/approve`,
     visible_to !== undefined ? { approved, reviewNote, visible_to } : { approved, reviewNote },
   )
 }
@@ -355,7 +355,7 @@ export function createTenantAssistant(
   form.set('display_name', data.display_name)
   appendTenantAssistantFormData(form, data)
   return authClient.post<{ success: boolean; data: TenantAssistantInfo; status?: 'approved' | 'pending'; message?: string }>(
-    '/api/v1/agents/tenant/create',
+    '/api/v1/agent-templates/tenant/create',
     form,
   )
 }
@@ -381,27 +381,27 @@ export function updateTenantAssistantMeta(params: UpdateTenantAssistantRequest):
   if (params.enabled !== undefined) form.set('enabled', String(params.enabled))
   if (params.removeAvatar === true) form.set('remove_avatar', 'true')
   return authClient.patch<{ ok: boolean }>(
-    `/api/v1/agents/tenant/${encodeURIComponent(params.id)}`,
+    `/api/v1/agent-templates/tenant/${encodeURIComponent(params.id)}`,
     form,
   )
 }
 
 export function deleteTenantAssistant(id: string): Promise<{ ok: boolean }> {
   return authClient.delete<{ ok: boolean }>(
-    `/api/v1/agents/tenant/${encodeURIComponent(id)}`,
+    `/api/v1/agent-templates/tenant/${encodeURIComponent(id)}`,
   )
 }
 
 export function downloadAssistant(assistantId: string, type: 'installed' | 'tenant'): Promise<Blob> {
   const path = type === 'installed'
-    ? `/api/v1/agents/installed/${encodeURIComponent(assistantId)}/download`
-    : `/api/v1/agents/tenant/${encodeURIComponent(assistantId)}/download`
+    ? `/api/v1/agent-templates/installed/${encodeURIComponent(assistantId)}/download`
+    : `/api/v1/agent-templates/tenant/${encodeURIComponent(assistantId)}/download`
   return authClient.getBlob(path)
 }
 
 export function getInstalledAgentRules(assistantName: string): Promise<{ rules: string }> {
   return authClient.get<{ rules: string }>(
-    `/api/v1/agents/installed/${encodeURIComponent(assistantName)}/rules`,
+    `/api/v1/agent-templates/installed/${encodeURIComponent(assistantName)}/rules`,
   )
 }
 
@@ -415,6 +415,6 @@ export function getTenantAssistantRules(
   id: string,
 ): Promise<{ rules: string; can_edit?: boolean }> {
   return authClient.get<{ rules: string; can_edit?: boolean }>(
-    `/api/v1/agents/tenant/${encodeURIComponent(id)}/rules`,
+    `/api/v1/agent-templates/tenant/${encodeURIComponent(id)}/rules`,
   )
 }

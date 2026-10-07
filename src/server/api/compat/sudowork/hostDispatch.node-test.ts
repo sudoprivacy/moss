@@ -16,6 +16,9 @@ void describe('production Sudowork host dispatch', () => {
       body: await context.req.json(),
     }))
     sudowork.get('/api/v1/admin/logs', (context) => context.json({ service: 'sudowork' }))
+    sudowork.post('/api/v1/agent-templates/meta', async context => context.json({
+      service: 'sudowork', query: context.req.query('version'), body: await context.req.json(),
+    }))
     sudowork.get('/api/v1/admin/users', (context) => context.json({ service: 'sudowork' }))
     sudowork.get('/api/v1/admin/enterprises', (context) => context.json({ service: 'sudowork' }))
     sudowork.get('/api/v1/qms/system/health', (context) => context.json({ service: 'qms' }))
@@ -126,6 +129,17 @@ void describe('production Sudowork host dispatch', () => {
       status: 200,
       body: { service: 'sudowork', body: { inputTokens: 7, outputTokens: 5 } },
     })
+  })
+
+  void test('template aliases preserve host dispatch, query and mutation body', async () => {
+    for (const segment of ['agents', 'agent-templates']) {
+      assert.deepEqual(await send('api.sudowork.test', `/api/v1/${segment}/meta?version=2`, 'POST', '{"name":"template"}'), {
+        status: 200, body: { service: 'sudowork', query: '2', body: { name: 'template' } },
+      })
+      assert.deepEqual(await send('moss.test', `/api/v1/${segment}/meta`, 'POST', '{}'), {
+        status: 200, body: { service: 'moss' },
+      })
+    }
   })
 
   void test('serves Moss operations when the legacy compatibility surface is disabled', async () => {

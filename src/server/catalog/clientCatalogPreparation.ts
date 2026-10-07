@@ -99,7 +99,7 @@ export async function prepareClientCatalogResource(kind: 'agents' | 'skills', id
       for (const dependency of dependencyIds(resource)) dependencies.push((await requireOrganizationResource('skill', dependency)).id)
       resources.push({ id: resource.id, kind: resourceKind, source: resource.sourceType, name: resource.name,
         version: String(resource.meta.catalogVersion ?? resource.meta.installed_version ?? resource.meta.version ?? ''), digest, runtimeRef, dependencies,
-        downloadRef: `/api/v1/client/catalog/preparations/${preparationId}/${resourceKind}/${encodeURIComponent(resource.id)}/download`,
+        downloadRef: `/api/v1/client/catalog/preparations/${preparationId}/${resourceKind === 'agents' ? 'agent-templates' : 'skills'}/${encodeURIComponent(resource.id)}/download`,
         isLocalAllowed: isLocalCatalogResource(resource.meta) })
       const runtimeName = `${resource.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || 'resource'}-${hash(resource.id).slice(0, 8)}--${digest.slice(0, 16)}`
       snapshot.push({ ...structuredClone(resource), name: resource.kind === 'skill' ? runtimeName : resource.name, path: join(target, key), meta: { ...structuredClone(resource.meta), catalogRuntimeRef: runtimeRef, catalogDigest: digest } })

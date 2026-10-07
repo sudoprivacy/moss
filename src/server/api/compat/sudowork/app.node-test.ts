@@ -641,8 +641,8 @@ void describe('Sudowork compatibility Hono app', () => {
       'POST /api/skills',
       'POST /api/skills/:skillId/approve',
       'DELETE /api/skills/:skillId',
-      'GET /api/v1/agents/visible',
-      'GET /api/v1/agents/visible/bindings',
+      'GET /api/v1/agent-templates/visible',
+      'GET /api/v1/agent-templates/visible/bindings',
       'GET /api/categories',
       'GET /api/catalog/artifacts/:kind/:resourceId',
     ]
@@ -672,7 +672,7 @@ void describe('Sudowork compatibility Hono app', () => {
     assert.equal(pageSkills.status, 200)
     assert.equal((await pageSkills.json() as any).data.skills[0].id, 'skill-1')
 
-    const visible = await app.request('/api/v1/agents/visible', {
+    const visible = await app.request('/api/v1/agent-templates/visible', {
       headers: { authorization: 'Bearer access-token' },
     })
     assert.deepEqual(await visible.json(), {

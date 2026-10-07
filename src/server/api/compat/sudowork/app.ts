@@ -1,6 +1,8 @@
 import { createCipheriv, randomBytes, randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
+import { getPath } from 'hono/utils/url'
+import { canonicalAgentTemplatePath } from '../../agentTemplatePaths.js'
 import {
   SudoworkIdentityError,
   type SudoworkLegacySession,
@@ -352,7 +354,7 @@ export function createSudoworkCompatibilityApp(options: {
   getUserProjection?: (user: SudoworkLegacyUser) => Promise<SudoworkUserProjection>
   qms?: Omit<Parameters<typeof createSudoworkQmsRoutes>[0], 'getActor'>
 }): Hono {
-  const app = new Hono()
+  const app = new Hono({ getPath: request => canonicalAgentTemplatePath(getPath(request)) })
   const loginMethod = async () => await options.systemConfiguration?.getLoginMethod() ?? options.loginMethod ?? 'password'
   const getProjection = options.getUserProjection ?? (async () => EMPTY_PROJECTION)
   const publicCasProviders = async () => await loginMethod() === 'cas' ? await options.cas?.listPublicProviders() ?? [] : []
@@ -789,14 +791,14 @@ export function createSudoworkCompatibilityApp(options: {
     return context.json({ success: true, message: 'success' })
   })
 
-  app.get('/api/v1/agents/visible/bindings', async (context) => {
+  app.get('/api/v1/agent-templates/visible/bindings', async (context) => {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(await options.catalog.listVisibleBindings(actor))
   })
 
-  app.get('/api/v1/agents/visible', async (context) => {
+  app.get('/api/v1/agent-templates/visible', async (context) => {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
