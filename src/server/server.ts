@@ -1134,7 +1134,12 @@ function readOAuth2Params(body: JsonBody): Record<string, string> | null {
 function parseRuntimeOptions(body: JsonBody) {
   if (typeof body.runtime_type === 'string') {
     return {
-      type: body.runtime_type === 'docker' ? 'docker' : 'host',
+      type:
+        body.runtime_type === 'docker'
+          ? 'docker'
+          : body.runtime_type === 'cohost'
+            ? 'cohost'
+            : 'host',
       dockerImage:
         typeof body.docker_image === 'string' ? body.docker_image : undefined,
       dockerMode:
@@ -1158,9 +1163,11 @@ function parseRuntimeOptions(body: JsonBody) {
   const type =
     runtime.type === 'docker'
       ? 'docker'
-      : runtime.type === 'host'
-        ? 'host'
-        : undefined
+      : runtime.type === 'cohost'
+        ? 'cohost'
+        : runtime.type === 'host'
+          ? 'host'
+          : undefined
   if (!type) {
     return undefined
   }
@@ -10813,80 +10820,83 @@ export function startServer(
         const ready = locallyOwnedAttempt
           ? { session, attempt: locallyOwnedAttempt }
           : await runtime.ensureSessionReady(sessionId)
+        // A client can send as soon as the HTTP upgrade completes. Finish the
+        // runner attachment first so its initial message always has a listener.
+        const runnerSocket = await runtime.connectToAttempt(ready.attempt)
+        if (socket.destroyed) {
+          runnerSocket.destroy()
+          return
+        }
+        socket.once('close', () => runnerSocket.destroy())
         wss.handleUpgrade(req, socket, head, ws => {
-          void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
-            let buffer = ''
-            const sendToRunner = (payload: Record<string, unknown>) => {
-              if (!runnerSocket.destroyed) {
-                process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
-                runnerSocket.write(`${jsonStringify(payload)}\n`)
-              } else {
-                process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
+          let buffer = ''
+          const sendToRunner = (payload: Record<string, unknown>) => {
+            if (!runnerSocket.destroyed) {
+              process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
+              runnerSocket.write(`${jsonStringify(payload)}\n`)
+            } else {
+              process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
+            }
+          }
+
+          ws.on('message', data => {
+            const text = wsDataToText(data)
+            process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+            sendToRunner({
+              type: 'stdin',
+              data: text.endsWith('\n') ? text : `${text}\n`,
+            })
+          })
+          ws.on('close', () => {
+            runnerSocket.destroy()
+          })
+          ws.on('error', () => {
+            runnerSocket.destroy()
+          })
+
+          runnerSocket.on('data', chunk => {
+            buffer += Buffer.from(chunk).toString('utf8')
+            while (true) {
+              const idx = buffer.indexOf('\n')
+              if (idx < 0) {
+                break
+              }
+              const line = buffer.slice(0, idx)
+              buffer = buffer.slice(idx + 1)
+              if (!line.trim()) {
+                continue
+              }
+
+              let parsed: { type?: string; line?: string }
+              try {
+                parsed = jsonParse(line) as { type?: string; line?: string }
+              } catch {
+                continue
+              }
+
+              if (parsed.type === 'stdout' && typeof parsed.line === 'string') {
+                if (ws.readyState === ws.OPEN) {
+                  ws.send(parsed.line)
+                }
+              }
+              if (parsed.type === 'exit') {
+                ws.close()
               }
             }
-
-            ws.on('message', data => {
-              const text = wsDataToText(data)
-              process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
-              sendToRunner({
-                type: 'stdin',
-                data: text.endsWith('\n') ? text : `${text}\n`,
-              })
-            })
-            ws.on('close', () => {
-              runnerSocket.destroy()
-            })
-            ws.on('error', () => {
-              runnerSocket.destroy()
-            })
-
-            runnerSocket.on('data', chunk => {
-              buffer += Buffer.from(chunk).toString('utf8')
-              while (true) {
-                const idx = buffer.indexOf('\n')
-                if (idx < 0) {
-                  break
-                }
-                const line = buffer.slice(0, idx)
-                buffer = buffer.slice(idx + 1)
-                if (!line.trim()) {
-                  continue
-                }
-
-                let parsed: { type?: string; line?: string }
-                try {
-                  parsed = jsonParse(line) as { type?: string; line?: string }
-                } catch {
-                  continue
-                }
-
-                if (parsed.type === 'stdout' && typeof parsed.line === 'string') {
-                  if (ws.readyState === ws.OPEN) {
-                    ws.send(parsed.line)
-                  }
-                }
-                if (parsed.type === 'exit') {
-                  ws.close()
-                }
-              }
-            })
-
-            runnerSocket.on('close', () => {
-              if (ws.readyState === ws.OPEN) {
-                ws.close()
-              }
-            })
-            runnerSocket.on('error', () => {
-              if (ws.readyState === ws.OPEN) {
-                ws.close()
-              }
-            })
-
-            wss.emit('connection', ws, req)
-          }).catch(error => {
-            logger.error(error instanceof Error ? error.message : String(error))
-            ws.close()
           })
+
+          runnerSocket.on('close', () => {
+            if (ws.readyState === ws.OPEN) {
+              ws.close()
+            }
+          })
+          runnerSocket.on('error', () => {
+            if (ws.readyState === ws.OPEN) {
+              ws.close()
+            }
+          })
+
+          wss.emit('connection', ws, req)
         })
       } catch (error) {
         logger.error(error instanceof Error ? error.message : String(error))

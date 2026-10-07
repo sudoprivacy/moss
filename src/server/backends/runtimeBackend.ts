@@ -6,6 +6,7 @@ import type {
 } from '../sessionManager.js'
 import { DockerBackend } from './dockerBackend.js'
 import { K8sBackend, type K8sBackendDefaults } from './k8sBackend.js'
+import { CohostBackend } from './cohostBackend.js'
 import { ScodeBackend } from './scodeBackend.js'
 
 type RuntimeBackendOptions = {
@@ -26,12 +27,14 @@ export class RuntimeBackend implements SessionBackend {
   readonly #dockerBackend: SessionBackend
   readonly #scodeBackend: SessionBackend
   readonly #k8sBackend: SessionBackend
+  readonly #cohostBackend: SessionBackend
   readonly #defaultRuntime: SessionRuntimeOptions
   readonly #scodePath?: string
 
   constructor(options: RuntimeBackendOptions = {}) {
     this.#dockerBackend = new DockerBackend(options.docker)
     this.#k8sBackend = new K8sBackend(options.k8s)
+    this.#cohostBackend = new CohostBackend()
     this.#scodeBackend = new ScodeBackend()
     this.#defaultRuntime = options.defaultRuntime ?? {
       type: 'host',
@@ -60,6 +63,10 @@ export class RuntimeBackend implements SessionBackend {
 
     if (runtimeType === 'k8s') {
       return this.#k8sBackend.spawn(mergedOptions)
+    }
+
+    if (runtimeType === 'cohost') {
+      return this.#cohostBackend.spawn(mergedOptions)
     }
 
     return this.#scodeBackend.spawn(mergedOptions)

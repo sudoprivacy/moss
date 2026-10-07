@@ -281,7 +281,8 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     defaultRuntime:
       process.env.MOSS_DEFAULT_RUNTIME === 'host' ||
       process.env.MOSS_DEFAULT_RUNTIME === 'docker' ||
-      process.env.MOSS_DEFAULT_RUNTIME === 'k8s'
+      process.env.MOSS_DEFAULT_RUNTIME === 'k8s' ||
+      process.env.MOSS_DEFAULT_RUNTIME === 'cohost'
         ? process.env.MOSS_DEFAULT_RUNTIME
         : raw.runtimeDefaults.type,
     engine: raw.runtimeDefaults.engine,

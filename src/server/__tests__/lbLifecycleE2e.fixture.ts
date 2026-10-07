@@ -7,6 +7,8 @@
 import { randomUUID } from 'crypto'
 import { mkdir, writeFile } from 'fs/promises'
 import { join } from 'path'
+import { createServer as createTcpServer, connect as connectTcp } from 'node:net'
+import { setTimeout as delay } from 'node:timers/promises'
 import { readServerConfig, ensureServerDirectories } from '../config.js'
 import { DirectConnectStore } from '../db.js'
 import { RuntimeService } from '../runtimeService.js'
@@ -98,6 +100,44 @@ const runtime = new RuntimeService({
   authService,
   serverInstanceId: randomUUID(),
 })
+if (process.env.MOSS_TEST_DELAYED_RUNNER === '1') {
+  const runner = createTcpServer(socket => {
+    let buffer = ''
+    socket.on('data', chunk => {
+      buffer += chunk.toString('utf8')
+      let boundary: number
+      while ((boundary = buffer.indexOf('\n')) >= 0) {
+        const frame = JSON.parse(buffer.slice(0, boundary)) as { type: string; data: string }
+        buffer = buffer.slice(boundary + 1)
+        if (frame.type === 'stdin') {
+          socket.write(`${JSON.stringify({ type: 'stdout', line: frame.data })}\n`)
+        }
+      }
+    })
+  })
+  await new Promise<void>(resolve => runner.listen(0, '127.0.0.1', resolve))
+  const address = runner.address()
+  if (!address || typeof address === 'string') throw new Error('Missing runner address')
+  const attempt = await store.createAttempt({
+    sessionId: 'lb-e2e-seed-session',
+    generation: 1,
+    backendType: 'host',
+    resumeTranscriptSessionId: 'lb-e2e-seed-session',
+    serverInstanceId: 'delayed-runner-fixture',
+  })
+  runtime.ensureSessionReady = async () => {
+    const session = await store.getSession('lb-e2e-seed-session')
+    if (!session) throw new Error('Missing seed session')
+    return { session, attempt }
+  }
+  runtime.connectToAttempt = async () => {
+    await delay(1000)
+    return new Promise((resolve, reject) => {
+      const socket = connectTcp(address.port, '127.0.0.1', () => resolve(socket))
+      socket.once('error', reject)
+    })
+  }
+}
 const server = startServer(config, runtime, authService, {
   info: () => {},
   warn: () => {},

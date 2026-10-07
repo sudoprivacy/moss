@@ -16,7 +16,7 @@ export type RunnerServerMessage =
       type: 'hello'
       attemptId: string
       sessionId: string
-      runtimeType: 'host' | 'docker' | 'k8s'
+      runtimeType: 'host' | 'docker' | 'k8s' | 'cohost'
       state: string
     }
   | {
