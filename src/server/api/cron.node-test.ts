@@ -5,6 +5,7 @@ import os from 'node:os'
 import { join } from 'node:path'
 import type { CronActor, CronService, CronServiceConfig } from '../services/cron/CronService.js'
 import type { CronJob, CronJobRun } from '../services/cron/CronStore.js'
+import type { CronJobSchedule } from '../services/cron/CronStore.js'
 
 const settingsHome = mkdtempSync(join(os.tmpdir(), 'moss-cron-settings-'))
 const homeMock = mock.method(os, 'homedir', () => settingsHome)
@@ -15,6 +16,42 @@ const { CronStore } = await import('../services/cron/CronStore.js')
 const { updateSystemSettings, SYSTEM_SETTINGS_PATH } = await import('../systemSettings.js')
 assert.equal(SYSTEM_SETTINGS_PATH, join(settingsHome, '.moss', 'settings.json'))
 beforeEach(async () => { await updateSystemSettings({ clientCronEnabled: true }) })
+
+void test('disabled cron schedules are validated before create or update writes any fields', async () => {
+  const database = new DirectConnectStore(':memory:')
+  const cronStore = new CronStore(database.driver)
+  const api = createCronApi(database.driver, {
+    cronService: { async addJob() {}, async updateJob() {} } as unknown as CronService,
+    getClientCronEnabled: () => true,
+  })
+  const auth = { orgId: 'org', userId: 'user', role: 'admin', scopes: ['*'] }
+  const base = { name: 'Valid', enabled: false, payloadMessage: 'Run', conversationMode: 'new' as const }
+  const invalid: CronJobSchedule[] = [
+    { kind: 'cron', value: 'not-a-cron' },
+    { kind: 'cron', value: '* * * * *', tz: 'Invalid/Timezone' },
+    { kind: 'every', value: '0m' },
+    { kind: 'every', value: '99999999999999999999h' },
+    { kind: 'at', value: 'invalid-date' },
+  ]
+  try {
+    for (const schedule of invalid) {
+      assert.equal((await api.createJob(auth, { ...base, schedule })).success, false)
+    }
+    assert.equal((await cronStore.listByUser('org', 'user')).length, 0)
+    const created = await api.createJob(auth, { ...base, schedule: { kind: 'cron', value: '0 9 * * *' } })
+    assert.equal(created.success, true)
+    assert.ok(created.data)
+    const id = created.data.id
+    for (const schedule of invalid) {
+      assert.equal((await api.updateJob(auth, id, { name: 'Changed', schedule })).success, false)
+      assert.equal((await cronStore.getById(id))?.name, 'Valid')
+      assert.equal((await cronStore.getById(id))?.schedule.value, '0 9 * * *')
+    }
+    assert.equal((await api.updateJob(auth, id, { schedule: { kind: 'every', value: '15m' } })).success, true)
+  } finally {
+    await database.close()
+  }
+})
 after(() => {
   homeMock.mock.restore()
   rmSync(settingsHome, { recursive: true, force: true })

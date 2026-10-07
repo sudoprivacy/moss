@@ -335,6 +335,9 @@ export function createEventTriggerApi(options: {
         typeof input.prompt_template === 'string' ? input.prompt_template.trim() : ''
       if (!name) return { success: false as const, message: 'name is required' }
       if (!promptTemplate) return { success: false as const, message: 'prompt_template is required' }
+      if (input.conversation_mode !== undefined && input.conversation_mode !== 'new' && input.conversation_mode !== 'reuse') {
+        return { success: false as const, message: 'conversation_mode must be new or reuse' }
+      }
 
       const { trigger, secret } = await store.insert({
         orgId: auth.orgId,
@@ -360,6 +363,9 @@ export function createEventTriggerApi(options: {
     async updateTrigger(auth: AuthLike, triggerId: string, updates: Record<string, unknown>) {
       const existing = await getOwned(auth, triggerId)
       if (!existing) return null
+      if (updates.conversation_mode !== undefined && updates.conversation_mode !== 'new' && updates.conversation_mode !== 'reuse') {
+        return { success: false as const, message: 'conversation_mode must be new or reuse' }
+      }
 
       const updated = await store.update(triggerId, {
         name: typeof updates.name === 'string' ? updates.name.trim() : undefined,

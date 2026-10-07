@@ -1,5 +1,6 @@
 import { migratePhonePasswords } from '../identity/phonePasswordMigration.js'
 import { randomUUID } from 'crypto'
+import { z } from 'zod'
 import type { DatabaseSync } from 'node:sqlite'
 import type { DirectConnectStore } from '../db.js'
 import { isUniqueViolation } from '../db/driver.js'
@@ -136,6 +137,17 @@ export class AuthServiceError extends Error {
     super(message)
     this.name = 'AuthServiceError'
   }
+}
+
+const TOKEN_LIMIT_SCHEMA = z.number().int().nonnegative().nullable()
+
+/** Reject invalid budgets instead of turning them into unlimited access. */
+function parseTokenLimit(value: unknown): number | null {
+  const parsed = TOKEN_LIMIT_SCHEMA.safeParse(value)
+  if (!parsed.success) {
+    throw new AuthServiceError(400, 'tokenLimit must be a non-negative integer or null')
+  }
+  return parsed.data
 }
 
 type LoginPolicyMethod = OrganizationLoginMethod
@@ -2336,14 +2348,14 @@ export class AuthService {
   async setUserTokenLimit(input: {
     orgId: string
     userId: string
-    tokenLimit: number | null
+    tokenLimit: unknown
   }, auth?: AuthContext): Promise<{ ok: true }> {
     const user = await this.db.getUserByIdAndOrg(input.userId, input.orgId)
     if (!user) {
       throw new AuthServiceError(404, 'Unknown user_id')
     }
     await this.assertCanManageExistingUser(user, auth)
-    await this.db.setUserTokenLimit(input.userId, input.tokenLimit)
+    await this.db.setUserTokenLimit(input.userId, parseTokenLimit(input.tokenLimit))
     return { ok: true }
   }
 
@@ -2370,14 +2382,14 @@ export class AuthService {
   async setDepartmentTokenLimit(input: {
     orgId: string
     departmentId: string
-    tokenLimit: number | null
+    tokenLimit: unknown
   }, auth?: AuthContext): Promise<{ ok: true }> {
     const department = await this.db.getDepartmentByIdAndOrg(input.departmentId, input.orgId)
     if (!department) {
       throw new AuthServiceError(404, 'Unknown department_id')
     }
     await this.assertCanManageDepartment(input.orgId, department.id, auth)
-    await this.db.setDepartmentTokenLimit(input.departmentId, input.tokenLimit)
+    await this.db.setDepartmentTokenLimit(input.departmentId, parseTokenLimit(input.tokenLimit))
     return { ok: true }
   }
 

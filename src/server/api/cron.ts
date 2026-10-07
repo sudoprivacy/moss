@@ -7,6 +7,7 @@
 import type { DbDriver } from '../db/driver.js'
 import { CronStore, type CronJob, type CronJobRun, type CronJobRunWithSession, type CreateCronJobInput, type UpdateCronJobInput } from '../services/cron/CronStore.js'
 import { CronService } from '../services/cron/CronService.js'
+import { validateSchedule } from '../services/cron/validateSchedule.js'
 import { hasScope, isCronAdminCapable } from '../auth/token.js'
 import { getSystemSettings } from '../systemSettings.js'
 
@@ -335,6 +336,8 @@ export function createCronApi(driver: DbDriver, config: CronApiConfig) {
       try {
         const blocked = await cronDisabledError(auth, config.getClientCronEnabled)
         if (blocked) return blocked
+        const scheduleError = validateSchedule(input.schedule)
+        if (scheduleError) return { success: false, message: scheduleError }
         // Executor defaults to the creator; validate any co-owners/executor the
         // caller supplied (org membership + executor ∈ {creator} ∪ co_owners).
         const validationError = await validateCoOwnersAndExecutor({
@@ -383,6 +386,11 @@ export function createCronApi(driver: DbDriver, config: CronApiConfig) {
         }
         const blocked = await cronDisabledError(auth, config.getClientCronEnabled, existing.orgId)
         if (blocked) return blocked
+
+        if (updates.schedule !== undefined) {
+          const scheduleError = validateSchedule(updates.schedule)
+          if (scheduleError) return { success: false, message: scheduleError }
+        }
 
         // Resolve the effective co-owner set + executor after this update, so the
         // constraint is checked against the post-update state (a caller may edit
