@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { NexusSecretClient } from '../../src/server/nexus/nexusSecretClient.js'
+import versions from '../../src/server/nexus/runtime-versions.json' with { type: 'json' }
 
 const [oldBinary, newBinary, plugins, evidence, previousPlugins = plugins, rejectionFlag] = process.argv.slice(2)
 assert(oldBinary && newBinary && plugins && evidence, 'four arguments are required')
@@ -20,7 +21,8 @@ assert(!rejectionFlag || rejectionFlag === '--expect-legacy-plugin-rejection', '
 const oldVersion = execFileSync(oldBinary, ['--version'], { encoding: 'utf8' }).trim()
 const newVersion = execFileSync(newBinary, ['--version'], { encoding: 'utf8' }).trim()
 assert.match(oldVersion, /plugin-abi 7/)
-assert.match(newVersion, /v0\.8\.0 .*plugin-abi 7/)
+assert.equal(newVersion.split(' ')[1], `v${versions['nexusd-cluster']}`)
+assert.match(newVersion, /plugin-abi 7/)
 mkdirSync(evidence, { recursive: true })
 const root = mkdtempSync(join(evidence, 'broker-upgrade-'))
 const data = join(root, 'data')
