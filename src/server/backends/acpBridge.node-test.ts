@@ -7,6 +7,57 @@ import { PassThrough } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { createAcpBridgeHandle } from './acpBridge.js'
+import { readSharedAgentMemory } from '../sharedAgentMemory.js'
+import { defaultAgentName } from '../agentIdentity.js'
+
+void test('a cloud turn persists an explicit fact before dispatching its prompt', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'moss-cloud-memory-'))
+  const sent: any[] = []
+  let events!: import('./acpTransport.js').AcpTransportEvents
+  const transport: import('./acpTransport.js').AcpMessageTransport = {
+    connected: true,
+    start(value) {
+      events = value
+    },
+    async send(message) {
+      sent.push(message)
+    },
+    async close() {},
+  }
+  const assistantName = defaultAgentName('fixture-user')
+  const handle = createAcpBridgeHandle({
+    transport,
+    sessionId: 'cloud-memory',
+    cwd,
+    model: 'fixture',
+    assistantName,
+    enabledSkillNames: [],
+    runtime: { type: 'k8s', engine: 'scode', k8sMode: 'user', configDir: cwd },
+  })
+  try {
+    await delay(5)
+    events.onMessage({ jsonrpc: '2.0', id: 'm-init', result: {} })
+    events.onMessage({
+      jsonrpc: '2.0',
+      id: 'm-session-new',
+      result: { sessionId: 'fixture-engine' },
+    })
+    handle.writeStdin(
+      JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: '记住：My project color is olive-cloud-fixture' },
+      }),
+    )
+    for (let i = 0; i < 200 && !sent.some((message) => message.method === 'session/prompt'); i++)
+      await delay(10)
+    assert(sent.some((message) => message.method === 'session/prompt'))
+    assert.match((await readSharedAgentMemory(cwd, assistantName))!, /olive-cloud-fixture/)
+    assert.equal(await readSharedAgentMemory(cwd, defaultAgentName('other-user')), null)
+  } finally {
+    await handle.destroy()
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
 
 void test('a failed ACP prompt emits an error result, releases busy, and allows the next turn', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'moss-acp-error-'))

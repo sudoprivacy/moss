@@ -38,7 +38,7 @@ import { ConfigurationScopeError, resolveConfigurationActor } from './configurat
 import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
-import { resolveSessionWorkspaceAccess } from './sessionWorkspace.js'
+import { normalizeWorkspaceRelativePath, resolveSessionWorkspaceAccess } from './sessionWorkspace.js'
 import { bytesLookLikeText } from './workspaceText.js'
 import {
   createSudorouterClient,
@@ -1291,16 +1291,6 @@ function redactWsUrl(rawUrl: string | undefined): string {
   } catch {
     return '<unparseable-url>'
   }
-}
-
-function normalizeWorkspaceRelativePath(value: string | null): string {
-  if (!value) return ''
-  if (value.includes('\0')) throw new HttpError(400, 'Invalid path')
-  const normalized = value.replace(/\\/g, '/').replace(/^\.\/+/, '')
-  if (/^[a-zA-Z]:\//.test(normalized) || normalized.startsWith('/')) {
-    throw new HttpError(400, 'Path must be relative')
-  }
-  return normalized
 }
 
 function isInsideDir(rootDir: string, targetPath: string): boolean {

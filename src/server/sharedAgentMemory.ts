@@ -1,8 +1,7 @@
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { mkdir, readFile, rename, writeFile } from 'fs/promises'
 import path from 'path'
-import * as lockfile from '../utils/lockfile.js'
-import { isDefaultAgentName } from './agentIdentity.js'
+import { isDefaultAgentName, isUserOwnedAgentName } from './agentIdentity.js'
 
 export type SharedAgentMemoryEntry = {
   content: string
@@ -29,7 +28,10 @@ export function getSharedAgentMemoryDir(
   configDir: string,
   assistantName: string,
 ): string {
-  return path.join(configDir, '.moss', 'memory', assistantName)
+  const directory = isUserOwnedAgentName(assistantName)
+    ? 'agent-' + createHash('sha256').update(assistantName).digest('hex')
+    : assistantName
+  return path.join(configDir, '.moss', 'memory', directory)
 }
 
 export function getSharedAgentMemoryFilePath(
@@ -163,6 +165,7 @@ export async function appendSharedAgentMemory(params: {
   )
   await mkdir(memoryDir, { recursive: true })
 
+  const { default: lockfile } = await import('proper-lockfile')
   const release = await lockfile.lock(memoryDir, LOCK_OPTIONS)
   try {
     const entries = await readExistingEntries(params.configDir, params.assistantName)
