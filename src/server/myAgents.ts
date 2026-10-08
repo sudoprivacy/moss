@@ -19,15 +19,19 @@ import {
   defaultAgentName,
   isDefaultAgentName,
   isUserCreatedAgentName,
+  sessionAgentName,
   userCreatedAgentName,
 } from './agentIdentity.js'
 import { listUserAgents } from './userAgentStore.js'
 
+/** How this personal agent originated; `template` means a user's instance. */
 export type MyAgentKind = 'default' | 'own' | 'template'
 
 export type MyAgent = {
   /** What a session stores in `assistantName`, and what the client sends back. */
   ref: string
+  /** Durable Nexus name under /agents; resolved with the authenticated user. */
+  agentName: string
   displayName: string
   kind: MyAgentKind
 }
@@ -55,7 +59,7 @@ export async function listMyAgents(input: {
   listSessionAssistants: SessionAssistantLister
   resolveTemplateName: TemplateNameResolver
 }): Promise<MyAgent[]> {
-  const agents: MyAgent[] = [
+  const agents: Array<Omit<MyAgent, 'agentName'>> = [
     {
       ref: defaultAgentName(input.userId),
       displayName: input.defaultDisplayName,
@@ -92,5 +96,8 @@ export async function listMyAgents(input: {
     })
   }
 
-  return agents
+  return agents.map(agent => ({
+    ...agent,
+    agentName: sessionAgentName(input.userId, agent.ref),
+  }))
 }

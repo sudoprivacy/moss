@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { listMyAgents } from './myAgents.js'
-import { defaultAgentName, userCreatedAgentName } from './agentIdentity.js'
+import { defaultAgentName, sessionAgentName, userCreatedAgentName } from './agentIdentity.js'
 import { createUserAgent, getUserAgent, initUserAgentStore, listUserAgents, resetUserAgentStoreForTests } from './userAgentStore.js'
 import { DatabaseSync } from 'node:sqlite'
 import { SqliteDriver } from './db/driver.js'
@@ -53,7 +53,7 @@ void test('a person always has at least their own agent', async () => {
     resolveTemplateName: nameIs('unused'),
   })
   assert.deepEqual(agents, [
-    { ref: defaultAgentName('u1'), displayName: '宋一民', kind: 'default' },
+    { ref: defaultAgentName('u1'), agentName: 'user-u1', displayName: '宋一民', kind: 'default' },
   ])
 })
 
@@ -101,6 +101,29 @@ void test('the three kinds appear in a stable order, each named by its own sourc
   // The references a session already stores come back unchanged, so the client
   // can match a conversation to its agent without knowing the three shapes.
   assert.equal(agents[2]?.ref, 'tpl-recruit')
+  assert.deepEqual(agents.map(a => a.agentName), [
+    'user-u1',
+    `u-u1--${own.id}`,
+    sessionAgentName('u1', 'tpl-recruit'),
+  ])
+})
+
+void test('a shared template reference names separate agents and display renames preserve identity', async () => {
+  resetUserAgentStoreForTests()
+  const list = (userId: string, displayName: string) => listMyAgents({
+    orgId: 'o1', userId, defaultDisplayName: userId,
+    listSessionAssistants: async () => [{ assistantName: 'tpl-recruit' }],
+    resolveTemplateName: nameIs(displayName),
+  })
+  const alice = (await list('alice', 'Recruiter'))[1]!
+  const bob = (await list('bob', 'Recruiter'))[1]!
+  const renamed = (await list('alice', 'Hiring helper'))[1]!
+  assert.equal(alice.ref, bob.ref)
+  assert.notEqual(alice.agentName, bob.agentName)
+  assert.equal(alice.agentName, sessionAgentName('alice', alice.ref))
+  assert.equal(bob.agentName, sessionAgentName('bob', bob.ref))
+  assert.equal(alice.agentName, renamed.agentName)
+  assert.notEqual(alice.displayName, renamed.displayName)
 })
 
 void test('a template whose catalog entry is gone keeps its conversations visible', async () => {
