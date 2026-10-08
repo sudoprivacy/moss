@@ -10,10 +10,11 @@ import { sessionAgentName } from '../agentIdentity.js'
 import { buildAvailableSkillSnapshot, buildSessionEnv, getAssistantRuntimeConfig } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { NexusAcpTransport } from './nexusAcpTransport.js'
-import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
+import { resolveCohostNexusConfig } from '../nexus/nexusEnvConfig.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
 import { syncWorkspaceSkills, type WorkspaceSkillLink } from '../../utils/scodeBridge.js'
+import { readCohostSessionState, writeCohostSessionState } from './cohostSessionState.js'
 
 /**
  * Session backend for a co-hosted sudocode runtime.
@@ -44,20 +45,8 @@ export class CohostBackend implements SessionBackend {
     // Nexus. The co-host runtime can be a separate local cohost daemon (for
     // example during the 0.2.23 rollout), so give it an explicit connection
     // namespace instead of silently moving Moss's vault connection with it.
-    const config = resolveNexusConfigFromEnv({
-      ...process.env,
-      MOSS_NEXUS_MODE: process.env.MOSS_COHOST_NEXUS_MODE ?? process.env.MOSS_NEXUS_MODE,
-      MOSS_NEXUS_ENDPOINT: process.env.MOSS_COHOST_NEXUS_ENDPOINT ?? process.env.MOSS_NEXUS_ENDPOINT,
-      MOSS_NEXUS_AUTH_TOKEN: process.env.MOSS_COHOST_NEXUS_AUTH_TOKEN ?? process.env.MOSS_NEXUS_AUTH_TOKEN,
-      MOSS_NEXUS_TLS_CA: process.env.MOSS_COHOST_NEXUS_TLS_CA ?? process.env.MOSS_NEXUS_TLS_CA,
-      MOSS_NEXUS_TLS_CERT: process.env.MOSS_COHOST_NEXUS_TLS_CERT ?? process.env.MOSS_NEXUS_TLS_CERT,
-      MOSS_NEXUS_TLS_KEY: process.env.MOSS_COHOST_NEXUS_TLS_KEY ?? process.env.MOSS_NEXUS_TLS_KEY,
-      MOSS_NEXUS_TLS_SERVER_NAME:
-        process.env.MOSS_COHOST_NEXUS_TLS_SERVER_NAME ?? process.env.MOSS_NEXUS_TLS_SERVER_NAME,
-    })
-    if (config.mode !== 'external') {
-      throw new Error('Cohost sessions require MOSS_NEXUS_MODE=external')
-    }
+    const config = resolveCohostNexusConfig()
+    const saved = options.resumeSessionId ? await readCohostSessionState(options.cwd) : undefined
 
     const identity = await mintSessionIdentity(config.endpoint, config.tls, options.userId)
     const client = identity
@@ -75,8 +64,15 @@ export class CohostBackend implements SessionBackend {
         model,
         ...ownerField(identity, options.userId),
         repos: [{ hostPath: options.cwd, alias: 'workspace' }],
+        resumeSessionId: saved?.durableSessionId,
+      })
+      if (!session.durableSessionId) throw new Error('Cohost daemon did not return a durable session ID')
+      await writeCohostSessionState(options.cwd, {
+        sessionId: session.sessionId,
+        durableSessionId: session.durableSessionId,
       })
     } catch (error) {
+      if (session) await agent.cancel(session.sessionId).catch(() => {})
       agent.close()
       throw error
     }
@@ -99,6 +95,7 @@ export class CohostBackend implements SessionBackend {
       model,
       modelProviderId: env.MOSS_MODEL_PROVIDER_ID,
       transcriptPath: options.transcriptPath,
+      resumeSessionId: saved?.durableSessionId,
       assistantName: options.assistantName,
       assistantDisplayName: options.assistantDisplayName,
       enabledSkillNames: enabledSkills,

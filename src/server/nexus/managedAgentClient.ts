@@ -107,6 +107,17 @@ export class ManagedAgentClient {
     await this.call<unknown>('managed_agent.cancel_v1', { session_id: sessionId, mode })
   }
 
+  /** Read the daemon's ownership and workspace record without starting a session. */
+  async getSession(sessionId: string): Promise<{
+    session_id: string
+    agent_id: string
+    owner_id: string
+    workspace_path: string
+    durable_session_id?: string
+  }> {
+    return this.call('managed_agent.get_session_v1', { session_id: sessionId })
+  }
+
   openSession(endpoint: NexusSessionEndpoint, events: {
     onMessage(message: SessionRpcMessage): void
     onClose(error: Error | undefined): void

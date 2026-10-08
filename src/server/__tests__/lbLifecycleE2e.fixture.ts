@@ -14,7 +14,7 @@ import { DirectConnectStore } from '../db.js'
 import { RuntimeService } from '../runtimeService.js'
 import { createAuthService } from '../auth/service.js'
 import { startServer } from '../server.js'
-import type { SessionRuntimeInfo } from '../types.js'
+import type { SessionRuntimeInfo } from '../sessionManager.js'
 import {
   ensureCompatibilityCoreSchema,
   ensureSqliteCompatibilityDomainSchemas,
@@ -48,10 +48,9 @@ const { service: authService } = await createAuthService({
 // entry carries usage 100+50=150 total tokens; the summary entry must be
 // filtered out by the transcript guard; the user entry passes the guard but
 // carries no usage and is skipped by the usage parser.
-const issued = await authService.issueTokenFromPassword({
-  username: config.bootstrapAdmin.username,
-  password: config.bootstrapAdmin.password,
-})
+const { username, password } = config.bootstrapAdmin
+if (!username || !password) throw new Error('Lifecycle fixture requires bootstrap credentials')
+const issued = await authService.issueTokenFromPassword({ username, password })
 // ServerConfig is flat (readServerConfig unfolds the server.json nesting):
 // transcriptDir/dbPath/runtimeDir are top-level, there is no config.storage.
 const transcriptDir = join(config.transcriptDir, 'lb-e2e-transcripts')
@@ -79,7 +78,7 @@ await writeFile(
   ].join('\n') + '\n',
   'utf8',
 )
-const runtimeInfo: SessionRuntimeInfo = { type: 'host' }
+const runtimeInfo: SessionRuntimeInfo = { type: 'host', engine: 'scode' }
 await store.createSession({
   sessionId: 'lb-e2e-seed-session',
   transcriptSessionId: 'lb-e2e-seed-session',
