@@ -16,9 +16,16 @@ void test('a cloud Wiki job receives its sources and instructions, collects outp
     await mkdir(promptDir, { recursive: true })
     await writeFile(join(promptDir, 'wiki-builder.md'), 'Trusted builtin Wiki instructions for the source documents')
     const { WikiJobExecutor } = await import('../channels/gateway/WikiJobExecutor.js')
-    for (const isFailure of [false, true]) {
-      const jobId = isFailure ? 'failed-job' : 'successful-job'
-      const job = { id: jobId, wikiId: 'owned-wiki', status: 'running' } as WikiBuildJob
+    for (const fixture of [
+      { name: 'single-instance', claimedBy: null, instanceId: undefined, isFailure: false, expectedStatus: 'succeeded' },
+      { name: 'owned-instance', claimedBy: 'owner', instanceId: 'owner', isFailure: false, expectedStatus: 'succeeded' },
+      { name: 'lost-owner', claimedBy: 'peer', instanceId: 'owner', isFailure: false, expectedStatus: 'cancelled' },
+      { name: 'foreign-claim', claimedBy: 'peer', instanceId: undefined, isFailure: false, expectedStatus: 'cancelled' },
+      { name: 'unsafe-output', claimedBy: null, instanceId: undefined, isFailure: true, expectedStatus: 'failed' },
+    ]) {
+      const { isFailure } = fixture
+      const jobId = fixture.name
+      const job = { id: jobId, wikiId: 'owned-wiki', status: 'running', claimedBy: fixture.claimedBy } as WikiBuildJob
       const wiki = { id: job.wikiId, orgId: 'org-fixture', name: 'Owned fixture', storagePath: join(root, 'live'), sourceDocumentIds: [] } as unknown as WikiRecord
       const files = new Map<string, Buffer>()
       const terminated: string[] = []
@@ -46,7 +53,7 @@ void test('a cloud Wiki job receives its sources and instructions, collects outp
         readFile: async (file: string) => files.get(file)!,
       } satisfies WorkspaceFileAccess
       const executor = new WikiJobExecutor(runtime as never, documents as never,
-        { markWikiNeedsRebuild: async () => {} } as never, undefined, undefined, () => workspace)
+        { markWikiNeedsRebuild: async () => {} } as never, undefined, fixture.instanceId, () => workspace)
       const internals = executor as unknown as {
         running: Map<string, { startedAt: number; sessionId?: string }>
         prepareInputs: (_wiki: WikiRecord, stage: string) => Promise<string[]>
@@ -74,8 +81,8 @@ void test('a cloud Wiki job receives its sources and instructions, collects outp
         isPublished = true
       }
       await internals.runJob(job)
-      assert.equal(status, isFailure ? 'failed' : 'succeeded')
-      assert.equal(isPublished, !isFailure)
+      assert.equal(status, fixture.expectedStatus, fixture.name)
+      assert.equal(isPublished, fixture.expectedStatus === 'succeeded', fixture.name)
       assert.deepEqual(terminated, ['build-' + jobId])
       assert.deepEqual(createdInput?.runtime, { hostMode: 'session', dockerMode: 'session', k8sMode: 'session' })
       assert.deepEqual(createdInput?.enabledSkills, [])
