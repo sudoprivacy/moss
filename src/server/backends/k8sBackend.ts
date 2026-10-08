@@ -765,7 +765,7 @@ async function kubectlApply(kubectlBase: string[], manifest: Record<string, unkn
     child.on('error', reject)
     child.on('close', code => {
       if (code === 0) return resolve()
-      reject(new Error(`kubectl apply failed (code ${code}): ${stderr.trim()}`))
+      reject(formatKubectlApplyError(code, stderr))
     })
     child.stdin?.end(JSON.stringify(manifest))
   })
@@ -780,6 +780,19 @@ async function kubectlApply(kubectlBase: string[], manifest: Record<string, unkn
  * infrastructure, so the correct resolution is to replace it rather than to retry
  * an apply that can never succeed.
  */
+/** Preserve actionable API errors without exposing manifests echoed by kubectl. */
+export function formatKubectlApplyError(code: number | null, stderr: string): Error {
+  const reason = /Error from server \((\w+)\)/.exec(stderr)?.[1]
+  const allowedReasons = new Set([
+    'Forbidden', 'Unauthorized', 'NotFound', 'AlreadyExists', 'Invalid', 'BadRequest',
+    'Timeout', 'ServerTimeout', 'InternalError', 'ServiceUnavailable', 'Gone',
+  ])
+  const detail = isImmutablePodSpecError(new Error(stderr))
+    ? 'pod spec field is immutable'
+    : reason && allowedReasons.has(reason) ? 'Kubernetes API ' + reason : 'manifest rejected'
+  return new Error('kubectl apply failed (code ' + code + '): ' + detail)
+}
+
 function isImmutablePodSpecError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return /may not change fields other than|field is immutable/i.test(message)
