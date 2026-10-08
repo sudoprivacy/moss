@@ -1022,12 +1022,32 @@ export class AuthService {
   }> {
     const phone = input.phone.trim()
     const invitationCode = input.invitationCode.trim()
+    const isGatewayRegistration = input.loginMethod === 'password' && Boolean(this.sudorouterAccounts)
+    if (isGatewayRegistration) {
+      try {
+        validateSudorouterAccountName(phone)
+      } catch (error) {
+        throw new AuthServiceError(400, (error as Error).message)
+      }
+    }
     const existing = await this.db.getUserByPhone(phone)
     if (existing) {
       // Racing double-submit, or a client that kept a stale register token.
       // Logging them in is both correct and kinder than a 409.
       if (input.loginMethod === 'password') {
         if (!input.password) throw new AuthServiceError(400, 'Missing password')
+        if (isGatewayRegistration && existing.status === 'pending') {
+          if (!verifyPassword(input.password, existing.passwordHash)) {
+            throw new AuthServiceError(401, 'Invalid username/email or password')
+          }
+          const invitation = await this.identityRepository.getInvitationByCode(invitationCode)
+          if (invitation?.status !== 'used' || invitation.usedByUserId !== existing.id || invitation.orgId !== existing.orgId) {
+            throw new AuthServiceError(409, 'Invitation does not belong to this pending registration')
+          }
+          await this.assertOrganizationLoginMethod(existing.orgId, 'password')
+          await this.ensureUserSudorouterAccount(existing.id)
+          await this.db.updateUser(existing.id, { status: 'active' })
+        }
         return this.issueTokenFromPassword({ username: phone, password: input.password })
       }
       return this.issueTokenFromPhone(phone)
@@ -1056,7 +1076,7 @@ export class AuthService {
         phone,
         password: input.password ?? phone,
         role: 'user',
-        status: 'active',
+        status: isGatewayRegistration ? 'pending' : 'active',
         invitationCode,
       }, onlineCommandContext(
         input.idempotencyKey ?? `phone-register:${phone}:${invitation.id}`,
@@ -1075,6 +1095,11 @@ export class AuthService {
     const created = await this.db.getUserByPhone(phone)
     if (!created) {
       throw new AuthServiceError(500, 'User creation failed')
+    }
+    if (isGatewayRegistration) {
+      await this.ensureUserSudorouterAccount(created.id)
+      await this.db.updateUser(created.id, { status: 'active' })
+      return this.issueTokenFromPassword({ username: phone, password: input.password! })
     }
     await this.db.updateUserLastLogin(created.id)
     return this.issueToken({
