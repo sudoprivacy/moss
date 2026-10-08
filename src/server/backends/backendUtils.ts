@@ -25,6 +25,13 @@ import type { WorkspaceSkillLink } from '../../utils/scodeBridge.js'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
+/** Opt into scode config discovery for the MCP servers authorized for this session. */
+export function buildScodeMcpSettings(mcpSettings: BackendSpawnOptions['mcpSettings']): Record<string, unknown> {
+  const mcpServers = mcpSettings?.mcpServers
+  if (!mcpServers || Object.keys(mcpServers).length === 0) return {}
+  return { mcpServers, experimental: { mcpConfigServers: true } }
+}
+
 export function resolveScodeCliPath(configPath?: string): string {
   if (configPath && fs.existsSync(configPath)) {
     return configPath

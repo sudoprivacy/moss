@@ -11,6 +11,7 @@ import {
   getAssistantRuntimeConfig,
   createSkillSymlinks,
   buildAvailableSkillSnapshot,
+  buildScodeMcpSettings,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { syncWorkspaceSkills, type WorkspaceSkillLink } from '../../utils/scodeBridge.js'
@@ -209,15 +210,13 @@ export class ScodeBackend implements SessionBackend {
   }
 }
 
-function buildScodeSettings(
+export function buildScodeSettings(
   options: BackendSpawnOptions,
   bundledPluginsDir: string,
 ): Record<string, unknown> {
   const settings: Record<string, unknown> = {
     plugins: { bundledRoot: bundledPluginsDir },
-  }
-  if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
-    Object.assign(settings, options.mcpSettings)
+    ...buildScodeMcpSettings(options.mcpSettings),
   }
   if (options.enabledSkillNames?.includes('cabin-hardware-control')) {
     settings.sandbox = {

@@ -19,6 +19,7 @@ import {
   buildConfigDir,
   getAssistantRuntimeConfig,
   buildAvailableSkillSnapshot,
+  buildScodeMcpSettings,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
@@ -927,11 +928,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function buildScodeSettings(options: BackendSpawnOptions): Record<string, unknown> {
-  const settings: Record<string, unknown> = {}
-  if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
-    Object.assign(settings, options.mcpSettings)
-  }
+export function buildScodeSettings(options: BackendSpawnOptions): Record<string, unknown> {
+  const settings: Record<string, unknown> = buildScodeMcpSettings(options.mcpSettings)
   if (options.enabledSkillNames?.includes('cabin-hardware-control')) {
     settings.sandbox = {
       ...(typeof settings.sandbox === 'object' && settings.sandbox !== null ? settings.sandbox : {}),
