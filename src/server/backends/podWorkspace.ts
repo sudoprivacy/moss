@@ -30,6 +30,7 @@ export type WorkspaceRemoteEntry = {
   /** Slash-separated, relative to the workspace root. */
   relativePath: string
   isDir: boolean
+  isSymbolicLink?: boolean
   size: number
 }
 
@@ -231,6 +232,7 @@ export function parseStatLines(raw: string, root: string): WorkspaceRemoteEntry[
     entries.push({
       relativePath: relative,
       isDir: kind === 'directory',
+      ...(kind === 'symbolic link' ? { isSymbolicLink: true } : {}),
       size: Number.isFinite(size) ? size : 0,
     })
   }
