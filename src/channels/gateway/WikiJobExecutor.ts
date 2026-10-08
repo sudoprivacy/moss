@@ -410,7 +410,7 @@ export class WikiJobExecutor {
       // build lost its mandate and must not publish.
       await assertStillRunning()
       const prePublish = await this.docStore.getBuildJob(job.id)
-      if (prePublish?.claimedBy !== this.instanceId) {
+      if (prePublish?.claimedBy !== (this.instanceId ?? null)) {
         throw new BuildCancelledError()
       }
       await this.publishStaged(wiki, stageDir, startedAt)
