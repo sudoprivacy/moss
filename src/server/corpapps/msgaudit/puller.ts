@@ -22,6 +22,7 @@ import {
   DIRECT_BUCKET,
   readCursor,
   updateRooms,
+  updateRoomNames,
   writeCursor,
   writeMedia,
   type ChatRecord,
@@ -38,6 +39,7 @@ import {
   writeLeaves,
   writeSnapshot,
   type LeaveRecord,
+  type RosterInfo,
 } from './members.js'
 import { appendMediaIndex, type MediaIndexEntry } from './mediaIndex.js'
 
@@ -103,11 +105,15 @@ export type PullConfig = {
   /** Stop after this many pages in one run; 0 = drain fully. */
   maxPages?: number
   /**
-   * Fetches a room's current member userids. Supplied by the caller
-   * because the 会话存档 SDK has no roster API — it comes from a sibling
-   * self-built app. Absent = skip membership snapshots entirely.
+   * Fetches a room's current roster. Supplied by the caller because the
+   * 会话存档 SDK has no roster API — it comes from a sibling self-built
+   * app. Absent = skip membership snapshots entirely.
+   *
+   * A bare `string[]` is still accepted (that was the original contract);
+   * returning `RosterInfo` additionally records the group and member names
+   * the lookup happened to see.
    */
-  rosterLookup?: (roomId: string) => Promise<string[] | null>
+  rosterLookup?: (roomId: string) => Promise<string[] | RosterInfo | null>
   /**
    * Whether to take membership snapshots. A plain boolean because
    * `rosterLookup` is a function and cannot cross the IPC boundary to the
@@ -317,16 +323,28 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
 
     // Phase 1: photograph anything missing today's snapshot.
     let complete = true
+    // Names seen along the way, folded into rooms.json once at the end:
+    // the index is one file for the whole corp app, so writing it per room
+    // would mean rewriting it thousands of times for no benefit.
+    const roomNames: Record<string, string> = {}
     for (const roomId of rooms) {
       try {
         if (await snapshotExists(cfg.corpAppId, roomId, today)) continue
-        const members = await cfg.rosterLookup(roomId)
-        if (!members) {
+        const roster = await cfg.rosterLookup(roomId)
+        if (!roster) {
           // No roster available (internal group answers 90501). Not a
           // failure of the day — just a room that cannot be photographed.
           continue
         }
-        await writeSnapshot(cfg.corpAppId, roomId, members)
+        // Accept both shapes: the original bare id list, and the richer
+        // RosterInfo that also carries the names seen in the same call.
+        const info: RosterInfo = Array.isArray(roster) ? { members: roster } : roster
+        if (info.members.length === 0) continue
+        await writeSnapshot(cfg.corpAppId, roomId, info.members, Date.now(), {
+          roomName: info.roomName,
+          memberNames: info.memberNames,
+        })
+        if (info.roomName) roomNames[roomId] = info.roomName
         snapshots += 1
       } catch (err) {
         // A room that failed today leaves the day incomplete, so phase 2
@@ -337,6 +355,16 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
           err instanceof Error ? err.message : err,
         )
       }
+    }
+    if (Object.keys(roomNames).length > 0) {
+      await updateRoomNames(cfg.corpAppId, roomNames).catch((err) => {
+        // Cosmetic: the snapshots already hold the names, and the next
+        // run retries. Never fail a pull over the convenience index.
+        console.error(
+          '[msgaudit] annotating rooms.json with group names failed:',
+          err instanceof Error ? err.message : err,
+        )
+      })
     }
     if (complete && rooms.length > 0) {
       await writeLastUpdated(cfg.corpAppId, today).catch(() => {})

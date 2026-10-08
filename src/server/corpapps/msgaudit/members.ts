@@ -33,12 +33,46 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { appDir, dayKey, sanitizeSegment } from './store.js'
 
+/**
+ * What a roster lookup can report about one room.
+ *
+ * `members` alone was the original contract and remains the only required
+ * field; the names are additive because the lookup that produces them
+ * (`groupchat/get`) returns them in the same response, while a lookup that
+ * cannot supply them is still useful.
+ */
+export type RosterInfo = {
+  members: string[]
+  roomName?: string
+  /** userid -> display name, for whichever members had one. */
+  memberNames?: Record<string, string>
+}
+
 /** One day's roster for one room. */
 export type MemberSnapshot = {
   roomid: string
   date: string
   /** Member userids present at snapshot time. */
   members: string[]
+  /**
+   * The group's own name, when the roster lookup could supply one.
+   *
+   * Recorded because nothing else can: `groupchat/list` does not return
+   * names, so resolving one otherwise costs a detail call per room — and
+   * the roster lookup already made exactly that call. Optional so an
+   * older snapshot, or a lookup that only yields ids, stays valid.
+   */
+  roomName?: string
+  /**
+   * userid -> display name, for the members this snapshot saw.
+   *
+   * The same reasoning: an internal userid cannot be resolved by this app
+   * through the directory (`/cgi-bin/user/get` answers 48002), and
+   * `groupchat/get` is the one endpoint that returns names for internal
+   * and external members alike. Capturing them here is free, where asking
+   * later is one call per room per report.
+   */
+  memberNames?: Record<string, string>
   /** Epoch ms the snapshot was taken. */
   takenAt: number
 }
@@ -121,6 +155,7 @@ export async function writeSnapshot(
   roomId: string,
   members: string[],
   takenAt = Date.now(),
+  meta?: { roomName?: string; memberNames?: Record<string, string> },
 ): Promise<MemberSnapshot> {
   const date = dayKey(takenAt)
   const dir = membersDir(corpAppId, roomId)
@@ -130,6 +165,12 @@ export async function writeSnapshot(
     date,
     members: [...new Set(members)].sort(),
     takenAt,
+  }
+  // Only write the optional fields when there is something to write, so a
+  // lookup that yields no names leaves no empty object behind to puzzle over.
+  if (meta?.roomName) snap.roomName = meta.roomName
+  if (meta?.memberNames && Object.keys(meta.memberNames).length > 0) {
+    snap.memberNames = meta.memberNames
   }
   const file = path.join(dir, `${date}.json`)
   const tmp = `${file}.tmp`

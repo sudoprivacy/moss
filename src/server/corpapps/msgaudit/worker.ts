@@ -18,9 +18,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PullConfig, PullResult } from './puller.js'
+import type { RosterInfo } from './members.js'
 
 /** A roster fetch the child needs us to perform (see pullChild.ts). */
 type RosterRequest = { kind: 'roster'; id: number; roomId: string }
+/** What the parent sends back; `RosterInfo` also carries the names it saw. */
+type RosterAnswer = string[] | RosterInfo | null
 type ResultMessage = { ok: boolean; result?: PullResult; error?: string }
 type ChildMessage = RosterRequest | ResultMessage
 
@@ -112,7 +115,7 @@ export function pullInChild(cfg: PullConfig): Promise<PullResult> {
       // we answer here where the connector and its credentials live.
       if (msg && (msg as RosterRequest).kind === 'roster') {
         const req = msg as RosterRequest
-        const answer = (members: string[] | null) => {
+        const answer = (members: RosterAnswer) => {
           try {
             child.send({ kind: 'rosterResult', id: req.id, members })
           } catch {
