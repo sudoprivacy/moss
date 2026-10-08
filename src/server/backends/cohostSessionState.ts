@@ -5,6 +5,15 @@ import { randomUUID } from 'node:crypto'
 export interface CohostSessionState {
   sessionId: string
   durableSessionId: string
+  repositoryPath?: string
+}
+
+/** A session's repository outlives the ManagedAgentService process ID. */
+export function cohostRepositoryPath(agentId: string, sessionId: string): string {
+  if (!agentId || /[\\/\0]/.test(agentId) || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) {
+    throw new Error('Invalid cohost repository identity')
+  }
+  return `/agents/${agentId}/workspaces/${sessionId}`
 }
 
 /** The host-side session locator contains no credentials. */
@@ -25,6 +34,11 @@ export async function readCohostSessionState(cwd: string): Promise<CohostSession
     if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
       throw new Error('Invalid cohost session state')
     }
+  }
+  if (value.repositoryPath !== undefined &&
+      (typeof value.repositoryPath !== 'string' ||
+       !/^\/agents\/[^/\\\0]+\/workspaces\/[A-Za-z0-9_-]{1,128}$/.test(value.repositoryPath))) {
+    throw new Error('Invalid cohost repository path')
   }
   return value as CohostSessionState
 }

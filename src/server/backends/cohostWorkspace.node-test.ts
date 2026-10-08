@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { createCohostWorkspaceAccess, cohostWorkspacePath } from './cohostWorkspace.js'
-import { cohostSessionStatePath, readCohostSessionState, writeCohostSessionState } from './cohostSessionState.js'
+import { cohostRepositoryPath, cohostSessionStatePath, readCohostSessionState, writeCohostSessionState } from './cohostSessionState.js'
 import { sessionAgentName } from '../agentIdentity.js'
 import type { SessionRecord } from '../types.js'
 
@@ -14,6 +14,9 @@ void test('cohost workspace paths reject traversal, absolute and drive paths', (
     assert.throws(() => cohostWorkspacePath('/proc/pid/workspace', path))
   }
   assert.equal(cohostWorkspacePath('/proc/pid/workspace', 'reports/../a.txt'), '/proc/pid/workspace/a.txt')
+  for (const agent of ['../owner', 'agent\\other', 'agent\0other']) {
+    assert.throws(() => cohostRepositoryPath(agent, 'session'))
+  }
 })
 
 void test('cohost state preserves the durable ID and refuses corrupt recovery metadata', async () => {
@@ -73,5 +76,19 @@ void test('workspace I/O uses the verified execution descriptor and closes every
     entryName = root+'/nested/private.txt'
     await assert.rejects(access.listTree(2), /Invalid cohost workspace entry/)
     assert.equal(closes, 9)
+    const repositoryPath = cohostRepositoryPath(descriptor.agent_id, session.sessionId)
+    await writeCohostSessionState(cwd, { sessionId: 'pid', durableSessionId: 'durable', repositoryPath })
+    entryName = repositoryPath+'/persisted.txt'
+    assert.equal((await access.listTree(2))[0]?.relativePath, 'persisted.txt')
+    assert.equal((await access.readFile('persisted.txt')).toString(), 'hello')
+    await access.writeFile('uploaded.txt', Buffer.from('durable'))
+    assert.deepEqual(calls.slice(-4), ['list:'+repositoryPath, 'read:'+repositoryPath+'/persisted.txt',
+      'mkdir:'+repositoryPath, 'write:'+repositoryPath+'/uploaded.txt:durable'])
+    await writeCohostSessionState(cwd, { sessionId: 'pid', durableSessionId: 'durable',
+      repositoryPath: cohostRepositoryPath(descriptor.agent_id, 'different-session') })
+    const callCount = calls.length
+    await assert.rejects(access.readFile('persisted.txt'), /repository does not belong/)
+    assert.equal(calls.length, callCount)
+    assert.equal(closes, 13)
   } finally { await rm(cwd, { recursive: true, force: true }) }
 })
