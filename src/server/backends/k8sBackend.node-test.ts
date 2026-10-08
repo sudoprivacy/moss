@@ -5,7 +5,23 @@ import { join, posix } from 'node:path'
 import { test } from 'node:test'
 import { writeAssistantOverrideAgentsMd } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
-import { buildWorkspaceInstructionsSecret, buildWorkspaceStorage } from './k8sBackend.js'
+import { buildWorkspaceInstructionsSecret, buildWorkspaceStorage, formatKubectlApplyError } from './k8sBackend.js'
+
+void test('kubectl errors retain API failure reasons without echoing secret manifests', () => {
+  const manifest = JSON.stringify({ stringData: { apiKey: 'synthetic-private-provider-key', password: 'synthetic-private-password' } })
+  const stderr = 'Error from server (Forbidden): error when applying patch:\n' + manifest + '\nsecrets is forbidden: cannot patch resource'
+  const error = formatKubectlApplyError(1, stderr)
+  assert.equal(error.message, 'kubectl apply failed (code 1): Kubernetes API Forbidden')
+  assert.doesNotMatch(error.message, /synthetic-private|apiKey|stringData/)
+  assert.equal(formatKubectlApplyError(null, manifest).message, 'kubectl apply failed (code null): manifest rejected')
+})
+
+void test('redacted apply errors preserve immutable pod replacement detection', () => {
+  const stderr = 'Error from server (Invalid): Pod is invalid: spec: Forbidden: pod updates may not change fields other than containers; ' + JSON.stringify({ env: [{ value: 'synthetic-private-provider-key' }] })
+  const error = formatKubectlApplyError(1, stderr)
+  assert.match(error.message, /field is immutable/)
+  assert.doesNotMatch(error.message, /synthetic-private|containers|env/)
+})
 
 void test('workspace persistence is opt-in and claims survive pod cleanup without sharing sessions', () => {
   assert.deepEqual(buildWorkspaceStorage('first', 'moss-sessions'), { volume: { name: 'workspace', emptyDir: {} }, claim: undefined })
