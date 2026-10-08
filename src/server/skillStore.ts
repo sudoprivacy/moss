@@ -17,6 +17,7 @@ import {
   USER_SKILLS_DIR,
 } from '../utils/skills/localSkillDirectories.js'
 import { getHubApiBaseUrl, getHubAuthorization, getCosBaseUrl } from './hubConfig.js'
+import { ResourceAccessError } from './catalog/resourceError.js'
 
 function getHubCategoriesUrl(): string {
   return `${getHubApiBaseUrl()}/categories`
@@ -512,8 +513,10 @@ async function extractSkillZip(
   buffer: Buffer,
   targetDir: string,
 ): Promise<void> {
-  const JSZip = await import('jszip')
-  const zip = await JSZip.loadAsync(buffer)
+  const { default: JSZip } = await import('jszip')
+  const zip = await JSZip.loadAsync(buffer).catch(() => {
+    throw new ResourceAccessError(400, 'Invalid skill ZIP archive')
+  })
   const files = Object.values(zip.files)
 
   // Find root SKILL.md path
@@ -547,13 +550,17 @@ async function extractSkillZip(
     // Skip directory entries (JSZip has entry.dir property)
     if (entry.dir) continue
 
+    if (!resolveSafeEntryPath(targetDir, entry.unsafeOriginalName || entry.name)) {
+      throw new ResourceAccessError(400, 'Unsafe skill archive entry path')
+    }
+
     let entryName = entry.name.replace(/\\/g, '/').replace(/^\.\/+/, '')
     if (stripPrefix && entryName.startsWith(stripPrefix)) {
       entryName = entryName.slice(stripPrefix.length)
     }
 
     const fullPath = resolveSafeEntryPath(targetDir, entryName)
-    if (!fullPath) continue
+    if (!fullPath) throw new ResourceAccessError(400, 'Unsafe skill archive entry path')
 
     await mkdir(path.dirname(fullPath), { recursive: true })
     const content = await entry.async('nodebuffer')
@@ -567,7 +574,7 @@ async function writeDirectoryEntries(
 ): Promise<void> {
   for (const entry of entries) {
     const fullPath = resolveSafeEntryPath(targetDir, entry.path)
-    if (!fullPath) continue
+    if (!fullPath) throw new ResourceAccessError(400, 'Unsafe skill directory entry path')
 
     await mkdir(path.dirname(fullPath), { recursive: true })
     await writeFile(fullPath, Buffer.from(entry.contentBase64, 'base64'))
@@ -618,7 +625,7 @@ async function installImportedSkillFromTemp(
 ): Promise<{ skillName: string; installedVersion: string }> {
   const skillDir = await findSkillDirWithSkillMd(tempDir)
   if (!skillDir) {
-    throw new Error('未找到 SKILL.md，无法识别技能目录')
+    throw new ResourceAccessError(400, '未找到 SKILL.md，无法识别技能目录')
   }
 
   const frontmatter = await readSkillFrontmatter(skillDir)
@@ -1206,7 +1213,7 @@ export async function importTenantSkillArchive(
   payload: ImportSkillArchivePayload & { userId: string; authorName?: string; pending?: boolean },
 ): Promise<ImportTenantSkillResult> {
   if (!payload.archiveBase64?.trim()) {
-    throw new Error('archiveBase64 is required')
+    throw new ResourceAccessError(400, 'archiveBase64 is required')
   }
 
   const targetBaseDir = payload.pending ? MOSS_SKILLS_TENANT_PENDING_DIR : MOSS_SKILLS_TENANT_DIR
@@ -1223,7 +1230,7 @@ export async function importTenantSkillDirectory(
   payload: ImportSkillDirectoryPayload & { userId: string; authorName?: string; pending?: boolean },
 ): Promise<ImportTenantSkillResult> {
   if (!Array.isArray(payload.entries) || payload.entries.length === 0) {
-    throw new Error('entries is required')
+    throw new ResourceAccessError(400, 'entries is required')
   }
 
   const targetBaseDir = payload.pending ? MOSS_SKILLS_TENANT_PENDING_DIR : MOSS_SKILLS_TENANT_DIR
@@ -1247,7 +1254,7 @@ async function installTenantSkillFromTemp(
 ): Promise<ImportTenantSkillResult> {
   const skillDir = await findSkillDirWithSkillMd(tempDir)
   if (!skillDir) {
-    throw new Error('未找到 SKILL.md，无法识别技能目录')
+    throw new ResourceAccessError(400, '未找到 SKILL.md，无法识别技能目录')
   }
 
   const frontmatter = await readSkillFrontmatter(skillDir)
