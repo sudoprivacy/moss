@@ -37,6 +37,7 @@ void test('workspace I/O uses the verified execution descriptor and closes every
   const calls: string[] = []
   let closes = 0
   let ready = 0
+  let entryName = root+'/result.txt'
   const client = {
     async call(method: string, raw: string, token: string) {
       assert.equal(token, 'user-token');assert.equal(method, 'managed_agent.get_session_v1')
@@ -44,7 +45,7 @@ void test('workspace I/O uses the verified execution descriptor and closes every
       return JSON.stringify(descriptor)
     },
     async stat(path: string) { return { size: 5, entryType: path.endsWith('/link') ? 6 : 0, isDirectory: false } },
-    async readdir(path: string) { calls.push('list:'+path);return [{ name: 'result.txt', entryType: 0 }] },
+    async readdir(path: string) { calls.push('list:'+path);return [{ name: entryName, entryType: 0 }] },
     async read(path: string) { calls.push('read:'+path);return Buffer.from('hello') },
     async mkdir(path: string) { calls.push('mkdir:'+path) },
     async write(path: string, bytes: Buffer) { calls.push('write:'+path+':'+bytes.toString()) },
@@ -66,5 +67,11 @@ void test('workspace I/O uses the verified execution descriptor and closes every
     await assert.rejects(access.readFile('result.txt'), /Invalid cohost workspace descriptor/)
     assert.equal(calls.length, 4, 'refused operations must never read or write file bytes')
     assert.equal(closes, 7);assert.equal(ready, 7)
+    descriptor.workspace_path = root
+    entryName = '/proc/another/workspace/private.txt'
+    await assert.rejects(access.listTree(2), /Invalid cohost workspace entry/)
+    entryName = root+'/nested/private.txt'
+    await assert.rejects(access.listTree(2), /Invalid cohost workspace entry/)
+    assert.equal(closes, 9)
   } finally { await rm(cwd, { recursive: true, force: true }) }
 })
