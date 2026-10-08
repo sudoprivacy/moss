@@ -126,7 +126,6 @@ export default function ApiKeysPage() {
       const response = await createApiKey(data)
       setNewApiKey(response.plain_text_key)
       toast.success('API Key 创建成功')
-      setIsDialogOpen(false)
       form.reset()
       fetchData()
     } catch (error) {
