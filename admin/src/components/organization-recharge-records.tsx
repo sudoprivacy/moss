@@ -108,21 +108,26 @@ function RechargeDetail({ order, isOperator, onClose, onChanged, onCredit }: { o
     try { await modelBillingApi.reconcile(isManual ? 'credits' : 'orders', order.order_no, isManual ? action === 'retry' ? 'retry' : 'resolve' : 'resolution', body, request.current.key); onChanged() } catch (e) { setError((e as Error).message) } finally { setIsBusy(false) }
   }
   const canResolve = isManual ? ['sending', 'needs_review'].includes(order.credit_status) : order.payment_status === 'paid' && order.credit_status !== 'credited' && (!resolution?.is_manual || resolution.original_outcome === 'unknown')
+  const canTakeover = !isManual && order.payment_status === 'paid' && order.credit_status !== 'credited' && !resolution?.is_manual
+  const canContinueManual = !isManual && resolution?.is_manual && resolution.status !== 'closed'
+  const canRetry = isManual && ['failed', 'pending'].includes(order.credit_status)
+  const canSubmitEvidence = canResolve || canTakeover || canContinueManual
+  const hasActions = isOperator && (canSubmitEvidence || canRetry)
   const audit = isManual ? order.audit : resolution?.audit
   return <Dialog open onOpenChange={open => { if (!open && !isBusy) onClose() }}><DialogContent className="max-h-[85vh] overflow-auto sm:max-w-2xl"><DialogHeader><DialogTitle>充值详情 · {isManual ? '后台充值' : '富友在线充值'}</DialogTitle><DialogDescription>{order.order_no} · 账户 #{order.router_user_id}</DialogDescription></DialogHeader>
     <p>金额 ${order.purchase_amount_usd}{!isManual && ` + 赠送 $${order.bonus_amount_usd}`} · {creditLabels[order.credit_status]}</p>
     {order.reason && <p>原因：{order.reason}</p>}{order.related_order_no && <p className="break-all">关联订单：{order.related_order_no}</p>}
-    {resolution && <div className="space-y-1 text-sm"><p>人工处理：{resolutionLabels[resolution.status]}</p><p>原应到账 ${resolution.expected_amount_usd} · 原确认到账 ${resolution.original_credited_usd}</p><p>人工累计到账 ${resolution.manual_credited_usd} · 差额 ${resolution.difference_usd}</p>{resolution.related_credits.map(c => <p key={c.credit_no}>{c.credit_no} · ${c.amount_usd} · {creditLabels[c.status] ?? c.status}</p>)}</div>}
+    {resolution && <div className="space-y-1 text-sm"><p>处理方式：{resolution.is_manual ? '人工处理' : '自动入账'}</p>{resolution.is_manual && <p>处理状态：{resolutionLabels[resolution.status]}</p>}<p>应到账 ${resolution.expected_amount_usd} · 原单已到账 ${resolution.original_credited_usd}</p>{resolution.is_manual && <p>人工累计到账 ${resolution.manual_credited_usd} · 差额 ${resolution.difference_usd}</p>}{resolution.related_credits.map(c => <p key={c.credit_no}>{c.credit_no} · ${c.amount_usd} · {creditLabels[c.status] ?? c.status}</p>)}</div>}
     {order.attempts?.map(a => <p key={a.reference} className="text-xs break-all">到账尝试：{a.reference} · {creditLabels[a.status] ?? a.status} · {formatTime(a.created_at)}</p>)}
     {audit?.map((a, i) => <p key={i} className="text-xs">{formatTime(a.created_at)} · {a.actor_user_id} · {a.action}：{a.evidence}</p>)}
-    {isOperator && <div className="space-y-3 border-t pt-3">
+    {hasActions && <div className="space-y-3 border-t pt-3">
       <p className="text-xs text-muted-foreground">未知结果请核对远端原请求，不能仅凭余额判断。确认已到账仅修复记录；确认未执行后才允许再次加额。</p>
-      <Label htmlFor="credit-evidence">处理原因 / 核对依据</Label><Input id="credit-evidence" value={evidence} disabled={isBusy} onChange={e => setEvidence(e.target.value)} maxLength={1000} />
+      {canSubmitEvidence && <><Label htmlFor="credit-evidence">处理原因 / 核对依据</Label><Input id="credit-evidence" value={evidence} disabled={isBusy} onChange={e => setEvidence(e.target.value)} maxLength={1000} /></>}
       {canResolve && <><select aria-label="核对结果" className="w-full rounded border p-2" value={outcome} disabled={isBusy} onChange={e => setOutcome(e.target.value)}><option value="unknown">无法确认，保持待核对</option><option value="credited">已确认到账（只修复记录）</option><option value="not_executed">已确认原请求未执行</option></select><label className="flex gap-2 text-sm"><input type="checkbox" checked={isFinished} disabled={isBusy} onChange={e => setIsFinished(e.target.checked)} />已核实原请求结束，不会继续执行</label><Button disabled={isBusy || !evidence.trim() || outcome !== 'unknown' && !isFinished} onClick={() => void onAction(isManual ? 'resolve' : 'original_result')}>登记{isManual ? '' : '原入账'}核对结果</Button></>}
       <div className="flex gap-2 flex-wrap">
-        {!isManual && order.payment_status === 'paid' && order.credit_status !== 'credited' && !resolution?.is_manual && <Button disabled={isBusy || !evidence.trim()} onClick={() => void onAction('takeover')}>转人工处理（关闭自动加额）</Button>}
-        {!isManual && resolution?.is_manual && resolution.status !== 'closed' && <><Button disabled={isBusy || resolution.original_outcome !== 'not_executed' || resolution.unsettled_count > 0} onClick={onCredit}>关联后台充值</Button><Button variant="outline" disabled={isBusy || !evidence.trim() || resolution.original_outcome === 'unknown' || resolution.unsettled_count > 0 || Number(resolution.difference_usd) > 0} onClick={() => void onAction('close')}>登记处理完成</Button></>}
-        {isManual && ['failed', 'pending'].includes(order.credit_status) && <Button disabled={isBusy} onClick={() => void onAction('retry')}>再次尝试到账（同一充值单）</Button>}
+        {canTakeover && <Button disabled={isBusy || !evidence.trim()} onClick={() => void onAction('takeover')}>转人工处理（关闭自动加额）</Button>}
+        {canContinueManual && resolution && <><Button disabled={isBusy || resolution.original_outcome !== 'not_executed' || resolution.unsettled_count > 0} onClick={onCredit}>关联后台充值</Button><Button variant="outline" disabled={isBusy || !evidence.trim() || resolution.original_outcome === 'unknown' || resolution.unsettled_count > 0 || Number(resolution.difference_usd) > 0} onClick={() => void onAction('close')}>登记处理完成</Button></>}
+        {canRetry && <Button disabled={isBusy} onClick={() => void onAction('retry')}>再次尝试到账（同一充值单）</Button>}
       </div>
     </div>}
     {error && <p role="alert" className="text-destructive">{error}</p>}
