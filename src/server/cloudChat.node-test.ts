@@ -17,8 +17,37 @@ import { withOrganizationResources } from './catalog/organizationResources.js'
 import { createUserAgent, resetUserAgentStoreForTests } from './userAgentStore.js'
 import { defaultAgentName, userCreatedAgentName } from './agentIdentity.js'
 import { getSessionConfigDir } from './runtimePaths.js'
-import { buildWorkspaceInstructionsSecret } from './backends/k8sBackend.js'
+import { buildWorkspaceInstructionsSecret, buildScodeSettings as buildK8sSettings } from './backends/k8sBackend.js'
+import { buildScodeSettings as buildLocalSettings } from './backends/scodeBackend.js'
+import { buildScodeSettings as buildDockerSettings } from './backends/dockerBackend.js'
+import type { BackendSpawnOptions } from './sessionManager.js'
 import type { AttemptRecord, ServerConfig, SessionRecord } from './types.js'
+
+for (const [name, build] of [
+  ['local', (input: BackendSpawnOptions) => buildLocalSettings(input, '/bundled/plugins')],
+  ['docker', (input: BackendSpawnOptions) => buildDockerSettings(input, '/bundled/plugins')],
+  ['kubernetes', buildK8sSettings],
+] as const) {
+  void test(`${name} runtime opts into MCP discovery only for authorized session servers`, () => {
+    const input = { sessionId: 'fixture', enabledSkillNames: ['cabin-hardware-control'] } as BackendSpawnOptions
+    for (const mcpSettings of [undefined, { mcpServers: {} }]) {
+      const settings = build({ ...input, mcpSettings })
+      assert.equal(settings.experimental, undefined)
+      assert.equal(settings.mcpServers, undefined)
+    }
+    const mcpSettings = { mcpServers: {
+      'authorized-remote': { type: 'http', url: 'https://qa.example/mcp', headers: { 'X-QA': 'fixture' } },
+      'authorized-local': { type: 'stdio', command: 'node', args: ['qa-mcp.js'] },
+    } }
+    const before = JSON.stringify(mcpSettings)
+    const settings = build({ ...input, mcpSettings })
+    assert.deepEqual(settings.experimental, { mcpConfigServers: true })
+    assert.deepEqual(settings.mcpServers, mcpSettings.mcpServers)
+    assert.deepEqual(settings.sandbox, { enabled: false, enabledPlatforms: ['macos'], allowUnsandboxedCommands: true })
+    if (name !== 'kubernetes') assert.deepEqual(settings.plugins, { bundledRoot: '/bundled/plugins' })
+    assert.equal(JSON.stringify(mcpSettings), before)
+  })
+}
 
 void test('personal cloud Agents retain memory and receive pod instructions without a catalog entry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'moss-personal-cloud-'))
