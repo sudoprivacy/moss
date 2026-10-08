@@ -716,6 +716,9 @@ export class RuntimeService {
             hostMode: assistantRuntime.memoryMode,
           }
         }
+        if (runtimeType === 'k8s' && input.runtime?.k8sMode === undefined) {
+          runtimeInput = { ...runtimeInput, k8sMode: assistantRuntime.memoryMode }
+        }
       } catch (error) {
         console.warn(
           `[RuntimeService] failed to resolve assistant memory_mode for ${input.assistantName}:`,
@@ -753,7 +756,10 @@ export class RuntimeService {
         input.userId,
         runtime.type === 'docker'
           ? runtime.dockerMode
-          : runtime.hostMode || 'session',
+          : runtime.type === 'k8s'
+            ? runtime.k8sMode
+            : runtime.hostMode || 'session',
+        isUserOwnedAgentName(input.assistantName) ? input.orgId : undefined,
       )
     const transcriptPath = getTranscriptPath(
       this.options.config.runtimeDir,
@@ -1877,8 +1883,10 @@ export class RuntimeService {
       try {
         const { findAssistantDir, readAssistantMeta } = await import('./agentStore.js')
         const found = await findAssistantDir(effectiveAssistantName)
+        let isMemoryEnabled = isUserOwnedAgentName(effectiveAssistantName)
         if (found) {
           const meta = await readAssistantMeta(found.dir)
+          isMemoryEnabled = meta?.memory_mode === 'user'
           const ids = Array.isArray(meta?.enabledWikis)
             ? meta.enabledWikis.filter((v: unknown): v is string => typeof v === 'string')
             : []
@@ -1919,61 +1927,59 @@ export class RuntimeService {
             }
             if (collectedApps.length > 0) availableCorpApps = collectedApps
           }
+        }
 
-          if (
-            meta?.memory_mode === 'user' &&
-            session.runtime.configDir &&
-            session.userId
-          ) {
-            const user = await this.authService.getUserOrNull(
-              session.userId,
-              session.orgId,
-            )
-            const departmentName = user?.departmentId
-              ? (await this.authService
-                  .listDepartments(session.orgId))
-                  .departments.find(d => d.id === user.departmentId)?.name ?? null
-              : null
-            const userProfileMemory = buildUserProfileMemory({
-              // Prefer the human display name; fall back to the login username.
-              userName: user?.displayName?.trim() || user?.name || null,
-              role: user?.role ?? null,
-              departmentName,
-              email: user?.email ?? null,
-            })
-            if (userProfileMemory) {
-              await appendSharedAgentMemory({
-                configDir: session.runtime.configDir,
-                assistantName: effectiveAssistantName,
-                content: userProfileMemory,
-                source: 'profile',
-              }).catch(() => {})
-            }
-            sharedMemory = await readSharedAgentMemory(
-              session.runtime.configDir,
-              effectiveAssistantName,
-            )
-          }
-
-          if (session.runtime.configDir) {
-            await writeAssistantOverrideAgentsMd({
+        if (isMemoryEnabled && session.runtime.configDir && session.userId) {
+          const user = await this.authService.getUserOrNull(
+            session.userId,
+            session.orgId,
+          )
+          const departmentName = user?.departmentId
+            ? (await this.authService
+                .listDepartments(session.orgId))
+                .departments.find(d => d.id === user.departmentId)?.name ?? null
+            : null
+          const userProfileMemory = buildUserProfileMemory({
+            // Prefer the human display name; fall back to the login username.
+            userName: user?.displayName?.trim() || user?.name || null,
+            role: user?.role ?? null,
+            departmentName,
+            email: user?.email ?? null,
+          })
+          if (userProfileMemory) {
+            await appendSharedAgentMemory({
               configDir: session.runtime.configDir,
-              // scode reads AGENTS.md from the workspace it runs in, not from configDir —
-              // without this the assistant identity never reaches the agent.
-              workspace: session.cwd,
               assistantName: effectiveAssistantName,
-              assistantDisplayName,
-              assistantRules: await import('./agentStore.js').then(m =>
+              content: userProfileMemory,
+              source: 'profile',
+            }).catch(() => {})
+          }
+          sharedMemory = await readSharedAgentMemory(
+            session.runtime.configDir,
+            effectiveAssistantName,
+          )
+        }
+
+        if (session.runtime.configDir) {
+          await writeAssistantOverrideAgentsMd({
+            configDir: session.runtime.configDir,
+            // scode reads AGENTS.md from the workspace it runs in, not from configDir —
+            // without this the assistant identity never reaches the agent.
+            workspace: session.cwd,
+            assistantName: effectiveAssistantName,
+            assistantDisplayName,
+            assistantRules: isUserOwnedAgentName(effectiveAssistantName)
+              ? null
+              : await import('./agentStore.js').then(m =>
                 m.getAssistantSystemPrompt(effectiveAssistantName!),
               ),
-              sharedMemory,
-            }).catch(err => {
-              console.warn(
-                `[RuntimeService] failed to write assistant override AGENTS.md for ${effectiveAssistantName}:`,
-                err,
-              )
-            })
-          }
+            sharedMemory,
+          }).catch(err => {
+            console.warn(
+              `[RuntimeService] failed to write assistant override AGENTS.md for ${effectiveAssistantName}:`,
+              err,
+            )
+          })
         }
       } catch (err) {
         console.warn(

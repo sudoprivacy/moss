@@ -8,6 +8,23 @@ import {
 } from './backends/podWorkspace.js'
 import type { RuntimeService } from './runtimeService.js'
 import type { ServerConfig, SessionRecord } from './types.js'
+import { posix } from 'node:path'
+import { ResourceAccessError } from './catalog/resourceError.js'
+
+/** Reject paths outside the workspace before either filesystem is accessed. */
+export function normalizeWorkspaceRelativePath(value: string | null): string {
+  if (!value) return ''
+  if (value.includes('\0')) throw new ResourceAccessError(400, 'Invalid path')
+  const normalized = value.replace(/\\/g, '/').replace(/^\.\/+/, '')
+  if (/^[a-zA-Z]:/.test(normalized) || normalized.startsWith('/')) {
+    throw new ResourceAccessError(400, 'Path must be relative')
+  }
+  const relativePath = posix.normalize(normalized)
+  if (relativePath === '..' || relativePath.startsWith('../')) {
+    throw new ResourceAccessError(400, 'Path escapes workspace root')
+  }
+  return relativePath
+}
 
 /**
  * Resolve workspace I/O in the runtime that owns the session's files.

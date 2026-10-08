@@ -3,8 +3,35 @@ import {
   PodExecError,
   withPodReadinessRetry,
 } from '../backends/podWorkspace.js'
-import { resolveSessionWorkspaceAccess } from '../sessionWorkspace.js'
+import { normalizeWorkspaceRelativePath, resolveSessionWorkspaceAccess } from '../sessionWorkspace.js'
 import type { ServerConfig, SessionRecord } from '../types.js'
+
+describe('workspace path validation', () => {
+  for (const path of [
+    '../outside',
+    'a/../../outside',
+    '..\\outside',
+    '/etc/passwd',
+    'C:\\Windows\\win.ini',
+    'C:outside',
+    '\\\\host\\share',
+    'a\0.txt',
+  ]) {
+    it(`rejects ${JSON.stringify(path)} before file access`, () => {
+      expect(() => normalizeWorkspaceRelativePath(path)).toThrow()
+      try {
+        normalizeWorkspaceRelativePath(path)
+      } catch (error) {
+        expect((error as { statusCode: number }).statusCode).toBe(400)
+      }
+    })
+  }
+  it('keeps ordinary paths and normalizes safe relative segments', () => {
+    expect(normalizeWorkspaceRelativePath(null)).toBe('')
+    expect(normalizeWorkspaceRelativePath('./reports\\draft.txt')).toBe('reports/draft.txt')
+    expect(normalizeWorkspaceRelativePath('reports/../draft.txt')).toBe('draft.txt')
+  })
+})
 
 describe('workspace access during runtime startup', () => {
   const config = { k8s: { namespace: 'moss-sessions' } } as ServerConfig

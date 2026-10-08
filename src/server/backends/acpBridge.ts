@@ -466,11 +466,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     if (
       options.assistantName &&
       runtime.configDir &&
-      (runtime.hostMode === 'user' || runtime.dockerMode === 'user')
+      (runtime.hostMode === 'user' || runtime.dockerMode === 'user' || runtime.k8sMode === 'user')
     ) {
       const memoryFact = extractRememberableUserFact(trimmedText)
       if (memoryFact) {
-        void appendSharedAgentMemory({
+        await appendSharedAgentMemory({
           configDir: runtime.configDir,
           assistantName: options.assistantName,
           content: memoryFact.content,
