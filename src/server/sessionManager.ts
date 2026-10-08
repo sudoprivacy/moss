@@ -3,7 +3,7 @@ import os from 'os'
 import type { WebSocket } from 'ws'
 import type { SessionIndexEntry } from './types.js'
 
-export type SessionRuntimeType = 'host' | 'docker' | 'k8s'
+export type SessionRuntimeType = 'host' | 'docker' | 'k8s' | 'cohost'
 
 export type SessionRuntimeOptions = {
   type?: SessionRuntimeType

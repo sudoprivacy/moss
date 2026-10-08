@@ -23,6 +23,7 @@ export type StartSessionResult = {
   osPid: number | null
   sessionEndpoint: NexusSessionEndpoint
   durableSessionId?: string
+  workspacePath?: string
 }
 
 export class ManagedAgentClient {
@@ -49,6 +50,7 @@ export class ManagedAgentClient {
    */
   async startSession(input: {
     agentId: string
+    repos?: Array<{ hostPath: string; alias: string }>
     /**
      * Omitted when the daemon supplies the runtime itself.
      *
@@ -62,10 +64,19 @@ export class ManagedAgentClient {
     zoneId?: string
     resumeSessionId?: string
   }): Promise<StartSessionResult> {
-    const res = await this.call<{ session_id: string; os_pid?: number | null; session_endpoint?: NexusSessionEndpoint; durable_session_id?: string }>(
+    const res = await this.call<{
+      session_id: string
+      os_pid?: number | null
+      session_endpoint?: NexusSessionEndpoint
+      durable_session_id?: string
+      workspace_path?: string
+    }>(
       'managed_agent.start_session_v1',
       {
         agent_id: input.agentId,
+        ...(input.repos?.length
+          ? { repos: input.repos.map(repo => ({ host_path: repo.hostPath, alias: repo.alias })) }
+          : {}),
         ...(input.resumeSessionId ? { resume_session_id: input.resumeSessionId } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.ownerId ? { owner_id: input.ownerId } : {}),
@@ -87,12 +98,24 @@ export class ManagedAgentClient {
       throw new Error('Nexus daemon does not support acp-mailbox/1; upgrade the daemon before starting sessions')
     }
     return { sessionId: res.session_id, osPid: res.os_pid ?? null,
-      sessionEndpoint: res.session_endpoint, durableSessionId: res.durable_session_id }
+      sessionEndpoint: res.session_endpoint, durableSessionId: res.durable_session_id,
+      workspacePath: res.workspace_path }
   }
 
   /** Terminate the session nexus is supervising. */
   async cancel(sessionId: string, mode: 'session' = 'session'): Promise<void> {
     await this.call<unknown>('managed_agent.cancel_v1', { session_id: sessionId, mode })
+  }
+
+  /** Read the daemon's ownership and workspace record without starting a session. */
+  async getSession(sessionId: string): Promise<{
+    session_id: string
+    agent_id: string
+    owner_id: string
+    workspace_path: string
+    durable_session_id?: string
+  }> {
+    return this.call('managed_agent.get_session_v1', { session_id: sessionId })
   }
 
   openSession(endpoint: NexusSessionEndpoint, events: {

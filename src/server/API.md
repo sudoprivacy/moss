@@ -618,7 +618,7 @@ unique email, so a phone-only account gets the platform's synthetic form, which
   "attemptId": "uuid-or-null",
   "execution": {
     "requestedLocation": "cloud",
-    "runtimeType": "host|docker|k8s",
+    "runtimeType": "host|docker|k8s|cohost",
     "sessionStatus": "active"
   },
   "createdAt": 0,
@@ -638,8 +638,7 @@ unique email, so a phone-only account gets the platform's synthetic form, which
   "cwd": "/abs/path/project",
   "dangerously_skip_permissions": true,
   "runtime": {
-    "type": "host",
-    "hostMode": "user"
+    "type": "cohost"
   }
 }
 ```

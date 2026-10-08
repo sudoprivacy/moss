@@ -10,6 +10,7 @@ import type { RuntimeService } from './runtimeService.js'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { posix } from 'node:path'
 import { ResourceAccessError } from './catalog/resourceError.js'
+import { createCohostWorkspaceAccess } from './backends/cohostWorkspace.js'
 
 /** Reject paths outside the workspace before either filesystem is accessed. */
 export function normalizeWorkspaceRelativePath(value: string | null): string {
@@ -38,6 +39,7 @@ export function resolveSessionWorkspaceAccess(
   runtime: Pick<RuntimeService, 'ensureSessionReady'>,
   createAccess = createPodWorkspaceAccess,
 ): WorkspaceFileAccess | null {
+  if (session.runtime?.type === 'cohost') return createCohostWorkspaceAccess(session, runtime)
   if (session.runtime?.type !== 'k8s') return null
   return createAccess({
     kubectlBase: buildKubectlBaseArgs(

@@ -5,7 +5,7 @@ import type { QmsRuntimeConfig } from './qms/config.js'
 
 export const runtimeInfoSchema = lazySchema(() =>
   z.object({
-    type: z.enum(['host', 'docker', 'k8s']),
+    type: z.enum(['host', 'docker', 'k8s', 'cohost']),
     engine: z.enum(['scode']).optional(),
     scodePath: z.string().optional(),
     dockerImage: z.string().optional(),
@@ -114,7 +114,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       databaseUrl: z.string().min(1).optional(),
     }).default({}),
     runtimeDefaults: z.object({
-      type: z.enum(['host', 'docker', 'k8s']).default('host'),
+      type: z.enum(['host', 'docker', 'k8s', 'cohost']).default('host'),
       engine: z.enum(['scode']).default('scode'),
       scodePath: z.string().optional(),
       hostScodePath: z.string().optional(),

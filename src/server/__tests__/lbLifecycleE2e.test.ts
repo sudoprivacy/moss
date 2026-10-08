@@ -168,6 +168,22 @@ afterEach(async () => {
 })
 
 describe('LB lifecycle E2E (real server process, node runtime)', () => {
+  it('delivers the first frame sent at open while the runner attachment is delayed', async () => {
+    const fixture = await startFixture({ MOSS_TEST_DELAYED_RUNNER: '1' })
+    // Node's ws is the production client; Bun substitutes its own WebSocket.
+    const client = Bun.spawnSync(['node', '-e', `
+      const WebSocket = require(process.argv[1]);
+      const ws = new WebSocket(process.argv[2], { headers: { Authorization: 'Bearer ' + process.argv[3] } });
+      const timeout = setTimeout(() => { console.error('First message was lost during runner attachment'); ws.terminate(); process.exitCode = 1; }, 3000);
+      ws.once('open', () => ws.send(JSON.stringify({ type: 'user', text: 'first message' })));
+      ws.once('message', data => { clearTimeout(timeout); console.log(data.toString()); ws.close(); });
+      ws.once('error', error => { clearTimeout(timeout); console.error(error.message); process.exitCode = 1; });
+    `, resolve(import.meta.dir, '../../../node_modules/ws'),
+    `${fixture.baseUrl.replace('http:', 'ws:')}/ws/sessions/lb-e2e-seed-session`, fixture.token])
+    expect(client.exitCode, client.stderr.toString()).toBe(0)
+    expect(JSON.parse(client.stdout.toString())).toEqual({ type: 'user', text: 'first message' })
+  }, 60_000)
+
   it('no nexus → /readyz is 503 with db:true, nexus:false, draining:false; instance id carries into the body and the moss_route cookie', async () => {
     const fixture = await startFixture({ MOSS_INSTANCE_ID: 'e2e-inst-1' })
     const response = await fetch(`${fixture.baseUrl}/readyz`)

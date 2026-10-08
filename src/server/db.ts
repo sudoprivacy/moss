@@ -61,7 +61,13 @@ function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
 function mapRuntime(row: SqlRow): SessionRuntimeInfo {
   const rawType = String(row.runtime_type)
   const type: SessionRuntimeInfo['type'] =
-    rawType === 'docker' ? 'docker' : rawType === 'k8s' ? 'k8s' : 'host'
+    rawType === 'docker'
+      ? 'docker'
+      : rawType === 'k8s'
+        ? 'k8s'
+        : rawType === 'cohost'
+          ? 'cohost'
+          : 'host'
   const mode =
     row.docker_mode === 'user'
       ? 'user'
@@ -124,7 +130,14 @@ function mapAttempt(row: SqlRow): AttemptRecord {
     attemptId: String(row.attempt_id),
     sessionId: String(row.session_id),
     generation: Number(row.generation),
-    backendType: String(row.backend_type) === 'docker' ? 'docker' : 'host',
+    backendType:
+      String(row.backend_type) === 'docker'
+        ? 'docker'
+        : String(row.backend_type) === 'k8s'
+          ? 'k8s'
+          : String(row.backend_type) === 'cohost'
+            ? 'cohost'
+            : 'host',
     runtimeState: String(row.runtime_state) as AttemptRuntimeState,
     serverInstanceId:
       typeof row.server_instance_id === 'string' ? row.server_instance_id : null,
