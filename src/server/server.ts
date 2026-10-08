@@ -2728,7 +2728,8 @@ export function startServer(
           })
           return
         }
-        if (await authService.findUserByPhone(username)) {
+        const existing = await authService.findUserByPhone(username)
+        if (existing && existing.status !== 'pending') {
           writeJson(res, 409, { success: false, msg: 'This account already exists' })
           return
         }
@@ -2740,7 +2741,6 @@ export function startServer(
           password,
         })
         const user = registered.user
-        await authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
         await ensureGatewayAccount(authService, config, {
           userId: user.id,
           username,
