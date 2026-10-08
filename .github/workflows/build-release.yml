@@ -82,6 +82,7 @@ jobs:
           node node_modules/typescript/bin/tsc --noEmit --module nodenext --resolveJsonModule \
             --moduleResolution nodenext --target es2022 --skipLibCheck \
             scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts \
+            scripts/e2e/cohost-session-recovery.ts \
             scripts/e2e/embedded-nexus-live.ts scripts/e2e/broker-upgrade-live.ts scripts/e2e/external-broker-live.ts
 
       # Nothing in this repo has ever type-checked: bun executes TypeScript
@@ -162,9 +163,36 @@ jobs:
           name: nexus-runtime-${{ matrix.os }}
           path: ${{ runner.temp }}/moss-runtime-evidence/**/acceptance.json
 
+  cohost-live:
+    name: Moss durable session recovery (real daemon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - run: bun install --frozen-lockfile
+      - name: Verify two owners, writer exclusion and exact history after resume
+        run: bash scripts/e2e/run-cohost-recovery.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOSS_COHOST_ARTIFACTS: ${{ runner.temp }}/moss-cohost-evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: moss-cohost-recovery
+          path: |
+            ${{ runner.temp }}/moss-cohost-evidence/**/acceptance.json
+            ${{ runner.temp }}/moss-cohost-evidence/**/daemon.log
+            ${{ runner.temp }}/moss-cohost-evidence/binary-version.txt
+
   build:
     name: build-amd64
-    needs: [test, runtime-live]
+    needs: [test, runtime-live, cohost-live]
     runs-on: ubuntu-latest
     services:
       postgres:

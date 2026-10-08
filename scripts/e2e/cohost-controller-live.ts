@@ -3,24 +3,11 @@ import { randomUUID } from 'node:crypto'
 import type { SessionRpcMessage, NexusSessionEndpoint } from '@nexus-ai-fs/vfs-client'
 import type { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
 
-export async function reviewSession(s: {
+/** One controller implementation for live turns and durable recovery acceptance. */
+export function connectController(s: {
   agent: ManagedAgentClient
   sessionEndpoint: NexusSessionEndpoint
-  durableSessionId?: string
-  owner: string
-}, files: {
-  write(path: string, content: Buffer, token: string): Promise<void>
-  read(path: string, token: string): Promise<Buffer>
-}) {
-  const code = `MOSS_${randomUUID()}`
-  const units = 9 + Math.floor(Math.random() * 17)
-  const subtotal = units * 29 + 47
-  const root = `/agents/agent-${s.owner}/review-${randomUUID()}`
-  const input = `${root}/order.json`
-  const result = `${root}/result.json`
-  const final = `${root}/final.json`
-  await files.write(input, Buffer.from(JSON.stringify({ code, units, unit_price: 29, delivery: 47 })), '')
-  const allowed = new Set([input, result, final])
+}, allowed: ReadonlySet<string>) {
   const pending = new Map<string, { resolve(value: any): void, reject(error: Error): void }>()
   let nextId = 0
   let approvals = 0
@@ -74,6 +61,39 @@ export async function reviewSession(s: {
       pending.delete(id)
     }
   }
+  return {
+    rpc,
+    updates,
+    get approvals() { return approvals },
+    assertHealthy() {
+      if (unexpected) throw new Error(unexpected)
+      if (updates.some(u => u.sessionUpdate === 'tool_call_update' && u.status === 'failed')) {
+        throw new Error('workflow recovered from a failed tool')
+      }
+    },
+    close: () => transport.close(),
+  }
+}
+
+export async function reviewSession(s: {
+  agent: ManagedAgentClient
+  sessionEndpoint: NexusSessionEndpoint
+  durableSessionId?: string
+  owner: string
+}, files: {
+  write(path: string, content: Buffer, token: string): Promise<void>
+  read(path: string, token: string): Promise<Buffer>
+}) {
+  const code = `MOSS_${randomUUID()}`
+  const units = 9 + Math.floor(Math.random() * 17)
+  const subtotal = units * 29 + 47
+  const root = `/agents/agent-${s.owner}/review-${randomUUID()}`
+  const input = `${root}/order.json`
+  const result = `${root}/result.json`
+  const final = `${root}/final.json`
+  await files.write(input, Buffer.from(JSON.stringify({ code, units, unit_price: 29, delivery: 47 })), '')
+  const controller = connectController(s, new Set([input, result, final]))
+  const { rpc } = controller
   try {
     await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
     const opened = await rpc('session/new', { cwd: '/', mcpServers: [] })
@@ -90,13 +110,10 @@ export async function reviewSession(s: {
     if (second.stopReason !== 'end_turn') throw new Error(`next turn stopped: ${second.stopReason}`)
     const savedFinal = JSON.parse((await files.read(final, '')).toString())
     if (savedFinal.code !== code || savedFinal.total !== subtotal + 13) throw new Error('next turn lost the actual order')
-    if (unexpected) throw new Error(unexpected)
-    if (approvals < 3) throw new Error('actual file requests did not reach the Moss controller')
-    if (updates.some(u => u.sessionUpdate === 'tool_call_update' && u.status === 'failed')) {
-      throw new Error('workflow recovered from a failed tool')
-    }
-    return { code, subtotal, total: subtotal + 13, approvals, sessionId }
+    controller.assertHealthy()
+    if (controller.approvals < 3) throw new Error('actual file requests did not reach the Moss controller')
+    return { code, subtotal, total: subtotal + 13, approvals: controller.approvals, sessionId }
   } finally {
-    await transport.close()
+    await controller.close()
   }
 }

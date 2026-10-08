@@ -1,6 +1,7 @@
 {
   "nexusd-cluster": "0.8.0",
+  "nexusd-cohost": "0.2.25",
   "nexus-vault": "0.5.68",
-  "scode": "v0.2.21",
-  "scode-linux-x64-bundle-sha256": "2709f1129bcda2c2b8c4eaeb5f669daef561d5dbf989d3cf845ba6388f03a06e"
+  "scode": "v0.2.23",
+  "scode-linux-x64-bundle-sha256": "1a7bc195abd66d0c582cfea8caac71dfefc16f7aef25b04d68500fa55d7e8abc"
 }
