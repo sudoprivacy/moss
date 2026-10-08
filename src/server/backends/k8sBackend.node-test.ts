@@ -5,7 +5,18 @@ import { join, posix } from 'node:path'
 import { test } from 'node:test'
 import { writeAssistantOverrideAgentsMd } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
-import { buildWorkspaceInstructionsSecret, buildWorkspaceStorage, formatKubectlApplyError } from './k8sBackend.js'
+import { buildWorkspaceInstructionsSecret, buildWorkspaceStorage, formatKubectlApplyError, buildK8sExecArgs } from './k8sBackend.js'
+
+void test('default cloud sessions use a supported scode workspace permission mode', () => {
+  const base = ['--kubeconfig', '/operator/cluster.yaml', '--namespace', 'moss-sessions']
+  const args = buildK8sExecArgs(base, 'owned-pod', 'claude-sonnet-4-6', false)
+  assert.equal(args[args.indexOf('--permission-mode') + 1], 'workspace-write')
+  assert.equal(args.includes('prompt'), false)
+  assert.deepEqual(args.slice(0, base.length + 5), [...base, 'exec', '-i', 'owned-pod', '--', 'scode'])
+  assert.equal(args[args.indexOf('--model') + 1], 'claude-sonnet-4-6')
+  const unrestricted = buildK8sExecArgs(base, 'owned-pod', 'claude-sonnet-4-6', true)
+  assert.equal(unrestricted[unrestricted.indexOf('--permission-mode') + 1], 'danger-full-access')
+})
 
 void test('kubectl errors retain API failure reasons without echoing secret manifests', () => {
   const manifest = JSON.stringify({ stringData: { apiKey: 'synthetic-private-provider-key', password: 'synthetic-private-password' } })

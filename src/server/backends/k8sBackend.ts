@@ -456,19 +456,7 @@ export class K8sBackend implements SessionBackend {
 
     // Bridge ACP via `kubectl exec -i`. The local kubectl process's stdio IS
     // the pod's exec stdio — feed it straight into acpBridge, same as docker.
-    const execArgs = [
-      ...kubectlBase,
-      'exec',
-      '-i',
-      podName,
-      '--',
-      'scode',
-      'acp',
-      '--output-format', 'json',
-      '--permission-mode', options.dangerouslySkipPermissions ? 'danger-full-access' : 'prompt',
-      '--auth', 'proxy',
-      '--model', model,
-    ]
+    const execArgs = buildK8sExecArgs(kubectlBase, podName, model, options.dangerouslySkipPermissions === true)
 
     // Nexus owns this kubectl process and exposes its ACP session mailbox.
     const transport = await startViaNexus({
@@ -606,6 +594,16 @@ async function startViaNexus(input: {
   // The same authenticated actor owns control-plane creation and all session
   // frames. Switching back to moss's principal would forge a different sender.
   return new NexusAcpTransport(agent, session)
+}
+
+/** Use permission modes supported by the pinned scode runtime for cloud sessions. */
+export function buildK8sExecArgs(kubectlBase: string[], podName: string, model: string, isDangerouslySkipPermissions: boolean): string[] {
+  return [
+    ...kubectlBase, 'exec', '-i', podName, '--', 'scode', 'acp',
+    '--output-format', 'json',
+    '--permission-mode', isDangerouslySkipPermissions ? 'danger-full-access' : 'workspace-write',
+    '--auth', 'proxy', '--model', model,
+  ]
 }
 
 export function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] {
