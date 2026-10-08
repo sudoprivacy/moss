@@ -35,11 +35,17 @@ export async function dispatchOrganizationBilling(
       const account = await service.retryOrganization(actor.orgId, String(org?.name ?? actor.orgId))
       data = { account_status: account.status }
     } else {
-      const match = path.match(/^\/api\/v1\/model-account\/members\/([^/]+)\/(limit|status|provision)$/)
+      const match = path.match(/^\/api\/v1\/model-account\/members\/([^/]+)\/(limit|limit-mode|usage|status|provision)$/)
       if (!match) throw new OrganizationBillingError('NOT_FOUND', '接口不存在', 404)
       const member = decodeURIComponent(match[1]!)
       const operationReference = reference ?? (typeof body.reference === 'string' ? body.reference : '')
-      if (match[2] === 'provision' && method === 'POST') {
+      if (match[2] === 'usage' && method === 'GET') {
+        data = await service.memberUsage(actor, member, Number(url.searchParams.get('page') ?? 1), Number(url.searchParams.get('page_size') ?? 20))
+      } else if (match[2] === 'limit-mode' && method === 'PATCH') {
+        if (typeof body.unlimited !== 'boolean' || !body.unlimited && typeof body.remaining_limit_usd !== 'string') throw new OrganizationBillingError('INVALID_LIMIT', '请选择限额模式并填写剩余限额')
+        const token = await service.setMemberLimitMode(actor, member, body.unlimited ? null : body.remaining_limit_usd as string, operationReference)
+        data = service.projectToken(token, await service.requireAccount(actor.orgId))
+      } else if (match[2] === 'provision' && method === 'POST') {
         await service.assertAdmin(actor, actor.orgId)
         // Retries reuse the recorded creation limit; callers cannot change it through this endpoint.
         const token = await service.ensureMember(actor.orgId, member)
@@ -57,7 +63,7 @@ export async function dispatchOrganizationBilling(
     return { status: 200, body: { success: true, data } }
   } catch (error) {
     if (error instanceof OrganizationBillingError) return { status: error.statusCode, body: { success: false, error: { code: error.code, message: error.message } } }
-    if (error instanceof RouterRequestError) return { status: error.outcome === 'unknown' ? 503 : 422, body: { success: false, error: { code: error.code, message: '模型服务请求未完成，请查询状态后重试' } } }
+    if (error instanceof RouterRequestError) return { status: error.outcome === 'unknown' ? 503 : 422, body: { success: false, error: { code: error.code, message: error.outcome === 'unknown' ? '模型服务结果待核对，请勿重复调整限额' : '模型服务拒绝了请求，请核对 Key 状态和剩余限额' } } }
     return { status: 400, body: { success: false, error: { code: 'INVALID_REQUEST', message: '请求参数无效或服务暂不可用' } } }
   }
 }

@@ -211,11 +211,11 @@ export class OrganizationBillingService {
       can_manage: isAdmin, can_recharge: user.role === 'admin' && user.org_id === actor.orgId && (this.options.isRechargeEnabled?.() ?? false),
       ...(organization ? { model_balance_usd: quotaToUsd(organization.quota, account.quota_per_usd), used_amount_usd: quotaToUsd(organization.used_quota, account.quota_per_usd) } : {}),
       member: members[0] ? this.projectToken(members[0], account) : null,
-      ...(isAdmin ? { default_member_limit_usd: account.default_member_quota === null ? null : quotaToUsd(account.default_member_quota, account.quota_per_usd) } : {}),
+      ...(isAdmin ? { router_user_id: account.router_user_id, default_member_limit_usd: account.default_member_quota === null ? null : quotaToUsd(account.default_member_quota, account.quota_per_usd) } : {}),
     }
   }
   projectToken(token: RouterToken, account: ModelAccountRow): Record<string, unknown> {
-    return { token_id: token.id, admin_status: token.admin_status, effective_status: token.effective_status,
+    return { token_id: token.id, token_name: token.name, admin_status: token.admin_status, effective_status: token.effective_status,
       unlimited: token.unlimited_quota, remaining_limit_usd: token.unlimited_quota ? null : quotaToUsd(token.remain_quota, account.quota_per_usd),
       used_amount_usd: quotaToUsd(token.used_quota, account.quota_per_usd), key_masked: token.key_masked ?? null }
   }
@@ -250,24 +250,29 @@ export class OrganizationBillingService {
   }
 
   async logs(actor: OrganizationBillingActor, page = 1, pageSize = 20): Promise<Record<string, unknown>> {
-    if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new OrganizationBillingError('INVALID_PAGE', '分页参数无效')
-    // dashboard validates active membership; only admins receive organization totals.
-    const dashboard = await this.dashboard(actor)
+    const user = await this.db.get('SELECT org_id, role, status FROM users WHERE id = ?', [actor.userId])
+    if (!user || user.status !== 'active' || user.org_id !== actor.orgId && user.role !== 'super_admin') throw new OrganizationBillingError('FORBIDDEN', '无权访问当前组织', 403)
+    return this.memberLogs(actor.orgId, actor.userId, page, pageSize)
+  }
+  async memberUsage(actor: OrganizationBillingActor, memberId: string, page = 1, pageSize = 20): Promise<Record<string, unknown>> {
+    await this.assertAdmin(actor, actor.orgId)
+    const user = await this.db.get('SELECT id FROM users WHERE id = ? AND org_id = ?', [memberId, actor.orgId])
+    if (!user) throw new OrganizationBillingError('MEMBER_UNAVAILABLE', '成员不属于当前组织', 404)
     const account = await this.requireAccount(actor.orgId)
-    const own = await this.token(actor.orgId, actor.userId)
-    if (!account.router_user_id || !dashboard.can_manage && !own?.router_token_id) return { items: [], total: 0, page, page_size: pageSize, truncated: false }
-    const rows = []
-    let truncated = false
-    for (let upstreamPage = 1; upstreamPage <= 100; upstreamPage++) {
-      const batch = await this.router.listLogs(account.router_user_id, account.router_username, upstreamPage, 100)
-      rows.push(...batch.items.filter(log => log.type === 2 && (dashboard.can_manage || log.token_id === own!.router_token_id)))
-      if (!batch.items.length || upstreamPage * 100 >= batch.total) break
-      if (upstreamPage === 100) truncated = true
-    }
-    return { items: rows.slice((page - 1) * pageSize, page * pageSize).map(log => ({ id: log.id, token_id: log.token_id,
+    const binding = await this.token(actor.orgId, memberId)
+    const token = binding?.router_token_id ? (await this.router.listTokens(binding.router_user_id, binding.router_token_id))[0] : undefined
+    return { member: token ? this.projectToken(token, account) : null, ...await this.memberLogs(actor.orgId, memberId, page, pageSize) }
+  }
+  private async memberLogs(orgId: string, memberId: string, page: number, pageSize: number): Promise<Record<string, unknown>> {
+    if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new OrganizationBillingError('INVALID_PAGE', '分页参数无效')
+    const account = await this.requireAccount(orgId)
+    const own = await this.token(orgId, memberId)
+    if (!account.router_user_id || !own?.router_token_id) return { items: [], total: 0, page, page_size: pageSize, truncated: false }
+    const batch = await this.router.listLogs(account.router_user_id, page, pageSize, own.router_token_id)
+    return { items: batch.items.map(log => ({ id: log.id, token_id: log.token_id,
       created_at: log.created_at, model_name: log.model_name, amount_usd: quotaToUsd(log.quota, account.quota_per_usd),
-      input_tokens: log.prompt_tokens, output_tokens: log.completion_tokens, request_id: log.request_id })),
-      total: rows.length, page, page_size: pageSize, truncated }
+      input_tokens: log.prompt_tokens, output_tokens: log.completion_tokens, request_id: log.request_id, duration: log.duration ?? null })),
+      total: batch.total, page, page_size: pageSize, truncated: false }
   }
 
   async setMemberStatus(actor: OrganizationBillingActor, memberId: string, status: RouterAdminStatus, reference: string): Promise<RouterToken> {
@@ -291,8 +296,22 @@ export class OrganizationBillingService {
     const delta = usdMicrosToQuota(parseUsd(amountUsd, false), account.quota_per_usd) * (direction === 'decrease' ? -1 : 1)
     return this.exclusive(`member:${actor.orgId}:${memberId}`, async () => {
       const token = await this.requireToken(actor.orgId, memberId)
-      return this.operation(actor.orgId, 'token-quota', reference, { tokenId: token.router_token_id, delta }, true,
+      await this.assertNoUncertainLimit(actor.orgId, 'token-quota', memberId)
+      return this.operation(actor.orgId, 'token-quota', reference, { tokenId: token.router_token_id, delta }, false,
         () => this.router.adjustTokenQuota(token.router_user_id, token.router_token_id!, delta, reference), memberId, actor.userId)
+    })
+  }
+  async setMemberLimitMode(actor: OrganizationBillingActor, memberId: string, limitUsd: string | null, reference: string): Promise<RouterToken> {
+    await this.assertAdmin(actor, actor.orgId)
+    if (!await this.db.get('SELECT id FROM users WHERE id = ? AND org_id = ?', [memberId, actor.orgId])) throw new OrganizationBillingError('MEMBER_UNAVAILABLE', '成员不属于当前组织', 404)
+    const account = await this.requireAccount(actor.orgId)
+    let limit: number | null
+    try { limit = limitUsd === null ? null : usdMicrosToQuota(parseUsd(limitUsd), account.quota_per_usd) } catch { throw new OrganizationBillingError('INVALID_AMOUNT', '限额必须为非负且最多两位小数的美元金额') }
+    return this.exclusive(`member:${actor.orgId}:${memberId}`, async () => {
+      const token = await this.requireToken(actor.orgId, memberId)
+      await this.assertNoUncertainLimit(actor.orgId, 'token-quota', memberId)
+      return this.operation(actor.orgId, 'token-mode', reference, { tokenId: token.router_token_id, limit }, false,
+        () => this.router.setTokenLimitMode(token.router_user_id, token.router_token_id!, limit, reference), memberId, actor.userId)
     })
   }
 
@@ -312,7 +331,8 @@ export class OrganizationBillingService {
         return current
       }
       const delta = usdMicrosToQuota(parseUsd(change.amountUsd, false), account.quota_per_usd) * (change.direction === 'decrease' ? -1 : 1)
-      return this.operation(actor.orgId, 'service-limit', reference, { tokenId: token.router_token_id, delta }, true,
+      await this.assertNoUncertainLimit(actor.orgId, 'service-limit')
+      return this.operation(actor.orgId, 'service-limit', reference, { tokenId: token.router_token_id, delta }, false,
         () => this.router.adjustTokenQuota(token.router_user_id, token.router_token_id!, delta, reference), undefined, actor.userId)
     })
   }
@@ -351,6 +371,12 @@ export class OrganizationBillingService {
   }
   private getOperation(reference: string): Promise<OperationRow | undefined> {
     return this.db.get<OperationRow>('SELECT * FROM organization_model_operations WHERE reference = ?', [reference])
+  }
+  private async assertNoUncertainLimit(orgId: string, type: 'token-quota' | 'service-limit', memberId?: string): Promise<void> {
+    const pending = await this.db.get(`SELECT reference FROM organization_model_operations
+      WHERE org_id = ? AND operation_type IN (?, ?) AND ${memberId ? 'member_id = ?' : 'member_id IS NULL'}
+      AND status IN ('sending', 'unknown') LIMIT 1`, memberId ? [orgId, type, 'token-mode', memberId] : [orgId, type, type])
+    if (pending) throw new OrganizationBillingError('NEEDS_REVIEW', '上次限额调整结果待核对，核对前不能再次调整', 409)
   }
   async operation<T>(orgId: string, type: string, reference: string, request: unknown, remotelyIdempotent: boolean, execute: () => Promise<T>, memberId?: string, actorId?: string): Promise<T> {
     if (!reference || reference.length > 200) throw new OrganizationBillingError('INVALID_REFERENCE', '缺少有效操作标识')

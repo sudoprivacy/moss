@@ -54,6 +54,7 @@ const nodeTestFiles = [
   'src/server/billing/creditApplicationService.node-test.ts',
   'src/server/billing/fuiouAdapter.node-test.ts',
   'src/server/billing/fuiouMock.node-test.ts',
+  'src/server/billing/routerMock.node-test.ts',
   'src/server/billing/rechargeService.node-test.ts',
   'src/server/billing/organizationBillingService.node-test.ts',
   'src/server/billing/organizationRechargeService.node-test.ts',

@@ -1,3 +1,4 @@
+import { OrganizationManualCreditService } from './organizationManualCreditService.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { SqlRow } from '../db/driver.js'
 import type { VerifiedPaymentEvent } from './fuiouAdapter.js'
@@ -24,8 +25,9 @@ const PACKAGES = [
 ] as const
 
 export class OrganizationRechargeService {
+  readonly manual: OrganizationManualCreditService
   constructor(readonly billing: OrganizationBillingService, private readonly payment?: OrganizationPaymentPort,
-    private readonly options: { exchangeRateMicros?: number; enabled?: boolean } = {}) {}
+    private readonly options: { exchangeRateMicros?: number; enabled?: boolean } = {}) { this.manual = new OrganizationManualCreditService(this, billing) }
   isEnabled(): boolean { return !!this.payment && this.options.enabled !== false }
   private requirePayment(): OrganizationPaymentPort {
     if (!this.payment || this.options.enabled === false) throw new OrganizationBillingError('PAYMENT_UNAVAILABLE', '充值服务未配置', 503)
@@ -82,17 +84,37 @@ export class OrganizationRechargeService {
   }
   async list(actor: OrganizationBillingActor, page = 1, pageSize = 20): Promise<{ items: Record<string, unknown>[]; total: number; page: number; page_size: number }> {
     await this.billing.assertAdmin(actor, actor.orgId, true)
-    if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new OrganizationBillingError('INVALID_PAGE', '分页参数无效')
-    const [orders, count] = await Promise.all([
-      this.billing.db.all<OrganizationOrder>('SELECT * FROM organization_model_orders WHERE org_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?', [actor.orgId, pageSize, (page - 1) * pageSize]),
-      this.billing.db.get('SELECT COUNT(*) AS total FROM organization_model_orders WHERE org_id = ?', [actor.orgId]),
-    ])
-    return { items: orders.map(order => this.project(order)), total: Number(count?.total ?? 0), page, page_size: pageSize }
+    return this.listRecords(actor, page, pageSize)
   }
   async get(actor: OrganizationBillingActor, orderNo: string): Promise<Record<string, unknown>> {
     await this.billing.assertAdmin(actor, actor.orgId, true)
     return this.project(await this.requireOrder(orderNo, actor.orgId))
   }
+  async listForAdministration(actor: OrganizationBillingActor, page = 1, pageSize = 20, source = 'all') {
+    await this.billing.assertAdmin(actor, actor.orgId)
+    return this.listRecords(actor, page, pageSize, source)
+  }
+  private async listRecords(actor: OrganizationBillingActor, page: number, pageSize: number, source = 'all') {
+    if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new OrganizationBillingError('INVALID_PAGE', '分页参数无效')
+    if (!['all', 'online', 'manual'].includes(source)) throw new OrganizationBillingError('INVALID_SOURCE', '充值来源无效')
+    const union = `SELECT order_no AS no, created_at, 'online' AS source FROM organization_model_orders WHERE org_id = ?
+      UNION ALL SELECT credit_no AS no, created_at, 'manual' AS source FROM organization_model_credits WHERE org_id = ?`
+    const filter = source === 'all' ? '' : ' WHERE source = ?'
+    const params = source === 'all' ? [actor.orgId, actor.orgId] : [actor.orgId, actor.orgId, source]
+    const [rows, count] = await Promise.all([
+      this.billing.db.all(`SELECT * FROM (${union}) records${filter} ORDER BY created_at DESC, no DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]),
+      this.billing.db.get(`SELECT COUNT(*) AS total FROM (${union}) records${filter}`, params),
+    ])
+    const items = await Promise.all(rows.map(async row => {
+      if (row.source === 'manual') return this.manual.project(await this.manual.requireCredit(String(row.no), actor.orgId))
+      const order = await this.requireOrder(String(row.no), actor.orgId)
+      const payer = await this.billing.db.get('SELECT name, display_name FROM users WHERE id = ? AND org_id = ?', [order.payer_user_id, order.org_id])
+      return { ...this.project(order), router_user_id: order.router_user_id, payer_username: payer?.name ?? null,
+        payer_nickname: payer?.display_name ?? null, paid_at: order.paid_at, credited_at: order.credited_at, resolution: await this.manual.orderSummary(order) }
+    }))
+    return { items, total: Number(count?.total ?? 0), page, page_size: pageSize }
+  }
+
   async sync(actor: OrganizationBillingActor, orderNo: string): Promise<Record<string, unknown>> {
     await this.billing.assertAdmin(actor, actor.orgId, true)
     const order = await this.requireOrder(orderNo, actor.orgId)
@@ -120,6 +142,11 @@ export class OrganizationRechargeService {
       if (event.orderDate !== date(order.created_at) || event.amountCents !== order.amount_cny_fen) throw new OrganizationBillingError('PAYMENT_MISMATCH', '支付金额或订单日期不匹配', 400)
       if (event.status !== 'SUCCESS' || order.credit_status === 'credited') return true
       await this.billing.db.run("UPDATE organization_model_orders SET payment_status = 'paid', paid_at = COALESCE(paid_at, ?), credit_status = 'sending' WHERE id = ?", [Date.now(), order.id])
+      const manual = await this.billing.db.get('SELECT order_no FROM organization_model_order_resolutions WHERE order_no = ?', [order.order_no])
+      if (manual) {
+        await this.billing.db.run("UPDATE organization_model_orders SET credit_status = 'needs_review' WHERE id = ?", [order.id])
+        return true
+      }
       try {
         await this.billing.operation(order.org_id, 'organization-recharge', `recharge:${order.id}`, { accountId: order.router_user_id, quota: order.credited_quota, orderNo: order.order_no }, false, async () => {
           await this.billing.router.changeAccountQuota(order.router_user_id, order.credited_quota, `Moss organization recharge ${order.order_no}`)
@@ -139,7 +166,7 @@ export class OrganizationRechargeService {
     return order
   }
   project(order: OrganizationOrder): Record<string, unknown> {
-    return { order_no: order.order_no, org_id: order.org_id, payer_user_id: order.payer_user_id,
+    return { source: 'online', order_no: order.order_no, org_id: order.org_id, payer_user_id: order.payer_user_id,
       purchase_amount_usd: formatUsdMicros(order.purchase_usd_micros), bonus_amount_usd: formatUsdMicros(order.bonus_usd_micros),
       amount_cny_fen: order.amount_cny_fen, payment_method: order.payment_method,
       payment_status: order.payment_status, credit_status: order.credit_status, created_at: order.created_at, expires_at: order.expires_at,

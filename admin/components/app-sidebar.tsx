@@ -194,7 +194,7 @@ const menuItems: NavItem[] = [
     requiredScope: 'admin:settings',
     children: [
       { title: '邀请码管理', url: OPERATION_ROUTES.invitations, icon: TicketCheck },
-      { title: '历史个人账务', url: OPERATION_ROUTES.billing, icon: ReceiptText },
+      { title: '账务管理', url: OPERATION_ROUTES.billing, icon: ReceiptText },
       { title: '业务审计', url: OPERATION_ROUTES.audit, icon: ClipboardList },
       { title: '质量管理', url: OPERATION_ROUTES.quality, icon: Activity },
       { title: 'Sudowork 系统设置', url: OPERATION_ROUTES.sudoworkSettings, icon: Settings },

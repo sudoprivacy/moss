@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import type { RouterAccount, RouterLog, RouterTokenCreated, RouterFetch } from '../organizationRouterAdapter.js'
 
 interface MockState {
@@ -39,6 +39,16 @@ export class RouterMock {
     const key = request.headers.get('Authorization')?.replace(/^Bearer /, '') ?? ''
     if (path === '/health') return json({ mode: this.options.upstream ? 'hybrid' : 'standalone', simulated_new_interfaces: true })
     if (path.startsWith('/v1/') || path === '/api/usage/token' || path === '/api/v1/logs') {
+      // Model discovery is read-only and must use the requesting member's Key.
+      // Other model routes remain blocked in hybrid mode: local limits cannot enforce upstream inference.
+      if (this.options.upstream && path === '/v1/models' && request.method === 'GET') {
+        const token = this.state.tokens.find(t => t.key === key)
+        if (!token) return failure('UNAUTHORIZED', 'Unknown model Key', 401)
+        const response = await (this.options.fetch ?? fetch)(`${this.options.upstream.baseUrl.replace(/\/$/, '')}/v1/models`, {
+          headers: { Authorization: `Bearer ${token.key}` }, redirect: 'error', signal: AbortSignal.timeout(10_000),
+        })
+        return json(await response.json(), response.status)
+      }
       if (this.options.upstream) return failure('HYBRID_NOT_ENFORCED', 'Hybrid mode does not simulate actual upstream inference enforcement', 409)
       const token = this.state.tokens.find(t => t.key === key)
       if (!token) return failure('UNAUTHORIZED', 'Unknown model Key', 401)
@@ -56,7 +66,8 @@ export class RouterMock {
     }
     if (key !== this.options.adminToken || request.headers.get('New-Api-User') !== (this.options.adminUserId ?? '1')) return failure('UNAUTHORIZED', 'Invalid mock administrator', 401)
     const body = request.method === 'GET' ? {} : await request.json() as Record<string, any>
-    if (this.options.upstream && !path.startsWith('/api/integration/') && !path.startsWith('/__mock/')) {
+    const isTokenManagement = ['/api/user/tokens', '/api/user/token/status', '/api/user/token/quota'].includes(path)
+    if (this.options.upstream && !isTokenManagement && !path.startsWith('/__mock/')) {
       return this.forward(request, body)
     }
     if (path === '/api/user/search') return ok({ items: this.state.accounts.filter(a => a.username.includes(url.searchParams.get('keyword') ?? '')) })
@@ -94,6 +105,17 @@ export class RouterMock {
       const page = Math.max(1, Number(url.searchParams.get('p') ?? 1)); const size = Math.min(100, Math.max(1, Number(url.searchParams.get('page_size') ?? 100)))
       return ok({ items: list.slice((page - 1) * size, page * size), total: list.length })
     }
+    if (path === '/api/log/query') {
+      const name = url.searchParams.get('api_key_name')
+      const list = this.state.logs.filter(log => log.user_id === Number(url.searchParams.get('user_id')) && log.type === 2)
+        .map(log => ({ created_at: log.created_at, type: 'consumption',
+          api_key_name: this.state.tokens.find(token => token.id === log.token_id)?.name ?? '', model_name: log.model_name,
+          cost: log.quota, prompt_tokens: log.prompt_tokens, completion_tokens: log.completion_tokens, other: { request_id: log.request_id } }))
+        .filter(log => !name || log.api_key_name === name).sort((a, b) => b.created_at - a.created_at)
+      const page = Math.max(1, Number(url.searchParams.get('page_num') ?? 1))
+      const size = Math.min(100, Math.max(1, Number(url.searchParams.get('page_size') ?? 20)))
+      return ok({ data: list.slice((page - 1) * size, page * size), count: list.length })
+    }
     if (path === '/__mock/consume') {
       if (this.options.upstream) return failure('HYBRID_NOT_ENFORCED', 'Consumption simulation requires standalone mode', 409)
       const token = this.state.tokens.find(t => t.id === body.token_id)
@@ -101,35 +123,32 @@ export class RouterMock {
       if (!token || !account || !Number.isSafeInteger(body.quota) || body.quota <= 0) return failure('INVALID', 'Invalid simulated consumption', 400)
       return this.consume(token, account, body.quota, 'mock-model') ?? ok()
     }
-    const match = path.match(/^\/api\/integration\/v1\/users\/(\d+)\/tokens(?:\/(\d+)\/(status|quota-adjustments))?$/)
-    if (match) {
-      const userId = Number(match[1]); const account = this.state.accounts.find(a => a.id === userId)
-      if (!account) return failure('NOT_FOUND', 'Account not mirrored in this mock; create it through the hybrid facade first', 404)
-      if (!match[2] && request.method === 'GET') {
-        const target = url.searchParams.get('token_id')
-        const tokens = this.state.tokens.filter(t => t.user_id === userId && (!target || t.id === Number(target)))
-        const page = Math.max(1, Number(url.searchParams.get('page') ?? 1)); const size = Math.min(100, Math.max(1, Number(url.searchParams.get('page_size') ?? 100)))
-        return ok({ items: tokens.slice((page - 1) * size, page * size).map(t => this.project(t, account)), total: tokens.length, page, page_size: size })
+    if (path === '/api/user/tokens' && request.method === 'GET') {
+      const userId = Number(url.searchParams.get('user_id'))
+      const account = this.state.accounts.find(a => a.id === userId)
+      if (!account) return failure('NOT_FOUND', 'Account missing', 404)
+      const target = url.searchParams.get('id')
+      const tokens = this.state.tokens.filter(t => t.user_id === userId && (!target || t.id === Number(target)))
+      return ok({ data: tokens.map(t => this.project(t, account)), count: tokens.length })
+    }
+    if (request.method === 'PUT' && ['/api/user/token/status', '/api/user/token/quota'].includes(path)) {
+      const token = this.state.tokens.find(t => t.id === body.id)
+      const account = this.state.accounts.find(a => a.id === token?.user_id)
+      if (!token || !account) return failure('NOT_FOUND', 'Token missing', 404)
+      if (path.endsWith('/status')) {
+        if (!['enable', 'disabled'].includes(body.status)) return failure('INVALID_STATUS', 'Invalid status', 400)
+        token.admin_status = body.status === 'enable' ? 'enabled' : 'disabled'
+      } else {
+        if (typeof body.unlimited_quota !== 'boolean' || !Number.isSafeInteger(body.delta_quota)) return failure('INVALID_AMOUNT', 'Invalid quota mode or amount', 400)
+        if (!body.unlimited_quota) {
+          const remaining = body.delta_quota === 0 ? 0 : token.remain_quota + body.delta_quota
+          if (!Number.isSafeInteger(remaining) || remaining < 0) return failure('INSUFFICIENT_QUOTA', 'Insufficient member limit', 422)
+          token.remain_quota = remaining
+        }
+        token.unlimited_quota = body.unlimited_quota
       }
-      const token = this.state.tokens.find(t => t.id === Number(match[2]) && t.user_id === userId)
-      if (!token) return failure('NOT_FOUND', 'Token missing', 404)
-      if (typeof body.reference !== 'string' || !body.reference) return failure('INVALID_REFERENCE', 'Reference required', 400)
-      const scope = `${match[3]}:${body.reference}`
-      const fingerprint = createHash('sha256').update(JSON.stringify([userId, token.id, body.status, body.delta_quota])).digest('hex')
-      const previous = this.state.commands.find(([key]) => key === scope)?.[1]
-      if (previous) return previous.fingerprint === fingerprint ? json({ ...(previous.response as Record<string, unknown>), idempotent_replay: true }) : failure('IDEMPOTENCY_CONFLICT', 'Reference reused', 409)
-      if (match[3] === 'status' && request.method === 'PATCH') {
-        if (!['enabled', 'disabled'].includes(body.status)) return failure('INVALID_STATUS', 'Invalid status', 400)
-        if (body.status === 'enabled' && (token.expired_time !== -1 && token.expired_time <= Date.now() / 1000 || !token.unlimited_quota && token.remain_quota <= 0)) return failure('TOKEN_UNAVAILABLE', 'Key expired or exhausted', 422)
-        token.admin_status = body.status
-      } else if (match[3] === 'quota-adjustments' && request.method === 'POST') {
-        if (token.unlimited_quota) return failure('QUOTA_MODE_CONFLICT', 'Key has no member limit', 409)
-        if (!Number.isSafeInteger(body.delta_quota) || !body.delta_quota || !Number.isSafeInteger(token.remain_quota + body.delta_quota)) return failure('INVALID_AMOUNT', 'Invalid quota delta', 400)
-        if (body.delta_quota < 0 && token.remain_quota + body.delta_quota < 0) return failure('INSUFFICIENT_QUOTA', 'Insufficient member limit', 422)
-        token.remain_quota += body.delta_quota
-      } else return failure('METHOD_NOT_ALLOWED', 'Invalid method', 405)
-      const response = { success: true, reference: body.reference, idempotent_replay: false, data: this.project(token, account) }
-      this.state.commands.push([scope, { fingerprint, response }]); this.save(); return json(response)
+      // Match the supplied API: repeated deltas apply again. Moss owns local deduplication.
+      this.save(); return ok(this.project(token, account))
     }
     return failure('NOT_FOUND', 'Mock route not implemented', 404)
   }
@@ -144,7 +163,7 @@ export class RouterMock {
     if (this.project(token, account).effective_status !== 'active') return failure('KEY_UNAVAILABLE', 'Key unavailable', 403)
     if (account.quota < quota || !token.unlimited_quota && token.remain_quota < quota) return failure('INSUFFICIENT_QUOTA', '额度不足', 403)
     account.quota -= quota; account.used_quota += quota
-    if (!token.unlimited_quota) token.remain_quota -= quota
+    token.remain_quota -= quota
     token.used_quota += quota
     this.state.logs.push({ id: String(this.state.logs.length + 1), user_id: account.id, token_id: token.id, type: 2, created_at: Math.floor(Date.now() / 1000), quota, model_name: model, prompt_tokens: 10, completion_tokens: 10, request_id: `mock-${this.state.logs.length + 1}` })
     this.save(); return null

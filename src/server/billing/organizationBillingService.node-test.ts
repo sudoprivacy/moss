@@ -10,9 +10,9 @@ import { RouterMock } from './testing/routerMock.js'
 async function setup(registrationQuota = 0, transform?: (fetcher: RouterFetch) => RouterFetch) {
   const sqlite = new DatabaseSync(':memory:')
   const db = new SqliteDriver(sqlite)
-  await db.exec(`CREATE TABLE organizations (id TEXT PRIMARY KEY); CREATE TABLE users (id TEXT PRIMARY KEY, org_id TEXT, role TEXT, status TEXT);
+  await db.exec(`CREATE TABLE organizations (id TEXT PRIMARY KEY); CREATE TABLE users (id TEXT PRIMARY KEY, org_id TEXT, role TEXT, status TEXT, name TEXT, display_name TEXT);
     INSERT INTO organizations VALUES ('org-a'), ('org-b');
-    INSERT INTO users VALUES ('admin-a', 'org-a', 'admin', 'active'), ('member-a', 'org-a', 'user', 'active'), ('member-b', 'org-a', 'user', 'active'), ('other', 'org-b', 'admin', 'active');`)
+    INSERT INTO users(id, org_id, role, status) VALUES ('admin-a', 'org-a', 'admin', 'active'), ('member-a', 'org-a', 'user', 'active'), ('member-b', 'org-a', 'user', 'active'), ('other', 'org-b', 'admin', 'active');`)
   const mock = new RouterMock({ adminToken: 'local-router-test', registrationQuota })
   const router = new OrganizationRouterAdapter({ baseUrl: 'http://mock', apiToken: 'local-router-test', adminUserId: '1', fetch: transform ? transform(mock.fetch) : mock.fetch })
   const values = new Map<string, string>()
@@ -153,7 +153,11 @@ void test('service Key and organization status do not alter member limits; old s
 })
 
 void test('member logs expose only their token records and filtered totals', async () => {
-  const c = await setup()
+  const queries: URL[] = []
+  const c = await setup(0, fetcher => async (input, init) => {
+    if (new URL(String(input)).pathname === '/api/log/query') queries.push(new URL(String(input)))
+    return fetcher(input, init)
+  })
   try {
     await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '100', defaultMemberLimitUsd: null })
     for (const memberId of ['member-a', 'member-b']) {
@@ -163,9 +167,58 @@ void test('member logs expose only their token records and filtered totals', asy
     const own = await c.service.logs({ userId: 'member-a', orgId: 'org-a' })
     assert.equal(own.total, 1)
     assert.equal((own.items as Array<Record<string, unknown>>)[0]!.token_id, (await c.service.token('org-a', 'member-a'))!.router_token_id)
-    assert.equal((await c.service.logs(actor)).total, 2)
+    assert.equal(queries[0]!.searchParams.get('api_key_name'), c.mock.snapshot().tokens.find(token => token.id === (own.items as Array<Record<string, unknown>>)[0]!.token_id)!.name)
+    assert.equal(queries[0]!.searchParams.get('type'), 'consumption')
+    assert.equal((await c.service.logs(actor)).total, 0, 'admin without own Key sees no member logs')
+    const firstPage = await c.service.memberUsage(actor, 'member-a', 1, 1)
+    assert.equal(firstPage.total, 1)
+    assert.ok(queries[1]!.searchParams.get('api_key_name'))
+    await assert.rejects(c.service.memberUsage(actor, 'other'), { statusCode: 404 })
+    await assert.rejects(c.service.memberUsage({ userId: 'member-a', orgId: 'org-a' }, 'member-b'), { statusCode: 403 })
+    assert.equal((firstPage.items as unknown[]).length, 1)
+    const beyond = await c.service.logs({ userId: 'member-a', orgId: 'org-a' }, 2, 1)
+    assert.equal(beyond.total, 1)
+    assert.deepEqual(beyond.items, [])
+    assert.equal(queries.at(-1)!.searchParams.get('page_num'), '2')
+    assert.equal(queries.at(-1)!.searchParams.get('page_size'), '1')
     await assert.rejects(c.service.logs({ userId: 'other', orgId: 'org-a' }))
   } finally { await c.db.close() }
+})
+
+void test('query log response maps cost as quota and rejects mismatched Key names or non-consumption rows', async () => {
+  const token = { id: 282, user_id: 9882, name: 'member-own', status: 1, remain_quota: 1000000, unlimited_quota: false, expired_time: -1 }
+  const row = { created_at: 1791444132, type: 'consumption', api_key_name: 'member-own', model_name: 'gpt-4o-mini',
+    prompt_tokens: 11, completion_tokens: 2, cost: 1, detail: 'must not reach UI', other: { request_id: 'request-1', sensitive: 'hidden' } }
+  let responseRow = row
+  let duplicates = false
+  let logCalls = 0
+  const router = new OrganizationRouterAdapter({ baseUrl: 'http://router', apiToken: 'admin', adminUserId: '76',
+    fetch: async input => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/user/tokens') return Response.json({ success: true, data: { count: duplicates ? 2 : 1, data: duplicates ? [token, { ...token, id: 283 }] : [token] } })
+      if (url.pathname === '/api/user/9882') return Response.json({ success: true, data: { id: 9882, username: 'org', status: 1, quota: 5000000, used_quota: 0 } })
+      assert.equal(url.pathname, '/api/log/query')
+      assert.deepEqual(Object.fromEntries(url.searchParams), { user_id: '9882', type: 'consumption', page_num: '1', page_size: '20', order_by: 'created_at', desc: 'true', api_key_name: 'member-own' })
+      logCalls++
+      return Response.json({ success: true, data: { count: 1, data: [responseRow] } })
+    },
+  })
+  const result = await router.listLogs(9882, 1, 20, 282)
+  assert.equal(result.total, 1)
+  assert.equal(result.items[0]!.token_id, 282)
+  assert.equal(quotaToUsd(result.items[0]!.quota), '0.000002')
+  assert.equal(result.items[0]!.request_id, 'request-1')
+  assert.equal('detail' in result.items[0]!, false)
+  assert.equal('other' in result.items[0]!, false)
+  responseRow = { ...row, api_key_name: 'member-other' }
+  await assert.rejects(router.listLogs(9882, 1, 20, 282), /scope/)
+  responseRow = { ...row, type: 'login' }
+  await assert.rejects(router.listLogs(9882, 1, 20, 282), /scope/)
+  const previousCalls = logCalls
+  duplicates = true
+  await assert.rejects(router.listLogs(9882, 1, 20, 282), /ambiguous/)
+  await assert.rejects(router.listLogs(9882, 1, 20, 9999), /ambiguous/)
+  assert.equal(logCalls, previousCalls, 'missing or ambiguous names must not fall back to all organization logs')
 })
 
 void test('organization account creation keeps the existing account-name initial password policy', async () => {
@@ -182,4 +235,146 @@ void test('organization account creation keeps the existing account-name initial
   await router.createAccount('mo_e30d2e4b5d58cb1c1', 'Organization')
   assert.equal(sent[0]!.password, 'test1111')
   assert.equal(sent[1]!.password, 'mo_e30d2e4b5d58cb1c1')
+})
+
+void test('documented Token API uses user_id/id, enable, PUT deltas and validates scope before writes', async () => {
+  const calls: Array<{ path: string; method: string; body: Record<string, unknown> | undefined }> = []
+  const token = { id: 278, user_id: 9880, status: 1, name: 'member', remain_quota: 2500000,
+    unlimited_quota: false, expired_time: -1, used_quota: 0, key: 'never-expose-this-full-key' }
+  const router = new OrganizationRouterAdapter({ baseUrl: 'http://router', apiToken: 'admin', adminUserId: '76',
+    fetch: async (input, init) => {
+      const url = new URL(String(input))
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined
+      calls.push({ path: url.pathname + url.search, method: init?.method ?? 'GET', body })
+      assert.equal(new Headers(init?.headers).get('New-Api-User'), '76')
+      if (url.pathname === '/api/user/tokens') return Response.json({ success: true, data: { count: 1, data: [token] } })
+      if (url.pathname === '/api/user/9880') return Response.json({ success: true, data: { id: 9880, username: 'org', quota: 5000000, used_quota: 0, status: 1 } })
+      return Response.json({ success: true, data: { ...token, status: body?.status === 'disabled' ? 2 : 1 } })
+    },
+  })
+  const list = await router.listTokens(9880, 278)
+  assert.equal(list[0]!.key_masked, 'neve****-key')
+  assert.equal(JSON.stringify(list).includes(token.key), false)
+  await router.setTokenStatus(9880, 278, 'enabled', 'enable-once')
+  await router.adjustTokenQuota(9880, 278, 500000, 'limit-once')
+  assert.equal(calls[0]!.path, '/api/user/tokens?user_id=9880&id=278')
+  const writes = calls.filter(call => call.method === 'PUT')
+  assert.deepEqual(writes.map(call => [call.path, call.body]), [
+    ['/api/user/token/status', { id: 278, status: 'enable', comment: 'Moss member status enable-once' }],
+    ['/api/user/token/quota', { id: 278, delta_quota: 500000, unlimited_quota: false, comment: 'Moss member limit limit-once' }],
+  ])
+  await assert.rejects(router.setTokenStatus(9999, 278, 'disabled', 'wrong-org'), /scope/)
+  await assert.rejects(router.adjustTokenQuota(9880, 279, 1, 'wrong-token'), /scope/)
+  assert.equal(calls.filter(call => call.method === 'PUT').length, 2)
+})
+
+void test('lost Token quota responses never replay non-idempotent member or service deltas', async () => {
+  let writes = 0
+  const c = await setup(0, fetcher => async (input, init) => {
+    const response = await fetcher(input, init)
+    if (String(input).endsWith('/api/user/token/quota') && init?.method === 'PUT') {
+      writes++
+      throw new Error('remote write succeeded but response was lost')
+    }
+    return response
+  })
+  try {
+    const account = await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '10', defaultMemberLimitUsd: '2' })
+    const member = await c.service.ensureMember('org-a', 'member-a')
+    await assert.rejects(c.service.adjustMemberLimit(actor, 'member-a', '1', 'increase', 'lost-member'))
+    await assert.rejects(c.service.adjustMemberLimit(actor, 'member-a', '1', 'increase', 'lost-member'), /待核对/)
+    await assert.rejects(c.service.adjustMemberLimit(actor, 'member-a', '1', 'increase', 'new-reference'), /待核对/)
+    assert.equal((await c.router.listTokens(account.router_user_id!, member.router_token_id!))[0]!.remain_quota, 1500000)
+    await assert.rejects(c.service.manageService(actor, 'lost-service', { amountUsd: '1', direction: 'increase' }))
+    await assert.rejects(c.service.manageService(actor, 'lost-service', { amountUsd: '1', direction: 'increase' }), /待核对/)
+    await assert.rejects(c.service.manageService(actor, 'new-service-reference', { amountUsd: '1', direction: 'increase' }), /待核对/)
+    assert.equal(writes, 2)
+    assert.equal((await c.router.getAccount(account.router_user_id!)).quota, 5000000)
+  } finally { await c.db.close() }
+})
+
+void test('Token list rejects incomplete or duplicate results instead of hiding members', async () => {
+  const token = { id: 278, user_id: 9880, status: 1, remain_quota: 2500000, unlimited_quota: false, expired_time: -1 }
+  for (const data of [{ count: 2, data: [token] }, { count: 2, data: [token, token] }]) {
+    const router = new OrganizationRouterAdapter({ baseUrl: 'http://router', apiToken: 'test', adminUserId: '76',
+      fetch: async () => Response.json({ success: true, data }),
+    })
+    await assert.rejects(router.listTokens(9880))
+  }
+})
+
+void test('limit mode preserves identity, spent usage and disabled status; switching back sets a fresh remaining budget', async () => {
+  const c = await setup()
+  try {
+    const account = await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '10', defaultMemberLimitUsd: '2' })
+    const binding = await c.service.ensureMember('org-a', 'member-a')
+    await c.mock.handle(new Request('http://mock/__mock/consume', { method: 'POST', headers: { Authorization: 'Bearer local-router-test', 'New-Api-User': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ token_id: binding.router_token_id, quota: 1000 }) }))
+    await c.service.setMemberStatus(actor, 'member-a', 'disabled', 'mode-disable')
+    const balance = (await c.router.getAccount(account.router_user_id!)).quota
+    const unlimited = await c.service.setMemberLimitMode(actor, 'member-a', null, 'mode-unlimited')
+    assert.equal(unlimited.unlimited_quota, true)
+    const finite = await c.service.setMemberLimitMode(actor, 'member-a', '5', 'mode-finite')
+    assert.equal(finite.remain_quota, 2500000)
+    assert.equal(finite.id, binding.router_token_id)
+    assert.equal(finite.used_quota, 1000)
+    assert.equal(finite.admin_status, 'disabled')
+    await c.service.setMemberLimitMode(actor, 'member-a', null, 'mode-unlimited')
+    assert.equal((await c.router.listTokens(account.router_user_id!, binding.router_token_id!))[0]!.unlimited_quota, false, 'replaying an old command cannot undo a later switch')
+    await c.service.setMemberLimitMode(actor, 'member-a', null, 'mode-unlimited-again')
+    const zero = await c.service.setMemberLimitMode(actor, 'member-a', '0', 'mode-zero')
+    assert.equal(zero.remain_quota, 0)
+    assert.equal((await c.router.getAccount(account.router_user_id!)).quota, balance)
+  } finally { await c.db.close() }
+})
+
+void test('unknown mode changes block both another mode change and quota increments', async () => {
+  let writes = 0
+  const c = await setup(0, fetcher => async (input, init) => {
+    const result = await fetcher(input, init)
+    if (String(input).endsWith('/api/user/token/quota')) { writes++; throw new Error('lost response') }
+    return result
+  })
+  try {
+    await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '10', defaultMemberLimitUsd: '2' })
+    await c.service.ensureMember('org-a', 'member-a')
+    await assert.rejects(c.service.setMemberLimitMode(actor, 'member-a', null, 'unknown-mode'))
+    await assert.rejects(c.service.setMemberLimitMode(actor, 'member-a', '5', 'next-mode'), /待核对/)
+    await assert.rejects(c.service.adjustMemberLimit(actor, 'member-a', '5', 'increase', 'next-delta'), /待核对/)
+    assert.equal(writes, 1)
+  } finally { await c.db.close() }
+})
+
+void test('mode reset plus new budget preserves negative history; a partial switch cannot replay', async () => {
+  let rejectBudget = false
+  let writes = 0
+  const c = await setup(0, fetcher => async (input, init) => {
+    if (String(input).endsWith('/api/user/token/quota')) {
+      writes++
+      const body = JSON.parse(String(init?.body))
+      if (rejectBudget && body.delta_quota > 0) return Response.json({ success: false, message: 'explicit rejection' }, { status: 400 })
+      const response = await fetcher(input, init)
+      return response
+    }
+    return fetcher(input, init)
+  })
+  try {
+    const account = await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '10', defaultMemberLimitUsd: null })
+    const member = await c.service.ensureMember('org-a', 'member-a')
+    const rawConsume = () => c.mock.handle(new Request('http://mock/__mock/consume', { method: 'POST', headers: { Authorization: 'Bearer local-router-test', 'New-Api-User': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ token_id: member.router_token_id, quota: 1000 }) }))
+    await rawConsume()
+    assert.equal((await c.router.listTokens(account.router_user_id!, member.router_token_id!))[0]!.remain_quota, -1000)
+    let finite = await c.service.setMemberLimitMode(actor, 'member-a', '5', 'negative-to-finite')
+    assert.equal(finite.remain_quota, 2500000); assert.equal(finite.used_quota, 1000)
+    await c.service.setMemberLimitMode(actor, 'member-a', null, 'positive-to-unlimited')
+    finite = await c.service.setMemberLimitMode(actor, 'member-a', '5', 'same-remaining-to-finite')
+    assert.equal(finite.remain_quota, 2500000, 'same amount must not be doubled')
+    await c.service.setMemberLimitMode(actor, 'member-a', null, 'before-partial')
+    rejectBudget = true
+    await assert.rejects(c.service.setMemberLimitMode(actor, 'member-a', '5', 'partial-switch'))
+    const previousWrites = writes
+    await assert.rejects(c.service.setMemberLimitMode(actor, 'member-a', '5', 'partial-switch'), /待核对/)
+    await assert.rejects(c.service.adjustMemberLimit(actor, 'member-a', '5', 'increase', 'after-partial'), /待核对/)
+    assert.equal(writes, previousWrites)
+    assert.equal((await c.router.listTokens(account.router_user_id!, member.router_token_id!))[0]!.remain_quota, 0)
+  } finally { await c.db.close() }
 })

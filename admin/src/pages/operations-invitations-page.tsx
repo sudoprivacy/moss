@@ -16,6 +16,11 @@ import { operationsApi, type InvitationCodeItem } from '@/lib/api/operations'
 
 const statusLabels = ['未使用', '已使用', '已撤销'] as const
 
+function formatCreatedAt(value: number): string {
+  const date = new Date(value)
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '-'
+}
+
 export default function OperationsInvitationsPage() {
   const [items, setItems] = useState<InvitationCodeItem[]>([])
   const [total, setTotal] = useState(0)
@@ -101,8 +106,11 @@ export default function OperationsInvitationsPage() {
                   <TableCell className="font-mono text-sm">{item.code}</TableCell>
                   <TableCell><Badge variant={item.status === 0 ? 'default' : 'secondary'}>{statusLabels[item.status]}</Badge></TableCell>
                   <TableCell>{item.initial_quota_usd ?? '—'}</TableCell>
-                  <TableCell>{item.used_by_user_id ?? '-'}</TableCell>
-                  <TableCell className="whitespace-nowrap">{item.created_at || '-'}</TableCell>
+                  <TableCell>
+                    <div>{item.used_by_nickname || item.used_by_phone || (item.used_by_user_id != null ? `用户 #${item.used_by_user_id}` : '-')}</div>
+                    {item.used_by_nickname && item.used_by_phone ? <div className="text-xs text-muted-foreground">{item.used_by_phone}</div> : null}
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap">{formatCreatedAt(item.created_at)}</TableCell>
                   <TableCell><div className="flex gap-1"><Button variant="ghost" size="icon" title="复制" onClick={() => { void navigator.clipboard.writeText(item.code); toast.success('已复制') }}><Copy className="size-4" /></Button>{item.status === 0 ? <Button variant="ghost" size="icon" title="撤销" onClick={() => void remove(item)}><Trash2 className="size-4" /></Button> : null}</div></TableCell>
                 </TableRow>
               ))}

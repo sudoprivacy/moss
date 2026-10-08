@@ -1,5 +1,9 @@
 # 组织共享 SudoRouter 账户：实现与联调说明
 
+> 2026-10-08：当前联调已直连 `http://10.0.1.8:3001`，本地 Router 3301 已停；仅富友支付保持本地模拟。最新结果见 [真实接口联调记录](2026-10-08-sudorouter-real-integration-results.md)。下方注明 2026-09-30 的验收表保留为历史记录。
+
+> 本轮补充实现见 [组织模型管理补充方案](2026-10-08-org-model-management-follow-up-plan.md)：成员限额模式切换、指定成员用量、独立后台充值，以及管理员用户中心只展示本人用量。已实现成员模式切换、个人日志隔离和后台组织充值；详细验收及上游限额接口限制见补充文档。
+
 ## 代码范围
 
 只修改 Moss 与 Sudowork。两个独立 worktree 使用分支 `codex/org-router-shared-billing`，创建时基于已拉取的 `origin/dev`：Moss `403594d`，Sudowork `6e277a4e`。
@@ -12,7 +16,7 @@
 
 创建新组织时设置初始 USD 额度及默认成员限额。组织对应一个 Router User，初始密码沿用 Router 账户名（不足 8 字符在末尾补 `1`），不绑定某个成员的用户名；服务器使用独立默认服务 Key，成员和组织管理员各有自己的 Key。默认服务 Key 的初始限额为 $1，可单独调整。现有 Router 注册赠额计入初始目标，只补不足部分；后续登录、重试或新建成员不补组织余额。
 
-后台创建成员可选“组织默认”“设置限额”“不限额”。邀请码注册只继承组织服务端默认值；旧邀请码赠额不写入新个人钱包，也不提高成员限额。有限 Key 可增加/减少剩余限额，不限额模式创建后不切换。调整限额不改变组织资金，不自动恢复停用 Key。
+后台创建成员可选“组织默认”“设置限额”“不限额”。邀请码注册只继承组织服务端默认值；旧邀请码赠额不写入新个人钱包，也不提高成员限额。有限 Key 可增加/减少剩余限额，已创建成员可切换限额/不限额（切回有限设置新的剩余预算）。调整限额不改变组织资金，不自动恢复停用 Key。
 
 停用/删除成员先禁用远端 Key；停用组织模型服务同时停止所有成员使用。恢复用户身份不会自动解除独立的 Key 停用，需要管理员明确启用 Key。现有原生用户不允许跨组织迁移，兼容入口对共享账户成员同样拒绝迁移。包含模型账户和资金记录的组织不能直接删除。
 
@@ -26,7 +30,7 @@
 - `$1 = 500000 quota`；内部资金更新使用整数 quota。
 - 沿用 `systemConfig.recharge.usdToCnyRate` 配置；订单独立固化购买 USD 微单位、赠送 USD 微单位、人民币分、汇率、quota 换算系数、组织收款账户、付款人和测试支付标志。
 - 保留等值优惠：$5 + $0.50、$10 + $1、$20 + $3、$50 + $10。
-- 充值菜单同时检查支付服务是否已配置并启用；仅当前组织角色为 `admin` 的用户可以创建/查询/支付组织订单；超管身份本身不授予充值权限。组织各管理员可查看同一组织订单，普通成员不能访问。
+- 充值菜单同时检查支付服务是否已配置并启用；仅当前组织角色为 `admin` 的用户可以创建/查询/支付组织订单；超管身份本身不授予充值权限。Moss 运营中心另有管理端列表及超级管理员后台充值/核对入口，组织管理员查看本组织、超管查看所选组织；普通成员不能访问。
 - 保留富友 RSA/GBK 回调协议校验和查单；新的 Moss 回调为 `POST /api/v1/model-billing/callback`，支持 JSON 和表单封装，不接受客户端直接声明“已支付”。
 - Router 入账继续复用 `PUT /api/user/quota`，不需要新的 Router 充值接口。
 - 订单收款账户在创建时冻结；测试/正式环境变化后拒绝继续支付原订单，必须取消后重新创建；付款人以后离职、变更角色或组织，不改变已支付订单归属。取消/过期后收到合法支付结果仍按原订单入账。
@@ -42,7 +46,7 @@
 | --- | --- |
 | `GET /api/v1/model-account` | 当前成员限额；管理员额外获得组织余额、管理能力 |
 | `GET /api/v1/model-account/members` | 管理员查看成员/服务 Key 的掩码、状态和限额 |
-| `GET /api/v1/model-account/logs?page=1&page_size=20` | 成员仅自己的 Token 消费记录；管理员组织记录 |
+| `GET /api/v1/model-account/logs?page=1&page_size=20` | 所有角色仅自己的 Token 消费记录 |
 | `PATCH /api/v1/model-account/defaults` | 设置后续成员默认限额 |
 | `PATCH /api/v1/model-account/status` | 停用/恢复整个组织模型服务 |
 | `POST /api/v1/model-account/retry` | 继续已记录的开户步骤，不重复不确定的旧接口写操作 |
@@ -52,7 +56,8 @@
 | `PATCH /api/v1/model-account/service/status` | 停用/启用默认服务 Key |
 | `POST /api/v1/model-account/service/limit` | 调整默认服务 Key 限额 |
 | `GET /api/v1/model-billing/packages` | USD 购买/赠送套餐及 CNY 应付 |
-| `GET /api/v1/model-billing/orders?page=1&page_size=20` | 组织订单分页 |
+| `GET /api/v1/model-billing/orders?page=1&page_size=20` | Sudowork 组织管理员订单分页 |
+| `GET /api/v1/model-billing/admin/orders?page=1&page_size=20` | Moss 管理端当前组织订单只读分页；支持超管所选组织 |
 | `POST /api/v1/model-billing/orders` | 创建固定收款组织的订单 |
 | `GET /api/v1/model-billing/orders/{orderNo}` | 查看订单 |
 | `POST /api/v1/model-billing/orders/{orderNo}/pay` | 获取富友支付二维码 |
@@ -82,19 +87,23 @@ Content-Type: application/json
 
 ## SudoRouter 接口边界
 
-继续使用既有创建 User、创建 Token、账户读取、User 状态、管理员日志和 `PUT /api/user/quota`，既有路由与请求语义不变。
+继续使用既有创建 User、创建 Token、账户读取、User 状态和 `PUT /api/user/quota`，既有路由与请求语义不变。
 
-新增供应方接口仍只有已批准的三类：
+供应方 2026-10-08 实际提供的三条路由已接入：
 
-1. N01 `GET /api/integration/v1/users/{user_id}/tokens`
-2. N02 `PATCH /api/integration/v1/users/{user_id}/tokens/{token_id}/status`
-3. N03 `POST /api/integration/v1/users/{user_id}/tokens/{token_id}/quota-adjustments`
+1. `GET /api/user/tokens?user_id={user_id}`；指定 Key 增加 `id={token_id}`，响应为 `data.data` 数组和 `data.count`。
+2. `PUT /api/user/token/status`，请求 `{id, status: "enable" | "disabled", comment}`。
+3. `PUT /api/user/token/quota`，请求 `{id, delta_quota, unlimited_quota: false, comment}`。
 
-N02/N03 使用持久 `reference` 与请求指纹，拒绝同 reference 的不同操作。具体供应方字段以本目录的 integration-api-draft 为准。
+这三条路由替代原 integration-api-draft 中的 `/api/integration/v1/...` 草案路径。鉴权仍使用管理员 Bearer 凭证与 `New-Api-User`，它与目标 `user_id` 不同。
 
-Moss 日志接口复用管理员 `GET /api/log/`，只返回可信绑定范围内的消费记录和过滤后的总数；最多扫描最近 10000 条组织日志，超限明确返回 `truncated: true`，UI 显示范围提示。它不修复 Router 旧成员日志入口直接访问同账户其他 Key 日志的问题。真实多成员环境上线前仍须供应方确认旧入口隔离；本地模拟通过不代表真实隔离已解决。
+修改前先按可信组织账户和 Token ID 查询归属，返回结果也再次核验。列表没有明确分页契约，若 `count` 与返回数组长度不一致则报错，不静默漏掉成员。默认/成员 Key 的掩码在 Moss 再次处理，列表凭证不用于模型请求；模型凭证仍来自创建时保存的完整 Key。
 
-## 本地模拟与混合联调
+真实限额接口未承诺远端幂等。Moss 在本地用稳定 `Idempotency-Key` 去重已成功操作；超时或响应丢失标记为待核对，同一个成员（或默认服务 Key）在核对前不能再次调整，换一个请求标识也不会绕过限制。`comment` 仅用于审计，不作为远端去重凭据。原子并发更新、超过一页的列表和供应方异常边界仍需专项验证。
+
+Moss 日志接口已接入供应方 `GET /api/log/query`：始终由后端填入组织的 `user_id` 和 `type=consumption`；所有角色均用当前登录人的可信 Token ID 查询真实 Key 名称，填入 `api_key_name`。客户端不能指定账户或 Key 名称。使用 `page_num/page_size/order_by=created_at/desc=true` 由上游分页，读取 `data.data/count`，不再扫描整份组织日志或限制最近 10000 条。响应名称必须精确匹配；缺失或重名时拒绝成员查询，不能放宽到组织全部日志。`cost` 按 quota 换算 USD，登录记录不展示。API 未提供原始记录 ID，Moss 生成的 id 仅用于列表展示。这个管理员查询接口已实测通过；旧成员入口 `/api/v1/logs` 仍能直读其他 Key 的日志，两者的验证结论不能混淆。
+
+## 离线回归工具（当前真实联调不启用）
 
 独立模拟，不连接远端 Router：
 
@@ -122,7 +131,9 @@ ROUTER_MOCK_UPSTREAM_ENV_FILE=/absolute/private/router-test.env node --import ts
 
 模拟状态默认保存到 `~/.local/state/moss-router-mock/standalone.json` 或 `hybrid.json`，权限 0600；其中含测试 Key，不能加入版本控制。通过 `ROUTER_MOCK_PORT` / `ROUTER_MOCK_STATE_FILE` 可改端口与状态文件。不要把两种模式的状态混用。
 
-混合模式不执行模型推理：本地模拟的停用/限额不会约束真实 Router 推理，因此此模式返回明确错误，避免把模拟验证误当作真实执行。`GET /health` 可确认模式。
+混合模式允许使用当前成员 Key 转发只读 `GET /v1/models`，供登录时发现模型并下发个人配置；列表失败不会回退成虚构模型。混合模式不执行模型推理：本地模拟的停用/限额不会约束真实 Router 推理，因此推理请求返回明确错误，避免把模拟验证误当作真实执行。`GET /health` 可确认模式。
+
+登录配置核验补充：此前混合模拟器连只读模型目录也返回 409，Moss 返回 `localRuntime.status = models_unavailable`，客户端按既有规则清空本地模型配置。放行只读目录后，已在真实桌面重新登录 `org-member`，核对磁盘配置只包含该成员 Token 278，不包含组织默认 Token 276 或管理员 Token 277。`org-admin` 的服务端配置同样核对为其成员 Token 277。成员模型配置字段为 `auth_modes.proxy.sudorouter.apiKey`；实际文件路径由桌面主进程提供，通常为 `~/.nexus/sudocode/sudocode.json`，本次隔离预览位于 `/Users/yobach/.local/state/org-router-preview/desktop-home/.nexus/sudocode/sudocode.json`。“关于 → 编辑配置”修正为显示主进程返回的实际路径。该验证涵盖 Key 下发与落盘，不代表真实推理已验收。
 
 真实 N01–N03 测试接口就绪后，使用独立测试配置将 Moss 指向该环境；若新接口有单独根地址，设置 `SUDOROUTER_INTEGRATION_BASE_URL`。不要把尚未真实执行过的混合模拟限额当作线上状态。重新验证：资源归属、reference 重放/冲突、并发扣费、启停、有限/不限额、旧日志隔离、富友回调协议校验及超时核对。
 
@@ -176,7 +187,7 @@ node --import tsx scripts/mock-fuiou.ts
 | 充值菜单与权限、充值不提高成员限额 | 实际桌面与 HTTP 通过；普通成员 7 个充值接口均 403 | 保留实现；环境启用支付后回归 |
 | 去积分、组织/成员绑定、默认限额继承与前端参数 | 自动测试与页面验证通过 | 保留实现；涉及 N01–N03 的外部执行行为仍需真实接口复验 |
 
-供应方本期仍只需补充 N01、N02、N03 三个管理接口。共享模型消费和旧日志隔离属于既有行为的验收/修复，不因此增加第四个充值或日志接口。真实服务若遵循已约定契约，主要工作是切换配置并回归；若路径、鉴权、字段或错误码存在差异，优先调整 Moss Router Adapter。若幂等、权限或扣额语义不满足约定，则需要供应方修复，不能只靠客户端映射解决。
+上述为 2026-09-30 的接口需求记录；2026-10-08 已接入实际提供的三个管理接口。共享模型消费和旧日志隔离属于既有行为的验收/修复，不因此增加第四个充值或日志接口。真实服务若遵循已约定契约，主要工作是切换配置并回归；若路径、鉴权、字段或错误码存在差异，优先调整 Moss Router Adapter。若幂等、权限或扣额语义不满足约定，则需要供应方修复，不能只靠客户端映射解决。
 
 正式环境还需确认 `$1 = 500000 quota` 与组织使用钱包余额计费的配置，避免订阅优先等现有配置改变共享余额扣费路径。历史资产归并和生产迁移不在已完成范围内。
 
@@ -184,7 +195,7 @@ node --import tsx scripts/mock-fuiou.ts
 
 自动测试覆盖精确金额、共享消费、独立限额、默认值、邀请码注册、权限、状态重放、日志过滤、重复回调、响应丢失、晚到支付和支付测试模式冻结。新测试加入 Moss 标准测试入口；Sudowork 增加 USD 请求及订单状态测试。
 
-真实新接口的执行语义、旧成员日志入口隔离和富友支付环境回调仍需外部测试环境验证。已有个人资产不自动迁移。`needs_review` 需要远端证据核对，不自动补钱。
+当前真实新接口的验证结果见 2026-10-08 联调记录；旧成员日志入口隔离仍未通过，富友真实环境回调仍待外部测试环境。已有个人资产不自动迁移。`needs_review` 需要远端证据核对，不自动补钱。
 
 ## 本次验证记录
 
@@ -195,3 +206,11 @@ node --import tsx scripts/mock-fuiou.ts
 - Chrome 无头浏览器使用真实 Moss 管理页面、模拟 HTTP 响应，验证创建组织 USD 参数、有限/不限额成员、限额调整和停用 Key、幂等标识及无积分列；未出现页面错误。此项是页面交互验证，不代表真实支付端到端通过。
 - 独立 HTTP 模拟器验证共享扣额、有限/不限额、限额重放不重复、组织停用。固定模拟模型响应仅支持非流式 chat completion。
 - 私密测试凭据未进入改动文件。未提交、推送、部署或迁移任何生产数据。
+
+## Moss 账务管理与真实富友切换（2026-10-08 补充）
+
+运营中心 `/operations/billing` 现为“账务管理”，默认显示“组织充值”，另有“历史个人账务”页签。组织订单读取 `organization_model_orders`；旧个人订单读取 `billing_orders`，旧页签为空不代表组织充值未记录。新页签展示订单号、冻结的 Router 账户、付款人、购买/赠送 USD、应付 CNY、付款/到账状态及时间；需要核对的订单不提供盲目重试。Moss 不提供新增支付入口。
+
+富友模拟覆盖实际适配器的 RSA/GBK 下单/查单、表单回调、金额日期校验，以及重复回调去重、漏回调查单和取消后晚到付款。自动回归也覆盖按完整汇率金额下单。当前本地预览 `FUIOU_TEST_MODE=true`，创建的订单应付金额冻结为 1 分；没有真实扫码付款。
+
+开始真实小额联调时，配置正式商户号、商户私钥、富友公钥、`FUIOU_PROD_API_URL`，设置 `FUIOU_TEST_MODE=false`，并将回调基址配置为富友可访问的公网 HTTPS 地址（最终路径 `/api/v1/model-billing/callback`）。重建订单后核对 USD→CNY 汇率与实际人民币应付。旧测试订单保留测试标识，不能切换环境后继续支付。真实支付宝/微信付款、商户渠道开通、真实报文兼容和公网回调仍须在真实商户环境验证；组织退款流程未实现，不能将模拟通过视为退款/结算验收。

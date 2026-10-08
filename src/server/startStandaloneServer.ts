@@ -401,7 +401,6 @@ async function finishStandaloneServerStartup(
     await authService.configureOrganizationBilling(new OrganizationRouterAdapter({
       ...sudorouterRuntime,
       modelBaseUrl: process.env.SUDOROUTER_MODEL_BASE_URL,
-      integrationBaseUrl: process.env.SUDOROUTER_INTEGRATION_BASE_URL,
     }), nexusClient)
   }
   if (sudorouter) {

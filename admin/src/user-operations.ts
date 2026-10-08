@@ -1,6 +1,6 @@
 import type { AuthUser } from '@/lib/api/types'
 
-export type UserOperation = 'model_account' | 'approve' | 'reject' | 'delete_pending'
+export type UserOperation = 'model_account' | 'model_usage' | 'approve' | 'reject' | 'delete_pending'
 
 export function accountStatusLabel(status: AuthUser['status']): string {
   if (status === 'pending') return '待审批'
@@ -10,6 +10,6 @@ export function accountStatusLabel(status: AuthUser['status']): string {
 }
 
 export function availableUserOperations(status: AuthUser['status'], _isSuperAdmin: boolean): UserOperation[] {
-  if (status === 'pending') return ['approve', 'reject', 'delete_pending', 'model_account']
-  return ['model_account']
+  if (status === 'pending') return ['approve', 'reject', 'delete_pending', 'model_account', 'model_usage']
+  return ['model_account', 'model_usage']
 }

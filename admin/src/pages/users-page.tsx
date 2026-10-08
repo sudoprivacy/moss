@@ -1406,7 +1406,7 @@ export default function UsersPage() {
                                       onClick={() => setUserOperation({ user, operation })}
                                     >
                                       <Coins className="mr-2 size-4" />
-                                      {operation === 'model_account' ? '模型限额与 Key' : operation === 'approve' ? '审批通过'
+                                      {operation === 'model_account' ? '模型限额与 Key' : operation === 'model_usage' ? '模型使用情况' : operation === 'approve' ? '审批通过'
                                         : operation === 'reject' ? '拒绝申请'
                                           : '删除待审批用户'}
                                     </DropdownMenuItem>

@@ -69,5 +69,28 @@ export async function ensureOrganizationBillingSchema(db: DbDriver): Promise<voi
       credited_at BIGINT
     );
     CREATE INDEX IF NOT EXISTS organization_model_orders_org_idx ON organization_model_orders(org_id, created_at, id);
+    CREATE TABLE IF NOT EXISTS organization_model_credits (
+      credit_no TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organization_model_accounts(org_id), router_user_id BIGINT NOT NULL,
+      amount_usd_micros BIGINT NOT NULL CHECK (amount_usd_micros > 0), quota BIGINT NOT NULL CHECK (quota > 0),
+      actor_user_id TEXT NOT NULL, reason TEXT NOT NULL, related_order_no TEXT REFERENCES organization_model_orders(order_no),
+      reference TEXT NOT NULL UNIQUE, fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'credited', 'failed', 'needs_review')), created_at BIGINT NOT NULL, credited_at BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS organization_model_credits_org_idx ON organization_model_credits(org_id, created_at, credit_no);
+    CREATE INDEX IF NOT EXISTS organization_model_credits_order_idx ON organization_model_credits(related_order_no, status);
+    CREATE TABLE IF NOT EXISTS organization_model_credit_attempts (
+      reference TEXT PRIMARY KEY, credit_no TEXT NOT NULL REFERENCES organization_model_credits(credit_no),
+      status TEXT NOT NULL CHECK (status IN ('sending', 'credited', 'failed', 'needs_review')), actor_user_id TEXT NOT NULL, created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS organization_model_credit_attempts_credit_idx ON organization_model_credit_attempts(credit_no, created_at);
+    CREATE TABLE IF NOT EXISTS organization_model_order_resolutions (
+      order_no TEXT PRIMARY KEY REFERENCES organization_model_orders(order_no),
+      original_outcome TEXT NOT NULL CHECK (original_outcome IN ('unknown', 'credited', 'not_executed')), is_closed INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS organization_model_credit_audit (
+      reference TEXT PRIMARY KEY, org_id TEXT NOT NULL, target_no TEXT NOT NULL, actor_user_id TEXT NOT NULL,
+      action TEXT NOT NULL, evidence TEXT NOT NULL, created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS organization_model_credit_audit_target_idx ON organization_model_credit_audit(target_no, org_id, created_at);
   `)
 }

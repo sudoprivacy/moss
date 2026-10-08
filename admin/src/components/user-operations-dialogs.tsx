@@ -6,16 +6,17 @@ import { operationsApi } from '@/lib/api/operations'
 import type { AuthUser } from '@/lib/api/types'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { ModelMemberDialog } from './model-account-management'
+import { ModelMemberDialog, ModelUsageDialog } from './model-account-management'
 import type { UserOperation } from '../user-operations'
 
 export function UserOperationsDialogs(props: { target: AuthUser | null; operation: UserOperation | null; onClose(): void; onChanged(): Promise<void> | void }) {
   if (!props.target || !props.operation) return null
+  if (props.operation === 'model_usage') return <ModelUsageDialog key={props.target.id} target={props.target} onClose={props.onClose} />
   if (props.operation === 'model_account') return <ModelMemberDialog target={props.target} onClose={props.onClose} onChanged={props.onChanged} />
   return <PendingMemberDialog {...props} target={props.target} operation={props.operation} />
 }
 
-function PendingMemberDialog({ target, operation, onClose, onChanged }: { target: AuthUser; operation: Exclude<UserOperation, 'model_account'>; onClose(): void; onChanged(): Promise<void> | void }) {
+function PendingMemberDialog({ target, operation, onClose, onChanged }: { target: AuthUser; operation: Exclude<UserOperation, 'model_account' | 'model_usage'>; onClose(): void; onChanged(): Promise<void> | void }) {
   const [isBusy, setIsBusy] = useState(false)
   const title = operation === 'approve' ? '审批通过' : operation === 'reject' ? '拒绝申请' : '删除待审批用户'
   const onSubmit = async () => {

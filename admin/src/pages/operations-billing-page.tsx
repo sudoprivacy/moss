@@ -5,6 +5,8 @@ import { AlertTriangle, BadgeDollarSign, RefreshCw, RotateCcw, Search } from 'lu
 import { toast } from 'sonner'
 
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { OrganizationRechargeRecords } from '../components/organization-recharge-records'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -119,6 +121,25 @@ function StatCard({ title, value, description }: { title: string; value: string;
 }
 
 export default function OperationsBillingPage() {
+  const { activeOrgId } = useAuth()
+  return (
+    <DashboardLayout title="账务管理" description="查看当前组织的充值订单、付款和到账状态，以及历史个人账务。">
+      <Tabs key={activeOrgId} defaultValue="organization" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="organization">组织充值</TabsTrigger>
+          <TabsTrigger value="legacy">历史个人账务</TabsTrigger>
+        </TabsList>
+        <TabsContent value="organization"><OrganizationRechargeRecords /></TabsContent>
+        <TabsContent value="legacy">
+          <p className="mb-4 text-sm text-muted-foreground">保留原个人订单、原始单位及历史处理记录。</p>
+          <LegacyPersonalBilling />
+        </TabsContent>
+      </Tabs>
+    </DashboardLayout>
+  )
+}
+
+function LegacyPersonalBilling() {
   const [stats, setStats] = useState<RechargeStats | null>(null)
   const [orders, setOrders] = useState<RechargeOrder[]>([])
   const [records, setRecords] = useState<RechargeRecord[]>([])
@@ -197,10 +218,6 @@ export default function OperationsBillingPage() {
   }
 
   return (
-    <DashboardLayout
-      title="历史个人账务"
-      description="保留原个人订单、原始单位及历史处理记录。组织共享账户充值请在 Sudowork 组织充值中心操作。"
-    >
       <div className="space-y-6">
         <div className="grid gap-4 md:grid-cols-4">
           {loading && !stats ? (
@@ -412,6 +429,5 @@ export default function OperationsBillingPage() {
           </TabsContent>
         </Tabs>
       </div>
-    </DashboardLayout>
   )
 }

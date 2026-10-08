@@ -570,6 +570,9 @@ export class SudoworkAdministrationService {
     const organization = (await this.organizations.listOrganizations())
       .find((item) => item.organization.id === invitation.orgId)
     if (!organization) throw new Error('Invitation organization is missing')
+    const usedBy = invitation.usedByUserId
+      ? await this.authDb.getUserByIdAndOrg(invitation.usedByUserId, invitation.orgId)
+      : null
     return {
       id: await this.requireLegacyId('invitation', invitation.id),
       code: invitation.code,
@@ -580,8 +583,8 @@ export class SudoworkAdministrationService {
       used_by_user_id: invitation.usedByUserId
         ? await this.identities.getNumericAlias('user', invitation.usedByUserId)
         : null,
-      used_by_phone: null,
-      used_by_nickname: null,
+      used_by_phone: usedBy?.phone ?? usedBy?.name ?? null,
+      used_by_nickname: usedBy?.displayName ?? null,
       created_at: invitation.createdAt,
       used_at: invitation.usedAt,
     }

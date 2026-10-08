@@ -8,10 +8,19 @@ export async function dispatchOrganizationRecharge(service: OrganizationRecharge
     const path = url.pathname.replace(/\/$/, '')
     let data: unknown
     if (method === 'GET' && path === '/api/v1/model-billing/packages') data = { items: await service.packages(actor) }
+    else if (method === 'GET' && path === '/api/v1/model-billing/admin/orders') data = await service.listForAdministration(actor, Number(url.searchParams.get('page') ?? 1), Number(url.searchParams.get('page_size') ?? 20), url.searchParams.get('source') ?? 'all')
     else if (method === 'GET' && path === '/api/v1/model-billing/orders') data = await service.list(actor, Number(url.searchParams.get('page') ?? 1), Number(url.searchParams.get('page_size') ?? 20))
+    else if (method === 'POST' && path === '/api/v1/model-billing/admin/credits') data = await service.manual.create(actor, body, reference ?? '')
     else if (method === 'POST' && path === '/api/v1/model-billing/orders') {
       if (typeof body.purchase_amount_usd !== 'string' || body.payment_method !== 'ALIPAY' && body.payment_method !== 'WECHAT') throw new OrganizationBillingError('INVALID_ORDER', '充值金额或支付方式无效')
       data = await service.createOrder(actor, body.purchase_amount_usd, body.payment_method, reference ?? '')
+    } else if (method === 'POST' && /^\/api\/v1\/model-billing\/admin\/(credits|orders)\/[^/]+\/(resolve|retry|resolution)$/.test(path)) {
+      const parts = path.split('/')
+      const no = decodeURIComponent(parts[6]!)
+      if (parts[5] === 'credits' && parts[7] === 'resolve') data = await service.manual.resolve(actor, no, body, reference ?? '')
+      else if (parts[5] === 'credits' && parts[7] === 'retry') data = await service.manual.retry(actor, no, reference ?? '')
+      else if (parts[5] === 'orders' && parts[7] === 'resolution') data = await service.manual.resolution(actor, no, body, reference ?? '')
+      else throw new OrganizationBillingError('NOT_FOUND', '接口不存在', 404)
     } else {
       const match = path.match(/^\/api\/v1\/model-billing\/orders\/([^/]+)(?:\/(pay|sync|cancel))?$/)
       if (!match) throw new OrganizationBillingError('NOT_FOUND', '接口不存在', 404)
