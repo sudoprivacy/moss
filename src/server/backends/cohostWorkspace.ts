@@ -1,6 +1,6 @@
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { posix } from 'node:path'
-import { readCohostSessionState } from './cohostSessionState.js'
+import { cohostRepositoryPath, readCohostSessionState } from './cohostSessionState.js'
 import type { WorkspaceFileAccess, WorkspaceRemoteEntry } from './podWorkspace.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { resolveCohostNexusConfig } from '../nexus/nexusEnvConfig.js'
@@ -41,10 +41,15 @@ export function createCohostWorkspaceAccess(
           descriptor.session_id !== state.sessionId || descriptor.durable_session_id !== state.durableSessionId) {
         throw new ResourceAccessError(403, 'Cohost workspace owner does not match the session')
       }
-      const root = `/proc/${state.sessionId}/workspace`
-      if (descriptor.workspace_path.replace(/\/+$/, '') !== root) {
+      const processRoot = `/proc/${state.sessionId}/workspace`
+      if (descriptor.workspace_path.replace(/\/+$/, '') !== processRoot) {
         throw new ResourceAccessError(503, 'Invalid cohost workspace descriptor')
       }
+      const expectedRepository = cohostRepositoryPath(expectedAgent, session.sessionId)
+      if (state.repositoryPath && state.repositoryPath !== expectedRepository) {
+        throw new ResourceAccessError(403, 'Cohost repository does not belong to this session')
+      }
+      const root = state.repositoryPath ?? processRoot
       return await operation(client, authToken, root)
     } finally { client.close() }
   }

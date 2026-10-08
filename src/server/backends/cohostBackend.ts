@@ -14,7 +14,7 @@ import { resolveCohostNexusConfig } from '../nexus/nexusEnvConfig.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
 import { syncWorkspaceSkills, type WorkspaceSkillLink } from '../../utils/scodeBridge.js'
-import { readCohostSessionState, writeCohostSessionState } from './cohostSessionState.js'
+import { cohostRepositoryPath, readCohostSessionState, writeCohostSessionState } from './cohostSessionState.js'
 
 /**
  * Session backend for a co-hosted sudocode runtime.
@@ -47,6 +47,13 @@ export class CohostBackend implements SessionBackend {
     // namespace instead of silently moving Moss's vault connection with it.
     const config = resolveCohostNexusConfig()
     const saved = options.resumeSessionId ? await readCohostSessionState(options.cwd) : undefined
+    const agentId = requireAgentId(options)
+    const expectedRepository = cohostRepositoryPath(agentId, options.sessionId)
+    if (saved?.repositoryPath && saved.repositoryPath !== expectedRepository) {
+      throw new Error('Cohost repository does not belong to this session')
+    }
+    // Keep the recorded repository identity when resuming existing native history.
+    const repositoryPath = saved ? saved.repositoryPath : expectedRepository
 
     const identity = await mintSessionIdentity(config.endpoint, config.tls, options.userId)
     const client = identity
@@ -55,7 +62,6 @@ export class CohostBackend implements SessionBackend {
         ? NexusVfsClient.withMtls(config.endpoint, config.tls)
         : new NexusVfsClient(config.endpoint)
     const agent = new ManagedAgentClient(client, config.authToken)
-    const agentId = requireAgentId(options)
 
     let session
     try {
@@ -63,13 +69,15 @@ export class CohostBackend implements SessionBackend {
         agentId,
         model,
         ...ownerField(identity, options.userId),
-        repos: [{ hostPath: options.cwd, alias: 'workspace' }],
+        repos: [{ hostPath: repositoryPath ?? options.cwd, alias: 'workspace' }],
         resumeSessionId: saved?.durableSessionId,
       })
       if (!session.durableSessionId) throw new Error('Cohost daemon did not return a durable session ID')
+      if (repositoryPath) await client.mkdir(repositoryPath, config.authToken, { parents: true, existOk: true })
       await writeCohostSessionState(options.cwd, {
         sessionId: session.sessionId,
         durableSessionId: session.durableSessionId,
+        ...(repositoryPath ? { repositoryPath } : {}),
       })
     } catch (error) {
       if (session) await agent.cancel(session.sessionId).catch(() => {})
