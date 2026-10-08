@@ -114,7 +114,7 @@ describe('NexusManager', () => {
       'utf8',
     )
 
-    expect(runtimeVersions['nexusd-cluster']).toBe('0.8.0')
+    expect(runtimeVersions['nexusd-cluster']).toBe('0.8.2')
     expect(runtimeVersions['nexus-vault']).toBe('0.5.68')
     expect(dockerfile).toContain('COPY src/server/nexus/runtime-versions.json /runtime-versions.json')
     expect(dockerfile).toContain("NEXUSD_CLUSTER_VERSION=\"$(jq -er '.\"nexusd-cluster\"' /runtime-versions.json)\"")
