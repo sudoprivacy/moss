@@ -29,6 +29,8 @@ void test('native creation, invitation registration, key lifecycle and member ro
     const billing = await auth.configureOrganizationBilling(router, secretPort)
     const org = (await auth.createOrganization({ name: 'Shared', code: 'shared', idempotencyKey: 'create-org', modelBilling: { initialAmountUsd: '20', defaultMemberLimitUsd: '3' } })).organization
     assert.equal((await billing.account(org.id))?.status, 'ready')
+    await assert.rejects(auth.deleteOrganization({ orgId: org.id }), /模型账户及资金记录/)
+    assert.ok(await db.getOrganization(org.id), 'deletion guard preserves the funded organization')
     const input = { orgId: org.id, name: 'Admin Example', password: 'Password123', role: 'admin', memberLimitUsd: null, idempotencyKey: 'admin-example' }
     const admin = (await auth.createProvisionedUser(input)).user
     assert.equal((await auth.createProvisionedUser(input)).user.id, admin.id)
