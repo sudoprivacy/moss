@@ -17,7 +17,6 @@ OFFLINE_DIR="/tmp/moss-e2e-offline"
 WORKSPACE_DIR="$TEST_HOME/workspace"
 SERVICE_NAME="moss-server"
 NETWORK_NAME="moss-network"
-PORT="43129"
 MOCK_API_KEY="moss-e2e-key"
 ADMIN_USERNAME="e2e-admin"
 ADMIN_PASSWORD="moss-e2e-admin-password"
@@ -156,6 +155,19 @@ MOCK_PORT="${MOCK_PORT%/v1}"
 MOCK_URL="http://$NETWORK_GATEWAY:$MOCK_PORT/v1"
 curl -fsS "http://127.0.0.1:$MOCK_PORT/healthz" >/dev/null
 curl -fsS "http://$NETWORK_GATEWAY:$MOCK_PORT/healthz" >/dev/null
+
+# Select the application port after the mock has bound its ephemeral port.
+# A fixed port in the ephemeral range can be assigned to that very mock.
+PORT="$(node --input-type=module - <<'NODE'
+import net from 'node:net'
+const server = net.createServer()
+server.on('error', error => { console.error(error); process.exit(1) })
+server.listen(0, '0.0.0.0', () => {
+  console.log(server.address().port)
+  server.close()
+})
+NODE
+)"
 
 # This smoke test exercises the Docker session runtime end to end -- it runs the
 # loaded runtime image directly and reaches the mock LLM over the moss-network
