@@ -22,7 +22,8 @@ if [[ -z "${NEXUSD_COHOST_BIN:-}" ]]; then
 fi
 
 "$NEXUSD_COHOST_BIN" --version | tee "$WORK/binary-version.txt"
-KERNEL="$(node -p "require('./src/server/nexus/runtime-versions.json')['nexusd-cluster']")"
-grep -Fq "nexus-vfs v$KERNEL" "$WORK/binary-version.txt"
+# Co-host and the standalone cluster daemon have independent release pins.
+grep -Fq "nexusd-cohost v${TAG#nexusd-cohost-v} " "$WORK/binary-version.txt"
+grep -Fq 'plugin-abi 7' "$WORK/binary-version.txt"
 bun build --target=node scripts/e2e/cohost-session-recovery.ts --outfile "$WORK/recovery.mjs"
 node "$WORK/recovery.mjs"
