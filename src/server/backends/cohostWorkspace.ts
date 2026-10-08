@@ -53,19 +53,23 @@ export function createCohostWorkspaceAccess(
       const entries: WorkspaceRemoteEntry[] = []
       const walk = async (relativePath: string, depth: number): Promise<void> => {
         if (depth >= maxDepth || entries.length >= 5000) return
-        const children = await client.readdir(cohostWorkspacePath(root, relativePath), token)
+        const directory = cohostWorkspacePath(root, relativePath)
+        const children = await client.readdir(directory, token)
         for (const child of children.slice(0, 500)) {
           if (entries.length >= 5000) break
-          if (!child.name || child.name === '.' || child.name === '..' || /[\\/\0]/.test(child.name)) {
+          // The VFS client returns absolute entry paths; older clients return basenames.
+          const name = child.name.startsWith(`${directory}/`)
+            ? child.name.slice(directory.length + 1) : child.name
+          if (!name || name === '.' || name === '..' || /[\\/\0]/.test(name)) {
             throw new ResourceAccessError(503, 'Invalid cohost workspace entry')
           }
-          const path = posix.join(relativePath, child.name)
+          const path = posix.join(relativePath, name)
           const info = await client.stat(cohostWorkspacePath(root, path), token)
           if (!info) continue
           const isSymbolicLink = child.entryType === 6
           const isDir = info.isDirectory && !isSymbolicLink
           entries.push({ relativePath: path, isDir, isSymbolicLink, size: info.size })
-          if (isDir && !['.git', 'node_modules'].includes(child.name)) await walk(path, depth + 1)
+          if (isDir && !['.git', 'node_modules'].includes(name)) await walk(path, depth + 1)
         }
       }
       await walk('', 0)
