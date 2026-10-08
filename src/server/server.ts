@@ -2202,7 +2202,7 @@ export function startServer(
     modelId: config.wikiIndex.modelId,
     modelMirror: config.wikiIndex.modelMirror,
     maxPassagesPerWiki: config.wikiIndex.maxPassagesPerWiki,
-  }, config.instanceId)
+  }, config.instanceId, session => resolveSessionWorkspaceAccess(session, config, runtime))
   wikiJobExecutor.start()
 
   // Document Center v2: start the external source sync worker. Polls

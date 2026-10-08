@@ -3,21 +3,23 @@
  *
  * Picks up queued rows from `wiki_build_jobs` and runs them through
  * RuntimeService (the same pipeline that drives chat sessions). The agent
- * for each build is the system-level `wiki-builder` agent (currently
- * hard-coded as a prompt below; will be promoted to $MOSS_HOME/assistants/
- * system/wiki-builder/system.md once tuned).
+ * for each build receives the builtin `wiki-builder` instructions from
+ * $MOSS_HOME/assistants/system/wiki-builder/wiki-builder.md.
  *
  * Design choices (per Document Center design doc):
  * - Reuses RuntimeService — no separate agent pool
  * - Global concurrency cap of 2 jobs
  * - Failed jobs are NOT auto-retried (user clicks "重新构建")
- * - Build output lands directly in the wiki's storage_path (cwd is set
- *   to that dir before spawning scode, which has full write access there)
+ * - Build inputs and output cross the runtime filesystem boundary before
+ *   the verified staging directory is published atomically
  */
 
 import { readFile, mkdir, readdir, writeFile, rename, rm, stat } from 'fs/promises'
 import path from 'path'
 import { RuntimeService } from '../../server/runtimeService.js'
+import type { SessionRecord } from '../../server/types.js'
+import type { WorkspaceFileAccess } from '../../server/backends/podWorkspace.js'
+import { copyWikiInputsToRuntime, copyWikiOutputsFromRuntime, loadWikiBuilderPrompt } from '../../server/wikiRuntimeWorkspace.js'
 import { DocumentStore, type DocumentRecord, type WikiBuildJob, type WikiRecord } from '../../server/documentStore.js'
 import type { DirectConnectStore } from '../../server/db.js'
 import { MOSS_WIKIS_DIR, MOSS_MODELS_DIR } from '../../utils/wikis/localWikiDirectories.js'
@@ -66,15 +68,12 @@ const IDLE_NUDGE_MESSAGE =
 // The actual system prompt now lives on disk at
 // `$MOSS_HOME/assistants/system/wiki-builder/wiki-builder.md`
 // (seeded by `seedBuiltinSystemAssistants` in server.ts on first boot).
-// scode's first-message injection path picks it up automatically via
-// `prepareFirstMessageForScode(...assistantName: 'wiki-builder')` —
-// the executor just needs to send a short trigger to kick the agent off.
+// The executor loads the builtin instructions directly. Internal jobs must
+// not depend on a tenant installing the builder in its Agent catalog.
 //
 // Customers can customize build behavior by editing the .md file in
 // place; subsequent server boots skip re-seeding.
 // ============================================================
-const WIKI_BUILDER_TRIGGER = '请开始构建 Wiki。'
-
 /** Thrown inside runJob when a cancel has been requested, so the catch block
  * can distinguish a user-initiated stop from a genuine build failure. */
 class BuildCancelledError extends Error {
@@ -123,6 +122,7 @@ export class WikiJobExecutor {
     /** This server instance's id (HA). Stamped on claimed jobs so peers leave
      * each other's in-flight staging artifacts alone; undefined = single instance. */
     private instanceId?: string,
+    private workspaceAccess?: (session: SessionRecord) => WorkspaceFileAccess | null,
   ) {}
 
   /** Start polling for queued jobs. Idempotent. */
@@ -254,6 +254,7 @@ export class WikiJobExecutor {
       // exactly what was built.
       await mkdir(stageDir, { recursive: true })
       builtDocIds = await this.prepareInputs(wiki, stageDir)
+      const prompt = await loadWikiBuilderPrompt()
       await assertStillRunning()
       await this.docStore.updateBuildJob(job.id, { progress: 25, currentStep: '调用 AI 生成 Wiki' })
 
@@ -262,6 +263,7 @@ export class WikiJobExecutor {
         cwd: stageDir,
         dangerouslySkipPermissions: true,
         userId: 'system:wiki-builder',
+        assistantDisplayName: 'Wiki Builder',
         orgId: wiki.orgId,
         role: 'admin',
         scopes: ['sessions:create', 'sessions:attach:any'],
@@ -270,6 +272,7 @@ export class WikiJobExecutor {
         // This internal job supplies its own prompt below. It must not imply a
         // store installation or inherit the organization's optional skills.
         enabledSkills: [],
+        runtime: { hostMode: 'session', dockerMode: 'session', k8sMode: 'session' },
       })
 
       // Track the session id in the in-memory state so cancelJob can
@@ -286,9 +289,15 @@ export class WikiJobExecutor {
       // Stage 3: attach + send prompt + wait for completion
       await assertStillRunning()
       const ready = await this.runtime.ensureSessionReady(created.sessionId)
+      const workspace = this.workspaceAccess?.(created) ?? null
+      if (created.runtime.type === 'k8s' && !workspace) {
+        throw new Error('Wiki builds require access to the Kubernetes workspace')
+      }
+      if (workspace) await copyWikiInputsToRuntime(stageDir, workspace)
+      await assertStillRunning()
       const socket = await this.runtime.connectToAttempt(ready.attempt)
 
-      const result = await this.driveSession(socket, job.id, WIKI_BUILDER_TRIGGER)
+      const result = await this.driveSession(socket, job.id, prompt)
       socket.destroy()
 
       // Cancel requested while the agent was running: stop before the
@@ -317,6 +326,9 @@ export class WikiJobExecutor {
         }
         throw new Error(reason)
       }
+
+      if (workspace) await copyWikiOutputsFromRuntime(stageDir, workspace)
+      await assertStillRunning()
 
       // Stage 4: verify output presence (in the staging dir — the live
       // wiki dir is untouched until the swap below).
@@ -428,6 +440,12 @@ export class WikiJobExecutor {
       }
     } finally {
       this.cancelRequested.delete(job.id)
+      const sessionId = this.running.get(job.id)?.sessionId
+      if (sessionId) {
+        await this.runtime.terminateSession(sessionId).catch(error => {
+          console.error(`[WikiJobExecutor] failed to terminate build session ${sessionId}:`, error)
+        })
+      }
       // Always reclaim the staging dir. On a successful publish it has
       // already been renamed into the live dir (rm of a missing path is a
       // no-op with force); on failure, cancel, or a lost recency race it's
@@ -1190,5 +1208,6 @@ function mapDocumentRow(row: Record<string, unknown>): DocumentRecord {
     storagePath: String(row.storage_path),
     uploadedBy: String(row.uploaded_by),
     uploadedAt: Number(row.uploaded_at),
+    sourceId: row.source_id == null ? null : String(row.source_id),
   }
 }
