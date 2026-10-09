@@ -1,3 +1,5 @@
+import { generateKeyPairSync } from 'node:crypto'
+import { FuiouAdapter } from '../billing/fuiouAdapter.js'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { test, type TestContext } from 'node:test'
@@ -128,7 +130,7 @@ void test('production-shaped phoneAuth works with compatibility off and no signI
 void test('conflicting legacy accounts require explicit credentials; protected historical keys cannot be changed', async t => {
   const { legacy, create } = setup(t)
   legacy.sms.conflicts = ['secretId', 'secretKey']
-  legacy.fuiou = { config: { enabled: false }, secrets: { merchantPrivateKey: 'existing-key' }, sources: {} }
+  legacy.fuiou = { config: { enabled: false }, secrets: { merchantPrivateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }, sources: {} }
   const service = create()
   await service.initialize()
   await assert.rejects(service.save('sms', { expectedVersion: null, config: smsConfig }, 'root'), status(409))
@@ -413,4 +415,53 @@ void test('old managed QMS snapshots do not load retired secrets or break platfo
   assert.equal(restarted.getActive('qms').config.encryptionRequired, undefined)
   const check = await restarted.check('qms', { expectedVersion: saved.version, config: { enabled: true, apiKeyHeader: 'bad header' }, secrets: { apiKey: 'valid' } })
   assert.equal(check.ready, false)
+})
+
+void test('saved raw Fuiou keys survive restart and equivalent encodings preserve protected key identity', async t => {
+  const { create } = setup(t)
+  const merchant = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const provider = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const service = create()
+  await service.initialize()
+  const config = { enabled: true, merchantCode: 'TEST', callbackBaseUrl: 'https://test.example', testMode: false }
+  const secrets = {
+    merchantPrivateKey: merchant.privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+    publicKey: provider.publicKey.export({ format: 'der', type: 'spki' }).toString('base64'),
+  }
+  const saved = await service.save('fuiou', { expectedVersion: null, config, secrets }, 'root')
+  const restarted = create('restarted')
+  await restarted.initialize()
+  const active = restarted.getActive('fuiou')
+  assert.doesNotThrow(() => new FuiouAdapter({ merchantCode: 'TEST', merchantPrivateKey: active.secrets.merchantPrivateKey, fuiouPublicKey: active.secrets.publicKey }))
+  assert.equal(JSON.stringify(await restarted.list()).includes(secrets.merchantPrivateKey), false)
+  const equivalent = await restarted.save('fuiou', { expectedVersion: saved.version, config, secrets: {
+    merchantPrivateKey: merchant.privateKey.export({ format: 'pem', type: 'pkcs1' }).toString().replaceAll('\n', '\\n'),
+    publicKey: provider.publicKey.export({ format: 'pem', type: 'spki' }).toString(),
+  } }, 'root')
+  await assert.rejects(restarted.save('fuiou', { expectedVersion: equivalent.version, config, secrets: {
+    merchantPrivateKey: provider.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+  } }, 'root'), status(409))
+  await assert.rejects(restarted.save('fuiou', { expectedVersion: equivalent.version, config, secrets: {
+    publicKey: merchant.publicKey.export({ format: 'pem', type: 'spki' }).toString(),
+  } }, 'root'), status(409))
+})
+
+void test('malformed or non-RSA Fuiou keys are rejected before save even when disabled', async t => {
+  const { create } = setup(t)
+  const service = create()
+  await service.initialize()
+  const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  for (const secrets of [
+    { merchantPrivateKey: 'secret-invalid-base64!' },
+    { publicKey: 'c2VjcmV0' },
+    { merchantPrivateKey: ec.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() },
+    { publicKey: ec.publicKey.export({ type: 'spki', format: 'pem' }).toString() },
+  ]) {
+    await assert.rejects(service.save('fuiou', { expectedVersion: null, config: { enabled: false }, secrets }, 'root'), error => {
+      assert.ok(status(400)(error))
+      assert.equal(String(error).includes(Object.values(secrets)[0]!), false)
+      return true
+    })
+  }
+  assert.equal(await service.hasSaved('fuiou'), false)
 })

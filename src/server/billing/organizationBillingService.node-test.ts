@@ -5,9 +5,10 @@ import { SqliteDriver } from '../db/driver.js'
 import { parseUsd, usdMicrosToQuota, quotaToUsd, payableCnyFen } from './modelMoney.js'
 import { OrganizationRouterAdapter, type RouterFetch } from './organizationRouterAdapter.js'
 import { OrganizationBillingService } from './organizationBillingService.js'
+import { dispatchOrganizationBilling } from './organizationBillingRoutes.js'
 import { RouterMock } from './testing/routerMock.js'
 
-async function setup(registrationQuota = 0, transform?: (fetcher: RouterFetch) => RouterFetch) {
+async function setup(registrationQuota = 0, transform?: (fetcher: RouterFetch) => RouterFetch, isRechargeEnabled = () => false) {
   const sqlite = new DatabaseSync(':memory:')
   const db = new SqliteDriver(sqlite)
   await db.exec(`CREATE TABLE organizations (id TEXT PRIMARY KEY); CREATE TABLE users (id TEXT PRIMARY KEY, org_id TEXT, role TEXT, status TEXT, name TEXT, display_name TEXT);
@@ -20,7 +21,7 @@ async function setup(registrationQuota = 0, transform?: (fetcher: RouterFetch) =
     putSecret: async (namespace: string, key: string, value: string) => { values.set(`${namespace}/${key}`, value) },
     getSecret: async (namespace: string, key: string) => { const value = values.get(`${namespace}/${key}`); return value ? { value, status: 'enabled', version: 1 } : null },
   }
-  const service = new OrganizationBillingService(db, router, secrets)
+  const service = new OrganizationBillingService(db, router, secrets, { isRechargeEnabled })
   await service.initialize()
   return { sqlite, db, service, router, mock, values }
 }
@@ -376,5 +377,72 @@ void test('mode reset plus new budget preserves negative history; a partial swit
     await assert.rejects(c.service.adjustMemberLimit(actor, 'member-a', '5', 'increase', 'after-partial'), /待核对/)
     assert.equal(writes, previousWrites)
     assert.equal((await c.router.listTokens(account.router_user_id!, member.router_token_id!))[0]!.remain_quota, 0)
+  } finally { await c.db.close() }
+})
+
+void test('payment access is local, authorized and independent of Router availability', async () => {
+  let isOffline = false; let requests = 0; let isEnabled = true
+  const c = await setup(0, fetcher => async (input, init) => {
+    if (isOffline) { requests++; throw new Error('upstream unavailable') }
+    return fetcher(input, init)
+  }, () => isEnabled)
+  try {
+    await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '0', defaultMemberLimitUsd: null })
+    isOffline = true
+    const access = await dispatchOrganizationBilling(c.service, actor, 'GET', new URL('http://test/api/v1/model-account/access'), {})
+    assert.equal(access.status, 200)
+    assert.equal((access.body as { data: { can_recharge: boolean } }).data.can_recharge, true)
+    assert.equal(requests, 0, 'access must not initiate any Router requests, including slow ones')
+    assert.equal((await c.service.access({ ...actor, userId: 'member-a' })).can_recharge, false)
+    await c.db.run("INSERT INTO users(id, role, status) VALUES ('root', 'super_admin', 'active')")
+    assert.equal((await c.service.access({ ...actor, userId: 'root' })).can_recharge, false)
+    for (const userId of ['other', 'missing']) {
+      const result = await dispatchOrganizationBilling(c.service, { ...actor, userId }, 'GET', new URL('http://test/api/v1/model-account/access'), {})
+      assert.equal(result.status, 403)
+    }
+    isEnabled = false
+    assert.equal((await c.service.access(actor)).can_recharge, false)
+    await c.db.run("UPDATE users SET status = 'disabled' WHERE id = 'admin-a'")
+    await assert.rejects(c.service.access(actor), /无权/)
+    assert.equal(requests, 0)
+  } finally { await c.db.close() }
+})
+
+void test('dashboard degrades independently without fabricated balances or cross-member data and recovers', async () => {
+  let failure: 'none' | 'tokens' | 'account' | 'both' = 'none'
+  const c = await setup(0, fetcher => async (input, init) => {
+    const path = new URL(String(input)).pathname
+    if ((failure === 'tokens' || failure === 'both') && path === '/api/user/tokens' || (failure === 'account' || failure === 'both') && /^\/api\/user\/\d+$/.test(path)) {
+      return new Response(JSON.stringify({ success: false, message: 'private upstream detail' }))
+    }
+    return fetcher(input, init)
+  }, () => true)
+  try {
+    await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '10', defaultMemberLimitUsd: '5' })
+    await c.service.ensureMember('org-a', 'admin-a')
+    failure = 'tokens'
+    const partial = await c.service.dashboard(actor)
+    assert.equal(partial.can_recharge, true)
+    assert.equal(partial.balance_status, 'available')
+    assert.equal(partial.model_balance_usd, '10.00')
+    assert.equal(partial.member_usage_status, 'unavailable')
+    assert.equal(partial.member, null)
+    assert.equal(JSON.stringify(partial).includes('private upstream detail'), false)
+    failure = 'account'
+    const withoutBalance = await c.service.dashboard(actor)
+    assert.equal(withoutBalance.balance_status, 'unavailable')
+    assert.equal('model_balance_usd' in withoutBalance, false)
+    assert.equal('used_amount_usd' in withoutBalance, false)
+    assert.equal(withoutBalance.member_usage_status, 'unavailable', 'Token effective status also requires the parent account status')
+    failure = 'both'
+    const unavailable = await c.service.dashboard(actor)
+    assert.equal(unavailable.member, null)
+    assert.equal(unavailable.balance_status, 'unavailable')
+    failure = 'none'
+    assert.equal((await c.service.dashboard(actor)).member_usage_status, 'available')
+    const pending = await c.service.dashboard({ ...actor, userId: 'member-a' })
+    assert.equal(pending.balance_status, 'not_applicable')
+    assert.equal(pending.member_usage_status, 'pending')
+    assert.equal('model_balance_usd' in pending, false)
   } finally { await c.db.close() }
 })

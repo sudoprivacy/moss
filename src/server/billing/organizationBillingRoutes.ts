@@ -11,6 +11,7 @@ export async function dispatchOrganizationBilling(
     const base = '/api/v1/model-account'
     let data: unknown
     if (method === 'GET' && path === base) data = await service.dashboard(actor)
+    else if (method === 'GET' && path === `${base}/access`) data = await service.access(actor)
     else if (method === 'GET' && path === `${base}/logs`) data = await service.logs(actor, Number(url.searchParams.get('page') ?? 1), Number(url.searchParams.get('page_size') ?? 20))
     else if (method === 'GET' && path === `${base}/members`) data = { items: await service.listMembers(actor) }
     else if (method === 'PATCH' && path === `${base}/status`) {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { generateKeyPairSync } from 'node:crypto'
+import { generateKeyPairSync, createPrivateKey, createPublicKey } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { SqliteDriver } from '../db/driver.js'
@@ -11,20 +11,28 @@ import { parseOrganizationPaymentCallback } from './organizationRechargeRoutes.j
 import { FuiouMock } from './testing/fuiouMock.js'
 import { RouterMock } from './testing/routerMock.js'
 
-void test('real RSA/GBK payment protocol credits once via callback or query, including a late payment', async () => {
+for (const format of ['pem', 'escaped-pem', 'raw', 'raw-pkcs1'] as const) void test(`real RSA/GBK payment protocol with ${format} keys credits once via callback or query, including a late payment`, async () => {
   const db = new SqliteDriver(new DatabaseSync(':memory:'))
   try {
     await db.exec(`CREATE TABLE organizations(id TEXT PRIMARY KEY); CREATE TABLE users(id TEXT PRIMARY KEY, org_id TEXT, role TEXT, status TEXT);
       INSERT INTO organizations VALUES ('org'); INSERT INTO users VALUES ('admin', 'org', 'admin', 'active'), ('member', 'org', 'user', 'active');`)
     const routerMock = new RouterMock({ adminToken: 'test' })
-    const router = new OrganizationRouterAdapter({ baseUrl: 'http://mock', apiToken: 'test', adminUserId: '1', fetch: routerMock.fetch })
+    let areTokensUnavailable = false
+    const router = new OrganizationRouterAdapter({ baseUrl: 'http://mock', apiToken: 'test', adminUserId: '1', fetch: async (input, init) => {
+      if (areTokensUnavailable && new URL(String(input)).pathname === '/api/user/tokens') return new Response(JSON.stringify({ success: false, message: 'Token endpoint unavailable' }))
+      return routerMock.fetch(input, init)
+    } })
     const secrets = new Map<string, string>()
     const billing = new OrganizationBillingService(db, router, {
       putSecret: async (_ns, key, value) => { secrets.set(key, value) },
       getSecret: async (_ns, key) => { const value = secrets.get(key); return value ? { value, status: 'enabled', version: 1 } : null },
-    })
+    }, { isRechargeEnabled: () => true })
     await billing.initialize()
     const account = await billing.configureOrganization('org', 'Test', { initialAmountUsd: '0', defaultMemberLimitUsd: '5' })
+    await billing.ensureMember('org', 'admin')
+    areTokensUnavailable = true
+    assert.equal((await billing.access({ userId: 'admin', orgId: 'org' })).can_recharge, true)
+    assert.equal((await billing.dashboard({ userId: 'admin', orgId: 'org' })).member_usage_status, 'unavailable')
     const pair = () => generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } })
     const merchant = pair(); const provider = pair(); const controlToken = 'only-for-local-test-control-token'
     let recharge: OrganizationRechargeService
@@ -36,8 +44,14 @@ void test('real RSA/GBK payment protocol credits once via callback or query, inc
         return new Response('success')
       },
     })
+    const keyInput = (value: string, kind: 'private' | 'public') => {
+      if (format === 'pem') return value
+      if (format === 'escaped-pem') return value.replaceAll('\n', '\\n')
+      const key = kind === 'private' ? createPrivateKey(value) : createPublicKey(value)
+      return key.export({ format: 'der', type: format === 'raw-pkcs1' ? 'pkcs1' : kind === 'private' ? 'pkcs8' : 'spki' }).toString('base64')
+    }
     const adapter = new FuiouAdapter({
-      merchantCode: 'TEST', merchantPrivateKey: merchant.privateKey, fuiouPublicKey: provider.publicKey,
+      merchantCode: 'TEST', merchantPrivateKey: keyInput(merchant.privateKey, 'private'), fuiouPublicKey: keyInput(provider.publicKey, 'public'),
       baseUrl: 'http://127.0.0.1:3303', callbackUrl: 'http://127.0.0.1:43127/api/v1/model-billing/callback',
       fetch: async (url, init) => mock.handle(new Request(url instanceof Request ? url.url : String(url), { method: init?.method, headers: init?.headers, body: String(init?.body) })),
     })
