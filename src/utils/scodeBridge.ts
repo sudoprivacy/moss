@@ -261,6 +261,7 @@ export async function prepareFirstMessageForScode(
     assistantName?: string | null
     identityName?: string | null
     workspace: string
+    executionWorkspace?: { repository: string; workingRoot: string }
     enabledSkillNames?: string[]
     sharedMemory?: string | null
     /**
@@ -287,7 +288,12 @@ export async function prepareFirstMessageForScode(
   // Business roles use workspace AGENTS.md, the entry scode actually loads.
   // A user-owned AGENTS.md is preserved; do not repeat identity overrides here.
   // 2. 添加草稿箱使用指令
-  instructions.push(buildDraftsInstruction(config.workspace))
+  instructions.push(buildDraftsInstruction(config.executionWorkspace?.repository ?? config.workspace))
+  if (config.executionWorkspace) {
+    instructions.push(
+      `[Nexus file tools]\nUse absolute file paths under ${config.executionWorkspace.repository}.\nRelative file paths resolve from ${config.executionWorkspace.workingRoot}; the repository is mounted there as workspace/.\nFor example, workspace/report.txt addresses ${config.executionWorkspace.repository}/report.txt.\nUse this same namespace for Read, Write, Edit and drafts.\n[End Nexus file tools]`,
+    )
+  }
 
   // 3. 构建工作空间技能目录提示
   const skillsHint = await buildWorkspaceSkillsHint(config.workspace, config.enabledSkillNames)

@@ -19,6 +19,8 @@ type AcpBridgeOptions = {
   transport?: AcpMessageTransport
   sessionId: string
   cwd: string
+  /** Repository and working root seen by the engine's file tools. */
+  executionWorkspace?: { repository: string; workingRoot: string }
   model: string
   /** Provider identity bound to this running scode process. */
   modelProviderId?: string
@@ -223,14 +225,18 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     return parts[parts.length - 1]?.trim() || text
   }
 
-  const writeTranscript = async (event: any) => {
-    if (!transcriptPath) return
-    try {
+  let transcriptWrites = Promise.resolve()
+  const writeTranscript = (event: any): Promise<void> => {
+    if (!transcriptPath) return Promise.resolve()
+    const line = JSON.stringify(event) + '\n'
+    // File operations must preserve the parent chain's message order.
+    transcriptWrites = transcriptWrites.then(async () => {
       await mkdir(dirname(transcriptPath), { recursive: true })
-      await appendFile(transcriptPath, JSON.stringify(event) + '\n', 'utf8')
-    } catch (e: any) {
-      process.stderr.write(`[AcpBridge] TRANSCRIPT WRITE ERROR: ${e.message}\n`)
-    }
+      await appendFile(transcriptPath, line, 'utf8')
+    }).catch((error: unknown) => {
+      process.stderr.write(`[AcpBridge] TRANSCRIPT WRITE ERROR: ${error instanceof Error ? error.message : String(error)}\n`)
+    })
+    return transcriptWrites
   }
 
   const persistScodeSessionId = (id: string | null | undefined): void => {
@@ -240,6 +246,29 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       .catch(err => {
         process.stderr.write(`[AcpBridge] Failed to persist scode session id: ${String(err)}\n`)
       })
+  }
+
+  const completeToolCall = (toolCallId: string): void => {
+    const toolInfo = currentTurnToolCalls.get(toolCallId)
+    if (!toolInfo) return
+    const output = currentTurnToolOutput.get(toolCallId)
+    emitStdout(JSON.stringify({
+      type: 'tool_use', sessionId, uuid: toolCallId, parentUuid: lastPersistedUuid,
+      isSidechain: false, name: toolInfo.name, tool_use_id: toolCallId,
+      status: 'completed', timestamp: new Date().toISOString(), cwd,
+      userType: 'external', version: 'unknown',
+    }) + '\n')
+    const result = {
+      type: 'tool_result', sessionId, uuid: randomUUID(), parentUuid: lastPersistedUuid,
+      isSidechain: false, tool_use_id: toolCallId, content: output?.content ?? '',
+      is_error: output?.isError ?? false, timestamp: new Date().toISOString(), cwd,
+      userType: 'external', version: 'unknown',
+    }
+    emitStdout(JSON.stringify(result) + '\n')
+    void writeTranscript(result)
+    lastPersistedUuid = result.uuid
+    currentTurnToolCalls.delete(toolCallId)
+    currentTurnToolOutput.delete(toolCallId)
   }
 
   const sendMessage = (message: SessionRpcMessage): void => {
@@ -505,6 +534,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           assistantName: options.assistantName,
           identityName: options.assistantDisplayName || options.assistantName,
           workspace: cwd,
+          executionWorkspace: options.executionWorkspace,
           enabledSkillNames: options.enabledSkillNames,
           sharedMemory: options.sharedMemory,
           availableWikis: options.availableWikis,
@@ -672,48 +702,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           process.stderr.write(`[AcpBridge] Turn Ended. Unblocking UI...\n`)
           currentTurnAssistantUuid = null // Reset UUID for the next turn
 
-          // Emit tool completion status for all tools in current turn
-          // This is needed because scode doesn't send individual tool completion events
-          for (const [toolCallId, toolInfo] of currentTurnToolCalls) {
-            const toolCompleteEvent = {
-              type: 'tool_use',
-              sessionId,
-              uuid: toolCallId,
-              parentUuid: lastPersistedUuid,
-              isSidechain: false,
-              name: toolInfo.name,
-              tool_use_id: toolCallId,
-              status: 'completed',
-              timestamp: new Date().toISOString(),
-              cwd,
-              userType: 'external',
-              version: 'unknown',
-            }
-            process.stderr.write(`[AcpBridge] EMITTING TOOL_COMPLETE EVENT for ${toolCallId}\n`)
-            emitStdout(JSON.stringify(toolCompleteEvent) + '\n')
-
-            // Persist a durable tool_result record carrying the captured output
-            // so a rendered transcript shows what each tool returned. Chained via
-            // lastPersistedUuid so it parents onto the tool_use event.
-            const output = currentTurnToolOutput.get(toolCallId)
-            const toolResultUuid = randomUUID()
-            const toolResultEvent = {
-              type: 'tool_result',
-              sessionId,
-              uuid: toolResultUuid,
-              parentUuid: lastPersistedUuid,
-              isSidechain: false,
-              tool_use_id: toolCallId,
-              content: output?.content ?? '',
-              is_error: output?.isError ?? false,
-              timestamp: new Date().toISOString(),
-              cwd,
-              userType: 'external',
-              version: 'unknown',
-            }
-            void writeTranscript(toolResultEvent)
-            lastPersistedUuid = toolResultUuid
-          }
+          // Older engines may report output without a terminal tool status.
+          for (const toolCallId of currentTurnToolCalls.keys()) completeToolCall(toolCallId)
           // Clear tracked tool calls / captured output for next turn
           currentTurnToolCalls.clear()
           currentTurnToolOutput.clear()
@@ -978,8 +968,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           }
 
           // scode reports a tool's output via ToolCallUpdate. Capture the latest
-          // content/status per toolCallId so the durable `tool_result` record
-          // written on stopReason carries the actual output (and error flag).
+          // content/status per toolCallId and retain terminal results immediately,
+          // including when a later model request fails before stopReason.
           if (sessionUpdate === 'tool_call_update' && update) {
             const toolCallId = update.toolCallId
             if (toolCallId) {
@@ -990,10 +980,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               // status), so an early in_progress update does not clobber output.
               if (captured !== undefined || isError) {
                 currentTurnToolOutput.set(toolCallId, {
-                  content: captured ?? '',
+                  content: captured ?? currentTurnToolOutput.get(toolCallId)?.content ?? '',
                   isError,
                 })
               }
+              if (status === 'completed' || isError) completeToolCall(toolCallId)
             }
           }
         }
@@ -1376,7 +1367,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       }
     },
     async destroy(force = false) {
-      await transport.close(force)
+      try { await transport.close(force) }
+      finally { await transcriptWrites }
 
       // Host mode session mode cleans configDir.
       if (runtime.type === 'host' && runtime.hostMode === 'session' && runtime.configDir) {

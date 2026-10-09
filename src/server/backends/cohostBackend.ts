@@ -100,6 +100,9 @@ export class CohostBackend implements SessionBackend {
       transport,
       sessionId: options.sessionId,
       cwd: options.cwd,
+      ...(repositoryPath && session.workspacePath ? {
+        executionWorkspace: { repository: repositoryPath, workingRoot: session.workspacePath },
+      } : {}),
       model,
       modelProviderId: env.MOSS_MODEL_PROVIDER_ID,
       transcriptPath: options.transcriptPath,
