@@ -59,3 +59,15 @@ test('failed organization mutations do not announce a changed list', async () =>
   await assert.rejects(deleteOrganization('test-org'), /mutation rejected/)
   assert.equal(changes, 0)
 })
+
+test('organization creation preserves the idempotency key and refresh notification', async () => {
+  const payload = { name: 'Shared billing' }
+  authClient.post = (async (path, body, options) => {
+    assert.equal(path, '/api/v1/organizations')
+    assert.deepEqual(body, payload)
+    assert.deepEqual(options?.headers, { 'Idempotency-Key': 'create-shared-org' })
+    return { organization: { id: 'shared-org', name: payload.name } }
+  }) as typeof authClient.post
+  await createOrganization(payload, 'create-shared-org')
+  assert.equal(changes, 1)
+})

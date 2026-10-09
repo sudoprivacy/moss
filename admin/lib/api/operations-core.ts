@@ -28,11 +28,13 @@ export interface InvitationCodeItem {
   code: string
   enterprise_id: number
   enterprise_name: string
-  initial_quota_usd: number
+  initial_quota_usd: number | null
   status: 0 | 1 | 2
   used_by_user_id?: number | null
-  used_at?: string | null
-  created_at: string
+  used_by_phone?: string | null
+  used_by_nickname?: string | null
+  used_at?: number | null
+  created_at: number
 }
 
 export interface BillingOrderItem {

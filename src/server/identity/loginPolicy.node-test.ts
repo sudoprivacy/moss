@@ -99,6 +99,33 @@ async function setup(t: TestContext, defaultLoginMethod: OrganizationLoginMethod
   return { db, authDb, service, identities, policies, config, setCasPolicy }
 }
 
+for (const loginMethod of ['sms', 'password'] as const) {
+  void test(`invitation registration with ${loginMethod} preserves the expected login password`, async t => {
+    const { service, policies } = await setup(t, loginMethod)
+    await policies.putOrganization('org-a', { loginMethod }, 'root')
+    const invitedPhone = '13800000001'
+    const password = loginMethod === 'sms' ? invitedPhone : 'ChosenPass123!'
+    const invitations = await service.createSudoworkAdministrationService().createInvitationCodes({
+      actor: root, count: 1,
+    })
+    const registered = await service.registerWithPhone({
+      phone: invitedPhone, nickname: 'Invited member', invitationCode: invitations.codes[0]!,
+      loginMethod, ...(loginMethod === 'password' ? { password } : {}),
+    })
+    // SMS deployments must enable password login before the initial password can be used.
+    await policies.putOrganization('org-a', { loginMethod: 'password' }, 'root')
+    const loggedIn = await service.issueTokenFromPassword({ username: invitedPhone, password })
+    assert.equal(loggedIn.user.id, registered.user.id)
+    await assert.rejects(
+      service.issueTokenFromPassword({
+        username: invitedPhone,
+        password: loginMethod === 'password' ? invitedPhone : 'ChosenPass123!',
+      }),
+      (error: unknown) => error instanceof AuthServiceError && error.statusCode === 401,
+    )
+  })
+}
+
 function providerIdentity(patch: Partial<OAuth2Identity> = {}): OAuth2Identity {
   return {
     extOrgId: 'new-external-org', extOrgName: 'New External Org',

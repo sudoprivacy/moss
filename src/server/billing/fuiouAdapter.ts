@@ -83,7 +83,7 @@ export class FuiouAdapter {
     return { qrCodeUrl: orderInfo, orderInfo }
   }
 
-  async queryPayment(order: BillingOrderRecord): Promise<{
+  async queryPayment(order: Pick<BillingOrderRecord, 'orderNo' | 'orderDate' | 'amountCents'>): Promise<{
     status: 'SUCCESS' | 'FAILED' | 'PENDING'
     event?: VerifiedPaymentEvent
   }> {

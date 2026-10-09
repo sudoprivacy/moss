@@ -46,6 +46,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     wallet: WalletService
     listModels: (orgId?: string) => Promise<ModelDescriptor[]> | ModelDescriptor[]
     sudorouter?: SudorouterPort & SudorouterUsagePort
+    isShared?: (orgId: string) => Promise<boolean>
     clock?: () => number
   }) {
     this.clock = options.clock ?? Date.now
@@ -65,6 +66,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     model?: string
     idempotencyKey?: string
   }): Promise<{ success: true; deducted: number; newBalance: number }> {
+    await this.assertLegacy(input.actor.orgId)
     this.assertTokenCount(input.inputTokens)
     this.assertTokenCount(input.outputTokens)
     const totalTokens = input.inputTokens + input.outputTokens
@@ -123,6 +125,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
   }
 
   async getDashboard(actor: IdentityActor): Promise<Record<string, unknown>> {
+    await this.assertLegacy(actor.orgId)
     const external = await this.getExternalDashboard(actor, true)
     if (external) return external
     const stats = await this.buildStats(actor)
@@ -144,6 +147,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
   }
 
   async listLedger(input: { actor: IdentityActor; timeFrom?: number; timeTo?: number }): Promise<{ data: unknown[]; total: number }> {
+    await this.assertLegacy(input.actor.orgId)
     await this.requireUser(input.actor.userId)
     const account = await this.options.repository.getExternalAccount('sudorouter', 'user', input.actor.userId)
     if (account && this.options.sudorouter) {
@@ -179,12 +183,14 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
   }
 
   async getStats(actor: IdentityActor): Promise<Record<string, unknown>> {
+    await this.assertLegacy(actor.orgId)
     const external = await this.getExternalDashboard(actor, false)
     if (external) return external
     return await this.buildStats(actor)
   }
 
   async getModelUsageStats(input: { actor: IdentityActor; startDate?: string; endDate?: string }): Promise<unknown[]> {
+    await this.assertLegacy(input.actor.orgId)
     await this.requireUser(input.actor.userId)
     const from = parseLocalDate(input.startDate!, false)
     const to = parseLocalDate(input.endDate!, true)
@@ -263,6 +269,10 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
     }
   }
 
+  private async assertLegacy(orgId: string): Promise<void> {
+    if (await this.options.isShared?.(orgId)) throw new SudoworkLegacyUsageError(409, '请使用组织模型账户的用量接口')
+  }
+
   private async getAllExternalLogs(externalUserId: string, fromSeconds: number, toSeconds: number): Promise<SudorouterUsageLog[]> {
     if (!this.options.sudorouter) return []
     const pageSize = 100
@@ -304,6 +314,7 @@ export class SudoworkLegacyUsageService implements SudoworkLegacyUsagePort {
   }
 
   async listAdminUserLedger(input: { actor: IdentityActor; legacyUserId: number; limit: number }): Promise<unknown[]> {
+    await this.assertLegacy(input.actor.orgId)
     this.assertAdmin(input.actor)
     const alias = await this.options.identities.resolveNumericAliasGlobal('user', input.legacyUserId)
     if (!alias) throw new SudoworkLegacyUsageError(404, '用户不存在')

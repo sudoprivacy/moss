@@ -78,6 +78,11 @@ import {
   type SudorouterUsagePort,
 } from '../billing/sudorouterAdapter.js'
 import { readSudorouterAccount, SudorouterAccountService } from '../billing/sudorouterAccountService.js'
+import { buildClientRuntime } from '../clientRuntime.js'
+import { parseUsd } from '../billing/modelMoney.js'
+import { OrganizationBillingService, type CreateOrganizationModelInput } from '../billing/organizationBillingService.js'
+import type { OrganizationRouterPort } from '../billing/organizationRouterAdapter.js'
+import { OrganizationRechargeService, type OrganizationPaymentPort } from '../billing/organizationRechargeService.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
 import { SudoworkBillingService, type BillingPaymentPort } from '../api/compat/sudowork/billingService.js'
 import { SudoworkLegacyUsageService } from '../api/compat/sudowork/legacyUsageService.js'
@@ -161,7 +166,8 @@ function loginMethodForTokenKey(keyId: string): LoginPolicyMethod | null {
 
 type NativeUserProjection = SanitizedAuthCenterUser & {
   legacyId: number | null
-  balanceUnits: number
+  balanceUnits?: number
+  modelBillingMode?: 'organization_shared'
   sudorouterUserId?: string | null
   sudorouterApiKeyMasked?: string | null
   sudorouterCredentialStatus?: 'ready' | 'missing' | 'unavailable'
@@ -352,6 +358,8 @@ export class AuthService {
   private readonly clientPolicies: ClientPolicyRepository
   private readonly loginPolicyDefaults: { loginMethod: LoginPolicyMethod } = { loginMethod: 'password' }
   private sudorouterAccountReader?: Pick<SudorouterAccountService, 'getAccount'>
+  private organizationBilling?: OrganizationBillingService
+  private organizationRecharge?: OrganizationRechargeService
   private sudorouterAccounts?: {
     accountProvisioner: Pick<SudorouterAccountService, 'ensureAccount'> & Partial<Pick<SudorouterAccountService, 'getAccount'>>
     initialQuotaUnits: number
@@ -372,7 +380,12 @@ export class AuthService {
   ) {
     this.identityRepository = new IdentityRepository(this.db.driver)
     this.clientPolicies = new ClientPolicyRepository(this.db.driver)
-    this.unifiedIdentity = new UnifiedIdentityService(this.db, this.identityRepository)
+    this.unifiedIdentity = new UnifiedIdentityService(this.db, this.identityRepository, {
+      stageOrganization: async (orgId, input) => {
+        if (this.organizationBilling) await this.organizationBilling.stageOrganization(orgId, input ?? { initialAmountUsd: '0.00', defaultMemberLimitUsd: null })
+      },
+      isShared: orgId => this.organizationBilling?.isShared(orgId) ?? Promise.resolve(false),
+    })
     this.cleanupTimer = setInterval(() => {
       void this.db.cleanupExpiredRevokedTokens()
     }, REVOKED_TOKENS_CLEANUP_INTERVAL_MS)
@@ -404,6 +417,7 @@ export class AuthService {
     getLoginMethod?: (orgId: string) => LoginPolicyMethod | Promise<LoginPolicyMethod>
   }): SudoworkIdentityService {
     return new SudoworkIdentityService({
+      unifiedIdentity: this.unifiedIdentity,
       authDb: this.db,
       identities: this.identityRepository,
       tokenStore: input.tokenStore,
@@ -437,6 +451,7 @@ export class AuthService {
       this.db,
       this.identityRepository,
       this.unifiedIdentity,
+      this.organizationBilling,
     )
   }
 
@@ -501,7 +516,7 @@ export class AuthService {
       this.createOrganizationIdentityService(),
       this.identityRepository,
       this.db,
-      input,
+      { ...input, modelBilling: this.organizationBilling },
     )
   }
 
@@ -527,14 +542,53 @@ export class AuthService {
   createSudorouterAccountService(input: {
     provider: SudorouterAccountPort
     secrets: Pick<NexusClient, 'putSecret' | 'getSecret'>
-  }): SudorouterAccountService {
-    return new SudorouterAccountService(
+  }): Pick<SudorouterAccountService, 'ensureAccount' | 'getAccount'> {
+    this.configureSudorouterCredentialReader(input.secrets)
+    const legacy = new SudorouterAccountService(
       this.db.driver,
       new BillingRepository(this.db.driver),
       input.provider,
       input.secrets,
     )
+    return {
+      ensureAccount: async (request, context) => {
+        if (this.organizationBilling && await this.organizationBilling.isShared(request.orgId)) {
+          return this.organizationBilling.provisionMemberAccount(request.orgId, request.ownerId)
+        }
+        return legacy.ensureAccount(request, context)
+      },
+      getAccount: async (ownerId, orgId) => {
+        if (this.organizationBilling && await this.organizationBilling.isShared(orgId)) {
+          const credential = await this.organizationBilling.credential(orgId, ownerId)
+          const token = await this.organizationBilling.token(orgId, ownerId)
+          return credential && token ? { externalUserId: credential.sudorouterUserId, token: credential.sudorouterKey,
+            tokenSecretRef: token.secret_ref!, quotaUnits: 0, usedQuotaUnits: 0 } : null
+        }
+        return legacy.getAccount(ownerId, orgId)
+      },
+    }
   }
+
+  async configureOrganizationBilling(router: OrganizationRouterPort, secrets: Pick<NexusClient, 'putSecret' | 'getSecret'>): Promise<OrganizationBillingService> {
+    const service = new OrganizationBillingService(this.db.driver, router, secrets, {
+      isRechargeEnabled: () => this.organizationRecharge?.isEnabled() ?? false,
+      onServiceReady: async (orgId, key, baseUrl) => {
+        await this.updateOrganizationSystemSettings(orgId, { url: baseUrl, apiKey: key, defaultModelProviderId: 'legacy-default',
+          modelProviders: [{ id: 'legacy-default', name: '组织模型服务', kind: 'openai-compatible', baseUrl,
+            discoveryUrl: `${baseUrl}/models`, protocol: 'openai-completions', enabled: true }] }, 'organization-model-provisioner')
+      },
+    })
+    await service.initialize()
+    this.organizationBilling = service
+    return service
+  }
+
+  getOrganizationBillingService(): OrganizationBillingService | undefined { return this.organizationBilling }
+
+  configureOrganizationRecharge(payment: OrganizationPaymentPort | undefined, enabled: boolean, exchangeRateMicros = 7_300_000): void {
+    if (this.organizationBilling) this.organizationRecharge = new OrganizationRechargeService(this.organizationBilling, payment, { enabled, exchangeRateMicros })
+  }
+  getOrganizationRechargeService(): OrganizationRechargeService | undefined { return this.organizationRecharge }
 
   configureSudorouterCredentialReader(secrets: Pick<NexusClient, 'getSecret'>): void {
     const repository = new BillingRepository(this.db.driver)
@@ -553,6 +607,13 @@ export class AuthService {
       identities: this.identityRepository,
       billing: new BillingRepository(this.db.driver),
       ...input,
+      getSharedProjection: async (userId, orgId) => {
+        if (!await this.organizationBilling?.isShared(orgId)) return null
+        const runtime = await buildClientRuntime(this, { id: userId, orgId })
+        return { billingMode: 'organization_shared', sudorouterKey: 'sudorouter_key' in runtime ? runtime.sudorouter_key : null,
+          modelServiceUrl: 'model_service_url' in runtime ? runtime.model_service_url : '',
+          models: runtime.models, scodeAutoModel: 'scode_auto_model' in runtime ? runtime.scode_auto_model ?? '' : '' }
+      },
       getRuntimeConfig: async orgId => {
         const settings = await this.getOrganizationSystemSettings(orgId)
         // This response carries a Router user token, so only its organization
@@ -747,6 +808,7 @@ export class AuthService {
     ) : undefined
     return new SudoworkBillingService({
       db: this.db.driver, auth: this.db, identities: this.identityRepository,
+      isShared: orgId => this.organizationBilling?.isShared(orgId) ?? Promise.resolve(false),
       repository, wallet, recharge, coordinator, credit, refund, payment: input.payment, paymentsEnabled: input.paymentsEnabled,
     })
   }
@@ -763,6 +825,7 @@ export class AuthService {
       repository,
       wallet: new WalletService(this.db.driver, repository),
       listModels: input.listModels,
+      isShared: orgId => this.organizationBilling?.isShared(orgId) ?? Promise.resolve(false),
       sudorouter: input.sudorouter,
     })
   }
@@ -1772,9 +1835,18 @@ export class AuthService {
     code?: string | null
     idempotencyKey?: string
     extOrgId?: string | null
+    modelBilling?: CreateOrganizationModelInput
   }): Promise<{
     organization: NativeOrganizationProjection & { userCount: number; departmentCount: number }
   }> {
+    if (this.organizationBilling) {
+      const created = await this.unifiedIdentity.createOrganization({ ...input, code: input.code ?? undefined, modelBilling: input.modelBilling ?? { initialAmountUsd: '0.00', defaultMemberLimitUsd: null } },
+        onlineCommandContext(input.idempotencyKey ?? `organization:${randomUUID()}`))
+      // Identity creation succeeds independently of external provisioning; its durable status is visible in the model account page.
+      await this.organizationBilling.retryOrganization(created.organizationId, input.name).catch(() => {})
+      const org = (await this.db.getOrganization(created.organizationId))!
+      return { organization: { ...(await this.projectOrganization(org))!, userCount: 0, departmentCount: 0 } }
+    }
     const name = input.name.trim()
     const extOrgId = input.extOrgId?.trim() || null
     if (!name) {
@@ -1862,6 +1934,7 @@ export class AuthService {
       throw new AuthServiceError(404, 'Unknown organization')
     }
     try {
+      if (await this.organizationBilling?.isShared(org.id)) throw new AuthServiceError(409, '组织含有模型账户及资金记录，不能删除')
       await this.db.driver.transaction(async () => {
         await this.identityRepository.deleteOrganizationRecords(org.id)
         await this.db.deleteOrganization(org.id)
@@ -2086,7 +2159,17 @@ export class AuthService {
    * The user's own model-gateway token, or null when the shared server key
    * applies. Used only server-side for model discovery and session credentials.
    */
-  async getUserModelCredential(userId: string): Promise<UserModelCredential | null> {
+  async getUserModelCredential(userId: string, orgId?: string): Promise<UserModelCredential | null> {
+    const identity = await this.db.getUserById(userId)
+    const scope = orgId ?? identity?.orgId
+    if (scope && this.organizationBilling && await this.organizationBilling.isShared(scope)) {
+      return this.organizationBilling.credential(scope, userId)
+    }
+    return this.getLegacyUserModelCredential(userId)
+  }
+
+  /** Historical personal payment callbacks must never resolve the new organization recipient. */
+  async getLegacyUserModelCredential(userId: string): Promise<UserModelCredential | null> {
     const reader = this.sudorouterAccountReader ?? this.sudorouterAccounts?.accountProvisioner
     if (reader?.getAccount) {
       const user = await this.db.getUserById(userId)
@@ -2103,6 +2186,13 @@ export class AuthService {
 
   /** Provision native registration/login through the configured account service. */
   async ensureUserSudorouterAccount(userId: string): Promise<boolean> {
+    if (this.organizationBilling) {
+      const user = await this.db.getUserById(userId)
+      if (user && await this.organizationBilling.isShared(user.orgId)) {
+        await this.organizationBilling.provisionMemberAccount(user.orgId, user.id)
+        return true
+      }
+    }
     if (!this.sudorouterAccounts) return false
     const user = await this.db.getUserById(userId)
     if (!user) throw new AuthServiceError(404, 'User does not exist')
@@ -2138,6 +2228,7 @@ export class AuthService {
     phone?: string
     status?: AuthCenterUser['status']
     initialCreditUnits?: number
+    memberLimitUsd?: string | null
     idempotencyKey?: string
   }, auth?: AuthContext): Promise<{
     user: SanitizedAuthCenterUser
@@ -2204,6 +2295,26 @@ export class AuthService {
   async createProvisionedUser(input: Parameters<AuthService['createUser']>[0], auth?: AuthContext): Promise<{
     user: SanitizedAuthCenterUser
   }> {
+    if (this.organizationBilling && await this.organizationBilling.isShared(input.orgId)) {
+      await this.assertCanManageSuperAdminTarget(null, input.role, auth)
+      await this.assertCanManageUserMutation(input.orgId, { role: input.role as AuthRole, departmentId: input.departmentId ?? null }, auth)
+      if (input.memberLimitUsd !== null && input.memberLimitUsd !== undefined) parseUsd(input.memberLimitUsd)
+      const reference = input.idempotencyKey ?? `member:${randomUUID()}`
+      const billing = this.organizationBilling
+      const created = await billing.exclusive(`identity:${reference}`, () => billing.operation(input.orgId, 'create-member-identity', `identity:${reference}`, {
+        name: input.name, email: input.email, role: input.role, departmentId: input.departmentId, memberLimitUsd: input.memberLimitUsd,
+      }, true, async () => {
+        const previous = await this.identityRepository.getCommandResult<{ userId: string }>('identity.create_user', reference)
+        if (previous) {
+          const user = await this.db.getUserById(previous.userId)
+          if (!user || user.orgId !== input.orgId || user.name !== input.name.trim()) throw new AuthServiceError(409, '成员创建请求不匹配')
+          return { user: sanitizeUser(user) }
+        }
+        return this.createUser({ ...input, initialCreditUnits: 0, idempotencyKey: reference }, auth)
+      }))
+      await billing.provisionMemberAccount(input.orgId, created.user.id, input.memberLimitUsd)
+      return created
+    }
     if (!this.sudorouterAccounts) return this.createUser(input, auth)
 
     try {
@@ -2364,6 +2475,7 @@ export class AuthService {
       throw new AuthServiceError(400, 'Missing user update fields')
     }
 
+    await this.organizationBilling?.beforeMemberChange(user.orgId, user.id, patch.status ?? user.status)
     await withExtIdConflict(() => this.db.updateUser(user.id, patch))
     return {
       user: sanitizeUser((await this.db.getUserByIdAndOrg(user.id, nextOrgId)) ?? user),
@@ -2835,13 +2947,14 @@ export class AuthService {
   }
 
   private async projectUser(user: AuthCenterUser): Promise<NativeUserProjection> {
+    const isShared = await this.organizationBilling?.isShared(user.orgId) ?? false
     const wallet = await this.identityRepository.getWallet('user', user.id)
     return {
       ...sanitizeUser(user),
       name: resolveDisplayName(user),
       displayName: user.displayName ?? null,
       legacyId: await this.identityRepository.getNumericAlias('user', user.id),
-      balanceUnits: wallet?.balanceUnits ?? 0,
+      ...(isShared ? { modelBillingMode: 'organization_shared' as const } : { balanceUnits: wallet?.balanceUnits ?? 0 }),
     }
   }
 

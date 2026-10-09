@@ -55,6 +55,7 @@ export interface SudoworkLegacySession {
 }
 
 interface ServiceOptions {
+  unifiedIdentity?: UnifiedIdentityService
   authDb: AuthCenterDb
   identities: IdentityRepository
   tokenStore: LegacyKeyValueStore
@@ -96,7 +97,7 @@ export class SudoworkIdentityService {
       this.tokenFactory,
       REFRESH_TOKEN_TTL_SECONDS,
     )
-    this.unifiedIdentity = new UnifiedIdentityService(
+    this.unifiedIdentity = options.unifiedIdentity ?? new UnifiedIdentityService(
       options.authDb,
       options.identities,
     )

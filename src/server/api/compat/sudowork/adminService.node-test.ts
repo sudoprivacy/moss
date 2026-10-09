@@ -112,6 +112,48 @@ void describe('Sudowork administration compatibility service', () => {
     db.close()
   })
 
+  void test('invitation list includes its member identity and preserves millisecond timestamps', async () => {
+    const { db, service, first, second, identities, authDb } = await setup()
+    try {
+      const actor = { userId: 'admin-a', orgId: first.organization.id, role: 'admin' }
+      await service.createInvitationCodes({ actor, count: 1 }, () => 'INVITED-MEMBER')
+      const pending = (await service.listInvitationCodes({ actor })).items[0]!
+      assert.equal(pending.used_by_user_id, null)
+      assert.equal(pending.used_by_phone, null)
+      assert.equal(pending.used_by_nickname, null)
+      assert.equal(pending.used_at, null)
+
+      const created = await service.createPasswordUser({
+        actor: { ...actor, role: 'super_admin' },
+        phone: '13800000001', nickname: '邀请码成员', password: 'StrongPass123',
+        enterpriseId: first.legacyEnterpriseId, invitationCodeId: pending.id,
+      })
+      const used = (await service.listInvitationCodes({ actor, status: 1 })).items[0]!
+      const stored = (await identities.getInvitationByCode(pending.code))!
+      assert.equal(used.used_by_user_id, created.id)
+      assert.equal(used.used_by_phone, '13800000001')
+      assert.equal(used.used_by_nickname, '邀请码成员')
+      assert.equal(used.created_at, stored.createdAt)
+      assert.equal(used.created_at, pending.created_at)
+      assert.equal(used.used_at, stored.usedAt)
+      assert(used.created_at > 1_000_000_000_000)
+
+      const userId = stored.usedByUserId!
+      await authDb.driver.run('UPDATE users SET phone = NULL WHERE id = ?', [userId])
+      await authDb.updateUser(userId, { displayName: null })
+      const unnamed = (await service.listInvitationCodes({ actor })).items[0]!
+      assert.equal(unnamed.used_by_phone, '13800000001')
+      assert.equal(unnamed.used_by_nickname, null)
+
+      // The invitation's original organization cannot read a moved member's current profile.
+      await authDb.updateUser(userId, { orgId: second.organization.id, displayName: '其他组织成员' })
+      const moved = (await service.listInvitationCodes({ actor })).items[0]!
+      assert.equal(moved.used_by_user_id, created.id)
+      assert.equal(moved.used_by_phone, null)
+      assert.equal(moved.used_by_nickname, null)
+    } finally { db.close() }
+  })
+
   void test('defaults invitation creation to the Moss actor organization', async () => {
     const { db, service, first, identities } = await setup()
     const actor = { userId: 'admin-a', orgId: first.organization.id, role: 'admin' }
