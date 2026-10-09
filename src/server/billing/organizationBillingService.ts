@@ -194,23 +194,41 @@ export class OrganizationBillingService {
       throw new OrganizationBillingError('FORBIDDEN', '需要当前组织管理员权限', 403)
     }
   }
-  async dashboard(actor: OrganizationBillingActor): Promise<Record<string, unknown>> {
+  private async accountContext(actor: OrganizationBillingActor) {
     const user = await this.db.get('SELECT org_id, role, status FROM users WHERE id = ?', [actor.userId])
     if (!user || user.status !== 'active' || user.org_id !== actor.orgId && user.role !== 'super_admin') {
       throw new OrganizationBillingError('FORBIDDEN', '无权访问当前组织', 403)
     }
     const account = await this.requireAccount(actor.orgId)
     const isAdmin = user.role === 'admin' || user.role === 'super_admin'
+    return { account, access: {
+      mode: 'organization_shared', currency: 'USD', org_id: actor.orgId, account_status: account.status,
+      can_manage: isAdmin, can_recharge: user.role === 'admin' && user.org_id === actor.orgId && (this.options.isRechargeEnabled?.() ?? false),
+    } }
+  }
+  /** Payment access must not wait for optional Router balance or Token queries. */
+  async access(actor: OrganizationBillingActor): Promise<Record<string, unknown>> {
+    return (await this.accountContext(actor)).access
+  }
+  async dashboard(actor: OrganizationBillingActor): Promise<Record<string, unknown>> {
+    const { account, access } = await this.accountContext(actor)
+    const isAdmin = access.can_manage
     const binding = await this.token(actor.orgId, actor.userId)
-    const [organization, members] = await Promise.all([
+    const [organizationResult, membersResult] = await Promise.allSettled([
       isAdmin && account.router_user_id ? this.router.getAccount(account.router_user_id) : Promise.resolve(null),
       binding?.router_token_id ? this.router.listTokens(binding.router_user_id, binding.router_token_id) : Promise.resolve([]),
     ])
+    for (const result of [organizationResult, membersResult]) {
+      if (result.status === 'rejected' && !(result.reason instanceof RouterRequestError)) throw result.reason
+    }
+    const organization = organizationResult.status === 'fulfilled' ? organizationResult.value : null
+    const member = membersResult.status === 'fulfilled' ? membersResult.value[0] : undefined
     return {
-      mode: 'organization_shared', currency: 'USD', org_id: actor.orgId, account_status: account.status,
-      can_manage: isAdmin, can_recharge: user.role === 'admin' && user.org_id === actor.orgId && (this.options.isRechargeEnabled?.() ?? false),
+      ...access,
+      balance_status: !isAdmin ? 'not_applicable' : !account.router_user_id ? 'pending' : organization ? 'available' : 'unavailable',
+      member_usage_status: !binding?.router_token_id ? 'pending' : member ? 'available' : 'unavailable',
       ...(organization ? { model_balance_usd: quotaToUsd(organization.quota, account.quota_per_usd), used_amount_usd: quotaToUsd(organization.used_quota, account.quota_per_usd) } : {}),
-      member: members[0] ? this.projectToken(members[0], account) : null,
+      member: member ? this.projectToken(member, account) : null,
       ...(isAdmin ? { router_user_id: account.router_user_id, default_member_limit_usd: account.default_member_quota === null ? null : quotaToUsd(account.default_member_quota, account.quota_per_usd) } : {}),
     }
   }
