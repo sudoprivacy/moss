@@ -38,6 +38,29 @@ setGlobalDispatcher(new Agent({
 export const NEXUS_REPO = process.env.MOSS_E2E_NEXUS_REPO ?? 'C:/work/sudo_workspace_v3/nexus'
 export const MOSS_REPO = process.env.MOSS_E2E_MOSS_REPO ?? 'C:/work/sudo_workspace_v3/moss'
 
+let modelDiscoveryStub: Promise<number> | null = null
+
+/** 静态模型目录 stub：任意 /models 返回默认模型清单（平台默认
+ * claude-sonnet-4-6 与 runtimeService 的 env-fallback
+ * gemini-3-flash-preview 都要覆盖——session 的默认模型链两值都可能出现）。
+ * 进程级单例：moss 多次重启（场景 3/8/A-2）期间端口保持不变。 */
+function ensureModelDiscoveryStub(): Promise<number> {
+  modelDiscoveryStub ??= new Promise<number>((resolve, reject) => {
+    void (async () => {
+      const port = await freePort()
+      const server = createHttpServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          data: [{ id: 'claude-sonnet-4-6' }, { id: 'gemini-3-flash-preview' }],
+        }))
+      })
+      server.on('error', reject)
+      server.listen(port, '127.0.0.1', () => resolve(port))
+    })()
+  })
+  return modelDiscoveryStub
+}
+
 /**
  * E2E 环境自检（H-1）：两个 E2E 套件的硬依赖清单。CI / 其他开发机缺任一项
  * 时整套 skip（describe `{ skip }`，钩子随之不执行），而非 before() 里 spawn
@@ -291,6 +314,22 @@ export async function startMoss(
     bootstrapAdmin: { username: adminUsername, password: adminPassword, email: 'p0@e2e.local' },
   }, null, 2))
   mkdirSync(join(tmp, 'mosshome'), { recursive: true })
+  // 模型发现预置（M-4）：10-02 dev merge（e2289f8）后 session spawn 必经
+  // discoverProviderModels——零配置 moss 的 legacy-default provider 打
+  // hk.sudorouter.ai/v1/models，无 key 得 401 → getModelsForSelection throw
+  // → session 创建 503。E2E 离线环境预置平台 settings（USERPROFILE/HOME
+  // 已重定向到 tmp/home，settings 路径即 tmp/home/.moss/settings.json），
+  // 把 provider 指向本进程的静态 stub。幂等：每次 startMoss 重写同内容。
+  const stubPort = await ensureModelDiscoveryStub()
+  mkdirSync(join(tmp, 'home', '.moss'), { recursive: true })
+  writeFileSync(join(tmp, 'home', '.moss', 'settings.json'), JSON.stringify({
+    modelProviders: [{
+      id: 'p0-stub',
+      name: 'P0 Local Model Stub',
+      baseUrl: `http://127.0.0.1:${stubPort}/v1`,
+    }],
+    defaultModelProviderId: 'p0-stub',
+  }, null, 2))
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,

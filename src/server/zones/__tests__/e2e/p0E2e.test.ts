@@ -83,6 +83,21 @@ async function waitBindingActive(orgId: string, timeoutMs = 120_000): Promise<Re
   }
 }
 
+/** nexus 铸 delegation 的 membership 回查要求 version 精确等于 moss 当前
+ * revision（与 delegationService.ts 的 `r${revision}` 同构）——测试直读
+ * moss.db 取真值，不假设场景执行顺序带来的具体数值。 */
+function currentMembershipVersion(userId: string): string {
+  const sqlite = new DatabaseSync(join(tmp, 'mosshome', 'server', 'moss.db'), { readOnly: true })
+  try {
+    const row = sqlite.prepare(
+      `SELECT membership_revision FROM users WHERE id = ?`,
+    ).get(userId) as { membership_revision: number }
+    return `r${Number(row.membership_revision)}`
+  } finally {
+    sqlite.close()
+  }
+}
+
 describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false : `zones E2E environment incomplete: ${e2eEnv.missing.join('; ')}` }, () => {
   let orgA = ''
   let orgB = ''
@@ -231,8 +246,10 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
     const recordBody = { record_kind: 'context', data: '{"moss":"zone-a-write-read"}' }
     const recordPath = `/v2/sessions/${sessionId}/records`
     const unauthenticatedWrite = await nexusApi(nexus!, 'POST', recordPath, recordBody, { Authorization: `Bearer ${nexusKeyA}` })
-    assert.equal(unauthenticatedWrite.status, 403)
-    assert.equal((unauthenticatedWrite.json as { detail?: { code?: string } }).detail?.code, 'GRANT_NOT_ACTIVE')
+    // record write 的拒绝折叠为 404（与读面同形，反枚举 L-8③）——不再回显
+    // GRANT_NOT_ACTIVE 原因码
+    assert.equal(unauthenticatedWrite.status, 404)
+    assert.equal((unauthenticatedWrite.json as { detail?: { code?: string } }).detail?.code, 'SESSION_NOT_FOUND')
     const write = await nexusApi(nexus!, 'POST', recordPath, recordBody, { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA })
     assert.equal(write.status, 201, JSON.stringify(write.json))
     const vfsPath = (write.json as { vfs_path?: string }).vfs_path
@@ -289,31 +306,47 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
       `UPDATE users SET status = 'disabled', membership_revision = membership_revision + 1 WHERE id = ?`,
     ).run(userA.id)
     mossDb.close()
-    const inactive = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
-      headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
-    })
-    assert.equal(inactive.status, 403, await inactive.text())
-    assert.equal(delegationStatus(), 'active')
+    try {
+      const inactive = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
+        headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
+      })
+      // zone GET 的权限拒绝折叠为 404（反枚举，与 zone 不存在同形）——
+      // fail-closed 语义本身由下方 delegationStatus 断言佐证
+      assert.equal(inactive.status, 404, await inactive.text())
+      assert.equal(delegationStatus(), 'active')
 
-    const restoreDb = new DatabaseSync(mossDbPath)
-    restoreDb.prepare(
-      `UPDATE users SET status = 'active', membership_revision = membership_revision + 1 WHERE id = ?`,
-    ).run(userA.id)
-    restoreDb.close()
-    const stale = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
-      headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
-    })
-    assert.equal(stale.status, 403, await stale.text())
-    assert.equal(delegationStatus(), 'active')
+      const restoreDb = new DatabaseSync(mossDbPath)
+      restoreDb.prepare(
+        `UPDATE users SET status = 'active', membership_revision = membership_revision + 1 WHERE id = ?`,
+      ).run(userA.id)
+      restoreDb.close()
+      const stale = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
+        headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
+      })
+      assert.equal(stale.status, 404, await stale.text())
+      assert.equal(delegationStatus(), 'active')
 
-    const tokenA3 = await login(moss, userA.name, userA.password)
-    const reissued = await mossApi(moss, tokenA3, 'POST', '/api/v1/zones/delegations', {})
-    assert.equal(reissued.status, 201, `active member must re-issue after restore: ${JSON.stringify(reissued.json)}`)
-    delegationA = (reissued.json as { delegation_id: string }).delegation_id
-    const restored = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
-      headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
-    })
-    assert.equal(restored.status, 200, await restored.text())
+      const tokenA3 = await login(moss, userA.name, userA.password)
+      const reissued = await mossApi(moss, tokenA3, 'POST', '/api/v1/zones/delegations', {})
+      assert.equal(reissued.status, 201, `active member must re-issue after restore: ${JSON.stringify(reissued.json)}`)
+      delegationA = (reissued.json as { delegation_id: string }).delegation_id
+      const restored = await fetch(`${nexus!.baseUrl}/v2/zones/${encodeURIComponent(zoneA)}`, {
+        headers: { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA },
+      })
+      assert.equal(restored.status, 200, await restored.text())
+    } finally {
+      // 断言中断时 userA 会泄漏为 disabled（后续场景 6/H-1 的 delegation
+      // 铸造将全部撞上该泄漏态）；正常路径上方已恢复 active，此条件写
+      // 不触发、零影响。
+      const cleanup = new DatabaseSync(mossDbPath)
+      try {
+        cleanup.prepare(
+          `UPDATE users SET status = 'active' WHERE id = ? AND status <> 'active'`,
+        ).run(userA.id)
+      } finally {
+        cleanup.close()
+      }
+    }
   })
 
   it('scenario 11: renaming the org does not change the zone id', async () => {
@@ -401,7 +434,7 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
     const defaultBinding = (await bindings()).find((row) => row.org_id === orgA && row.is_default === true)
     assert.ok(defaultBinding?.nexus_grant_id)
     const issued = await nexusApi(nexus!, 'POST', '/v2/auth/zone-delegations', {
-      user_id: userA.id, org_id: orgA, membership_version: 'r2', zone_id: zoneA,
+      user_id: userA.id, org_id: orgA, membership_version: currentMembershipVersion(userA.id), zone_id: zoneA,
       audience: 'nexus-api', ttl_s: 300, grant_id: defaultBinding.nexus_grant_id,
       purpose: 'data-access', scope_rules: [{ capability: 'zone.data.read', resource_prefixes: ['/'] }],
     }, { Authorization: `Bearer ${nexus!.apiKey}`, 'Idempotency-Key': `moss-s6-reissue-${randomUUID()}` })
@@ -442,7 +475,7 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
       {
         user_id: userA.id,
         org_id: orgA,
-        membership_version: 'r2',
+        membership_version: currentMembershipVersion(userA.id),
         zone_id: zoneA,
         audience: 'nexus-api',
         ttl_s: 300,
@@ -573,7 +606,7 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
     const defaultBinding = (await bindings()).find((row) => row.org_id === orgA && row.is_default === true)
     assert.ok(defaultBinding?.nexus_grant_id)
     const runtimeDelegationResponse = await nexusApi(nexus!, 'POST', '/v2/auth/zone-delegations', {
-      user_id: userA.id, org_id: orgA, membership_version: 'r2', zone_id: zoneA,
+      user_id: userA.id, org_id: orgA, membership_version: currentMembershipVersion(userA.id), zone_id: zoneA,
       audience: 'nexus-api', ttl_s: 300, grant_id: defaultBinding.nexus_grant_id,
       purpose: 'runtime', scope_rules: [{ capability: 'zone.runtime.execute', resource_prefixes: [`/sessions/${sessionId}`] }],
     }, { ...adminHeaders, 'Idempotency-Key': `moss-suspend-runtime-${sessionId}` })
@@ -616,13 +649,16 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
     assert.equal((refreshSuspended.json as { observed_zone_status?: string }).observed_zone_status, 'suspended')
 
     const deniedRun = await nexusApi(nexus!, 'POST', '/v2/runtime/start', runBody(`moss-suspend-denied-${randomUUID()}`), runtimeHeaders)
-    assert.equal(deniedRun.status, 409, JSON.stringify(deniedRun.json))
+    // suspended zone 的 runtime 拒绝来自 capability 层的 suspend gate
+    // （authz.py 的 ZONE_NOT_ACTIVE Decision → 403），非业务层 409
+    assert.equal(deniedRun.status, 403, JSON.stringify(deniedRun.json))
     assert.equal((deniedRun.json as { detail?: { code?: string } }).detail?.code, 'ZONE_NOT_ACTIVE')
 
     const recordBody = { record_kind: 'context', data: '{"suspended":true}' }
     const staleWrite = await nexusApi(nexus!, 'POST', `/v2/sessions/${sessionId}/records`, recordBody, { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': dataDelegation })
-    assert.equal(staleWrite.status, 403, JSON.stringify(staleWrite.json))
-    assert.equal((staleWrite.json as { detail?: { code?: string } }).detail?.code, 'GRANT_REVOKED')
+    // record write 的拒绝折叠为 404（与读面同形）——GRANT_REVOKED 原因码不再回显
+    assert.equal(staleWrite.status, 404, JSON.stringify(staleWrite.json))
+    assert.equal((staleWrite.json as { detail?: { code?: string } }).detail?.code, 'SESSION_NOT_FOUND')
     const deniedWrite = await nexusApi(nexus!, 'POST', `/v2/sessions/${sessionId}/records`, recordBody, adminHeaders)
     assert.equal(deniedWrite.status, 409, JSON.stringify(deniedWrite.json))
     assert.equal((deniedWrite.json as { detail?: { code?: string } }).detail?.code, 'ZONE_NOT_ACTIVE')
