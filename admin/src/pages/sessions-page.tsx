@@ -288,6 +288,8 @@ export default function SessionsPage() {
                   {filteredSessions.map(session => {
                     const config = statusConfig[session.status] || { label: session.status, tone: 'neutral' as const }
                     const isTerminating = terminatingId === session.sessionId
+                    const runtimeImage = session.runtime.type === 'k8s' ? session.runtime.k8sImage
+                      : session.runtime.type === 'docker' ? session.runtime.dockerImage : undefined
                     const agent = session.assistantName ? agentsByName.get(session.assistantName) : undefined
                     const userName = getUserName(session)
                     return (
@@ -305,7 +307,7 @@ export default function SessionsPage() {
                               <Badge variant="secondary" className="font-normal">{session.runtime.type}</Badge>
                               {session.source && channelPlatforms[session.source] ? <Badge variant="outline" className="font-normal text-muted-foreground">{channelPlatforms[session.source]}</Badge> : null}
                             </div>
-                            {session.runtime.dockerImage ? <span className="max-w-40 truncate text-xs text-muted-foreground" title={session.runtime.dockerImage}>{session.runtime.dockerImage}</span> : null}
+                            {runtimeImage ? <span className="max-w-40 truncate text-xs text-muted-foreground" title={runtimeImage}>{runtimeImage}</span> : null}
                           </div>
                         </TableCell>
                         <TableCell>{session.runtime.dockerMode ? <Badge variant="outline" className="font-normal">{session.runtime.dockerMode}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>

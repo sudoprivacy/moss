@@ -98,7 +98,7 @@ for (const type of runtimes) {
     assert.deepEqual(parseReply(await controller.turn('Recall the order code and final total from this conversation. Reply only JSON with code and total. Do not use tools.')), { code, total: subtotal + 13 })
     const context = await request(`/api/v1/sessions/${sessionId}/context`)
     assert(JSON.stringify(context.context.messages).includes(code), 'HTTP transcript must contain this fresh conversation')
-    reports.push({ runtime: type, sessionId, code, dependent_turn_verified: true, reattach_verified: true, persisted_http_context_verified: true })
+    reports.push({ runtime: type, runtime_image: type === 'k8s' ? context.session.runtime.k8sImage : undefined, sessionId, code, dependent_turn_verified: true, reattach_verified: true, persisted_http_context_verified: true })
   } finally {
     controller?.close()
     if (sessionId) await request(`/api/v1/sessions/${sessionId}/terminate`, 'POST', {})

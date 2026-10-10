@@ -65,6 +65,21 @@ The account's model preference is set to gpt-6-luna. Use a fresh account and
 disable it after acceptance. Evidence may contain conversation data and belongs
 in private storage.
 
+With an isolated Chrome profile and `ai-dev-browser` on `PYTHONPATH`, inspect
+the real recorded sessions through the UI:
+
+```sh
+MOSS_COHOST_LIVE=1 MOSS_E2E_BROWSER_PORT=9423 \
+  python scripts/e2e/server-session-browser-live.py \
+  https://agent.sudoprivacy.com /private/acceptance-login.json \
+  /private/evidence/deployed/acceptance.json /private/evidence/browser
+```
+
+The browser test signs in through the visible login form and checks each
+runtime badge, recorded conversation and session list. Image fields are shown
+for their corresponding runtime, so other runtimes do not display a Docker
+default image. The card uses a general runtime heading.
+
 CI typechecks the live scripts. The packaged installer E2E checks that an
 unlisted co-host account receives 403 without a new session row. It also submits
 both k8s request formats to an installation without a cluster and checks that
