@@ -20,6 +20,15 @@ Configure `MOSS_COHOST_NEXUS_MODE=external`, endpoint and TLS CA/cert/key for th
 execution daemon. The primary `MOSS_NEXUS_*` connection continues to serve the
 deployment's Vault. Bind the co-host daemon to loopback and use mTLS.
 
+Reassert the `/model` backend on every daemon start. This deployment's root uses
+the node-local fallback metastore; a dynamically mounted backend is not rebound
+after a cold restart. Bundle the bootstrap script for Node and install the
+operator-adjusted [systemd drop-in](../deploy/nexus-cohost-model.conf). Its
+`ExecStartPost` waits for the mTLS endpoint before configuring the backend. Keep
+the provider key in the daemon's private environment file. Do not add it to
+mount parameters. The bootstrap must finish before the service is considered
+started.
+
 ## Real model workflow
 
 Use a real provider credential in the daemon's environment. The bootstrap
@@ -84,7 +93,8 @@ CI typechecks the live scripts. The packaged installer E2E checks that an
 unlisted co-host account receives 403 without a new session row. It also submits
 both k8s request formats to an installation without a cluster and checks that
 they fail as k8s instead of starting the default runtime. Existing native
-co-host CI exercises two owners and daemon restart recovery. Run the real model
+co-host CI exercises two owners, actual daemon process restarts, the model
+startup bootstrap and restoration of exact conversation history. Run the real model
 scripts locally before committing changes to their workflow.
 
 ## Recorded live acceptance
@@ -105,3 +115,7 @@ the Vault 0.5.68 plugin and 591 original Vault content files. Moss's temporary
 `moss:config/_health-probe` is a known mutable startup probe, so compare user
 content separately from that one probe. Keep full request and conversation
 evidence in private storage.
+
+The production co-host service was restarted with the startup hook on 2026-10-10.
+The real workflow passed again with 15 native model requests, 8 approvals and
+3 persisted results. Compaction reduced history from 11,232 to 3,011 tokens.

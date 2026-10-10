@@ -21,7 +21,7 @@ const artifacts = process.env.MOSS_COHOST_ARTIFACTS ?? join(tmpdir(), 'moss-coho
 mkdirSync(artifacts, { recursive: true })
 const work = mkdtempSync(join(artifacts, 'recovery-'))
 const model = 'moss-recovery-fixture'
-const modelMount = '/agents/recovery-model'
+const modelMount = '/model'
 const zone = 'moss-recovery'
 const requests: any[] = []
 const clients: NexusVfsClient[] = []
@@ -118,6 +118,7 @@ try {
   await new Promise<void>(resolve => provider.listen(0, '127.0.0.1', resolve))
   const address = provider.address()
   assert(address && typeof address !== 'string')
+  const providerUrl = `http://127.0.0.1:${address.port}`
   const reservation = reservePort()
   await new Promise<void>(resolve => reservation.listen(0, '127.0.0.1', resolve))
   const reserved = reservation.address()
@@ -131,16 +132,42 @@ try {
     models: { [model]: { alias: model, name: model, input: ['text'],
       providers: { 'api-key': { provider: 'anthropic', model } } } },
   }))
-  daemon = spawn(binary, ['--bind-addr', `127.0.0.1:${port}`], { env: {
+  const daemonEnv = {
     ...process.env, SUDO_CODE_CONFIG_HOME: config, NEXUS_DATA_DIR: join(work, 'data'),
     NEXUS_IDENTITY_DIR: join(work, 'identity'), NEXUS_API_KEY_SECRET: `fixture-${randomUUID()}`,
     NEXUS_ADVERTISE_ADDR: `127.0.0.1:${port}`, NEXUS_CLUSTER_INIT: `${zone},model`,
     NEXUS_CLUSTER_INIT_MOUNTS: `/agents=${zone},/sessions=${zone},/conversations=${zone}`, RUST_LOG: 'info',
-  }, windowsHide: true })
-  daemon.stdout!.on('data', data => { daemonLog += data.toString() })
-  daemon.stderr!.on('data', data => { daemonLog += data.toString() })
-  daemon.once('error', error => { daemonLog += String(error) })
-  await waitFor('founder topology', async () => daemonLog.includes('Static topology applied') ? true : undefined, 60_000)
+    ANTHROPIC_API_KEY: 'fixture-unused',
+  }
+  async function bootDaemon() {
+    const offset = daemonLog.length
+    daemon = spawn(binary, ['--bind-addr', `127.0.0.1:${port}`], { env: daemonEnv, windowsHide: true })
+    daemon.stdout!.on('data', data => { daemonLog += data.toString() })
+    daemon.stderr!.on('data', data => { daemonLog += data.toString() })
+    daemon.once('error', error => { daemonLog += String(error) })
+    await waitFor('founder topology', async () => daemonLog.slice(offset).includes('Static topology applied') ? true : undefined, 60_000)
+  }
+  async function stopDaemon() {
+    const running = daemon!
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { running.kill('SIGKILL'); reject(new Error('Daemon shutdown timed out')) }, 20_000)
+      running.once('exit', () => { clearTimeout(timer); resolve() })
+      running.kill('SIGTERM')
+    })
+  }
+  async function mountModel() {
+    const bootstrap = process.env.MOSS_COHOST_MODEL_BOOTSTRAP
+    assert(bootstrap, 'The real startup bootstrap bundle is required')
+    await new Promise<void>((resolve, reject) => {
+      const hook = spawn(process.execPath, [bootstrap, endpoint, tls, providerUrl, join(work, 'model')], { windowsHide: true })
+      let output = ''
+      hook.stdout!.on('data', data => { output += data.toString() })
+      hook.stderr!.on('data', data => { output += data.toString() })
+      hook.once('error', reject)
+      hook.once('exit', code => code === 0 ? resolve() : reject(new Error(`Model startup bootstrap failed: ${output}`)))
+    })
+  }
+  await bootDaemon()
   const endpoint = `127.0.0.1:${port}`
   const tls = join(work, 'data', 'tls')
   const operatorTls = { ca: join(tls, 'ca.pem'), cert: join(tls, 'node.pem'), key: join(tls, 'node-key.pem') }
@@ -157,10 +184,7 @@ try {
   const options = { 'grpc.ssl_target_name_override': 'nexus-node', 'grpc.default_authority': 'nexus-node' }
   node = new definitions.nexus.raft.ZoneApiService(endpoint, credential, options)
   vfs = new definitions.nexus.grpc.vfs.NexusVFSService(endpoint, credential, options)
-  await rpc(vfs, 'setattr', { path: modelMount, entry_type: 2, backend_type: 'anthropic',
-    backend_name: 'moss-recovery-model', zone_id: 'model', backend_params: {
-      base_url: `http://127.0.0.1:${address.port}`, api_key: 'fixture-unused', blob_root: join(work, 'model'),
-    } })
+  await mountModel()
   const principal = `moss-recovery-${randomUUID()}`
   const minted = await rpc(node, 'mintAgent', { subject_id: principal, display_name: principal })
   assert.equal(minted.success, true, minted.error)
@@ -219,6 +243,9 @@ try {
       'cancel must remove the old managed process')
       await assert.rejects(other.agent.startSession({ agentId, model, resumeSessionId: sid,
         ...ownerField(other.identity, current === a ? ownerB : ownerA) }), /ownership|bindings/, 'another owner must not restore this transcript')
+      await stopDaemon()
+      await bootDaemon()
+      await mountModel()
       active = await waitFor('released writer lease', async () => {
         try { return await start(sid) }
         catch (error) { if (/still running/.test(String(error))) return undefined; throw error }
@@ -251,7 +278,7 @@ try {
   assert.notEqual(proofs[0].durable, proofs[1].durable)
   writeFileSync(join(work, 'acceptance.json'), JSON.stringify({ binary, checks: [
     'mTLS owner credentials', 'real controller approval', 'native transcript stream', 'second writer refusal',
-    'wrong owner refusal', 'same durable ID and new pid/channel', 'exact prior history', 'dependent file write',
+    'wrong owner refusal', 'process restart with model startup hook', 'same durable ID and new pid/channel', 'exact prior history', 'dependent file write',
   ], proofs, modelRequests: requests.length }, null, 2))
   console.log(`PASS: two Moss owners stop and resume exact durable conversations; evidence=${work}`)
 } catch (error) {
