@@ -79,9 +79,11 @@ jobs:
       # it needs node_modules.
       - name: Keep the live e2e scripts compiling
         run: |
-          node node_modules/typescript/bin/tsc --noEmit --module nodenext \
+          node node_modules/typescript/bin/tsc --noEmit --module nodenext --resolveJsonModule \
             --moduleResolution nodenext --target es2022 --skipLibCheck \
-            scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts
+            scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts \
+            scripts/e2e/cohost-session-recovery.ts \
+            scripts/e2e/embedded-nexus-live.ts scripts/e2e/broker-upgrade-live.ts scripts/e2e/external-broker-live.ts
 
       # Nothing in this repo has ever type-checked: bun executes TypeScript
       # without checking it, and the release artifact is produced by `bun build`,
@@ -105,10 +107,92 @@ jobs:
         run: |
           bun run check
           bun run test:settings
+          bun run test:organizations
+
+  runtime-live:
+    name: Installed Nexus runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - run: bun install --frozen-lockfile
+      - name: Install checksum-verified runtime
+        run: bun scripts/fetch-nexus-runtime.js
+      - name: Bundle as production Node code
+        run: bun build --target=node scripts/e2e/embedded-nexus-live.ts --outfile bin/embedded-nexus-live.mjs
+      - name: Verify real startup and vault persistence across restart
+        run: node bin/embedded-nexus-live.mjs
+        env:
+          MOSS_NEXUS_LIVE_ARTIFACTS: ${{ runner.temp }}/moss-runtime-evidence
+      - name: Verify upgrade and rollback from the cloud broker version
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OLD="$RUNNER_TEMP/nexus-previous-runtime"
+          mkdir -p "$OLD"
+          curl -fsSL --max-time 90 \
+            https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com/nexus-vfs/release/v0.7.19/nexusd-cluster-linux-x86_64.tar.gz \
+            -o "$OLD/runtime.tar.gz"
+          printf '%s  %s\n' deb36ed3f2c63a5c8a53ecef60d76806edcbc3e2826628db701b36094ec0ae34 "$OLD/runtime.tar.gz" | sha256sum --check
+          tar -xzf "$OLD/runtime.tar.gz" -C "$OLD"
+          mkdir -p "$OLD/plugins"
+          curl -fsSL --max-time 90 \
+            https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com/nexus-vault/release/v0.5.67/nexus-vault-linux-x86_64.tar.gz \
+            -o "$OLD/vault.tar.gz"
+          printf '%s  %s\n' 380ad81dafaaf919acb76ec8c0f57869295b1580bfde8f9e4ccef321e1065735 "$OLD/vault.tar.gz" | sha256sum --check
+          tar -xzf "$OLD/vault.tar.gz" -C "$OLD/plugins"
+          bun build --target=node scripts/e2e/broker-upgrade-live.ts --outfile bin/broker-upgrade-live.mjs
+          node bin/broker-upgrade-live.mjs \
+            "$OLD/nexusd-cluster-linux-x86_64/nexusd-cluster" \
+            "$PWD/bin/nexus/nexusd" "$PWD/bin/nexus/plugins" \
+            "$RUNNER_TEMP/moss-runtime-evidence" "$OLD/plugins"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nexus-runtime-${{ matrix.os }}
+          path: ${{ runner.temp }}/moss-runtime-evidence/**/acceptance.json
+
+  cohost-live:
+    name: Moss durable session recovery (real daemon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - run: bun install --frozen-lockfile
+      - name: Verify two owners, writer exclusion and exact history after resume
+        run: bash scripts/e2e/run-cohost-recovery.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOSS_COHOST_ARTIFACTS: ${{ runner.temp }}/moss-cohost-evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: moss-cohost-recovery
+          path: |
+            ${{ runner.temp }}/moss-cohost-evidence/**/acceptance.json
+            ${{ runner.temp }}/moss-cohost-evidence/**/daemon.log
+            ${{ runner.temp }}/moss-cohost-evidence/binary-version.txt
 
   build:
     name: build-amd64
-    needs: test
+    needs: [test, runtime-live, cohost-live]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -202,11 +286,21 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
           SCODE_VERSION: ${{ steps.release.outputs.scode_version }}
+          # Optional. Unauthenticated Hugging Face downloads are rate-limited per
+          # IP, and a GitHub runner's IP is shared with every other build, so the
+          # model fetch answers 429 at random. The fetch retries either way; a
+          # token removes the cause instead of waiting it out.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
+          secret_args=()
+          if [ -n "${HF_TOKEN:-}" ]; then
+            secret_args+=(--secret "id=hf_token,env=HF_TOKEN")
+          fi
           docker buildx build \
             --platform linux/amd64 \
             --load \
+            "${secret_args[@]}" \
             -t "my-moss-runtime:$IMAGE_TAG" \
             -f deploy/runtime/Dockerfile .
           docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version 2>&1 | tee dist/scode-version.txt

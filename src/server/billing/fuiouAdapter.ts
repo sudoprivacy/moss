@@ -1,10 +1,11 @@
 import {
-  constants, createHash, createPrivateKey, createPublicKey,
+  constants, createHash,
   privateDecrypt, publicEncrypt, type KeyObject,
 } from 'node:crypto'
 import iconv from 'iconv-lite'
 import type { BillingOrderRecord } from './billingRepository.js'
 import type { PaymentIntent } from './rechargeService.js'
+import { parseFuiouRsaKey } from './fuiouKeys.js'
 
 export interface FuiouCallbackPayload {
   mchnt_cd: string
@@ -83,7 +84,7 @@ export class FuiouAdapter {
     return { qrCodeUrl: orderInfo, orderInfo }
   }
 
-  async queryPayment(order: BillingOrderRecord): Promise<{
+  async queryPayment(order: Pick<BillingOrderRecord, 'orderNo' | 'orderDate' | 'amountCents'>): Promise<{
     status: 'SUCCESS' | 'FAILED' | 'PENDING'
     event?: VerifiedPaymentEvent
   }> {
@@ -201,7 +202,7 @@ export class FuiouAdapter {
 
   private createPrivateDecryptor(key: string | KeyObject | undefined): (encrypted: Buffer) => Buffer {
     if (!key) throw new FuiouProtocolError('FUIOU_NOT_CONFIGURED', 'Fuiou 商户私钥未配置')
-    const privateKey = typeof key === 'string' ? createPrivateKey(key.replaceAll('\\n', '\n')) : key
+    const privateKey = parseFuiouRsaKey(key, 'private')
     const modulusLength = privateKey.asymmetricKeyDetails?.modulusLength
     if (!modulusLength) throw new FuiouProtocolError('FUIOU_INVALID_KEY', 'Fuiou 商户私钥无法识别')
     const blockSize = Math.ceil(modulusLength / 8)
@@ -219,7 +220,7 @@ export class FuiouAdapter {
 
   private createPublicEncryptor(key: string | KeyObject | undefined): (plain: Buffer) => Buffer {
     if (!key) return () => { throw new FuiouProtocolError('FUIOU_NOT_CONFIGURED', 'Fuiou 公钥未配置') }
-    const publicKey = typeof key === 'string' ? createPublicKey(key.replaceAll('\\n', '\n')) : key
+    const publicKey = parseFuiouRsaKey(key, 'public')
     const modulusLength = publicKey.asymmetricKeyDetails?.modulusLength
     if (!modulusLength) throw new FuiouProtocolError('FUIOU_INVALID_KEY', 'Fuiou 公钥无法识别')
     const blockSize = Math.ceil(modulusLength / 8)

@@ -15,6 +15,8 @@ import {
   Wallet,
   Building2,
   BookText,
+  Check,
+  ChevronDown,
   Plug,
   KeyRound,
   ChevronRight,
@@ -45,12 +47,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+  Command,
+  CommandEmpty,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Sidebar,
   SidebarContent,
@@ -71,7 +74,7 @@ import {
 import { useAuth } from '@/lib/hooks/use-auth'
 import { useUnsavedChanges } from '@/lib/hooks/use-unsaved-changes'
 import { hasAnyScope, hasScope, setPreferredOrgId } from '@/lib/api/client'
-import { getOrganizations, switchOrg } from '@/lib/api/auth'
+import { getOrganizations, ORGANIZATIONS_CHANGED_EVENT, switchOrg } from '@/lib/api/auth'
 import { getEnterpriseConfig } from '@/lib/api/enterprise'
 import type { AuthOrgWithCounts, EnterpriseConfig } from '@/lib/api/types'
 import { cn } from '@/lib/utils'
@@ -202,7 +205,7 @@ const menuItems: NavItem[] = [
     requiredScope: 'admin:settings',
     children: [
       { title: '邀请码管理', url: OPERATION_ROUTES.invitations, icon: TicketCheck },
-      { title: '账务运营', url: OPERATION_ROUTES.billing, icon: ReceiptText },
+      { title: '账务管理', url: OPERATION_ROUTES.billing, icon: ReceiptText },
       { title: '业务审计', url: OPERATION_ROUTES.audit, icon: ClipboardList },
       { title: '质量管理', url: OPERATION_ROUTES.quality, icon: Activity },
       { title: 'Sudowork 系统设置', url: OPERATION_ROUTES.sudoworkSettings, icon: Settings },
@@ -306,19 +309,28 @@ export function AppSidebar() {
   const isSuperAdmin = user?.role === 'super_admin'
   const [organizations, setOrganizations] = useState<AuthOrgWithCounts[]>([])
   const [switchingOrg, setSwitchingOrg] = useState(false)
+  const [orgPickerOpen, setOrgPickerOpen] = useState(false)
+  const [orgSearch, setOrgSearch] = useState('')
 
   useEffect(() => {
     if (!isSuperAdmin) return
     let cancelled = false
-    getOrganizations()
-      .then((res) => {
-        if (!cancelled) setOrganizations(res.organizations)
-      })
-      .catch(() => {
-        if (!cancelled) setOrganizations([])
-      })
+    let latestRequest = 0
+    const refreshOrganizations = () => {
+      const request = ++latestRequest
+      void getOrganizations()
+        .then((res) => {
+          if (!cancelled && request === latestRequest) setOrganizations(res.organizations)
+        })
+        .catch(() => {
+          // Keep the last usable list if a refresh fails.
+        })
+    }
+    refreshOrganizations()
+    window.addEventListener(ORGANIZATIONS_CHANGED_EVENT, refreshOrganizations)
     return () => {
       cancelled = true
+      window.removeEventListener(ORGANIZATIONS_CHANGED_EVENT, refreshOrganizations)
     }
   }, [isSuperAdmin])
 
@@ -499,6 +511,14 @@ export function AppSidebar() {
   }
 
   const activeOrganization = organizations.find((organization) => organization.id === activeOrgId)
+  const normalizedOrgSearch = orgSearch.trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+  const filteredOrganizations = normalizedOrgSearch
+    ? organizations.filter((organization) => {
+        const name = organization.name.toLocaleLowerCase()
+        const id = organization.id.toLocaleLowerCase()
+        return name.includes(normalizedOrgSearch) || id.includes(normalizedOrgSearch)
+      })
+    : organizations
   const brandName = enterpriseConfig?.top_name || enterpriseConfig?.app_name || activeOrganization?.name || '管理平台'
   const accountName = user?.displayName || user?.name || '当前用户'
 
@@ -525,29 +545,64 @@ export function AppSidebar() {
         {isSuperAdmin ? (
           <SidebarMenu>
             <SidebarMenuItem>
-              <Select
-                value={activeOrgId ?? ''}
-                onValueChange={(value) => void handleSwitchOrg(value)}
-                disabled={switchingOrg}
+              <Popover
+                open={orgPickerOpen}
+                onOpenChange={(open) => {
+                  setOrgPickerOpen(open)
+                  if (!open) setOrgSearch('')
+                }}
               >
-                <SelectTrigger
-                  className="border-sidebar-border bg-background/60 h-auto w-full justify-start gap-2 px-2 py-2 text-left shadow-none hover:bg-sidebar-accent group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-transparent group-data-[collapsible=icon]:bg-transparent group-data-[collapsible=icon]:p-2! group-data-[collapsible=icon]:[&>svg]:hidden"
-                  aria-label="切换组织"
-                >
-                  <span className="shrink-0"><Building2 className="text-sidebar-foreground/70 size-4" /></span>
-                  <span className="grid min-w-0 flex-1 gap-0.5 group-data-[collapsible=icon]:hidden">
-                    <SelectValue placeholder={activeOrganization?.name || '选择组织'} />
-                    <span className="text-muted-foreground text-xs">企业工作空间</span>
-                  </span>
-                </SelectTrigger>
-                <SelectContent>
-                  {organizations.map((organization) => (
-                    <SelectItem key={organization.id} value={organization.id}>
-                      {organization.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    role="combobox"
+                    aria-label="切换组织"
+                    aria-expanded={orgPickerOpen}
+                    disabled={switchingOrg}
+                    className="border-sidebar-border bg-background/60 flex h-auto w-full items-center justify-start gap-2 rounded-md border px-2 py-2 text-left text-sm shadow-none outline-none hover:bg-sidebar-accent focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-transparent group-data-[collapsible=icon]:bg-transparent group-data-[collapsible=icon]:p-2! group-data-[collapsible=icon]:[&>svg]:hidden"
+                  >
+                    <span className="shrink-0"><Building2 className="text-sidebar-foreground/70 size-4" /></span>
+                    <span className="grid min-w-0 flex-1 gap-0.5 group-data-[collapsible=icon]:hidden">
+                      <span className="truncate">{activeOrganization?.name || '选择组织'}</span>
+                      <span className="text-muted-foreground text-xs">企业工作空间</span>
+                    </span>
+                    <ChevronDown className="text-sidebar-foreground/60 size-4 shrink-0" aria-hidden="true" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-72 max-w-[calc(100vw-1rem)] p-0">
+                  <Command shouldFilter={false}>
+                    <CommandInput
+                      placeholder="搜索组织名称或 ID"
+                      aria-label="搜索组织"
+                      value={orgSearch}
+                      onValueChange={setOrgSearch}
+                    />
+                    <CommandList className="max-h-72">
+                      <CommandEmpty>未找到匹配的组织</CommandEmpty>
+                      {filteredOrganizations.map((organization) => (
+                        <CommandItem
+                          key={organization.id}
+                          value={organization.id}
+                          onSelect={() => {
+                            setOrgPickerOpen(false)
+                            setOrgSearch('')
+                            void handleSwitchOrg(organization.id)
+                          }}
+                        >
+                          <span className="min-w-0 truncate">{organization.name}</span>
+                          <Check
+                            className={cn(
+                              'ml-auto size-4 shrink-0',
+                              organization.id === activeOrgId ? 'opacity-100' : 'opacity-0',
+                            )}
+                            aria-hidden="true"
+                          />
+                        </CommandItem>
+                      ))}
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
             </SidebarMenuItem>
           </SidebarMenu>
         ) : null}

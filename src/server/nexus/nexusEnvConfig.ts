@@ -103,3 +103,14 @@ export function resolveNexusConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
 
   return { mode, endpoint, authToken: env.MOSS_NEXUS_AUTH_TOKEN?.trim() ?? '', tls }
 }
+
+/** Resolve the execution daemon separately from the deployment's secrets daemon. */
+export function resolveCohostNexusConfig(env: NodeJS.ProcessEnv = process.env): Extract<ResolvedNexusConfig, { mode: 'external' }> {
+  const executionEnv = { ...env }
+  for (const suffix of ['MODE', 'ENDPOINT', 'AUTH_TOKEN', 'TLS_CA', 'TLS_CERT', 'TLS_KEY', 'TLS_SERVER_NAME']) {
+    executionEnv[`MOSS_NEXUS_${suffix}`] = env[`MOSS_COHOST_NEXUS_${suffix}`] ?? env[`MOSS_NEXUS_${suffix}`]
+  }
+  const config = resolveNexusConfigFromEnv(executionEnv)
+  if (config.mode !== 'external') throw new Error('Cohost sessions require MOSS_NEXUS_MODE=external')
+  return config
+}

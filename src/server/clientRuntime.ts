@@ -42,10 +42,10 @@ export async function buildClientRuntime(
 
   let credential
   try {
-    credential = await authService.getUserModelCredential(user.id)
+    credential = await authService.getUserModelCredential(user.id, user.orgId)
     if (!credential) {
       await authService.ensureUserSudorouterAccount(user.id)
-      credential = await authService.getUserModelCredential(user.id)
+      credential = await authService.getUserModelCredential(user.id, user.orgId)
     }
   } catch {
     return unavailable('credential_pending')

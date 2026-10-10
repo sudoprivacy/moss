@@ -26,13 +26,99 @@ afterEach(() => {
 });
 
 describe("invited phone registration", () => {
+  async function preparePasswordGateway() {
+    const created = await auth.createOrganization({ name: "Password gateway" });
+    const orgId = created.organization.id;
+    const identities = createIdentityTestRepository(raw, {}, db.driver);
+    await auth.createOrganizationIdentityService().createInvitations(
+      { orgId, count: 1, initialCreditUnits: 200 }, () => "PASSWORD",
+    );
+    const secrets = new Map<string, string>();
+    let isTokenFailure = false;
+    let externalUser: { externalUserId: string; username: string; quotaUnits: number; usedQuotaUnits: number } | null = null;
+    const calls = { users: 0, tokens: 0, quota: 0 };
+    const accounts = new SudorouterAccountService(db.driver, createBillingTestRepository(raw, db.driver), {
+      async findUserByUsername() { return externalUser; },
+      async createUser(input) {
+        calls.users += 1;
+        externalUser = { externalUserId: "92", username: input.username, quotaUnits: 0, usedQuotaUnits: 0 };
+        return externalUser;
+      },
+      async getUser() { assert(externalUser); return externalUser; },
+      async changeQuota(input) { assert(externalUser); calls.quota += 1; externalUser.quotaUnits += input.deltaUnits; return { success: true }; },
+      async createToken() {
+        calls.tokens += 1;
+        if (isTokenFailure) throw new Error("Temporary token service outage");
+        return "password-private-user-key";
+      },
+    }, {
+      async putSecret(namespace, key, value) { secrets.set(`${namespace}/${key}`, value); },
+      async getSecret(namespace, key) {
+        const value = secrets.get(`${namespace}/${key}`);
+        return value ? { value, status: "enabled", version: 1 } : null;
+      },
+    });
+    auth.configureSudorouterAccounts({ accountProvisioner: accounts, initialQuotaUnits: 100000 });
+    return { orgId, identities, calls, setTokenFailure: (isFailure: boolean) => { isTokenFailure = isFailure; }, getExternalUser: () => externalUser };
+  }
+
+  it("rejects a gateway username that is too long before creating an identity or consuming the invitation", async () => {
+    const fixture = await preparePasswordGateway();
+    await assert.rejects(auth.registerWithPhone({
+      phone: "a".repeat(21), nickname: "Long username", invitationCode: "PASSWORD", loginMethod: "password", password: "StrongPass123",
+    }), (error: unknown) => error instanceof AuthServiceError && error.statusCode === 400);
+    assert.equal(await db.getUserByPhone("a".repeat(21)), null);
+    assert.equal((await fixture.identities.getInvitationByCode("PASSWORD"))?.status, "pending");
+    assert.deepEqual(fixture.calls, { users: 0, tokens: 0, quota: 0 });
+  });
+
+  it("keeps a failed invited password registration pending and retries without duplicate identities or quota", async () => {
+    const fixture = await preparePasswordGateway();
+    const input = { phone: "qa-password-retry", nickname: "Retry fixture", invitationCode: "PASSWORD", loginMethod: "password" as const, password: "StrongPass123" };
+    fixture.setTokenFailure(true);
+    await assert.rejects(auth.registerWithPhone(input), (error: unknown) => error instanceof AuthServiceError && error.statusCode === 503);
+    const pending = await db.getUserByPhone(input.phone);
+    assert(pending);
+    assert.equal(pending.status, "pending");
+    const invitation = await fixture.identities.getInvitationByCode("PASSWORD");
+    assert.equal(invitation?.status, "used");
+    assert.equal(invitation?.usedByUserId, pending.id);
+    await assert.rejects(auth.issueTokenFromPassword({ username: input.phone, password: input.password }), (error: unknown) => error instanceof AuthServiceError && error.statusCode === 401);
+    const calls = { ...fixture.calls };
+    await assert.rejects(auth.registerWithPhone({ ...input, password: "WrongPassword123" }), (error: unknown) => error instanceof AuthServiceError && error.statusCode === 401);
+    await assert.rejects(auth.registerWithPhone({ ...input, invitationCode: "OTHER-INVITATION" }), (error: unknown) => error instanceof AuthServiceError && error.statusCode === 409);
+    assert.deepEqual(fixture.calls, calls, "rejected retries must not call the gateway");
+    assert.equal((await db.getUserById(pending.id))?.status, "pending");
+    fixture.setTokenFailure(false);
+    const registered = await auth.registerWithPhone(input);
+    assert.equal(registered.user.id, pending.id);
+    assert.equal((await db.getUserById(pending.id))?.status, "active");
+    assert.equal((await fixture.identities.getWallet("user", pending.id))?.balanceUnits, 200);
+    assert.equal(fixture.calls.users, 1);
+    assert.equal(fixture.calls.quota, 1);
+    assert.equal(fixture.getExternalUser()?.quotaUnits, 100000);
+    assert.equal((await auth.issueTokenFromPassword({ username: input.phone, password: input.password })).user.id, pending.id);
+    assert.deepEqual(await auth.getUserModelCredential(pending.id), { sudorouterUserId: "92", sudorouterKey: "sk-password-private-user-key" });
+    assert.equal(await db.getUserModelCredential(pending.id), null);
+  });
+
+  it("does not activate an unrelated pending account with a different invitation", async () => {
+    const fixture = await preparePasswordGateway();
+    const created = await auth.createUser({ orgId: fixture.orgId, name: "qa-admin-pending", phone: "qa-admin-pending", role: "user", password: "StrongPass123", status: "pending" });
+    await assert.rejects(auth.registerWithPhone({ phone: "qa-admin-pending", invitationCode: "PASSWORD", loginMethod: "password", password: "StrongPass123" }), (error: unknown) => error instanceof AuthServiceError && error.statusCode === 409);
+    assert.equal((await db.getUserById(created.user.id))?.status, "pending");
+    assert.equal((await fixture.identities.getInvitationByCode("PASSWORD"))?.status, "pending");
+    assert.deepEqual(fixture.calls, { users: 0, tokens: 0, quota: 0 });
+  });
+
   it("provisions a native registrant once and reads its model key from the encrypted store", async () => {
     const created = await auth.createOrganization({ name: "Gateway" });
     const orgId = created.organization.id;
     const identities = createIdentityTestRepository(raw, {}, db.driver);
-    const profile = await identities.getOrganizationProfile(orgId);
-    assert(profile);
-    await identities.putOrganizationProfile({ ...profile, loginMethod: "sms" });
+    await auth.putOrganizationClientPolicy(orgId, {
+      loginMethod: "sms",
+      loginMethodInherited: false,
+    }, "test");
     await auth.createOrganizationIdentityService().createInvitations(
       { orgId, count: 1, initialCreditUnits: 200 }, () => "GATEWAY",
     );
@@ -84,9 +170,10 @@ describe("invited phone registration", () => {
     const created = await auth.createOrganization({ name: "Acme" });
     const orgId = created.organization.id;
     const repository = createIdentityTestRepository(raw, {}, db.driver);
-    const profile = await repository.getOrganizationProfile(orgId);
-    assert(profile);
-    await repository.putOrganizationProfile({ ...profile, loginMethod: "sms" });
+    await auth.putOrganizationClientPolicy(orgId, {
+      loginMethod: "sms",
+      loginMethodInherited: false,
+    }, "test");
     const organizations = auth.createOrganizationIdentityService();
     await organizations.createInvitations({ orgId, count: 1 }, () => "JOINME");
 
@@ -122,9 +209,10 @@ describe("invited phone registration", () => {
     const created = await auth.createOrganization({ name: "Acme" });
     const orgId = created.organization.id;
     const repository = createIdentityTestRepository(raw, {}, db.driver);
-    const profile = await repository.getOrganizationProfile(orgId);
-    assert(profile);
-    await repository.putOrganizationProfile({ ...profile, loginMethod: "sms" });
+    await auth.putOrganizationClientPolicy(orgId, {
+      loginMethod: "sms",
+      loginMethodInherited: false,
+    }, "test");
     const organizations = auth.createOrganizationIdentityService();
     await organizations.createInvitations({ orgId, count: 1 }, () => "ONCE01");
 

@@ -1,7 +1,7 @@
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { mkdir, readFile, rename, writeFile } from 'fs/promises'
 import path from 'path'
-import * as lockfile from '../utils/lockfile.js'
+import { isDefaultAgentName, isUserOwnedAgentName } from './agentIdentity.js'
 
 export type SharedAgentMemoryEntry = {
   content: string
@@ -28,7 +28,10 @@ export function getSharedAgentMemoryDir(
   configDir: string,
   assistantName: string,
 ): string {
-  return path.join(configDir, '.moss', 'memory', assistantName)
+  const directory = isUserOwnedAgentName(assistantName)
+    ? 'agent-' + createHash('sha256').update(assistantName).digest('hex')
+    : assistantName
+  return path.join(configDir, '.moss', 'memory', directory)
 }
 
 export function getSharedAgentMemoryFilePath(
@@ -162,6 +165,7 @@ export async function appendSharedAgentMemory(params: {
   )
   await mkdir(memoryDir, { recursive: true })
 
+  const { default: lockfile } = await import('proper-lockfile')
   const release = await lockfile.lock(memoryDir, LOCK_OPTIONS)
   try {
     const entries = await readExistingEntries(params.configDir, params.assistantName)
@@ -220,17 +224,28 @@ export async function writeAssistantOverrideAgentsMd(params: {
   assistantRules?: string | null
   sharedMemory?: string | null
 }): Promise<void> {
+  // Only a chosen assistant has a role to impose. A user's own agent has no
+  // persona — its name is derived from a user id, so naming it here would make
+  // the agent call itself `user-<uuid>`, which is worse than saying nothing. It
+  // still gets the memory section below: that is how its memory reaches it.
+  // The test is the agent's kind, not whether a display name happens to be
+  // supplied — a catalog assistant without one is still named by its own name.
+  // Only the implicit default has no persona. An agent the user made has a name
+  // they chose, and it should introduce itself by it.
+  const hasRole = !isDefaultAgentName(params.assistantName)
   const identityName = params.assistantDisplayName?.trim() || params.assistantName
-  const lines = [
-    AGENTS_MD_HEADER,
-    '',
-    '## Application role',
-    'Follow the role, identity, and response instructions defined in Assistant Rules below.',
-    `If those rules do not specify an identity, use ${identityName} as your assistant name.`,
-    'Explain this role and its responsibilities when asked about your role.',
-    'Keep the application role distinct from the underlying model and runtime. Answer questions about model identity truthfully; do not invent or deny it.',
-    '',
-  ]
+  const lines = [AGENTS_MD_HEADER, '']
+
+  if (hasRole) {
+    lines.push(
+      '## Application role',
+      'Follow the role, identity, and response instructions defined in Assistant Rules below.',
+      `If those rules do not specify an identity, use ${identityName} as your assistant name.`,
+      'Explain this role and its responsibilities when asked about your role.',
+      'Keep the application role distinct from the underlying model and runtime. Answer questions about model identity truthfully; do not invent or deny it.',
+      '',
+    )
+  }
 
   if (params.sharedMemory?.trim()) {
     lines.push('## Shared User Memory')
@@ -250,6 +265,14 @@ export async function writeAssistantOverrideAgentsMd(params: {
   }
 
   const body = `${lines.join('\n').trimEnd()}\n`
+
+  // Nothing to say: no role, no memory, no rules. Writing the header alone
+  // would plant a file that announces itself as an override and overrides
+  // nothing — and in a real user directory that is a file we created for no
+  // reason.
+  if (!hasRole && !params.sharedMemory?.trim() && !params.assistantRules?.trim()) {
+    return
+  }
 
   // Legacy location. Nothing reads it today, but keep writing it so existing tooling
   // that inspects configDir keeps working.

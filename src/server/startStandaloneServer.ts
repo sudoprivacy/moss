@@ -1,4 +1,5 @@
 import { PlatformConfigService } from './configuration/platformConfigService.js'
+import { OrganizationRouterAdapter } from './billing/organizationRouterAdapter.js'
 import { PlatformIntegrationSettingsRepository } from './configuration/platformIntegrationSettingsRepository.js'
 import { legacyPlatformSnapshots, applyPlatformRuntime, platformInfrastructure, platformEnvironment, smsReadiness, resolveNativeSmsCredentials } from './configuration/platformConfigRuntime.js'
 import type { ServerConfig } from './types.js'
@@ -402,6 +403,12 @@ async function finishStandaloneServerStartup(
     getSecret: key => configStore.get(key),
   })
   const sudorouter = sudorouterRuntime ? new SudorouterAdapter(sudorouterRuntime) : undefined
+  if (sudorouterRuntime) {
+    await authService.configureOrganizationBilling(new OrganizationRouterAdapter({
+      ...sudorouterRuntime,
+      modelBaseUrl: process.env.SUDOROUTER_MODEL_BASE_URL,
+    }), nexusClient)
+  }
   if (sudorouter) {
     // Use the resolved platform adapter; a disabled integration skips adoption too.
     const migrated = await migrateLegacySudorouterCredentials(store.driver, sudorouter, nexusClient)
@@ -472,7 +479,7 @@ async function finishStandaloneServerStartup(
     readFile: path => readFileSync(path, 'utf8'),
   })
   const billing = sudorouter
-    ? createBillingCompatibilityService(authService, systemConfiguration, config.systemConfig.recharge.fuiou.callbackBaseUrl || publicBaseUrl, billingRuntime, sudorouter, infrastructure.billing.enabled)
+    ? createBillingCompatibilityService(authService, systemConfiguration, config.systemConfig.recharge.fuiou.callbackBaseUrl || publicBaseUrl, billingRuntime, sudorouter, infrastructure.billing.enabled, Math.round(config.systemConfig.recharge.usdToCnyRate * 1_000_000))
     : undefined
   const listOrganizationModels = async (orgId?: string) => {
     const settings = orgId
@@ -767,6 +774,7 @@ function createBillingCompatibilityService(
   runtime: BillingRuntimeConfig | null,
   sudorouter: SudorouterAdapter,
   paymentsEnabled = true,
+  exchangeRateMicros = 7_300_000,
 ) {
   const payment = runtime ? new FuiouAdapter({
     merchantCode: runtime.merchantCode,
@@ -778,6 +786,16 @@ function createBillingCompatibilityService(
     timeoutMs: runtime.timeoutMs,
     testMode: runtime.testMode,
   }) : undefined
+  authService.configureOrganizationRecharge(runtime ? new FuiouAdapter({
+    merchantCode: runtime.merchantCode,
+    merchantPrivateKey: runtime.merchantPrivateKey,
+    fuiouPublicKey: runtime.fuiouPublicKey,
+    callbackUrl: `${publicBaseUrl.replace(/\/+$/, '')}/api/v1/model-billing/callback`,
+    baseUrl: runtime.baseUrl,
+    refundUrl: runtime.refundUrl,
+    timeoutMs: runtime.timeoutMs,
+    testMode: runtime.testMode,
+  }) : undefined, paymentsEnabled, exchangeRateMicros)
   return authService.createSudoworkBillingService({
     sudorouter,
     payment,

@@ -6,6 +6,37 @@ subprocess (`ScodeBackend`) or a local docker container (`DockerBackend`). It
 plugs into the same `SessionBackend` seam and is selected by
 `runtime.type === 'k8s'`.
 
+## Retaining workspace files across runtime restarts
+
+Set `MOSS_K8S_WORKSPACE_STORAGE_CLASS=local-path` for the bundled k3s storage
+provisioner, or set it to the StorageClass used by your cluster. Optionally set
+`MOSS_K8S_WORKSPACE_STORAGE_SIZE=10Gi` (the default requested capacity). The
+equivalent server configuration fields are `k8s.workspaceStorageClass` and
+`k8s.workspaceStorageSize`.
+
+Each session gets its own PersistentVolumeClaim. Runtime cleanup deletes the pod
+and credential Secret, but retains this claim so reconnecting can recover the
+workspace. Existing claims keep their original class and capacity. HOME and
+scode configuration remain temporary. Without this setting, workspace files
+use `emptyDir` and disappear when the pod is deleted.
+
+When persistence is enabled, authorized workspace reads and writes restore a
+missing or completed runtime before retrying the file operation. Opening the
+file panel or downloading a result does not require sending another chat
+message. Recovery uses the existing session resume path and its ownership
+checks; missing files and permission errors are not treated as runtime failures.
+
+The server's namespace Role needs `get`, `create`, and `patch` permissions for
+`persistentvolumeclaims`; the compute installer now includes these. Claims are
+retained even after a session is deleted. Operators must apply their own backup
+and retention policy before explicitly removing claims labelled
+`app=moss-scode` and `moss.sudo.dev/session-id=<session-id>`.
+
+Enabling persistence does not migrate files from existing temporary pods. Back
+up active workspaces before replacing those pods. `local-path` preserves data
+on its selected node; surviving node or disk loss requires a storage provider
+and backup policy that support that failure mode.
+
 ## Topology: moss and the kubelet are on DIFFERENT hosts
 
 This backend targets the real deployment: **moss (control plane) runs on one
@@ -22,7 +53,7 @@ config must reach the pod through the k8s API, not through shared paths.
 | `settings.json` (MCP + sandbox) | same **Secret** | `$SUDO_CODE_CONFIG_HOME/settings.json` | same |
 | enabled-skill `SKILL.md` | same **Secret** | `$cwd/.nexus/sudocode/skills/<name>/SKILL.md` | scode discovers skills here; hostPath symlinks would dangle on the remote node |
 | HOME / `CLAUDE_CONFIG_DIR` | **emptyDir** | `$HOME` (= `configDir`) | pod-local, writable; scode writes memory/state here |
-| workspace / cwd | **emptyDir** | `$cwd` (= session workspace path) | scode writes results here; moss reads them back over the ACP stream, and the transcript is written **moss-side** by `acpBridge`, so the workspace is legitimately pod-local |
+| workspace / cwd | **PVC** when configured, otherwise **emptyDir** | `$cwd` (= session workspace path) | scode writes results here; workspace APIs read them through the pod; the transcript is written **moss-side** by `acpBridge` |
 | `SUDO_CODE_CONFIG_HOME` dir | **emptyDir** + Secret files layered on top | `configDir/.nexus/sudocode` | writable dir so scode can create state; the two config files arrive read-only via the Secret |
 | **scode binary** | **hostPath** (node-local, `type: File`) | `MOSS_K8S_SCODE_PATH` (same path in pod) | the binary legitimately lives on the compute node, pre-staged out-of-band per node — this is the ONE thing that stays hostPath |
 

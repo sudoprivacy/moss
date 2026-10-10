@@ -1,9 +1,10 @@
-import { createInterface } from 'readline'
 import { appendFile, mkdir, rm, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import type { BackendHandle, SessionRuntimeInfo } from '../sessionManager.js'
-import type { AcpChildProcessLike } from './nexusSpawnHandle.js'
+import type { ChildProcess } from 'node:child_process'
+import type { SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
+import { StdioAcpTransport, type AcpMessageTransport } from './acpTransport.js'
 import { prepareFirstMessageForScode } from '../../utils/scodeBridge.js'
 import {
   appendSharedAgentMemory,
@@ -14,15 +15,12 @@ import { ensureDraftsDirectory } from '../draftsCleanup.js'
 import { ArtifactTracker, artifactManifestPath } from '../artifacts.js'
 
 type AcpBridgeOptions = {
-  /**
-   * The agent process's pipes. Narrowed from `ChildProcess` to the subset this
-   * bridge touches so a nexus-supervised agent — whose stdio lives on
-   * `/proc/{pid}/fd/*` rather than a local pipe — can be driven by the same
-   * code. A real `ChildProcess` satisfies it structurally.
-   */
-  child: AcpChildProcessLike
+  child?: ChildProcess
+  transport?: AcpMessageTransport
   sessionId: string
   cwd: string
+  /** Repository and working root seen by the engine's file tools. */
+  executionWorkspace?: { repository: string; workingRoot: string }
   model: string
   /** Provider identity bound to this running scode process. */
   modelProviderId?: string
@@ -58,8 +56,10 @@ type AcpBridgeOptions = {
 }
 
 export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle {
-  const { child, sessionId, cwd, model, modelProviderId, runtime } = options
+  const { sessionId, cwd, model, modelProviderId, runtime } = options
   const containerMode = options.containerMode ?? runtime.containerMode ?? 'session'
+  if (!options.transport && !options.child) throw new Error('ACP requires a message transport or local process')
+  const transport = options.transport ?? new StdioAcpTransport(options.child!, containerMode === 'user')
   const transcriptPath = options.transcriptPath
   const artifacts = runtime.type === 'host' ? new ArtifactTracker(cwd, sessionId, artifactManifestPath(transcriptPath ?? join(runtime.configDir ?? cwd, '.moss', `${sessionId}.jsonl`))) : null
   let artifactFinalization: Promise<void> = Promise.resolve()
@@ -78,7 +78,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   }
   const reevaluateBusy = (): void => {
     // A completed or failed prompt releases busy only when no work remains.
-    if (pendingPromptIds.size > 0 || pendingAskUserQuestions.size > 0) {
+    if (pendingPromptIds.size > 0 || pendingAskUserQuestions.size > 0 || pendingPermissions.size > 0) {
       setBusy(true)
       return
     }
@@ -90,9 +90,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     setBusy(false)
   }
 
-  if (!child.stdin || !child.stdout) {
-    throw new Error('Failed to start scode process pipes')
-  }
 
   const stdoutListeners = new Set<(line: string) => void>()
   const stderrListeners = new Set<(line: string) => void>()
@@ -125,10 +122,15 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const pendingRpcRequests = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timeoutId: NodeJS.Timeout }>()
   const pendingPromptIds = new Set<string>()
 
+  const pendingPermissions = new Map<string, {
+    rpcId: string | number
+    options: Set<string>
+  }>()
+
   // Pending AskUserQuestion requests waiting for user answer
   // Maps tool_call_id -> { requestId, questionData, resolve, reject }
   const pendingAskUserQuestions = new Map<string, {
-    requestId: string
+    requestId: string | number
     toolCallId: string
     questionData: any
     resolve: (value: any) => void
@@ -223,14 +225,18 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     return parts[parts.length - 1]?.trim() || text
   }
 
-  const writeTranscript = async (event: any) => {
-    if (!transcriptPath) return
-    try {
+  let transcriptWrites = Promise.resolve()
+  const writeTranscript = (event: any): Promise<void> => {
+    if (!transcriptPath) return Promise.resolve()
+    const line = JSON.stringify(event) + '\n'
+    // File operations must preserve the parent chain's message order.
+    transcriptWrites = transcriptWrites.then(async () => {
       await mkdir(dirname(transcriptPath), { recursive: true })
-      await appendFile(transcriptPath, JSON.stringify(event) + '\n', 'utf8')
-    } catch (e: any) {
-      process.stderr.write(`[AcpBridge] TRANSCRIPT WRITE ERROR: ${e.message}\n`)
-    }
+      await appendFile(transcriptPath, line, 'utf8')
+    }).catch((error: unknown) => {
+      process.stderr.write(`[AcpBridge] TRANSCRIPT WRITE ERROR: ${error instanceof Error ? error.message : String(error)}\n`)
+    })
+    return transcriptWrites
   }
 
   const persistScodeSessionId = (id: string | null | undefined): void => {
@@ -242,15 +248,49 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       })
   }
 
+  const completeToolCall = (toolCallId: string): void => {
+    const toolInfo = currentTurnToolCalls.get(toolCallId)
+    if (!toolInfo) return
+    const output = currentTurnToolOutput.get(toolCallId)
+    emitStdout(JSON.stringify({
+      type: 'tool_use', sessionId, uuid: toolCallId, parentUuid: lastPersistedUuid,
+      isSidechain: false, name: toolInfo.name, tool_use_id: toolCallId,
+      status: 'completed', timestamp: new Date().toISOString(), cwd,
+      userType: 'external', version: 'unknown',
+    }) + '\n')
+    const result = {
+      type: 'tool_result', sessionId, uuid: randomUUID(), parentUuid: lastPersistedUuid,
+      isSidechain: false, tool_use_id: toolCallId, content: output?.content ?? '',
+      is_error: output?.isError ?? false, timestamp: new Date().toISOString(), cwd,
+      userType: 'external', version: 'unknown',
+    }
+    emitStdout(JSON.stringify(result) + '\n')
+    void writeTranscript(result)
+    lastPersistedUuid = result.uuid
+    currentTurnToolCalls.delete(toolCallId)
+    currentTurnToolOutput.delete(toolCallId)
+  }
+
+  const sendMessage = (message: SessionRpcMessage): void => {
+    void transport.send(message).catch(error => {
+      const failure = error instanceof Error ? error : new Error(String(error))
+      for (const pending of pendingRpcRequests.values()) {
+        clearTimeout(pending.timeoutId)
+        pending.reject(failure)
+      }
+      pendingRpcRequests.clear()
+      for (const listener of stderrListeners) listener(`${failure.message}\n`)
+      void transport.close()
+    })
+  }
+
   const sendRpc = (method: string, params: any, customId?: string) => {
     const id = customId || `m-${rpcId++}`
     if (method === 'session/prompt') pendingPromptIds.add(id)
-    const msg = { jsonrpc: '2.0', id, method, params }
+    const msg: SessionRpcMessage = { jsonrpc: '2.0', id, method, params }
     const raw = JSON.stringify(msg) + '\n'
     process.stderr.write(`[AcpBridge] Sending RPC: ${raw}`)
-    if (child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
-      child.stdin.write(raw)
-    }
+    sendMessage(msg)
   }
 
   const sendNewSession = (): void => {
@@ -273,12 +313,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   // Send RPC and wait for response (for model switching)
   const sendRpcAndWait = (method: string, params: any, customId?: string, timeoutMs = 30000): Promise<any> => {
     const id = customId || `m-${rpcId++}`
-    const msg = { jsonrpc: '2.0', id, method, params }
+    const msg: SessionRpcMessage = { jsonrpc: '2.0', id, method, params }
     const raw = JSON.stringify(msg) + '\n'
     process.stderr.write(`[AcpBridge] Sending RPC (wait): ${raw}`)
-    if (child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
-      child.stdin.write(raw)
-    }
+    sendMessage(msg)
 
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => {
@@ -363,7 +401,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
     if (pendingQuestionKey && pendingAskUserQuestions.has(pendingQuestionKey)) {
       const pendingQuestion = pendingAskUserQuestions.get(pendingQuestionKey)!
-      pendingAskUserQuestions.delete(pendingQuestionKey)
+      for (const [key, pending] of pendingAskUserQuestions) {
+        if (pending.requestId === pendingQuestion.requestId) pendingAskUserQuestions.delete(key)
+      }
       // Also clean up the mapping
       askUserQuestionUuidToRequestId.delete(parentToolUseId!)
       // A2: user answered -> question no longer pending. Busy is still true
@@ -390,9 +430,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       }
       const raw = JSON.stringify(responseMsg) + '\n'
       process.stderr.write(`[AcpBridge] Sending AskUserQuestion RPC response: ${raw}\n`)
-      if (child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
-      child.stdin.write(raw)
-    }
+      sendMessage(responseMsg as SessionRpcMessage)
 
       // Also emit user message to transcript for record
       const userEvent = {
@@ -457,11 +495,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     if (
       options.assistantName &&
       runtime.configDir &&
-      (runtime.hostMode === 'user' || runtime.dockerMode === 'user')
+      (runtime.hostMode === 'user' || runtime.dockerMode === 'user' || runtime.k8sMode === 'user')
     ) {
       const memoryFact = extractRememberableUserFact(trimmedText)
       if (memoryFact) {
-        void appendSharedAgentMemory({
+        await appendSharedAgentMemory({
           configDir: runtime.configDir,
           assistantName: options.assistantName,
           content: memoryFact.content,
@@ -496,6 +534,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           assistantName: options.assistantName,
           identityName: options.assistantDisplayName || options.assistantName,
           workspace: cwd,
+          executionWorkspace: options.executionWorkspace,
           enabledSkillNames: options.enabledSkillNames,
           sharedMemory: options.sharedMemory,
           availableWikis: options.availableWikis,
@@ -571,26 +610,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     })
   }
 
-  let stdoutBuffer = ''
-  child.stdout.on('data', (data: Buffer) => {
-    const chunk = data.toString('utf8')
-    // Silencing the very verbose RAW STDOUT unless needed for deep debugging
-    // process.stderr.write(`[AcpBridge] RAW STDOUT: ${chunk}\n`)
-    stdoutBuffer += chunk
-
-    while (true) {
-      const newlineIdx = stdoutBuffer.indexOf('\n')
-      if (newlineIdx === -1) break
-
-      const line = stdoutBuffer.slice(0, newlineIdx).trim()
-      stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1)
-
-      if (!line) continue
-
+  const onMessage = (parsed: any): void => {
       try {
-        const parsed = JSON.parse(line)
-
         if (parsed.id === 'm-init') {
+          if (parsed.error) throw new Error(`ACP initialization failed: ${parsed.error.message}`)
           if (options.resumeSessionId) {
             process.stderr.write(`[AcpBridge] Initialization complete, loading session ${options.resumeSessionId}...\n`)
             sendRpc('session/load', {
@@ -603,41 +626,29 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             process.stderr.write(`[AcpBridge] Initialization complete, creating session...\n`)
             sendNewSession()
           }
-          continue
+          return
         }
 
         if (parsed.id === 'm-session-new') {
+          if (parsed.error || !parsed.result?.sessionId) throw new Error(`ACP session creation failed: ${JSON.stringify(parsed.error)}`)
           process.stderr.write(`[AcpBridge] session/new response: ${JSON.stringify(parsed)}\n`)
           acpSessionId = parsed.result?.sessionId || parsed.result?.id || parsed.result?.session_id
           persistScodeSessionId(acpSessionId)
           process.stderr.write(`[AcpBridge] ACP Session Ready: ${acpSessionId}\n`)
           completeHandshake()
-          continue
+          return
         }
 
         if (parsed.id === 'm-session-load') {
           process.stderr.write(`[AcpBridge] session/load response: ${JSON.stringify(parsed)}\n`)
           if (parsed.error) {
-            // Loud on purpose. This is the silent-amnesia path: the session is
-            // revived and looks healthy, but starts with an EMPTY context. The
-            // usual cause is the workspace losing `.moss/scode-session-id`
-            // (which is where resumeSessionId is read from) while the session
-            // row still points at a transcript — so nothing else in the stack
-            // reports a problem, and the only symptom is a user saying the bot
-            // forgot everything.
-            process.stderr.write(
-              `[AcpBridge] session/load FAILED for ${options.resumeSessionId} — falling back to session/new. ` +
-              `CONVERSATION HISTORY WILL NOT BE RESTORED for this session. ` +
-              `error=${JSON.stringify(parsed.error)}\n`,
-            )
-            sendNewSession()
-            continue
+            throw new Error(`ACP session resume failed: ${JSON.stringify(parsed.error)}`)
           }
           acpSessionId = parsed.result?.sessionId || parsed.result?.id || parsed.result?.session_id || options.resumeSessionId || null
           persistScodeSessionId(acpSessionId)
           process.stderr.write(`[AcpBridge] ACP Session Loaded: ${acpSessionId}\n`)
           completeHandshake()
-          continue
+          return
         }
 
         // Handle session/setModel response
@@ -655,7 +666,13 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               pending.resolve(parsed.result)
             }
           }
-          continue
+          return
+        }
+
+        if (typeof parsed.id === 'string' && pendingPromptIds.has(parsed.id) && (parsed.result || parsed.error)) {
+          pendingPermissions.clear()
+          pendingAskUserQuestions.clear()
+          askUserQuestionUuidToRequestId.clear()
         }
 
         if (typeof parsed.id === 'string' && pendingPromptIds.delete(parsed.id) && parsed.error) {
@@ -678,55 +695,15 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           currentTurnToolCalls.clear()
           currentTurnToolOutput.clear()
           reevaluateBusy()
-          continue
+          return
         }
 
         if (parsed.result?.stopReason) {
           process.stderr.write(`[AcpBridge] Turn Ended. Unblocking UI...\n`)
           currentTurnAssistantUuid = null // Reset UUID for the next turn
 
-          // Emit tool completion status for all tools in current turn
-          // This is needed because scode doesn't send individual tool completion events
-          for (const [toolCallId, toolInfo] of currentTurnToolCalls) {
-            const toolCompleteEvent = {
-              type: 'tool_use',
-              sessionId,
-              uuid: toolCallId,
-              parentUuid: lastPersistedUuid,
-              isSidechain: false,
-              name: toolInfo.name,
-              tool_use_id: toolCallId,
-              status: 'completed',
-              timestamp: new Date().toISOString(),
-              cwd,
-              userType: 'external',
-              version: 'unknown',
-            }
-            process.stderr.write(`[AcpBridge] EMITTING TOOL_COMPLETE EVENT for ${toolCallId}\n`)
-            emitStdout(JSON.stringify(toolCompleteEvent) + '\n')
-
-            // Persist a durable tool_result record carrying the captured output
-            // so a rendered transcript shows what each tool returned. Chained via
-            // lastPersistedUuid so it parents onto the tool_use event.
-            const output = currentTurnToolOutput.get(toolCallId)
-            const toolResultUuid = randomUUID()
-            const toolResultEvent = {
-              type: 'tool_result',
-              sessionId,
-              uuid: toolResultUuid,
-              parentUuid: lastPersistedUuid,
-              isSidechain: false,
-              tool_use_id: toolCallId,
-              content: output?.content ?? '',
-              is_error: output?.isError ?? false,
-              timestamp: new Date().toISOString(),
-              cwd,
-              userType: 'external',
-              version: 'unknown',
-            }
-            void writeTranscript(toolResultEvent)
-            lastPersistedUuid = toolResultUuid
-          }
+          // Older engines may report output without a terminal tool status.
+          for (const toolCallId of currentTurnToolCalls.keys()) completeToolCall(toolCallId)
           // Clear tracked tool calls / captured output for next turn
           currentTurnToolCalls.clear()
           currentTurnToolOutput.clear()
@@ -949,7 +926,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               emitStdout(JSON.stringify(assistantEvent) + '\n')
               void writeTranscript(assistantEvent)
               lastPersistedUuid = assistantUuid
-              continue
+              return
             }
 
             if (toolCallId) {
@@ -991,8 +968,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           }
 
           // scode reports a tool's output via ToolCallUpdate. Capture the latest
-          // content/status per toolCallId so the durable `tool_result` record
-          // written on stopReason carries the actual output (and error flag).
+          // content/status per toolCallId and retain terminal results immediately,
+          // including when a later model request fails before stopReason.
           if (sessionUpdate === 'tool_call_update' && update) {
             const toolCallId = update.toolCallId
             if (toolCallId) {
@@ -1003,18 +980,43 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               // status), so an early in_progress update does not clobber output.
               if (captured !== undefined || isError) {
                 currentTurnToolOutput.set(toolCallId, {
-                  content: captured ?? '',
+                  content: captured ?? currentTurnToolOutput.get(toolCallId)?.content ?? '',
                   isError,
                 })
               }
+              if (status === 'completed' || isError) completeToolCall(toolCallId)
             }
           }
         }
 
+        if (parsed.method === 'session/request_permission' && parsed.id !== undefined) {
+          const params = parsed.params
+          if (params?.sessionId !== acpSessionId || !Array.isArray(params?.options)) {
+            sendMessage({ jsonrpc: '2.0', id: parsed.id, result: { outcome: { outcome: 'cancelled' } } })
+            return
+          }
+          const requestId = randomUUID()
+          pendingPermissions.set(requestId, {
+            rpcId: parsed.id,
+            options: new Set(params.options.map((option: any) => String(option.optionId))),
+          })
+          setBusy(true)
+          emitStdout(JSON.stringify({
+            type: 'control_request', request_id: requestId, session_id: sessionId,
+            request: {
+              subtype: 'can_use_tool', title: params.toolCall?.title,
+              tool_name: params.toolCall?.title, rawInput: params.toolCall?.rawInput,
+              toolCall: params.toolCall, options: params.options,
+            },
+          }) + '\n')
+          return
+        }
+
         // Handle _scode/ask_user_question RPC request from scode
         // This is sent when scode needs user input for AskUserQuestion tool
-        if (parsed.method === '_scode/ask_user_question' && parsed.params && parsed.id) {
-          const requestId = parsed.id
+        if (parsed.method === '_scode/ask_user_question' && parsed.params && parsed.id !== undefined) {
+          const requestId = String(parsed.id)
+          const rpcId = parsed.id as string | number
           const params = parsed.params
           const toolCallId = params.tool_call_id || params.toolCallId
 
@@ -1050,7 +1052,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           // Store pending question for later response
           // Key by requestId since that's what we need to respond with
           pendingAskUserQuestions.set(requestId, {
-            requestId,
+            requestId: rpcId,
             toolCallId: toolCallId || requestId,
             questionData,
             resolve: () => {}, // Will be set when user responds
@@ -1062,7 +1064,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           // If we found a linked uuid, also store under that key for easier lookup
           if (linkedUuid) {
             pendingAskUserQuestions.set(linkedUuid, {
-              requestId,
+              requestId: rpcId,
               toolCallId: toolCallId || requestId,
               questionData,
               resolve: () => {},
@@ -1097,11 +1099,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             process.stderr.write(`[AcpBridge] Skipping duplicate AskUserQuestion event - session/update already emitted one with uuid=${linkedUuid}\n`)
           }
         }
-      } catch {
-        // Ignore parse errors
+      } catch (error) {
+        for (const listener of stderrListeners) listener(`ACP message handling failed: ${String(error)}\n`)
+        void transport.close()
       }
-    }
-  })
+  }
 
   // Initial hello and start handshake
   process.nextTick(() => {
@@ -1119,22 +1121,29 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     emitStdout(hello)
 
     sendRpc('initialize', {
-      protocolVersion: '1.0',
+      protocolVersion: 1,
       clientInfo: { name: 'moss-bridge', version: '1.0' },
     }, 'm-init')
   })
 
-  if (child.stderr) {
-    const stderrRl = createInterface({ input: child.stderr })
-    stderrRl.on('line', line => {
-      for (const l of stderrListeners) l(line + '\n')
-      process.stderr.write(`[AcpBridge stderr] ${line}\n`)
-    })
-  }
-
-  child.on('close', (code, signal) => {
-    setBusy(false)
-    for (const l of exitListeners) l(code, signal)
+  transport.start({
+    onMessage,
+    onStderr(line) {
+      for (const listener of stderrListeners) listener(line)
+    },
+    onClose(code, signal, error) {
+      setBusy(false)
+      const failure = error ?? new Error('ACP connection closed')
+      for (const pending of pendingRpcRequests.values()) {
+        clearTimeout(pending.timeoutId)
+        pending.reject(failure)
+      }
+      pendingRpcRequests.clear()
+      pendingPromptIds.clear()
+      pendingPermissions.clear()
+      pendingAskUserQuestions.clear()
+      for (const listener of exitListeners) listener(code, signal)
+    },
   })
 
   return {
@@ -1142,10 +1151,28 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     runtime,
     writeStdin(data: string) {
       process.stderr.write(`[AcpBridge] writeStdin called: ${data?.slice(0, 100)}...\n`)
-      if (child.stdin?.destroyed) {
+      if (!transport.connected) {
         process.stderr.write(`[AcpBridge] writeStdin: stdin destroyed, ignoring\n`)
         return
       }
+
+      // Only an explicit response to a live advertised option can approve a tool.
+      // Consumed or stale control replies never become model input.
+      try {
+        const control = JSON.parse(data)
+        if (control?.type === 'control_response') {
+          const response = control.response
+          const pending = pendingPermissions.get(response?.request_id)
+          if (pending) {
+            pendingPermissions.delete(response.request_id)
+            const optionId = response.response?.behavior
+            const outcome = response.subtype === 'success' && pending.options.has(optionId)
+              ? { outcome: 'selected', optionId } : { outcome: 'cancelled' }
+            sendMessage({ jsonrpc: '2.0', id: pending.rpcId, result: { outcome } })
+          }
+          return
+        }
+      } catch { /* ordinary text input */ }
 
       // Interrupt: cancel the current turn via ACP session/cancel (scode replies
       // to the pending prompt with stopReason:'cancelled', which flows through
@@ -1157,13 +1184,16 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         const parsed = JSON.parse(data)
         if (parsed?.type === 'control_request' && parsed.request?.subtype === 'interrupt') {
           process.stderr.write(`[AcpBridge] Received interrupt control_request\n`)
-          if (acpSessionId && child.stdin && !child.stdin.writableEnded) {
-            const cancelMsg = JSON.stringify({
+          pendingPermissions.clear()
+          pendingAskUserQuestions.clear()
+          askUserQuestionUuidToRequestId.clear()
+          if (acpSessionId) {
+            const cancelMsg: SessionRpcMessage = {
               jsonrpc: '2.0',
               method: 'session/cancel',
               params: { sessionId: acpSessionId },
-            }) + '\n'
-            child.stdin.write(cancelMsg)
+            }
+            sendMessage(cancelMsg)
           }
           // Durable marker (result_type:'user'): a `result` row is ignored by the
           // /context reader (no blank bubble) yet stays in the JSONL for resume.
@@ -1230,11 +1260,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             return
           }
 
-          // Build scode model name with proxy/ prefix if needed
-          let scodeModelName = modelId
-          if (!scodeModelName.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(scodeModelName)) {
-            scodeModelName = `proxy/${scodeModelName}`
-          }
+          // The id goes to scode verbatim: passthrough forwards the alias to
+          // sudorouter as the model name, so a `proxy/` prefix would arrive
+          // there as part of the name and 400 ("No available channel").
+          const scodeModelName = modelId
 
           process.stderr.write(`[AcpBridge] Model switch requested: ${scodeModelName}, acpSessionId: ${acpSessionId}\n`)
 
@@ -1337,22 +1366,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         process.stderr.write(`[AcpBridge] persistInProgressTurn error: ${err}\n`)
       }
     },
-    destroy(force = false) {
-      if (child.killed) return
-
-      if (containerMode === 'user') {
-        // User container mode: don't signal the docker exec CLI — that won't
-        // propagate to scode inside the container. The real kill is performed
-        // by DockerBackend.cleanupSessionArtifactsForUserContainer via the
-        // moss-session-reap script. Just close stdin so scode's read loop
-        // sees EOF if it polls.
-        try { child.stdin?.end() } catch {}
-        setBusy(false)
-        return
-      }
-
-      // Legacy session mode: signal the docker run / host child directly.
-      child.kill(force ? 'SIGKILL' : 'SIGTERM')
+    async destroy(force = false) {
+      try { await transport.close(force) }
+      finally { await transcriptWrites }
 
       // Host mode session mode cleans configDir.
       if (runtime.type === 'host' && runtime.hostMode === 'session' && runtime.configDir) {

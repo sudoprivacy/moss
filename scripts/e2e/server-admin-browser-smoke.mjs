@@ -595,6 +595,76 @@ async function main() {
   await capture("05-user-created", ["用户与组织管理", options.createdUsername]);
   recordAssertion("通过管理端创建用户并在列表中确认");
 
+  await navigate("/api-keys");
+  await waitForText("创建 API Key");
+  await clickText("创建 API Key");
+  await waitForExpression(
+    `Boolean(document.querySelector('[role="dialog"] [role="combobox"]'))`,
+    "API key owner selector",
+  );
+  const ownerSelector = await evaluate(`(() => {
+    const element = document.querySelector('[role="dialog"] [role="combobox"]');
+    const rect = element.getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  })()`);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed", button: "left", clickCount: 1, ...ownerSelector,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased", button: "left", clickCount: 1, ...ownerSelector,
+  });
+  await waitForText(options.createdUsername);
+  await clickText(options.createdUsername, '[role="option"]');
+  const keyName = `e2e-browser-key-${options.createdUsername}`;
+  await fillDialogField("Key 名称", keyName);
+  assert(await evaluate(`(() => {
+    const label = [...document.querySelectorAll('[role="dialog"] label')]
+      .find(element => element.textContent.includes('(sessions:list)'));
+    if (!label) return false;
+    document.getElementById(label.htmlFor).click();
+    return true;
+  })()`), "Could not select the API key session-list scope");
+  await clickText("创建", '[role="dialog"] button');
+  await waitForExpression(
+    `document.querySelector('[role="dialog"]')?.innerText.includes('API Key 已创建')
+      && Boolean(document.querySelector('[role="dialog"] code'))`,
+    "one-time API key reveal remains open after creation",
+  );
+  assert(await evaluate(`(async () => {
+    const value = document.querySelector('[role="dialog"] code').textContent.trim();
+    const response = await fetch('/api/v1/auth/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'api_key', api_key: value }),
+    });
+    const result = await response.json();
+    return response.ok && Boolean(result.access_token);
+  })()`), "The key shown in the creation dialog must authenticate");
+  recordAssertion("API Key 创建后保持弹窗并显示可用的完整 Key");
+  await clickText("完成", '[role="dialog"] button');
+  await waitForExpression(
+    `!document.querySelector('[role="dialog"]')`,
+    "one-time API key reveal closes on completion",
+  );
+  await clickText("创建 API Key");
+  await waitForExpression(
+    `Boolean(document.querySelector('[role="dialog"] form'))`,
+    "fresh API key creation form",
+  );
+  assert(await evaluate(`!document.querySelector('[role="dialog"] code')
+    && document.querySelector('[role="dialog"] input[name="name"]')?.value === ''`),
+  "Reopening the dialog must clear the previous key and form");
+  await clickText("取消", '[role="dialog"] button');
+  assert(await evaluate(`(async () => {
+    const headers = { Authorization: 'Bearer ' + localStorage.getItem('moss_access_token') };
+    const response = await fetch('/api/v1/api-keys', { headers });
+    const { api_keys: keys } = await response.json();
+    const key = keys.find(item => item.name === ${JSON.stringify(keyName)});
+    if (!response.ok || !key || key.status !== 'active') return false;
+    const revoked = await fetch('/api/v1/api-keys/' + encodeURIComponent(key.id), { method: 'DELETE', headers });
+    return revoked.ok && (await revoked.json()).ok === true;
+  })()`), "Could not revoke the isolated browser fixture key");
+  recordAssertion("完成后清除一次性 Key，重新创建时展示空表单，测试 Key 已撤销");
+
   await navigate("/settings/agents");
   await waitForText("Moss E2E 智能体", "mock Hub agent");
   await waitForExpression(

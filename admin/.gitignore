@@ -28,3 +28,4 @@ node_modules
 !/tests/credentials.browser.js
 !/tests/config-scope.test.ts
 !/tests/config-scope.browser.py
+!/tests/organizations-api.test.ts

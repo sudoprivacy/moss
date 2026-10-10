@@ -18,9 +18,10 @@ import {
   getAssistantRuntimeConfig,
   createSkillSymlinks,
   buildAvailableSkillSnapshot,
+  buildScodeMcpSettings,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
-import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
+
 import { reapInUserContainer } from '../runtime/reaper.js'
 import { toHostPath } from '../runtime/dockerPathMap.js'
 import { logRuntimeEvent, logRuntimeMetric } from '../runtime/runtimeMetrics.js'
@@ -187,20 +188,13 @@ export class DockerBackend implements SessionBackend {
       // Use model from env (which includes user preference), or fallback
       // env.MOSS_DEFAULT_MODEL has priority: user preference > system settings > default
       const model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
-      let scodeModelName = model
-      if (!scodeModelName.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(scodeModelName)) {
-        scodeModelName = `proxy/${scodeModelName}`
-      }
+      const scodeModelName = model
 
-      // Preload all available models from sudorouter API
-      // This allows dynamic model switching without modifying sudocode.json
-      const allModels = ensureOpenAIModelConfig(
-        await buildAllModelsConfig(baseUrl),
-        model,
-        env.MOSS_MODEL_PROVIDER_PROTOCOL === 'openai-responses' || env.MOSS_MODEL_PROVIDER_PROTOCOL === 'anthropic-messages'
-          ? env.MOSS_MODEL_PROVIDER_PROTOCOL
-          : 'openai-completions',
-      )
+      // The proxy connection only. A static model list here would pin every
+      // model to one wire format and freeze a catalog sudorouter changes
+      // underneath us; with only the proxy connection present, scode resolves
+      // unknown aliases through passthrough and takes each model's wire format
+      // from the capabilities it reads off sudorouter `/v1/models`.
 
       const scodeConfig = {
         auth_modes: {
@@ -211,10 +205,11 @@ export class DockerBackend implements SessionBackend {
             }
           }
         },
-        models: allModels  // Preload all available models
       }
       writeFileSync(dummySudocodePath, JSON.stringify(scodeConfig, null, 2), 'utf8')
-      process.stderr.write(`[DockerBackend] Preloaded ${Object.keys(allModels).length} models into sudocode.json\n`)
+      process.stderr.write(
+        `[DockerBackend] Wrote sudocode.json (proxy connection only; models resolved dynamically via sudorouter)\n`,
+      )
     } catch (e) {
       process.stderr.write(`[DockerBackend] Failed to create dynamic sudocode.json: ${e}\n`)
     }
@@ -260,11 +255,9 @@ export class DockerBackend implements SessionBackend {
         .filter(p => existsSync(p)),
     )
 
-    // Use model from env (which includes user preference), or fallback
-    let model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
-    if (model && !model.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(model)) {
-      model = `proxy/${model}`
-    }
+    // Use model from env (which includes user preference), or fallback. The id
+    // goes to scode verbatim — see the sudocode.json note above.
+    const model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
     console.log(`[DockerBackend] Model for session ${options.sessionId}: ${model} (from env.MOSS_DEFAULT_MODEL: ${env.MOSS_DEFAULT_MODEL})`)
 
     let args: string[]
@@ -562,15 +555,13 @@ export class DockerBackend implements SessionBackend {
   }
 }
 
-function buildScodeSettings(
+export function buildScodeSettings(
   options: BackendSpawnOptions,
   bundledPluginsDir: string,
 ): Record<string, unknown> {
   const settings: Record<string, unknown> = {
     plugins: { bundledRoot: bundledPluginsDir },
-  }
-  if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
-    Object.assign(settings, options.mcpSettings)
+    ...buildScodeMcpSettings(options.mcpSettings),
   }
   if (options.enabledSkillNames?.includes('cabin-hardware-control')) {
     settings.sandbox = {

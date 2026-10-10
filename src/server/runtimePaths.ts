@@ -113,8 +113,10 @@ export function getSessionConfigDir(
   sessionId: string,
   userId: string,
   mode: 'session' | 'user' | undefined,
+  orgId?: string,
 ): string {
   if (mode === 'user') {
+    if (orgId) return join(config.runtimeDir, 'organizations', orgId, 'users', userId, 'config')
     return join(config.runtimeDir, 'users', userId, 'config')
   }
   return join(config.runtimeDir, 'sessions', sessionId, 'config')

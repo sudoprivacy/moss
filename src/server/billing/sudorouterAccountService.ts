@@ -9,7 +9,7 @@ import type { SudorouterAccountPort, SudorouterUserAccount } from './sudorouterA
 
 const TOKEN_NAMESPACE = 'moss:sudorouter-users'
 
-interface SudorouterSecretPort {
+export interface SudorouterSecretPort {
   putSecret(namespace: string, key: string, value: string, subject?: string): Promise<void>
   getSecret(namespace: string, key: string, subject?: string): Promise<{
     value: string | null

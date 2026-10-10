@@ -21,6 +21,12 @@ import type {
   OrganizationResponse,
 } from './types'
 
+export const ORGANIZATIONS_CHANGED_EVENT = 'moss:organizations-changed'
+
+function notifyOrganizationsChanged(): void {
+  window.dispatchEvent(new Event(ORGANIZATIONS_CHANGED_EVENT))
+}
+
 function storeLoginResponse(response: LoginResponse): void {
   setToken(response.access_token)
   if (response.refresh_token) {
@@ -175,24 +181,33 @@ export async function getOrganizations(): Promise<OrganizationsListResponse> {
 
 export async function createOrganization(
   data: CreateOrganizationRequest,
+  idempotencyKey?: string,
 ): Promise<OrganizationResponse> {
-  return authClient.post<OrganizationResponse>('/api/v1/organizations', data)
+  const response = await authClient.post<OrganizationResponse>('/api/v1/organizations', data, {
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+  })
+  notifyOrganizationsChanged()
+  return response
 }
 
 export async function updateOrganization(
   orgId: string,
   data: UpdateOrganizationRequest,
 ): Promise<OrganizationResponse> {
-  return authClient.patch<OrganizationResponse>(
+  const response = await authClient.patch<OrganizationResponse>(
     `/api/v1/organizations/${orgId}`,
     data,
   )
+  notifyOrganizationsChanged()
+  return response
 }
 
 export async function deleteOrganization(
   orgId: string,
 ): Promise<{ ok: boolean }> {
-  return authClient.delete<{ ok: boolean }>(`/api/v1/organizations/${orgId}`)
+  const response = await authClient.delete<{ ok: boolean }>(`/api/v1/organizations/${orgId}`)
+  notifyOrganizationsChanged()
+  return response
 }
 
 export async function setUserTokenLimit(

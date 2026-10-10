@@ -1,17 +1,15 @@
 /**
- * Two sessions, one co-host daemon — the shape sudocloud is moving to.
- *
- * Today a session gets its own pod and its own scode subprocess, so "one
- * daemon, many sessions" has never been exercised on our side. `nexusd-cohost`
- * turns a spawn into a thread inside the daemon, which makes the interesting
- * question not "does it start" but "do two of them stay apart": distinct
- * session ids, the owner each was opened for, and per-agent state that does not
- * bleed.
+ * Open two owners' sessions in one auth-on co-host daemon and verify distinct
+ * credentials, durable session ids, transcripts, and per-agent state.
  *
  * Drives moss's own functions rather than a probe, so what passes here is the
  * code that would run in production.
  *
- * Needs a live auth-on daemon, so CI cannot run it; CI only keeps it compiling.
+ * Needs a live auth-on daemon. CI typechecks the script; local acceptance can
+ * also drive the real model with MOSS_COHOST_LIVE=1 and COHOST_E2E_MODEL set to
+ * an alias declared in the daemon's sudocode.json. The live workflow approves
+ * only its fresh order/result paths and verifies two turns of persisted files
+ * for each owner, plus the actual Nexus model requests.
  *
  *   nexusd-cohost --cluster-init citest --hostname e2e --advertise-addr 127.0.0.1:22140
  *     --data-dir <d> --identity-dir <i>
@@ -26,6 +24,7 @@ import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 
 import { mintSessionIdentity, ownerField } from '../../src/server/nexus/sessionIdentity.js'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
+import { reviewSession } from './cohost-controller-live.js'
 
 const TLS = process.argv[2]
 const ENDPOINT = process.argv[3]
@@ -134,20 +133,43 @@ for (const [label, s] of [['first', a], ['second', b]] as const) {
   expect(`the ${label} session reaches ready, which needs an in-process runtime`, state === 'ready', state)
 }
 
-const homes = await Promise.all(
-  [a, b].map(async s => (await s.client.readdir(`/agents/agent-${s.owner}`, '')).map((e: any) => String(e.name ?? e).split('/').pop())),
-)
-for (const [i, entries] of homes.entries()) {
+for (const [i, s] of [a, b].entries()) {
   expect(
-    `agent ${i + 1} has the runtime's own per-agent storage`,
-    entries.includes('sessions') && entries.includes('conversations'),
-    entries.join(' '),
+    `agent ${i + 1} has its own durable conversation endpoint`,
+    s.sessionEndpoint.protocol === 'acp-mailbox/1' && Boolean(s.durableSessionId)
+      && await s.client.exists(s.sessionEndpoint.transcript, ''),
+    s.sessionEndpoint.transcript,
   )
 }
 expect(
   'each agent got its own home, not a shared one',
   a.owner !== b.owner && `/agents/agent-${a.owner}` !== `/agents/agent-${b.owner}`,
 )
+
+if (process.env.MOSS_COHOST_LIVE === '1') {
+  const operator = NexusVfsClient.withMtls(ENDPOINT, {
+    ca: join(TLS, 'ca.pem'), cert: join(TLS, 'node.pem'), key: join(TLS, 'node-key.pem'),
+  })
+  try {
+    const first = await reviewSession(a, operator)
+    const second = await reviewSession(b, operator)
+    expect('both real sessions persist their own order and dependent total', first.code !== second.code)
+    expect('the controllers keep distinct durable conversations', first.sessionId !== second.sessionId)
+    const requests = (await operator.readdir('/model', '')).filter(e => e.name.endsWith('.prompt'))
+    let checked = 0
+    for (const entry of requests) {
+      const path = entry.name.startsWith('/') ? entry.name : `/model/${entry.name}`
+      const request = JSON.parse((await operator.read(path, '')).toString())
+      expect('the native Nexus request uses the selected model', request.body?.model === MODEL)
+      expect('the native request targets Claude Messages', request.nexus_http?.path === 'v1/messages')
+      checked += 1
+    }
+    expect('both conversations actually cross the Nexus model mount', checked >= 6, checked)
+    console.log(`LIVE MOSS COHOST PASS: two owners, ${first.approvals + second.approvals} actual approvals, four persisted results`)
+  } finally {
+    operator.close()
+  }
+}
 
 await a.agent.cancel(a.sessionId).catch(() => {})
 await b.agent.cancel(b.sessionId).catch(() => {})

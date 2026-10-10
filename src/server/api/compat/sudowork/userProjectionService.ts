@@ -30,6 +30,7 @@ export class SudoworkUserProjectionService {
     secrets: ProjectionSecretPort
     listModels: (orgId?: string) => Promise<ModelDescriptor[]> | ModelDescriptor[]
     getRuntimeConfig: (orgId?: string) => Promise<{ modelServiceUrl: string; scodeAutoModel: string }> | { modelServiceUrl: string; scodeAutoModel: string }
+    getSharedProjection?: (userId: string, orgId: string) => Promise<SudoworkUserProjection | null>
     quotaReader?: Pick<SudorouterPort, 'getUser'>
   }) {}
 
@@ -41,6 +42,8 @@ export class SudoworkUserProjectionService {
     if (!alias || organizationId !== alias.orgId) {
       throw new SudoworkUserProjectionError(500, '用户企业信息异常')
     }
+    const shared = await this.options.getSharedProjection?.(alias.resourceId, alias.orgId)
+    if (shared) return shared
     const wallet = await this.options.billing.getWallet('user', alias.resourceId)
     let account = await this.options.billing.getExternalAccount('sudorouter', 'user', alias.resourceId)
     if (!wallet || !account?.tokenSecretRef) {

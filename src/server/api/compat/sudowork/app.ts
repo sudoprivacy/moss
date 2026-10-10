@@ -1,6 +1,8 @@
 import { createCipheriv, randomBytes, randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
+import { getPath } from 'hono/utils/url'
+import { canonicalAgentTemplatePath } from '../../agentTemplatePaths.js'
 import {
   SudoworkIdentityError,
   type SudoworkLegacySession,
@@ -94,6 +96,7 @@ export interface SudoworkAdministrationPort {
     name: string
     code: string
     creditPool?: number
+    modelBilling?: import('../../../billing/organizationBillingService.js').CreateOrganizationModelInput
     logo?: string | null
     appName?: string | null
     topName?: string | null
@@ -185,16 +188,17 @@ export interface SudoworkCasPort {
 }
 
 export interface SudoworkUserProjection {
+  billingMode?: 'organization_shared'
   sudorouterKey: string | null
   modelServiceUrl: string
   models: string[]
   scodeAutoModel: string
-  totalPoints: number
-  usedPoints: number
-  remainingPoints: number
-  bonusPoints: number
-  quota: number
-  usedQuota: number
+  totalPoints?: number
+  usedPoints?: number
+  remainingPoints?: number
+  bonusPoints?: number
+  quota?: number
+  usedQuota?: number
 }
 
 export interface SudoworkSmsPort {
@@ -352,7 +356,7 @@ export function createSudoworkCompatibilityApp(options: {
   getUserProjection?: (user: SudoworkLegacyUser) => Promise<SudoworkUserProjection>
   qms?: Omit<Parameters<typeof createSudoworkQmsRoutes>[0], 'getActor'>
 }): Hono {
-  const app = new Hono()
+  const app = new Hono({ getPath: request => canonicalAgentTemplatePath(getPath(request)) })
   const loginMethod = async () => await options.systemConfiguration?.getLoginMethod() ?? options.loginMethod ?? 'password'
   const getProjection = options.getUserProjection ?? (async () => EMPTY_PROJECTION)
   const publicCasProviders = async () => await loginMethod() === 'cas' ? await options.cas?.listPublicProviders() ?? [] : []
@@ -455,12 +459,12 @@ export function createSudoworkCompatibilityApp(options: {
           model_service_url: projection.modelServiceUrl,
           models: projection.models,
           scode_auto_model: projection.scodeAutoModel,
-          points: {
+          ...(projection.billingMode ? { billing_mode: projection.billingMode } : { points: {
             total: projection.totalPoints,
             used: projection.usedPoints,
             remaining: projection.remainingPoints,
             bonus: projection.bonusPoints,
-          },
+          } }),
         },
       },
     }
@@ -789,14 +793,14 @@ export function createSudoworkCompatibilityApp(options: {
     return context.json({ success: true, message: 'success' })
   })
 
-  app.get('/api/v1/agents/visible/bindings', async (context) => {
+  app.get('/api/v1/agent-templates/visible/bindings', async (context) => {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
     return context.json(await options.catalog.listVisibleBindings(actor))
   })
 
-  app.get('/api/v1/agents/visible', async (context) => {
+  app.get('/api/v1/agent-templates/visible', async (context) => {
     const actor = await getAuthenticatedActor(context.req.header('Authorization'))
     if (!actor) return context.json({ success: false, msg: '未授权' }, 401)
     if (!options.catalog) return context.json({ success: false, msg: '服务器内部错误' }, 500)
@@ -888,6 +892,7 @@ export function createSudoworkCompatibilityApp(options: {
     await options.administration.createEnterprise({
       actor, name, code,
       creditPool: typeof body.credit_pool === 'number' ? body.credit_pool : undefined,
+      modelBilling: typeof body.initial_amount_usd === 'string' ? { initialAmountUsd: body.initial_amount_usd, defaultMemberLimitUsd: typeof body.default_member_limit_usd === 'string' ? body.default_member_limit_usd : null } : undefined,
       logo: typeof body.logo === 'string' ? body.logo : null,
       appName: typeof body.app_name === 'string' ? body.app_name : null,
       topName: typeof body.top_name === 'string' ? body.top_name : null,
@@ -1445,11 +1450,13 @@ export function createSudoworkCompatibilityApp(options: {
         status: user.status,
         enterprise_id: user.enterpriseId,
         enterprise_code: user.enterpriseCode,
+        ...(projection.billingMode ? { billing_mode: projection.billingMode } : {
         bonus_points: projection.bonusPoints,
         remaining_points: projection.remainingPoints,
         used_points: projection.usedPoints,
         quota: projection.quota,
         used_quota: projection.usedQuota,
+        }),
       },
     })
   })

@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
-import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { DbDriver } from '../db/driver.js'
 import { registerOrganizationCustom, saveOrganizationInstallation, withOrganizationResources, type ResourceKind, type ResourceMetadata } from './organizationResources.js'
+import { publishDirectory } from './publishDirectory.js'
 
 export type ResourceMigrationEntry = {
   kind: ResourceKind
@@ -85,9 +86,7 @@ export async function migrateOrganizationResources(driver: DbDriver, home: strin
       try {
         await cp(item.entry.path, staging, { recursive: true })
         if (await contentHash(staging) !== item.hash) throw new Error('Resource changed during migration; retry with writers stopped')
-        try { await rename(staging, item.target) } catch (error) {
-          if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code || '')) throw error
-        }
+        await publishDirectory(staging, item.target)
       } finally { await rm(staging, { recursive: true, force: true }) }
     }
     await driver.transaction(async () => {

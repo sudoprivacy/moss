@@ -1,4 +1,7 @@
+import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
+import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
+import { dispatchOrganizationRecharge, parseOrganizationPaymentCallback } from './billing/organizationRechargeRoutes.js'
 import { artifactManifestPath, readArtifacts, projectArtifactDrafts } from './artifacts.js'
 import { SudoworkCasService, SudoworkCasError } from './api/compat/sudowork/casService.js'
 import { PlatformConfigService } from './configuration/platformConfigService.js'
@@ -10,6 +13,8 @@ import { MOSS_SKILLS_HUB_DIR } from '../utils/skills/localSkillDirectories.js'
 import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrganizationSkillUnused, requireOrganizationResource, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
 import { installAndPrepareClientCatalogResource, describeClientCatalogItem } from './catalog/clientCatalogInstall.js'
 import http from 'http'
+import { PrivateAgentArchives, handlePrivateAgentArchives } from './privateAgentArchives.js'
+import { canonicalAgentTemplatePath } from './api/agentTemplatePaths.js'
 import { randomUUID, timingSafeEqual } from 'crypto'
 import net from 'net'
 import { existsSync, cpSync, rmSync, readFileSync, renameSync } from 'fs'
@@ -41,7 +46,7 @@ import { ConfigurationScopeError, resolveConfigurationActor } from './configurat
 import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
-import { buildKubectlBaseArgs, buildResourceNames } from './backends/k8sBackend.js'
+import { normalizeWorkspaceRelativePath, resolveSessionWorkspaceAccess } from './sessionWorkspace.js'
 import { bytesLookLikeText } from './workspaceText.js'
 import {
   createSudorouterClient,
@@ -85,7 +90,6 @@ import {
 } from './credits/recharge.js'
 import {
   buildRemoteWorkspaceTree,
-  createPodWorkspaceAccess,
   type WorkspaceFileAccess,
 } from './backends/podWorkspace.js'
 import { getConfigStore, maskConfigValue } from './configStore/configStore.js'
@@ -234,6 +238,13 @@ import {
   setUserModelPreference,
   initUserModelPreferenceStore,
 } from './userModelPreference.js'
+import { listMyAgents } from './myAgents.js'
+import {
+  InvalidAgentNameError,
+  createUserAgent,
+  initUserAgentStore,
+  listUserAgents,
+} from './userAgentStore.js'
 import { getAvailableModels, getCacheStatus, getModelsForSelection, refreshModelCache } from './modelListCache.js'
 import { createCabinApi } from './cabin/api.js'
 import { CabinStore } from './cabin/store.js'
@@ -1131,7 +1142,12 @@ function readOAuth2Params(body: JsonBody): Record<string, string> | null {
 function parseRuntimeOptions(body: JsonBody) {
   if (typeof body.runtime_type === 'string') {
     return {
-      type: body.runtime_type === 'docker' ? 'docker' : 'host',
+      type:
+        body.runtime_type === 'docker'
+          ? 'docker'
+          : body.runtime_type === 'cohost'
+            ? 'cohost'
+            : 'host',
       dockerImage:
         typeof body.docker_image === 'string' ? body.docker_image : undefined,
       dockerMode:
@@ -1155,9 +1171,11 @@ function parseRuntimeOptions(body: JsonBody) {
   const type =
     runtime.type === 'docker'
       ? 'docker'
-      : runtime.type === 'host'
-        ? 'host'
-        : undefined
+      : runtime.type === 'cohost'
+        ? 'cohost'
+        : runtime.type === 'host'
+          ? 'host'
+          : undefined
   if (!type) {
     return undefined
   }
@@ -1288,16 +1306,6 @@ function redactWsUrl(rawUrl: string | undefined): string {
   } catch {
     return '<unparseable-url>'
   }
-}
-
-function normalizeWorkspaceRelativePath(value: string | null): string {
-  if (!value) return ''
-  if (value.includes('\0')) throw new HttpError(400, 'Invalid path')
-  const normalized = value.replace(/\\/g, '/').replace(/^\.\/+/, '')
-  if (/^[a-zA-Z]:\//.test(normalized) || normalized.startsWith('/')) {
-    throw new HttpError(400, 'Path must be relative')
-  }
-  return normalized
 }
 
 function isInsideDir(rootDir: string, targetPath: string): boolean {
@@ -1648,31 +1656,6 @@ async function readUserCredits(
   return result
 }
 
-/**
- * Workspace access for a session whose files do not live on moss's filesystem.
- *
- * Null when they do — host and docker sessions write straight to `session.cwd`,
- * docker by bind-mounting it — and the direct-fs path applies unchanged.
- *
- * Derived from the session id rather than read off a backend handle: the handle
- * lives in the runner process, and the HTTP server answering these requests is
- * a different process, so it can only re-derive the pod's name.
- */
-function resolveSessionWorkspaceAccess(
-  session: SessionRecord,
-  config: ServerConfig,
-): WorkspaceFileAccess | null {
-  if (session.runtime?.type !== 'k8s') return null
-  return createPodWorkspaceAccess({
-    kubectlBase: buildKubectlBaseArgs(
-      config.k8s?.namespace || 'moss-sessions',
-      config.k8s?.kubeconfig,
-    ),
-    podName: buildResourceNames(session.sessionId).podName,
-    cwd: session.cwd,
-  })
-}
-
 async function readWorkspaceFilePreview(
   session: SessionRecord,
   pathParam: string | null,
@@ -2001,28 +1984,6 @@ async function serveAdminRequest(
   await writeFileResponse(res, join(adminDistDir, 'index.html'), headOnly)
 }
 
-function setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  const origin = req.headers.origin
-  if (!origin) return false
-
-  res.setHeader('Access-Control-Allow-Origin', origin)
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Device-Id, X-Cabin-Tablet-Token, X-Cabin-Tablet-Id')
-  res.setHeader('Access-Control-Allow-Credentials', 'true')
-  res.setHeader('Access-Control-Max-Age', '86400')
-  return true
-}
-
-function handleCorsPreflight(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  if (req.method === 'OPTIONS' && req.headers.origin) {
-    setCorsHeaders(req, res)
-    res.writeHead(204)
-    res.end()
-    return true
-  }
-  return false
-}
-
 export function startServer(
   config: ServerConfig,
   runtime: RuntimeService,
@@ -2053,6 +2014,7 @@ export function startServer(
   getConnections: () => Promise<number>
 } {
   const adminDistDir = resolveAdminDistDir()
+  const privateAgentArchives = new PrivateAgentArchives(join(config.rootDir, 'private-agent-archives'))
   const wss = new WebSocketServer({ noServer: true })
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
     cabinEnabled: config.cabin.enabled,
@@ -2216,6 +2178,14 @@ export function startServer(
     process.exit(1)
   })
 
+  // Agents a user made for themselves. Same reasoning as above: a DDL failure
+  // here means a user cannot create a second context of their own, which must
+  // not be a silent degradation to the in-memory fallback.
+  void initUserAgentStore(runtime.store.driver).catch(err => {
+    console.error('[startup] user agent store init failed:', err)
+    process.exit(1)
+  })
+
   // Document Center v2: seed builtin system assistants (wiki-builder etc.)
   // from the repo into $MOSS_HOME/assistants/system/ if not already present.
   // Customers can override by editing files in place — subsequent boots
@@ -2241,7 +2211,7 @@ export function startServer(
     modelId: config.wikiIndex.modelId,
     modelMirror: config.wikiIndex.modelMirror,
     maxPassagesPerWiki: config.wikiIndex.maxPassagesPerWiki,
-  }, config.instanceId)
+  }, config.instanceId, session => resolveSessionWorkspaceAccess(session, config, runtime))
   wikiJobExecutor.start()
 
   // Document Center v2: start the external source sync worker. Polls
@@ -2511,7 +2481,7 @@ export function startServer(
     try {
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
-      const pathname = url.pathname
+      const pathname = canonicalAgentTemplatePath(url.pathname)
       if (pathname.startsWith('/api/v1/auth/') || pathname === '/api/v1/client/local-runtime') res.setHeader('Cache-Control', 'no-store')
       const isHead = req.method === 'HEAD'
 
@@ -2597,6 +2567,18 @@ export function startServer(
         return
       }
 
+      if (req.method === 'POST' && pathname === '/api/v1/model-billing/callback') {
+        try {
+          const recharge = authService.getOrganizationRechargeService()
+          if (!recharge) throw new HttpError(503, '组织充值未配置')
+          await recharge.handleCallback(parseOrganizationPaymentCallback(await readBody(req), String(req.headers['content-type'] ?? 'application/json')))
+          res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); res.end('success')
+        } catch {
+          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' }); res.end('fail')
+        }
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/recharge/callback') {
         try {
           await handleRechargeCallback(
@@ -2604,7 +2586,7 @@ export function startServer(
             buildFuiouClient(config),
             buildSudorouterClient(config),
             await readJsonBody(req) as unknown as FuiouCallbackPayload,
-            async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+            async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
           )
           res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
           res.end('success')
@@ -2767,7 +2749,8 @@ export function startServer(
           })
           return
         }
-        if (await authService.findUserByPhone(username)) {
+        const existing = await authService.findUserByPhone(username)
+        if (existing && existing.status !== 'pending') {
           writeJson(res, 409, { success: false, msg: 'This account already exists' })
           return
         }
@@ -2779,7 +2762,6 @@ export function startServer(
           password,
         })
         const user = registered.user
-        await authService.setUserPassword({ orgId: user.orgId, userId: user.id, password })
         await ensureGatewayAccount(authService, config, {
           userId: user.id,
           username,
@@ -3852,8 +3834,25 @@ export function startServer(
       }
 
       const resourceAuth = auth
+      if (await handlePrivateAgentArchives(req, res, pathname, auth, privateAgentArchives)) return
       return await withOrganizationResources({ orgId: auth.orgId, userId: auth.userId, driver: runtime.store.driver, visibility: await authService.buildVisibilityFilter(auth) }, async () => {
       const auth = resourceAuth
+      if (pathname.startsWith('/api/v1/model-billing/')) {
+        res.setHeader('Cache-Control', 'no-store')
+        const result = await dispatchOrganizationRecharge(authService.getOrganizationRechargeService(), auth, req.method ?? 'GET', url,
+          ['POST', 'PATCH'].includes(req.method ?? '') ? await readJsonBody(req) : {},
+          typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined)
+        writeJson(res, result.status, result.body)
+        return
+      }
+      if (pathname === '/api/v1/model-account' || pathname.startsWith('/api/v1/model-account/')) {
+        res.setHeader('Cache-Control', 'no-store')
+        const result = await dispatchOrganizationBilling(authService.getOrganizationBillingService(), auth, req.method ?? 'GET', url,
+          ['POST', 'PATCH'].includes(req.method ?? '') ? await readJsonBody(req) : {},
+          typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined)
+        writeJson(res, result.status, result.body)
+        return
+      }
       if (req.method === 'GET' && pathname === '/api/v1/client/local-runtime') {
         res.setHeader('Cache-Control', 'no-store')
         writeJson(res, 200, await buildClientRuntime(authService, { id: auth.userId, orgId: auth.orgId }))
@@ -4002,11 +4001,21 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/organizations') {
         await authService.requireSuperAdmin(auth)
         const body = await readJsonBody(req)
+        if (authService.getOrganizationBillingService()
+          && (typeof body.initial_amount_usd !== 'string' || body.default_member_limit_usd !== null && typeof body.default_member_limit_usd !== 'string')) {
+          throw new HttpError(400, '请设置组织初始额度与默认成员限额（USD），不限额请传 null')
+        }
         writeJson(
           res,
           200,
           await authService.createOrganization({
             name: typeof body.name === 'string' ? body.name : '',
+            idempotencyKey: typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined,
+            modelBilling: authService.getOrganizationBillingService() ? {
+              initialAmountUsd: body.initial_amount_usd as string,
+              defaultMemberLimitUsd: body.default_member_limit_usd as string | null,
+              serviceLimitUsd: typeof body.service_limit_usd === 'string' ? body.service_limit_usd : undefined,
+            } : undefined,
             extOrgId:
               body.ext_org_id === null || typeof body.ext_org_id === 'string'
                 ? body.ext_org_id
@@ -6501,6 +6510,9 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/users') {
         authService.requireScope(auth, 'admin:users')
         const body = await readJsonBody(req)
+        if (body.member_limit_usd !== undefined && body.member_limit_usd !== null && typeof body.member_limit_usd !== 'string') {
+          throw new HttpError(400, '成员限额须为 USD 字符串或 null（不限额）')
+        }
         // Org is pinned to the caller's current org — never trust body.org_id.
         // A super_admin targets another org by switching into it (switchOrg),
         // which makes auth.orgId that org; this blocks cross-org user creation.
@@ -6509,6 +6521,7 @@ export function startServer(
           200,
           await authService.createProvisionedUser({
             orgId: auth.orgId,
+            memberLimitUsd: body.member_limit_usd as string | null | undefined,
             email: typeof body.email === 'string' ? body.email : '',
             name: typeof body.name === 'string' ? body.name : '',
             displayName:
@@ -6574,7 +6587,7 @@ export function startServer(
       // `enhancement` is reported disabled: it described a Dify pre-injection
       // binding that only the previous server had. Claiming otherwise would
       // have the client wrap chats with something that does not exist here.
-      if (req.method === 'GET' && pathname === '/api/v1/agents/visible') {
+      if (req.method === 'GET' && pathname === '/api/v1/agent-templates/visible') {
         const filter = await authService.buildVisibilityFilter(auth)
         const installed = await getInstalledAssistants()
         writeJson(res, 200, {
@@ -6609,12 +6622,15 @@ export function startServer(
       if (req.method === 'GET' && pathname === '/api/v1/user/dashboard') {
         writeJson(res, 200, {
           success: true,
-          data: await readUserCredits(authService, config, auth.userId),
+          data: await authService.getOrganizationBillingService()?.isShared(auth.orgId)
+            ? await authService.getOrganizationBillingService()!.dashboard(auth)
+            : await readUserCredits(authService, config, auth.userId),
         })
         return
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/recharge/create') {
+        if (await authService.getOrganizationBillingService()?.isShared(auth.orgId)) throw new HttpError(409, '请使用组织充值中心')
         if (config.systemConfig.rechargeMode !== 'pay' || config.systemConfig.recharge.fuiou.enabled === false || config.systemConfig.sudorouterEnabled === false) {
           writeJson(res, 403, { success: false, msg: '充值功能未开启' })
           return
@@ -6719,7 +6735,8 @@ export function startServer(
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/user/model-usage-stats') {
-        const gatewayUserId = (await authService.getUserModelCredential(auth.userId))?.sudorouterUserId
+        if (await authService.getOrganizationBillingService()?.isShared(auth.orgId)) throw new HttpError(409, '请使用组织模型账户的用量接口')
+        const gatewayUserId = (await authService.getLegacyUserModelCredential(auth.userId))?.sudorouterUserId
         if (!gatewayUserId) {
           writeJson(res, 200, { success: true, data: [] })
           return
@@ -6760,6 +6777,7 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/credit-applications') {
+        if (await authService.getOrganizationBillingService()?.isShared(auth.orgId)) throw new HttpError(409, '请联系管理员调整成员限额')
         if (config.systemConfig.rechargeMode !== 'approve') {
           writeJson(res, 403, { success: false, msg: '积分申请未开启' })
           return
@@ -6799,6 +6817,7 @@ export function startServer(
         // Only an approval needs the gateway; reviewApplication enforces that.
         // Requiring it for a rejection too would leave a deployment with no
         // gateway unable to close a request it never intended to grant.
+        if (await authService.getOrganizationBillingService()?.isShared(application.orgId)) throw new HttpError(409, '请使用成员限额管理')
         const approving = body.approve === true
         const client = buildSudorouterClient(config)
         try {
@@ -6809,7 +6828,7 @@ export function startServer(
               typeof body.approved_points === 'number' ? body.approved_points : undefined,
             adminComment: typeof body.admin_comment === 'string' ? body.admin_comment : undefined,
             gatewayUserId:
-              (await authService.getUserModelCredential(application.userId))?.sudorouterUserId ?? null,
+              (await authService.getLegacyUserModelCredential(application.userId))?.sudorouterUserId ?? null,
           })
           writeJson(res, 200, { success: true, data: toPayload(reviewed, pointsToQuota) })
         } catch (err) {
@@ -6936,7 +6955,7 @@ export function startServer(
             {
               orderId: byId ? existing.id : undefined,
               orderNo: byId ? undefined : existing.orderNo,
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '订单同步重试成功', data })
@@ -6966,7 +6985,7 @@ export function startServer(
             buildSudorouterClient(config),
             {
               orderNo,
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '订单状态同步完成', data })
@@ -6989,7 +7008,7 @@ export function startServer(
             buildSudorouterClient(config),
             {
               orgId: auth.role === 'super_admin' ? undefined : auth.orgId,
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '待处理订单同步完成', data })
@@ -7030,7 +7049,7 @@ export function startServer(
           writeJson(res, 400, { success: false, msg: '订单状态不支持退款' })
           return
         }
-        const gatewayUserId = (await authService.getUserModelCredential(order.userId))?.sudorouterUserId
+        const gatewayUserId = (await authService.getLegacyUserModelCredential(order.userId))?.sudorouterUserId
         const client = buildSudorouterClient(config)
         if (!gatewayUserId || !client) {
           writeJson(res, 409, { success: false, msg: '用户信息异常' })
@@ -7076,7 +7095,7 @@ export function startServer(
               orderNo,
               reason,
               adminId: auth.userId,
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '退款成功', data: result })
@@ -7113,7 +7132,7 @@ export function startServer(
             buildSudorouterClient(config),
             order,
             {
-              getGatewayUserId: async userId => (await authService.getUserModelCredential(userId))?.sudorouterUserId ?? null,
+              getGatewayUserId: async userId => (await authService.getLegacyUserModelCredential(userId))?.sudorouterUserId ?? null,
             },
           )
           writeJson(res, 200, { success: true, msg: '模拟支付成功', data: { order_no: order.orderNo } })
@@ -7153,7 +7172,7 @@ export function startServer(
         authService.requireScope(auth, 'admin:users')
         const userId = userMatch[1] || ''
         const body = await readJsonBody(req)
-        const result = authService.updateUser({
+        const result = await authService.updateUser({
           orgId: auth.orgId,
           userId,
           name: typeof body.name === 'string' ? body.name : undefined,
@@ -7226,14 +7245,13 @@ export function startServer(
         authService.requireScope(auth, 'admin:users')
         const userId = userTokenLimitMatch[1] || ''
         const body = await readJsonBody(req)
-        const tokenLimit = body.tokenLimit === null ? null : Number(body.tokenLimit)
         writeJson(
           res,
           200,
           await authService.setUserTokenLimit({
             orgId: auth.orgId,
             userId,
-            tokenLimit: tokenLimit !== null && Number.isFinite(tokenLimit) ? tokenLimit : null,
+            tokenLimit: body.tokenLimit,
           }, auth),
         )
         return
@@ -7262,14 +7280,13 @@ export function startServer(
         authService.requireScope(auth, 'admin:users')
         const departmentId = departmentTokenLimitMatch[1] || ''
         const body = await readJsonBody(req)
-        const tokenLimit = body.tokenLimit === null ? null : Number(body.tokenLimit)
         writeJson(
           res,
           200,
           await authService.setDepartmentTokenLimit({
             orgId: auth.orgId,
             departmentId,
-            tokenLimit: tokenLimit !== null && Number.isFinite(tokenLimit) ? tokenLimit : null,
+            tokenLimit: body.tokenLimit,
           }, auth),
         )
         return
@@ -7289,6 +7306,53 @@ export function startServer(
             .map(session => serializeSession(session)),
         })
         return
+      }
+
+      // Agents a user made for themselves — distinct from the assistant catalog,
+      // which holds templates everybody shares. These are the user's own
+      // principals: one memory, one conversation list, one inbox each.
+      // The agents this person has, as the sidebar shows them: the implicit
+      // default, the ones they made, and the templates they have actually used.
+      // Assembled here because only the server knows which of the three kinds a
+      // stored reference is and where each kind's name lives.
+      if (req.method === 'GET' && pathname === '/api/v1/agents/mine') {
+        const user = await authService.getUserOrNull(auth.userId, auth.orgId).catch(() => null)
+        const { resolveAssistantDisplayName } = await import('./agentStore.js')
+        const agents = await listMyAgents({
+          orgId: auth.orgId,
+          userId: auth.userId,
+          // The default agent is the person's own, so it is named after them.
+          // Empty when the account has no name; the client labels `kind` then,
+          // rather than being handed a placeholder that reads like a name.
+          defaultDisplayName: user?.displayName?.trim() || user?.name || '',
+          listSessionAssistants: ({ orgId, userId }) => runtime.store.listUserSessions(orgId, userId),
+          resolveTemplateName: resolveAssistantDisplayName,
+        })
+        writeJson(res, 200, { success: true, data: agents })
+        return
+      }
+
+      if (pathname === '/api/v1/user-agents') {
+        if (req.method === 'GET') {
+          writeJson(res, 200, { success: true, data: await listUserAgents(auth.orgId, auth.userId) })
+          return
+        }
+        if (req.method === 'POST') {
+          const body = (await readJsonBody(req)) as { displayName?: unknown }
+          const displayName = typeof body.displayName === 'string' ? body.displayName : ''
+          try {
+            const agent = await createUserAgent({
+              orgId: auth.orgId,
+              userId: auth.userId,
+              displayName,
+            })
+            writeJson(res, 201, { success: true, data: agent })
+          } catch (err) {
+            if (err instanceof InvalidAgentNameError) throw new HttpError(400, err.message)
+            throw err
+          }
+          return
+        }
       }
 
       // User model preference endpoints
@@ -8570,7 +8634,7 @@ export function startServer(
           const body = await readJsonBody(req)
           const result = await eventTriggerApi.updateTrigger(auth, triggerId, body)
           if (!result) throw new HttpError(404, 'Trigger not found')
-          writeJson(res, 200, result)
+          writeJson(res, result.success ? 200 : 400, result)
           return
         }
         if (req.method === 'DELETE') {
@@ -8643,11 +8707,12 @@ export function startServer(
         return
       }
 
-      const preparationDownload = pathname.match(/^\/api\/v1\/client\/catalog\/preparations\/([a-f0-9]{64})\/(agents|skills)\/([^/]+)\/download$/)
+      const preparationDownload = pathname.match(/^\/api\/v1\/client\/catalog\/preparations\/([a-f0-9]{64})\/(agent-templates|agents|skills)\/([^/]+)\/download$/)
       if (req.method === 'GET' && preparationDownload) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const { downloadClientPreparation } = await import('./catalog/clientCatalogPreparation.js')
-        const artifact = await downloadClientPreparation(preparationDownload[1]!, preparationDownload[2] as 'agents' | 'skills', decodeURIComponent(preparationDownload[3]!))
+        const kind = preparationDownload[2] === 'skills' ? 'skills' : 'agents'
+        const artifact = await downloadClientPreparation(preparationDownload[1]!, kind, decodeURIComponent(preparationDownload[3]!))
         res.setHeader('Content-Type', 'application/zip')
         res.setHeader('X-Content-SHA256', artifact.digest)
         res.end(artifact.bytes)
@@ -8703,7 +8768,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'GET' && pathname === '/api/v1/agents/installed') {
+      if (req.method === 'GET' && pathname === '/api/v1/agent-templates/installed') {
         const filter = await authService.buildVisibilityFilter(auth)
         // Return all installed assistants: hub, tenant, and custom
         const all = await getInstalledAssistants()
@@ -8718,7 +8783,7 @@ export function startServer(
         return
       }
 
-      const installedAgentRulesMatch = pathname.match(/^\/api\/v1\/agents\/installed\/([^/]+)\/rules$/)
+      const installedAgentRulesMatch = pathname.match(/^\/api\/v1\/agent-templates\/installed\/([^/]+)\/rules$/)
       if (req.method === 'GET' && installedAgentRulesMatch) {
         authService.requireScope(auth, 'admin:settings')
         const assistantName = decodeURIComponent(installedAgentRulesMatch[1] || '')
@@ -8730,7 +8795,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/agents/install') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/install') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         const assistantMeta = isJsonBody(body.assistantMeta)
@@ -8759,7 +8824,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/agents/create') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/create') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
 
@@ -8803,7 +8868,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/agents/uninstall') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/uninstall') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         await uninstallAssistant({
@@ -8816,7 +8881,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'PATCH' && pathname === '/api/v1/agents/meta') {
+      if (req.method === 'PATCH' && pathname === '/api/v1/agent-templates/meta') {
         const body = await readJsonBody(req)
         // Editing installed hub/system agents stays admin-only. CUSTOM agents
         // (created from the SudoWork client, visible only to their owner) are
@@ -8899,7 +8964,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'PATCH' && pathname === '/api/v1/agents/visibility') {
+      if (req.method === 'PATCH' && pathname === '/api/v1/agent-templates/visibility') {
         authService.requireScope(auth, 'admin:settings')
         const body = await readJsonBody(req)
         await updateInstalledAssistantMeta({
@@ -8910,7 +8975,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'POST' && pathname === '/api/v1/agents/sync-from-hub') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/sync-from-hub') {
         authService.requireScope(auth, 'admin:settings')
         if (getAgentSyncProgress().status === 'running') {
           writeJson(res, 409, { error: 'Sync already in progress' })
@@ -8940,7 +9005,7 @@ export function startServer(
       }
 
       // backward compat alias
-      if (req.method === 'POST' && pathname === '/api/v1/agents/sync') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/sync') {
         authService.requireScope(auth, 'admin:settings')
         if (getAgentSyncProgress().status === 'running') {
           writeJson(res, 409, { error: 'Sync already in progress' })
@@ -8969,14 +9034,14 @@ export function startServer(
         return
       }
 
-      if (req.method === 'GET' && pathname === '/api/v1/agents/sync-status') {
+      if (req.method === 'GET' && pathname === '/api/v1/agent-templates/sync-status') {
         authService.requireScope(auth, 'admin:settings')
         writeJson(res, 200, getAgentSyncProgress())
         return
       }
 
-      // POST /api/v1/agents/custom - Upload custom agent
-      if (req.method === 'POST' && pathname === '/api/v1/agents/custom') {
+      // POST /api/v1/agent-templates/custom - Upload custom agent
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/custom') {
         const body = await readJsonBody(req)
         console.log('[Upload Assistant] Received upload request, name:', body.name, 'id:', body.id, 'displayName:', body.displayName)
         const fileBase64 = typeof body.file === 'string' ? body.file : ''
@@ -9011,8 +9076,8 @@ export function startServer(
         return
       }
 
-      // GET /api/v1/agents/tenant - List tenant assistants
-      if (req.method === 'GET' && pathname === '/api/v1/agents/tenant') {
+      // GET /api/v1/agent-templates/tenant - List tenant assistants
+      if (req.method === 'GET' && pathname === '/api/v1/agent-templates/tenant') {
         const status = url.searchParams.get('status') || undefined
         const allRows = await runtime.store.listTenantAssistants(status, auth.orgId)
         // Filter by visibility for non-admin users
@@ -9081,8 +9146,8 @@ export function startServer(
         return
       }
 
-      // GET /api/v1/agents/installed/:id/download - Download installed agent by ID
-      const agentDownloadMatch = pathname.match(/^\/api\/v1\/agents\/installed\/([^/]+)\/download$/)
+      // GET /api/v1/agent-templates/installed/:id/download - Download installed agent by ID
+      const agentDownloadMatch = pathname.match(/^\/api\/v1\/agent-templates\/installed\/([^/]+)\/download$/)
       if (req.method === 'GET' && agentDownloadMatch) {
         const assistantId = decodeURIComponent(agentDownloadMatch[1] || '')
         try {
@@ -9107,13 +9172,13 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/agents/tenant/create - Create a tenant assistant.
+      // POST /api/v1/agent-templates/tenant/create - Create a tenant assistant.
       // Admins (admin:settings) create it directly as approved (files in the
       // tenant dir, live immediately). Non-admins (store:tenant:write) instead
       // submit it as a PENDING approval request: files are staged in the
       // tenant-pending dir (invisible to the runtime scan) and only moved into
       // the tenant dir when an admin approves.
-      if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/create') {
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/tenant/create') {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const storeAdmin = isStoreAdmin(auth)
         const request = await readTenantAssistantRequest(req)
@@ -9276,7 +9341,7 @@ export function startServer(
         return
       }
 
-      const tenantAgentRulesMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)\/rules$/)
+      const tenantAgentRulesMatch = pathname.match(/^\/api\/v1\/agent-templates\/tenant\/([^/]+)\/rules$/)
       if (req.method === 'GET' && tenantAgentRulesMatch) {
         // Reading the system prompt follows the same rule the tenant list uses:
         // anyone the agent is visible to may READ it (the /download endpoint
@@ -9329,8 +9394,8 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/agents/tenant/publish - Publish tenant agent request
-      if (req.method === 'POST' && pathname === '/api/v1/agents/tenant/publish') {
+      // POST /api/v1/agent-templates/tenant/publish - Publish tenant agent request
+      if (req.method === 'POST' && pathname === '/api/v1/agent-templates/tenant/publish') {
         const body = await readJsonBody(req)
         const assistantId = typeof body.assistantId === 'string' ? body.assistantId : ''
         const publishNote = typeof body.publishNote === 'string' ? body.publishNote : undefined
@@ -9385,8 +9450,8 @@ export function startServer(
         return
       }
 
-      // POST /api/v1/admin/agents/tenant/:id/approve - Approve tenant agent
-      const agentApproveMatch = pathname.match(/^\/api\/v1\/admin\/agents\/tenant\/([^/]+)\/approve$/)
+      // POST /api/v1/admin/agent-templates/tenant/:id/approve - Approve tenant agent
+      const agentApproveMatch = pathname.match(/^\/api\/v1\/admin\/agent-templates\/tenant\/([^/]+)\/approve$/)
       if (req.method === 'POST' && agentApproveMatch) {
         authService.requireScope(auth, 'admin:settings')
         const tenantAssistantId = decodeURIComponent(agentApproveMatch[1] || '')
@@ -9424,8 +9489,8 @@ export function startServer(
         return
       }
 
-      // PATCH /api/v1/agents/tenant/:id - Update tenant agent meta
-      const agentTenantPatchMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)$/)
+      // PATCH /api/v1/agent-templates/tenant/:id - Update tenant agent meta
+      const agentTenantPatchMatch = pathname.match(/^\/api\/v1\/agent-templates\/tenant\/([^/]+)$/)
       if (req.method === 'PATCH' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
@@ -9598,7 +9663,7 @@ export function startServer(
         return
       }
 
-      // DELETE /api/v1/agents/tenant/:id - Delete tenant agent
+      // DELETE /api/v1/agent-templates/tenant/:id - Delete tenant agent
       if (req.method === 'DELETE' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
@@ -9623,8 +9688,8 @@ export function startServer(
         return
       }
 
-      // GET /api/v1/agents/tenant/:id/download - Download tenant agent
-      const tenantAgentDownloadMatch = pathname.match(/^\/api\/v1\/agents\/tenant\/([^/]+)\/download$/)
+      // GET /api/v1/agent-templates/tenant/:id/download - Download tenant agent
+      const tenantAgentDownloadMatch = pathname.match(/^\/api\/v1\/agent-templates\/tenant\/([^/]+)\/download$/)
       if (req.method === 'GET' && tenantAgentDownloadMatch) {
         const tenantAssistantId = decodeURIComponent(tenantAgentDownloadMatch[1] || '')
         await requireOrganizationResource('agent', tenantAssistantId)
@@ -10622,7 +10687,7 @@ export function startServer(
         const root = await readWorkspaceTree(session, {
           path: url.searchParams.get('path'),
           search: url.searchParams.get('search'),
-        }, resolveSessionWorkspaceAccess(session, config))
+        }, resolveSessionWorkspaceAccess(session, config, runtime))
         if (session.runtime.type === 'host') await projectArtifactDrafts(root, session.cwd, await readArtifacts(artifactManifestPath(session.transcriptPath)))
         writeJson(res, 200, { root })
         return
@@ -10639,7 +10704,7 @@ export function startServer(
         writeJson(res, 200, await readWorkspaceFilePreview(
           session,
           url.searchParams.get('path'),
-          resolveSessionWorkspaceAccess(session, config),
+          resolveSessionWorkspaceAccess(session, config, runtime),
         ))
         return
       }
@@ -10657,7 +10722,7 @@ export function startServer(
         const result = await writeWorkspaceFile(session, {
           path: typeof body.path === 'string' ? body.path : null,
           contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
-        }, resolveSessionWorkspaceAccess(session, config), uploadLimit)
+        }, resolveSessionWorkspaceAccess(session, config, runtime), uploadLimit)
         writeJson(res, 200, result)
         return
       }
@@ -10673,7 +10738,7 @@ export function startServer(
         const { materializeClientSkills } = await import('./catalog/clientCatalogPreparation.js')
         const assistant = session.assistantName?.startsWith('moss-prepared:') ? session.assistantName : undefined
         const skills = await materializeClientSkills(body.skills as string[], assistant, async (path, bytes, mode) => {
-          await writeWorkspaceFile(session, { path, contentBase64: bytes.toString('base64'), mode }, resolveSessionWorkspaceAccess(session, config), 50 * 1024 * 1024)
+          await writeWorkspaceFile(session, { path, contentBase64: bytes.toString('base64'), mode }, resolveSessionWorkspaceAccess(session, config, runtime), 50 * 1024 * 1024)
         })
         writeJson(res, 200, { skills })
         return
@@ -11048,80 +11113,83 @@ export function startServer(
         const ready = locallyOwnedAttempt
           ? { session, attempt: locallyOwnedAttempt }
           : await runtime.ensureSessionReady(sessionId)
+        // A client can send as soon as the HTTP upgrade completes. Finish the
+        // runner attachment first so its initial message always has a listener.
+        const runnerSocket = await runtime.connectToAttempt(ready.attempt)
+        if (socket.destroyed) {
+          runnerSocket.destroy()
+          return
+        }
+        socket.once('close', () => runnerSocket.destroy())
         wss.handleUpgrade(req, socket, head, ws => {
-          void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
-            let buffer = ''
-            const sendToRunner = (payload: Record<string, unknown>) => {
-              if (!runnerSocket.destroyed) {
-                process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
-                runnerSocket.write(`${jsonStringify(payload)}\n`)
-              } else {
-                process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
+          let buffer = ''
+          const sendToRunner = (payload: Record<string, unknown>) => {
+            if (!runnerSocket.destroyed) {
+              process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
+              runnerSocket.write(`${jsonStringify(payload)}\n`)
+            } else {
+              process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
+            }
+          }
+
+          ws.on('message', data => {
+            const text = wsDataToText(data)
+            process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+            sendToRunner({
+              type: 'stdin',
+              data: text.endsWith('\n') ? text : `${text}\n`,
+            })
+          })
+          ws.on('close', () => {
+            runnerSocket.destroy()
+          })
+          ws.on('error', () => {
+            runnerSocket.destroy()
+          })
+
+          runnerSocket.on('data', chunk => {
+            buffer += Buffer.from(chunk).toString('utf8')
+            while (true) {
+              const idx = buffer.indexOf('\n')
+              if (idx < 0) {
+                break
+              }
+              const line = buffer.slice(0, idx)
+              buffer = buffer.slice(idx + 1)
+              if (!line.trim()) {
+                continue
+              }
+
+              let parsed: { type?: string; line?: string }
+              try {
+                parsed = jsonParse(line) as { type?: string; line?: string }
+              } catch {
+                continue
+              }
+
+              if (parsed.type === 'stdout' && typeof parsed.line === 'string') {
+                if (ws.readyState === ws.OPEN) {
+                  ws.send(parsed.line)
+                }
+              }
+              if (parsed.type === 'exit') {
+                ws.close()
               }
             }
-
-            ws.on('message', data => {
-              const text = wsDataToText(data)
-              process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
-              sendToRunner({
-                type: 'stdin',
-                data: text.endsWith('\n') ? text : `${text}\n`,
-              })
-            })
-            ws.on('close', () => {
-              runnerSocket.destroy()
-            })
-            ws.on('error', () => {
-              runnerSocket.destroy()
-            })
-
-            runnerSocket.on('data', chunk => {
-              buffer += Buffer.from(chunk).toString('utf8')
-              while (true) {
-                const idx = buffer.indexOf('\n')
-                if (idx < 0) {
-                  break
-                }
-                const line = buffer.slice(0, idx)
-                buffer = buffer.slice(idx + 1)
-                if (!line.trim()) {
-                  continue
-                }
-
-                let parsed: { type?: string; line?: string }
-                try {
-                  parsed = jsonParse(line) as { type?: string; line?: string }
-                } catch {
-                  continue
-                }
-
-                if (parsed.type === 'stdout' && typeof parsed.line === 'string') {
-                  if (ws.readyState === ws.OPEN) {
-                    ws.send(parsed.line)
-                  }
-                }
-                if (parsed.type === 'exit') {
-                  ws.close()
-                }
-              }
-            })
-
-            runnerSocket.on('close', () => {
-              if (ws.readyState === ws.OPEN) {
-                ws.close()
-              }
-            })
-            runnerSocket.on('error', () => {
-              if (ws.readyState === ws.OPEN) {
-                ws.close()
-              }
-            })
-
-            wss.emit('connection', ws, req)
-          }).catch(error => {
-            logger.error(error instanceof Error ? error.message : String(error))
-            ws.close()
           })
+
+          runnerSocket.on('close', () => {
+            if (ws.readyState === ws.OPEN) {
+              ws.close()
+            }
+          })
+          runnerSocket.on('error', () => {
+            if (ws.readyState === ws.OPEN) {
+              ws.close()
+            }
+          })
+
+          wss.emit('connection', ws, req)
         })
       } catch (error) {
         logger.error(error instanceof Error ? error.message : String(error))

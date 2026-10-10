@@ -1,7 +1,7 @@
 /**
  * Workspace file access for pod-hosted sessions, over `kubectl exec`.
  *
- * A pod's workspace is an emptyDir: it exists only inside the pod, on whatever
+ * A pod's workspace is mounted inside the pod, on whatever
  * node the pod landed on. moss cannot reach it through its own filesystem — the
  * host path of the same name is a different, empty directory. Every workspace
  * read and write for such a session therefore has to go through the pod.
@@ -30,6 +30,7 @@ export type WorkspaceRemoteEntry = {
   /** Slash-separated, relative to the workspace root. */
   relativePath: string
   isDir: boolean
+  isSymbolicLink?: boolean
   size: number
 }
 
@@ -59,9 +60,11 @@ export type PodWorkspaceTarget = {
   podName: string
   /** The workspace root *inside the pod*. */
   cwd: string
+  /** Restore a persistent workspace's runtime after it exits or is reclaimed. */
+  onPodUnavailable?: () => Promise<void>
 }
 
-class PodExecError extends Error {
+export class PodExecError extends Error {
   constructor(
     message: string,
     readonly exitCode: number | null,
@@ -87,6 +90,7 @@ export function isPodNotReadyExecError(exitCode: number | null, stderr: string):
     text.includes('container not found') ||
     text.includes('error dialing backend') ||
     text.includes('is not created or running') ||
+    text.includes('cannot exec into a container in a completed pod') ||
     POD_OBJECT_MISSING.test(text)
   )
 }
@@ -112,11 +116,15 @@ const POD_OBJECT_MISSING = /pods "[^"]*" not found/
  * kubectl answers `container not found`. That is not a workspace error: the same
  * exec succeeds moments later. Retrying briefly turns a panel that opened too
  * early into one that fills in, rather than one the user has to poke again.
+ * A runner's attach socket can be ready before its pod accepts exec, so even
+ * ensureSessionReady does not eliminate this window. Cold gvisor starts need
+ * more than the original four seconds; keep retries bounded below 30 seconds.
  *
  * Safe for all three callers: the two reads are idempotent, and the write resends
  * the same bytes to the same path.
  */
 const EXEC_RETRY_DELAYS_MS = [250, 500, 1000, 2000]
+const STARTUP_RETRY_DELAYS_MS = [...EXEC_RETRY_DELAYS_MS, 4000, 5000, 5000, 5000, 5000]
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -127,14 +135,28 @@ async function execInPod(
   argv: string[],
   stdin?: Buffer,
 ): Promise<Buffer> {
+  return withPodReadinessRetry(() => execInPodOnce(target, argv, stdin), target.onPodUnavailable)
+}
+
+/** Retry transport readiness failures, restoring an opted-in persistent runtime once. */
+export async function withPodReadinessRetry(
+  execute: () => Promise<Buffer>,
+  onPodUnavailable?: () => Promise<void>,
+): Promise<Buffer> {
+  const retryDelays = onPodUnavailable ? STARTUP_RETRY_DELAYS_MS : EXEC_RETRY_DELAYS_MS
+  let isRecoveryAttempted = false
   for (let attempt = 0; ; attempt++) {
     try {
-      return await execInPodOnce(target, argv, stdin)
+      return await execute()
     } catch (error) {
       const notReady =
         error instanceof PodExecError && isPodNotReadyExecError(error.exitCode, error.stderr)
-      if (!notReady || attempt >= EXEC_RETRY_DELAYS_MS.length) throw error
-      await sleep(EXEC_RETRY_DELAYS_MS[attempt]!)
+      if (!notReady || attempt >= retryDelays.length) throw error
+      if (onPodUnavailable && !isRecoveryAttempted) {
+        isRecoveryAttempted = true
+        await onPodUnavailable()
+      }
+      await sleep(retryDelays[attempt]!)
     }
   }
 }
@@ -210,6 +232,7 @@ export function parseStatLines(raw: string, root: string): WorkspaceRemoteEntry[
     entries.push({
       relativePath: relative,
       isDir: kind === 'directory',
+      ...(kind === 'symbolic link' ? { isSymbolicLink: true } : {}),
       size: Number.isFinite(size) ? size : 0,
     })
   }

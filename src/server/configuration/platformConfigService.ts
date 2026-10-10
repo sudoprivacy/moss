@@ -1,4 +1,5 @@
-import { randomUUID, createPrivateKey, createPublicKey } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
+import { parseFuiouRsaKey } from '../billing/fuiouKeys.js'
 import type { DbDriver } from '../db/driver.js'
 import { PlatformIntegrationSettingsRepository } from './platformIntegrationSettingsRepository.js'
 import { PLATFORM_DEFINITIONS, PLATFORM_PROVIDERS, type PlatformProvider, type PlatformValues } from './platformConfigDefinition.js'
@@ -159,7 +160,8 @@ export class PlatformConfigService {
     {
       const protectedFields = id === 'fuiou' ? ['merchantPrivateKey', 'publicKey'] : []
       for (const key of protectedFields) {
-        if (previous.secrets[key] && snapshot.secrets[key] !== previous.secrets[key]) {
+        if (previous.secrets[key] && snapshot.secrets[key] !== previous.secrets[key]
+          && !sameFuiouKey(previous.secrets[key]!, snapshot.secrets[key] ?? '', key === 'merchantPrivateKey' ? 'private' : 'public')) {
           throw new PlatformConfigError(409, '历史支付数据依赖此密钥；请先完成专门的密钥轮换迁移，不能在此直接覆盖或清除')
         }
       }
@@ -228,17 +230,14 @@ export function validatePlatformConfig(id: PlatformProvider, snapshot: PlatformS
   }
   if (id === 'sudorouter' && snapshot.config.enabled && !/^\d+$/.test(String(snapshot.config.adminUserId))) issues.push('管理员用户 ID 须为数字')
   if (id === 'sms' && !mockSms && snapshot.config.enabled && (!Array.isArray(snapshot.config.templateParams) || !snapshot.config.templateParams.some(x => x.includes('{code}')))) issues.push('模板参数必须包含 {code}')
-  if (snapshot.config.enabled && id === 'fuiou') {
+  if (id === 'fuiou') {
     const privateName = 'merchantPrivateKey'
     const publicName = 'publicKey'
     for (const [key, privatePart] of [[privateName, true], [publicName, false]] as const) {
       const value = snapshot.secrets[key]
       if (!value) continue
       try {
-        const text = value.replaceAll('\\n', '\n')
-        const pem = text.includes('-----BEGIN') ? text : `-----BEGIN ${privatePart ? 'PRIVATE' : 'PUBLIC'} KEY-----\n${text}\n-----END ${privatePart ? 'PRIVATE' : 'PUBLIC'} KEY-----`
-        const parsed = privatePart ? createPrivateKey(pem) : createPublicKey(pem)
-        if (parsed.asymmetricKeyType !== 'rsa') throw new Error()
+        parseFuiouRsaKey(value, privatePart ? 'private' : 'public')
       } catch { issues.push(`${key} 不是有效的 RSA 密钥`) }
     }
   }
@@ -246,4 +245,11 @@ export function validatePlatformConfig(id: PlatformProvider, snapshot: PlatformS
     issues.push('QMS API Key 请求头格式无效')
   }
   return issues
+}
+
+function sameFuiouKey(previous: string, next: string, kind: 'private' | 'public'): boolean {
+  try {
+    const options = { format: 'der', type: kind === 'private' ? 'pkcs8' : 'spki' } as const
+    return parseFuiouRsaKey(previous, kind).export(options).equals(parseFuiouRsaKey(next, kind).export(options))
+  } catch { return false }
 }

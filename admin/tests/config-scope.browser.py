@@ -68,7 +68,18 @@ def run(args):
                 'isSuperAdmin': state['role'] == 'super_admin', 'organization': {'id': state['org']},
             })
         elif path == '/api/v1/organizations':
-            fulfill(route, {'organizations': [{'id': 'org-a', 'name': 'Org A'}, {'id': 'org-b', 'name': 'Org B'}]})
+            fulfill(route, {'organizations': [
+                {'id': 'org-a', 'name': 'Org A'},
+                {'id': 'org-b', 'name': 'Org B'},
+                {'id': 'org-c', 'name': 'Org C'},
+                {'id': 'org-d', 'name': 'Org D'},
+                {'id': 'org-e', 'name': 'Org E'},
+                {'id': 'org-f', 'name': 'Org F'},
+                {'id': 'org-g', 'name': 'Org G'},
+                {'id': 'org-h', 'name': 'Org H'},
+                {'id': 'org-i', 'name': 'Org I'},
+                {'id': 'org-j', 'name': 'Org J'},
+            ]})
         elif path == '/api/v1/auth/switch-org':
             state['org'] = request.post_data_json['org_id']
             fulfill(route, {'access_token': 'fixture-token', 'refresh_token': 'fixture-refresh', 'expires_in': 3600})
@@ -197,11 +208,21 @@ def run(args):
 
             # Use the existing sidebar organization switch, including its discard guard and reload.
             page.locator('#setting-model').fill('discard-before-org-switch')
-            page.get_by_role('combobox', name='切换组织').click()
+            org_switch = page.get_by_role('combobox', name='切换组织')
+            org_switch.click()
+            command_list = page.locator('[data-slot="command-list"]')
+            assert command_list.evaluate('(node) => node.scrollHeight > node.clientHeight')
+            org_search = page.get_by_placeholder('搜索组织名称或 ID')
+            org_search.fill('not-an-organization')
+            expect(page.get_by_text('未找到匹配的组织', exact=True)).to_be_visible()
+            org_search.fill('  oRg-b  ')
+            expect(page.get_by_role('option', name='Org A', exact=True)).to_have_count(0)
             page.get_by_role('option', name='Org B', exact=True).click()
             page.get_by_role('button', name='继续编辑', exact=True).click()
             assert state['org'] == 'org-a'
-            page.get_by_role('combobox', name='切换组织').click()
+            org_switch.click()
+            org_search = page.get_by_placeholder('搜索组织名称或 ID')
+            org_search.fill('ORG-B')
             page.get_by_role('option', name='Org B', exact=True).click()
             page.get_by_role('button', name='放弃更改', exact=True).click()
             expect(page.locator('#setting-model')).to_have_value('organization-org-b-model')

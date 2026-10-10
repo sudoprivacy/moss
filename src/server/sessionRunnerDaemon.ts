@@ -94,11 +94,11 @@ export class SessionRunnerDaemon {
   #state: 'starting' | 'running' | 'stopped' | 'failed' = 'starting'
   #stopping = false
   #heartbeatFailures = 0
-  #stopReason: 'terminated' | 'idle_timeout' | 'runtime_exit' | 'idle_busy_timeout' | 'fenced' = 'runtime_exit'
+  #stopReason: 'terminated' | 'idle_timeout' | 'runtime_exit' | 'idle_busy_timeout' | 'fenced' | 'process_shutdown' = 'runtime_exit'
   /**
-   * A-5: set when a path explicitly chose #stopReason (fenced / idle_*).
+   * Set when a path explicitly chose #stopReason (protocol delete / fenced / idle_*).
    * The generic SIGTERM/SIGINT handlers must not overwrite that choice with
-   * 'terminated' — without this guard the fenced reason is unreachable at
+   * 'process_shutdown' — without this guard the fenced reason is unreachable at
    * onExit time (both handlers fire on the self-SIGTERM the fenced path
    * sends). The DB never sees 'fenced' either way (the fenced writer's own
    * predicate already fails — by design), so this is audit-visibility only.
@@ -140,6 +140,8 @@ export class SessionRunnerDaemon {
         kubeconfig: manifest.session.runtime.k8sKubeconfig || manifest.config.k8s?.kubeconfig,
         imagePullPolicy: manifest.config.k8s?.imagePullPolicy,
         imagePullSecrets: manifest.config.k8s?.imagePullSecrets,
+        workspaceStorageClass: manifest.config.k8s?.workspaceStorageClass,
+        workspaceStorageSize: manifest.config.k8s?.workspaceStorageSize,
         cpuLimit: manifest.config.k8s?.cpuLimit,
         memoryLimit: manifest.config.k8s?.memoryLimit,
         podReadyTimeoutSec: manifest.config.k8s?.podReadyTimeoutSec,
@@ -346,7 +348,7 @@ export class SessionRunnerDaemon {
         }, this.manifest.config.instanceId)
         // Lifecycle marks:
         //   terminate (client-initiated delete)    -> status=terminated, desired=terminated
-        //   idle / busy-ceiling kill (server-side) -> status=ended, desired=ACTIVE
+        //   idle / busy-ceiling / process stop    -> status=ended, desired=ACTIVE
         //     The Sudowork client treats WS close as "detach": session stays
         //     alive on the server, scode may be killed after idleTimeoutMs /
         //     maxDetachedBusyMs, but the user still wants the session and may
@@ -357,13 +359,14 @@ export class SessionRunnerDaemon {
         //   natural exit code=0 (no stopping)     -> status=ended, desired=ended
         //   non-zero exit (no stopping)           -> status=failed, desired=active
         //     keeps last user intent active so client can retry.
-        const idleish =
+        const isRecoverableStop =
           this.#stopReason === 'idle_timeout' ||
-          this.#stopReason === 'idle_busy_timeout'
+          this.#stopReason === 'idle_busy_timeout' ||
+          this.#stopReason === 'process_shutdown'
         let nextStatus: 'ended' | 'failed' | 'terminated'
         let nextDesired: 'active' | 'ended' | 'terminated'
         if (this.#stopping) {
-          if (idleish) {
+          if (isRecoverableStop) {
             nextStatus = 'ended'
             nextDesired = 'active'
           } else {
@@ -407,12 +410,14 @@ export class SessionRunnerDaemon {
 
       process.once('SIGTERM', () => {
         this.#stopping = true
-        if (!this.#stopReasonExplicit) this.#stopReason = 'terminated'
+        // Service managers signal the entire process group on restart. A
+        // process stop does not change the user's intent to keep the session.
+        if (!this.#stopReasonExplicit) this.#stopReason = 'process_shutdown'
         void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
       })
       process.once('SIGINT', () => {
         this.#stopping = true
-        if (!this.#stopReasonExplicit) this.#stopReason = 'terminated'
+        if (!this.#stopReasonExplicit) this.#stopReason = 'process_shutdown'
         void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
       })
     } catch (error) {
@@ -515,6 +520,7 @@ export class SessionRunnerDaemon {
     if (parsed.type === 'shutdown') {
       this.#stopping = true
       this.#stopReason = 'terminated'
+      this.#stopReasonExplicit = true
       void this.#store.addEvent(
         this.manifest.session.sessionId,
         this.manifest.attempt.attemptId,

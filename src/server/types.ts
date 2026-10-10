@@ -5,7 +5,7 @@ import type { QmsRuntimeConfig } from './qms/config.js'
 
 export const runtimeInfoSchema = lazySchema(() =>
   z.object({
-    type: z.enum(['host', 'docker', 'k8s']),
+    type: z.enum(['host', 'docker', 'k8s', 'cohost']),
     engine: z.enum(['scode']).optional(),
     scodePath: z.string().optional(),
     dockerImage: z.string().optional(),
@@ -114,7 +114,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       databaseUrl: z.string().min(1).optional(),
     }).default({}),
     runtimeDefaults: z.object({
-      type: z.enum(['host', 'docker', 'k8s']).default('host'),
+      type: z.enum(['host', 'docker', 'k8s', 'cohost']).default('host'),
       engine: z.enum(['scode']).default('scode'),
       scodePath: z.string().optional(),
       hostScodePath: z.string().optional(),
@@ -183,6 +183,8 @@ export const serverFileConfigSchema = lazySchema(() =>
       imagePullPolicy: z.string().default('IfNotPresent'),
       // Names of pre-created dockerconfigjson pull secrets (private registries).
       imagePullSecrets: z.array(z.string()).default([]),
+      workspaceStorageClass: z.string().min(1).optional(),
+      workspaceStorageSize: z.string().min(1).optional(),
       cpuLimit: z.string().default('2'),
       memoryLimit: z.string().default('4Gi'),
       podReadyTimeoutSec: z.number().int().min(1).default(90),
@@ -701,6 +703,8 @@ export type ServerConfig = {
     kubeconfig?: string
     imagePullPolicy: string
     imagePullSecrets: string[]
+    workspaceStorageClass?: string
+    workspaceStorageSize?: string
     cpuLimit: string
     memoryLimit: string
     podReadyTimeoutSec: number

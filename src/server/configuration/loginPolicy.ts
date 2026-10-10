@@ -22,11 +22,24 @@ export async function resolveEffectiveLoginMethod(
   orgId?: string,
   options: { ignoreOrganizationPolicy?: boolean } = {},
 ): Promise<OrganizationLoginMethod> {
-  return (orgId && !options.ignoreOrganizationPolicy
-    ? loginMethod((await policies.getOrganization(orgId)).loginMethod)
-    : undefined)
-    ?? loginMethod((await policies.getPlatform()).loginMethod)
-    ?? (orgId ? loginMethod((await identities.getOrganizationProfile(orgId))?.loginMethod) : undefined)
+  const organizationPolicy = orgId && !options.ignoreOrganizationPolicy
+    ? await policies.getOrganization(orgId)
+    : undefined
+  const organizationMethod = loginMethod(organizationPolicy?.loginMethod)
+  if (organizationMethod) return organizationMethod
+
+  const platformMethod = loginMethod((await policies.getPlatform()).loginMethod)
+  if (platformMethod) return platformMethod
+
+  // `ignoreOrganizationPolicy` resolves the platform's effective default. It
+  // must not fall back to an organization's legacy profile, otherwise the UI
+  // can display "follow platform" while authentication still uses that old
+  // profile value. Explicit inheritance has the same platform-only fallback.
+  if (options.ignoreOrganizationPolicy || organizationPolicy?.loginMethodInherited === true) {
+    return defaults?.loginMethod ?? 'password'
+  }
+
+  return (orgId ? loginMethod((await identities.getOrganizationProfile(orgId))?.loginMethod) : undefined)
     ?? defaults?.loginMethod
     ?? 'password'
 }

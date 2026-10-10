@@ -1,3 +1,4 @@
+import { HttpError } from '../httpRespond.js'
 import type { McpStore } from '../mcp/db.js'
 import type { AuthContext } from '../auth/token.js'
 import type { AuthService } from '../auth/service.js'
@@ -30,17 +31,17 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
     if (auth.role === 'dept_admin') {
       const deptId = await getUserDepartmentId(auth.userId)
       if (input.scope === 'org') {
-        throw Object.assign(new Error('部门管理员不能创建企业级 MCP'), { statusCode: 403 })
+        throw new HttpError(403, '部门管理员不能创建企业级 MCP')
       }
       if (input.scope === 'department') {
         if (input.owner_id !== deptId) {
-          throw Object.assign(new Error('部门管理员只能管理本部门的 MCP'), { statusCode: 403 })
+          throw new HttpError(403, '部门管理员只能管理本部门的 MCP')
         }
       }
       return
     }
 
-    throw Object.assign(new Error('权限不足'), { statusCode: 403 })
+    throw new HttpError(403, '权限不足')
   }
 
   async function assertCanManageExistingMcp(auth: AuthContext, server: { scope: string; owner_type: string; owner_id: string }): Promise<void> {
@@ -49,10 +50,10 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
     if (auth.role === 'dept_admin') {
       const deptId = await getUserDepartmentId(auth.userId)
       if (server.owner_type === 'department' && server.owner_id === deptId) return
-      throw Object.assign(new Error('权限不足，只能管理本部门的 MCP'), { statusCode: 403 })
+      throw new HttpError(403, '权限不足，只能管理本部门的 MCP')
     }
 
-    throw Object.assign(new Error('权限不足'), { statusCode: 403 })
+    throw new HttpError(403, '权限不足')
   }
 
   const writeAudit = async (
@@ -214,22 +215,16 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
 
       // 必填字段校验
       if (!input.name || typeof input.name !== 'string' || !input.name.trim()) {
-        const err = new Error('name 为必填字段')
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, 'name 为必填字段')
       }
       if (input.scope === 'department' && (!input.owner_id || !input.owner_id.trim())) {
-        const err = new Error('部门级 MCP 必须指定所属部门')
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, '部门级 MCP 必须指定所属部门')
       }
 
       // Check name uniqueness
       const existing = await mcpStore.getMcpServerByName(auth.orgId, input.name)
       if (existing) {
-        const err = new Error('MCP 名称已存在')
-        Object.assign(err, { statusCode: 409 })
-        throw err
+        throw new HttpError(409, 'MCP 名称已存在')
       }
 
       // 补全可枚举字段的默认值(与前端 wizard Select 默认值一致)
@@ -262,7 +257,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
 
       // 鉴权配置结构校验
       const authError = validateAuthConfig(resolvedInput.auth_type ?? 'none', resolvedInput.auth_config_json ?? null, resolvedInput.secret_ref ?? null)
-      if (authError) { const err = new Error(authError); Object.assign(err, { statusCode: 400 }); throw err }
+      if (authError) throw new HttpError(400, authError)
 
       const server = await mcpStore.createMcpServer(auth.orgId, resolvedInput, auth.userId)
       void writeAudit(auth.orgId, auth.userId, 'create', server.id, server.name, { name: input.name }, ip)
@@ -281,18 +276,14 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       const effectiveScope = input.scope ?? existing.scope
       const effectiveOwnerId = input.owner_id ?? existing.owner_id
       if (effectiveScope === 'department' && (!effectiveOwnerId || !effectiveOwnerId.trim())) {
-        const err = new Error('部门级 MCP 必须指定所属部门')
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, '部门级 MCP 必须指定所属部门')
       }
 
       // If name is being changed, check uniqueness
       if (input.name && input.name !== existing.name) {
         const nameConflict = await mcpStore.getMcpServerByName(auth.orgId, input.name)
         if (nameConflict) {
-          const err = new Error('MCP 名称已存在')
-          Object.assign(err, { statusCode: 409 })
-          throw err
+          throw new HttpError(409, 'MCP 名称已存在')
         }
       }
 
@@ -301,7 +292,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       const effectiveAuthConfigJson = input.auth_config_json !== undefined ? input.auth_config_json : existing.auth_config_json
       const effectiveSecretRef = input.secret_ref !== undefined ? input.secret_ref : existing.secret_ref
       const authError = validateAuthConfig(effectiveAuthType, effectiveAuthConfigJson ?? null, effectiveSecretRef ?? null)
-      if (authError) { const err = new Error(authError); Object.assign(err, { statusCode: 400 }); throw err }
+      if (authError) throw new HttpError(400, authError)
 
       const server = await mcpStore.updateMcpServer(auth.orgId, id, input, auth.userId)
 
@@ -466,59 +457,41 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
     async createTemplate(auth: AuthContext, input: McpTemplateInput, ip?: string) {
       authService.requireScope(auth, 'admin:mcp:write')
       if (!input.name?.trim()) {
-        const err = new Error('模板名称不能为空')
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, '模板名称不能为空')
       }
       if (!input.icon?.trim()) {
-        const err = new Error('模板图标不能为空')
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, '模板图标不能为空')
       }
       const existing = await mcpStore.getTemplateByName(auth.orgId, input.name)
       if (existing) {
-        const err = new Error('模板名称已存在')
-        Object.assign(err, { statusCode: 409 })
-        throw err
+        throw new HttpError(409, '模板名称已存在')
       }
       if (input.config_json) {
         const validation = validateConfigJson(input.config_json)
         if (!validation.ok) {
-          const err = new Error(validation.message!)
-          Object.assign(err, { statusCode: 400 })
-          throw err
+          throw new HttpError(400, validation.message!)
         }
       }
       // Validate new fields
       const authConfigValidation = validateAuthConfigJson(input.auth_config_json ?? null)
       if (!authConfigValidation.ok) {
-        const err = new Error(authConfigValidation.message!)
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, authConfigValidation.message!)
       }
       const visibleToValidation = validateVisibleToJson(input.visible_to_json ?? null)
       if (!visibleToValidation.ok) {
-        const err = new Error(visibleToValidation.message!)
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, visibleToValidation.message!)
       }
       const boundAssistantsValidation = validateBoundJson(input.bound_assistants_json ?? null, 'bound_assistants_json')
       if (!boundAssistantsValidation.ok) {
-        const err = new Error(boundAssistantsValidation.message!)
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, boundAssistantsValidation.message!)
       }
       const boundSkillsValidation = validateBoundJson(input.bound_skills_json ?? null, 'bound_skills_json')
       if (!boundSkillsValidation.ok) {
-        const err = new Error(boundSkillsValidation.message!)
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, boundSkillsValidation.message!)
       }
       const securityPolicyValidation = validateSecurityPolicyJson(input.security_policy_json ?? null)
       if (!securityPolicyValidation.ok) {
-        const err = new Error(securityPolicyValidation.message!)
-        Object.assign(err, { statusCode: 400 })
-        throw err
+        throw new HttpError(400, securityPolicyValidation.message!)
       }
       // auth_type dual-write sync: extract auth_type from auth_config_json
       if (input.auth_config_json) {
@@ -537,46 +510,40 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       authService.requireScope(auth, 'admin:mcp:write')
       const existing = await mcpStore.getTemplate(auth.orgId, id)
       if (!existing) {
-        const err = new Error('模板不存在')
-        Object.assign(err, { statusCode: 404 })
-        throw err
+        throw new HttpError(404, '模板不存在')
       }
       if (input.name !== undefined && input.name !== existing.name) {
         const nameConflict = await mcpStore.getTemplateByName(auth.orgId, input.name)
         if (nameConflict) {
-          const err = new Error('模板名称已存在')
-          Object.assign(err, { statusCode: 409 })
-          throw err
+          throw new HttpError(409, '模板名称已存在')
         }
       }
       if (input.config_json !== undefined) {
         const validation = validateConfigJson(input.config_json)
         if (!validation.ok) {
-          const err = new Error(validation.message!)
-          Object.assign(err, { statusCode: 400 })
-          throw err
+          throw new HttpError(400, validation.message!)
         }
       }
       // Validate new fields
       if (input.auth_config_json !== undefined) {
         const v = validateAuthConfigJson(input.auth_config_json)
-        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+        if (!v.ok) { throw new HttpError(400, v.message!) }
       }
       if (input.visible_to_json !== undefined) {
         const v = validateVisibleToJson(input.visible_to_json)
-        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+        if (!v.ok) { throw new HttpError(400, v.message!) }
       }
       if (input.bound_assistants_json !== undefined) {
         const v = validateBoundJson(input.bound_assistants_json, 'bound_assistants_json')
-        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+        if (!v.ok) { throw new HttpError(400, v.message!) }
       }
       if (input.bound_skills_json !== undefined) {
         const v = validateBoundJson(input.bound_skills_json, 'bound_skills_json')
-        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+        if (!v.ok) { throw new HttpError(400, v.message!) }
       }
       if (input.security_policy_json !== undefined) {
         const v = validateSecurityPolicyJson(input.security_policy_json)
-        if (!v.ok) { const err = new Error(v.message!); Object.assign(err, { statusCode: 400 }); throw err }
+        if (!v.ok) { throw new HttpError(400, v.message!) }
       }
       // auth_type dual-write sync: extract auth_type from auth_config_json
       if (input.auth_config_json) {
@@ -595,9 +562,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       authService.requireScope(auth, 'admin:mcp:write')
       const existing = await mcpStore.getTemplate(auth.orgId, id)
       if (!existing) {
-        const err = new Error('模板不存在')
-        Object.assign(err, { statusCode: 404 })
-        throw err
+        throw new HttpError(404, '模板不存在')
       }
       await mcpStore.deleteTemplate(auth.orgId, id)
       void writeAudit(auth.orgId, auth.userId, 'delete_template', id, existing.name, undefined, ip)
@@ -688,9 +653,7 @@ export function createMcpAdminApi(deps: McpAdminDeps) {
       // Check name uniqueness
       const existing = await mcpStore.getMcpServerByName(auth.orgId, serverInput.name)
       if (existing) {
-        const err = new Error('MCP 名称已存在')
-        Object.assign(err, { statusCode: 409 })
-        throw err
+        throw new HttpError(409, 'MCP 名称已存在')
       }
 
       await assertCanManageMcp(auth, serverInput, 'install_template')

@@ -8,6 +8,7 @@ import {
   type AuthCenterUser,
 } from '../authCenter/db.js'
 import { IdentityRepository } from './identityRepository.js'
+import type { CreateOrganizationModelInput } from '../billing/organizationBillingService.js'
 
 export interface CreateUnifiedUserInput {
   id?: string
@@ -48,6 +49,10 @@ export class UnifiedIdentityService {
   constructor(
     private readonly authDb: AuthCenterDb,
     private readonly repository: IdentityRepository,
+    private readonly modelBilling?: {
+      stageOrganization(orgId: string, input?: CreateOrganizationModelInput): Promise<void>
+      isShared(orgId: string): Promise<boolean>
+    },
   ) {}
 
   async createOrganization(input: {
@@ -66,6 +71,7 @@ export class UnifiedIdentityService {
     appCompanyName?: string | null
     loginDescription?: string | null
     initialCreditUnits?: number
+    modelBilling?: CreateOrganizationModelInput
   }, context: CommandContext): Promise<CreateUnifiedOrganizationResult> {
     assertTrustedCommandContext(context)
     const previous = await this.repository.getCommandResult<CreateUnifiedOrganizationResult>(
@@ -110,7 +116,9 @@ export class UnifiedIdentityService {
       } else {
         legacyEnterpriseId = await this.repository.allocateNumericAlias('enterprise', organizationId, organizationId)
       }
-      await this.repository.createWallet('organization', organizationId, input.initialCreditUnits ?? 0)
+      if (context.source === 'online') await this.modelBilling?.stageOrganization(organizationId, input.modelBilling)
+      const shared = await this.modelBilling?.isShared(organizationId) ?? false
+      await this.repository.createWallet('organization', organizationId, shared ? 0 : input.initialCreditUnits ?? 0)
       const result = { organizationId, legacyEnterpriseId, code }
       await this.repository.recordCommandResult(
         'identity.create_organization', context.idempotencyKey, context.source, result,
@@ -220,7 +228,8 @@ export class UnifiedIdentityService {
         legacyUserId = await this.repository.allocateNumericAlias('user', userId, input.orgId)
       }
 
-      await this.repository.createWallet('user', userId, invitation?.initialCreditUnits ?? input.initialCreditUnits ?? 0)
+      const shared = await this.modelBilling?.isShared(input.orgId) ?? false
+      await this.repository.createWallet('user', userId, shared ? 0 : invitation?.initialCreditUnits ?? input.initialCreditUnits ?? 0)
       if (invitation) await this.repository.consumeInvitation(invitation.id, userId)
 
       const suppressed = context.externalEffects === 'suppress_external'

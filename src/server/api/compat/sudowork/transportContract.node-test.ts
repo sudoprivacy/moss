@@ -20,6 +20,18 @@ function identity() {
 }
 
 void describe('Sudowork transport contract', () => {
+  void test('canonical and legacy template URLs share authentication and response semantics', async () => {
+    const app = createSudoworkCompatibilityApp({
+      identity: identity(),
+      catalog: { listVisibleAgents: () => [{ id: 'template-1' }] } as never,
+    })
+    for (const segment of ['agents', 'agent-templates']) {
+      assert.equal((await app.request(`/api/v1/${segment}/visible`)).status, 401)
+      const response = await app.request(`/api/v1/${segment}/visible`, { headers: { authorization: 'Bearer access' } })
+      assert.equal(response.status, 200)
+      assert.deepEqual(await response.json(), [{ id: 'template-1' }])
+    }
+  })
   void test('CORS 预检不消耗登录限额，第 11 次同 IP 登录保持旧 429 响应', async () => {
     const counters = new Map<string, number>()
     const app = createSudoworkCompatibilityApp({
@@ -94,7 +106,7 @@ void describe('Sudowork transport contract', () => {
     assert.match(archive.headers.get('content-disposition') ?? '', /filename\*=UTF-8''/)
     assert.equal(await archive.text(), 'archive')
 
-    const chat = await app.request('/api/v1/agents/agent-1/chat', {
+    const chat = await app.request('/api/v1/agent-templates/agent-1/chat', {
       method: 'POST', headers: { authorization: 'Bearer access', 'content-type': 'application/json' },
       body: JSON.stringify({ query: 'hello' }),
     })
@@ -102,7 +114,7 @@ void describe('Sudowork transport contract', () => {
     assert.equal(chat.headers.get('x-accel-buffering'), 'no')
     assert.equal(await chat.text(), 'data: ok\n\n')
 
-    const audio = await app.request('/api/v1/agents/agent-1/text-to-audio', {
+    const audio = await app.request('/api/v1/agent-templates/agent-1/text-to-audio', {
       method: 'POST', headers: { authorization: 'Bearer access', 'content-type': 'application/json' },
       body: JSON.stringify({ text: 'hello' }),
     })

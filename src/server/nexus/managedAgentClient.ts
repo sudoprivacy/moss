@@ -1,19 +1,5 @@
-/**
- * Client for nexus's `managed_agent` service — the control plane that owns an
- * agent's process record (PCB), its `/proc/{pid}` entry and the byte tunnel on
- * `/proc/{pid}/fd/{0,1,2}`.
- *
- * Transport is the generic `Call` RPC: `<service>.<method>` with a JSON payload
- * and a JSON reply, the same surface `nexusSecretClient` already uses for
- * `password-vault.*`. The daemon's rpc_codec wraps a success as
- * `{"result": <value>}`; {@link call} unwraps it.
- *
- * Only the `spawn_spec` path is used here: nexus launches the command moss
- * computes and pumps its stdio through node-local memory `DT_STREAM`s. nexus
- * never frames or parses ACP — moss keeps that, unchanged, in `acpBridge`.
- */
-
-import type { NexusVfsClient, StreamReadResult } from '@nexus-ai-fs/vfs-client'
+/** Managed session control plane and the shared conversation transport. */
+import { NexusSessionTransport, type NexusVfsClient, type NexusSessionEndpoint, type SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
 
 /**
  * Raw subprocess spec. The launch-logic SSOT stays moss-side: nexus executes
@@ -35,6 +21,9 @@ export type StartSessionResult = {
    * this, which works because the broker is co-located with moss.
    */
   osPid: number | null
+  sessionEndpoint: NexusSessionEndpoint
+  durableSessionId?: string
+  workspacePath?: string
 }
 
 export class ManagedAgentClient {
@@ -61,6 +50,7 @@ export class ManagedAgentClient {
    */
   async startSession(input: {
     agentId: string
+    repos?: Array<{ hostPath: string; alias: string }>
     /**
      * Omitted when the daemon supplies the runtime itself.
      *
@@ -72,11 +62,22 @@ export class ManagedAgentClient {
     model?: string
     ownerId?: string
     zoneId?: string
+    resumeSessionId?: string
   }): Promise<StartSessionResult> {
-    const res = await this.call<{ session_id: string; os_pid?: number | null }>(
+    const res = await this.call<{
+      session_id: string
+      os_pid?: number | null
+      session_endpoint?: NexusSessionEndpoint
+      durable_session_id?: string
+      workspace_path?: string
+    }>(
       'managed_agent.start_session_v1',
       {
         agent_id: input.agentId,
+        ...(input.repos?.length
+          ? { repos: input.repos.map(repo => ({ host_path: repo.hostPath, alias: repo.alias })) }
+          : {}),
+        ...(input.resumeSessionId ? { resume_session_id: input.resumeSessionId } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.ownerId ? { owner_id: input.ownerId } : {}),
         ...(input.zoneId ? { zone_id: input.zoneId } : {}),
@@ -92,29 +93,37 @@ export class ManagedAgentClient {
           : {}),
       },
     )
-    return { sessionId: res.session_id, osPid: res.os_pid ?? null }
+    if (!res.session_endpoint) {
+      await this.cancel(res.session_id)
+      throw new Error('Nexus daemon does not support acp-mailbox/1; upgrade the daemon before starting sessions')
+    }
+    return { sessionId: res.session_id, osPid: res.os_pid ?? null,
+      sessionEndpoint: res.session_endpoint, durableSessionId: res.durable_session_id,
+      workspacePath: res.workspace_path }
   }
 
   /** Terminate the session nexus is supervising. */
-  async cancel(sessionId: string, mode: 'session' | 'agent' = 'session'): Promise<void> {
+  async cancel(sessionId: string, mode: 'session' = 'session'): Promise<void> {
     await this.call<unknown>('managed_agent.cancel_v1', { session_id: sessionId, mode })
   }
 
-  /** Append bytes to the agent's stdin stream (`/proc/{sid}/fd/0`). */
-  streamWrite(streamPath: string, data: Buffer): Promise<void> {
-    return this.client.streamWrite(streamPath, data, this.authToken)
+  /** Read the daemon's ownership and workspace record without starting a session. */
+  async getSession(sessionId: string): Promise<{
+    session_id: string
+    agent_id: string
+    owner_id: string
+    workspace_path: string
+    durable_session_id?: string
+  }> {
+    return this.call('managed_agent.get_session_v1', { session_id: sessionId })
   }
 
-  /**
-   * Read from an fd stream. A blocking read long-polls; a timeout or `eof`
-   * means "nothing yet, re-read at the same offset". A real disconnect rejects
-   * — that, not `eof`, is how the caller learns the agent is gone.
-   */
-  streamReadAt(
-    streamPath: string,
-    offset: string,
-    options?: { blocking?: boolean; timeoutMs?: number },
-  ): Promise<StreamReadResult> {
-    return this.client.streamReadAt(streamPath, offset, this.authToken, options)
+  openSession(endpoint: NexusSessionEndpoint, events: {
+    onMessage(message: SessionRpcMessage): void
+    onClose(error: Error | undefined): void
+  }): NexusSessionTransport {
+    return new NexusSessionTransport({ client: this.client, authToken: this.authToken, endpoint, ...events })
   }
+
+  close(): void { this.client.close() }
 }

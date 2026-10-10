@@ -16,6 +16,11 @@ import { operationsApi, type InvitationCodeItem } from '@/lib/api/operations'
 
 const statusLabels = ['未使用', '已使用', '已撤销'] as const
 
+function formatCreatedAt(value: number): string {
+  const date = new Date(value)
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '-'
+}
+
 export default function OperationsInvitationsPage() {
   const [items, setItems] = useState<InvitationCodeItem[]>([])
   const [total, setTotal] = useState(0)
@@ -24,7 +29,6 @@ export default function OperationsInvitationsPage() {
   const [loading, setLoading] = useState(true)
   const [createOpen, setCreateOpen] = useState(false)
   const [count, setCount] = useState('1')
-  const [quota, setQuota] = useState('0')
   const [saving, setSaving] = useState(false)
 
   const load = useCallback(async () => {
@@ -46,14 +50,13 @@ export default function OperationsInvitationsPage() {
 
   const create = async () => {
     const parsedCount = Number(count)
-    const parsedQuota = Number(quota)
-    if (!Number.isInteger(parsedCount) || parsedCount < 1 || parsedCount > 100 || parsedQuota < 0) {
-      toast.error('数量须为 1 至 100，初始额度不能小于 0')
+    if (!Number.isInteger(parsedCount) || parsedCount < 1 || parsedCount > 100) {
+      toast.error('数量须为 1 至 100')
       return
     }
     setSaving(true)
     try {
-      const response = await operationsApi.createInvitations({ count: parsedCount, initialQuotaUsd: parsedQuota })
+      const response = await operationsApi.createInvitations({ count: parsedCount })
       toast.success(`已创建 ${response.data.count} 个邀请码`)
       setCreateOpen(false)
       setPage(1)
@@ -96,15 +99,18 @@ export default function OperationsInvitationsPage() {
         </div>
         <div className="overflow-x-auto rounded-md border">
           <Table>
-            <TableHeader><TableRow><TableHead>邀请码</TableHead><TableHead>状态</TableHead><TableHead>初始额度</TableHead><TableHead>使用者</TableHead><TableHead>创建时间</TableHead><TableHead className="w-24">操作</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>邀请码</TableHead><TableHead>状态</TableHead><TableHead>历史注册赠额（USD）</TableHead><TableHead>使用者</TableHead><TableHead>创建时间</TableHead><TableHead className="w-24">操作</TableHead></TableRow></TableHeader>
             <TableBody>
               {loading ? Array.from({ length: 6 }, (_, index) => <TableRow key={index}><TableCell colSpan={6}><Skeleton className="h-7 w-full" /></TableCell></TableRow>) : items.map(item => (
                 <TableRow key={item.id}>
                   <TableCell className="font-mono text-sm">{item.code}</TableCell>
                   <TableCell><Badge variant={item.status === 0 ? 'default' : 'secondary'}>{statusLabels[item.status]}</Badge></TableCell>
-                  <TableCell>{item.initial_quota_usd}</TableCell>
-                  <TableCell>{item.used_by_user_id ?? '-'}</TableCell>
-                  <TableCell className="whitespace-nowrap">{item.created_at || '-'}</TableCell>
+                  <TableCell>{item.initial_quota_usd ?? '—'}</TableCell>
+                  <TableCell>
+                    <div>{item.used_by_nickname || item.used_by_phone || (item.used_by_user_id != null ? `用户 #${item.used_by_user_id}` : '-')}</div>
+                    {item.used_by_nickname && item.used_by_phone ? <div className="text-xs text-muted-foreground">{item.used_by_phone}</div> : null}
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap">{formatCreatedAt(item.created_at)}</TableCell>
                   <TableCell><div className="flex gap-1"><Button variant="ghost" size="icon" title="复制" onClick={() => { void navigator.clipboard.writeText(item.code); toast.success('已复制') }}><Copy className="size-4" /></Button>{item.status === 0 ? <Button variant="ghost" size="icon" title="撤销" onClick={() => void remove(item)}><Trash2 className="size-4" /></Button> : null}</div></TableCell>
                 </TableRow>
               ))}
@@ -115,7 +121,7 @@ export default function OperationsInvitationsPage() {
         <div className="flex items-center justify-between text-sm text-muted-foreground"><span>共 {total} 条</span><div className="flex gap-2"><Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(value => value - 1)}>上一页</Button><span className="self-center">第 {page} 页</span><Button variant="outline" size="sm" disabled={page * 20 >= total} onClick={() => setPage(value => value + 1)}>下一页</Button></div></div>
       </div>
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent><DialogHeader><DialogTitle>批量创建邀请码</DialogTitle></DialogHeader><div className="grid gap-4 py-2"><div className="grid gap-2"><Label htmlFor="invite-count">数量</Label><Input id="invite-count" type="number" min={1} max={100} value={count} onChange={event => setCount(event.target.value)} /></div><div className="grid gap-2"><Label htmlFor="invite-quota">注册赠送额度</Label><Input id="invite-quota" type="number" min={0} step="0.01" value={quota} onChange={event => setQuota(event.target.value)} /></div></div><DialogFooter><Button variant="outline" onClick={() => setCreateOpen(false)}>取消</Button><Button disabled={saving} onClick={() => void create()}>创建</Button></DialogFooter></DialogContent>
+        <DialogContent><DialogHeader><DialogTitle>批量创建邀请码</DialogTitle></DialogHeader><div className="grid gap-4 py-2"><div className="grid gap-2"><Label htmlFor="invite-count">数量</Label><Input id="invite-count" type="number" min={1} max={100} value={count} onChange={event => setCount(event.target.value)} /></div><p className="text-sm text-muted-foreground">新共享账户成员继承组织默认限额；可在“用户与组织管理”中设置。邀请码不赠送个人余额。</p></div><DialogFooter><Button variant="outline" onClick={() => setCreateOpen(false)}>取消</Button><Button disabled={saving} onClick={() => void create()}>创建</Button></DialogFooter></DialogContent>
       </Dialog>
     </DashboardLayout>
   )

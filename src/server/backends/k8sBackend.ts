@@ -1,5 +1,7 @@
 import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
+import { isDefaultAgentName } from '../agentIdentity.js'
 import { execFile, spawn } from 'child_process'
+import { createHash } from 'node:crypto'
 import { mkdir, readFile } from 'fs/promises'
 import { join, posix as posixPath } from 'path'
 import { promisify } from 'util'
@@ -11,20 +13,24 @@ import type {
   SessionBackend,
   SessionRuntimeInfo,
 } from '../sessionManager.js'
+import { sessionAgentName } from '../agentIdentity.js'
 import {
   buildSessionEnv,
   buildConfigDir,
   getAssistantRuntimeConfig,
   buildAvailableSkillSnapshot,
+  buildScodeMcpSettings,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
 import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
-import { NexusSpawnHandle, type AcpChildProcessLike } from './nexusSpawnHandle.js'
-import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
+import { NexusAcpTransport } from './nexusAcpTransport.js'
+
 import { getWorkspaceAgentsMdPath } from '../sharedAgentMemory.js'
+import { collectSkillAssets } from './skillAssets.js'
+import { createPodWorkspaceAccess } from './podWorkspace.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -55,6 +61,10 @@ export type K8sBackendDefaults = {
    * (comma-separated). Empty → none.
    */
   imagePullSecrets?: string[]
+  /** Opt in to a retained per-session workspace PVC using this StorageClass. */
+  workspaceStorageClass?: string
+  /** Requested capacity for new workspace claims. Existing claims keep their capacity. */
+  workspaceStorageSize?: string
   /** Path to the kubeconfig that reaches the k3s API server. `MOSS_K8S_KUBECONFIG`. */
   kubeconfig?: string
   /** CPU limit for the pod (k8s quantity). Defaults to `2`. */
@@ -76,7 +86,66 @@ type PodVolumeMount = {
   readOnly?: boolean
 }
 
+/** Keep the same workspace claim across runtime attempts without sharing it between sessions. */
+export function buildWorkspaceStorage(sessionId: string, namespace: string, storageClass?: string, storageSize = '10Gi') {
+  if (!storageClass) return { volume: { name: 'workspace', emptyDir: {} } as PodVolume, claim: undefined }
+  const claimName = `scode-workspace-${createHash('sha256').update(sessionId).digest('hex').slice(0, 40)}`
+  return {
+    volume: { name: 'workspace', persistentVolumeClaim: { claimName } } as PodVolume,
+    claim: {
+      apiVersion: 'v1',
+      kind: 'PersistentVolumeClaim',
+      metadata: {
+        name: claimName,
+        namespace,
+        // No pod ownerReference: runtime cleanup must preserve user files.
+        labels: { app: MOSS_POD_APP_LABEL, [MOSS_POD_SESSION_LABEL]: sessionId },
+      },
+      spec: {
+        accessModes: ['ReadWriteOnce'],
+        storageClassName: storageClass,
+        resources: { requests: { storage: storageSize } },
+      },
+    },
+  }
+}
+
+/** Reuse an owned claim; never resize or replace user storage while starting a runtime. */
+async function ensureWorkspaceClaim(kubectlBase: string[], claim: NonNullable<ReturnType<typeof buildWorkspaceStorage>['claim']>): Promise<void> {
+  const { stdout } = await execFileAsync('kubectl', [...kubectlBase, 'get', 'pvc', claim.metadata.name, '--ignore-not-found', '-o', 'json'], { windowsHide: true })
+  if (stdout.trim()) {
+    const existing = JSON.parse(stdout)
+    if (existing.metadata?.labels?.[MOSS_POD_SESSION_LABEL] !== claim.metadata.labels[MOSS_POD_SESSION_LABEL]) {
+      throw new Error(`Workspace claim belongs to a different session: ${claim.metadata.name}`)
+    }
+    return
+  }
+  await kubectlApply(kubectlBase, claim)
+}
+
 /** Drop mounts that would collide on the same in-pod path (first wins). */
+/**
+ * The agent this spawn belongs to, as nexus will name it.
+ *
+ * Not the chosen template: that is shared, and `/agents/{name}` is zone-wide
+ * while a zone is a tenant, so naming the runtime after the template put every
+ * user in an organization who picked it into one agent home. The runtime's
+ * agent is this user and that template together.
+ *
+ * `RuntimeService` assigns a session its agent at create, and again at launch
+ * for sessions that predate that. A spawn arriving without one, or without the
+ * user it belongs to, means the assignment was bypassed — worth saying rather
+ * than inventing a name for.
+ */
+function requireAgentId(options: BackendSpawnOptions): string {
+  if (!options.assistantName || !options.userId) {
+    throw new Error(
+      `k8s spawn for session ${options.sessionId} has no agent; RuntimeService assigns one to every session`,
+    )
+  }
+  return sessionAgentName(options.userId, options.assistantName)
+}
+
 function dedupeMounts(mounts: PodVolumeMount[]): PodVolumeMount[] {
   const seen = new Set<string>()
   const out: PodVolumeMount[] = []
@@ -99,10 +168,11 @@ async function readScodeSessionId(filePath: string): Promise<string | undefined>
 }
 
 /** Deliver the workspace instructions across the control-plane/pod filesystem boundary. */
-export async function buildWorkspaceInstructionsSecret(workspace: string, isRequired = false): Promise<{
+export async function buildWorkspaceInstructionsSecret(workspace: string, assistantName?: string): Promise<{
   data: Record<string, string>
   mounts: Array<{ key: string; mountPath: string }>
 }> {
+  const isRequired = Boolean(assistantName && !isDefaultAgentName(assistantName))
   const filePath = getWorkspaceAgentsMdPath(workspace)
   try {
     const body = await readFile(filePath, 'utf8')
@@ -130,22 +200,24 @@ export async function buildWorkspaceInstructionsSecret(workspace: string, isRequ
  *    per-session {@link https://kubernetes.io/docs/concepts/configuration/secret Secret}
  *    `scode-cfg-<sid>` and mounted read-only at the exact in-container paths
  *    scode reads (`SUDO_CODE_CONFIG_HOME` and the workspace skills dir).
- *  - HOME / `CLAUDE_CONFIG_DIR` and the session workspace/cwd are pod-local
- *    `emptyDir`s (scode writes there; moss reads results back over the ACP
- *    stream, and the transcript is written moss-side by {@link createAcpBridgeHandle},
- *    so a pod-local workspace is correct).
+ *  - HOME / `CLAUDE_CONFIG_DIR` are pod-local `emptyDir`s. The session workspace
+ *    uses a retained per-session PVC when workspaceStorageClass is configured;
+ *    otherwise it is also temporary. Workspace HTTP access uses kubectl exec.
  *  - scode itself ships INSIDE the runtime image, so pods need nothing staged on
  *    the node — a standard k3s + gvisor node is enough.
  *
- * The ACP bridge is reused UNCHANGED: `spawn('kubectl', ['exec','-i', …])`'s
- * stdio ARE the pod's exec stdio, interchangeable with a docker `exec` child.
- * The container command is `sleep infinity` so moss can `kubectl exec` scode per
- * turn. Teardown deletes the pod + Secret; {@link gcOrphanedPods} reaps leaks.
+ * Nexus owns the kubectl exec subprocess and exposes its session mailbox.
+ * The pod sleeps until that adapter starts scode. Teardown deletes the pod
+ * and Secret; gcOrphanedPods reaps abandoned resources.
  */
 export class K8sBackend implements SessionBackend {
   constructor(private readonly defaults: K8sBackendDefaults = {}) {}
 
   async spawn(options: BackendSpawnOptions): Promise<BackendHandle> {
+    if (resolveNexusConfigFromEnv().mode !== 'external') {
+      throw new Error('Kubernetes sessions require an external Nexus daemon with acp-mailbox/1')
+    }
+    const agentId = requireAgentId(options)
     const runtime = options.runtime
     const image = runtime?.k8sImage || this.defaults.image
     if (!image) {
@@ -203,16 +275,18 @@ export class K8sBackend implements SessionBackend {
       process.stderr.write(`[K8sBackend] Workspace skills sync warning: ${err}\n`)
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)
+    const skillAssets = await collectSkillAssets(workspaceSkillLinks)
 
     const env = buildSessionEnv(options, {
       ...(options.sessionToken ? { SESSION_TOKEN: options.sessionToken } : {}),
     })
 
-    // Resolve model (identical priority to docker/scode backend).
-    let model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
-    if (model && !model.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(model)) {
-      model = `proxy/${model}`
-    }
+    // Resolve model (identical priority to docker/scode backend). The id goes to
+    // scode verbatim: `--auth proxy` already selects the proxy auth mode, and
+    // scode's passthrough forwards the alias to sudorouter as the model name, so
+    // a `proxy/` prefix arrives there as part of the name and 400s with
+    // "No available channel for model proxy/...".
+    const model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
 
     // ---- Build the per-session Secret payload (delivered into the pod) ----
     // Keys map 1:1 to files mounted read-only at the paths scode reads. This is
@@ -220,28 +294,26 @@ export class K8sBackend implements SessionBackend {
     // (remote) pod — hence a Secret, not a ConfigMap or hostPath.
     // RuntimeService writes AGENTS.md on the control plane. The pod's emptyDir
     // does not contain that file until we explicitly deliver it, just like skills.
-    const instructions = await buildWorkspaceInstructionsSecret(safeCwd, Boolean(options.assistantName))
+    const instructions = await buildWorkspaceInstructionsSecret(safeCwd, options.assistantName)
     const secretData: Record<string, string> = { ...instructions.data }
     const secretMounts = [...instructions.mounts]
 
-    // sudocode.json — preloaded auth + models, exactly like docker backend.
+    // sudocode.json — the proxy connection only. A static model list here would
+    // pin every model to one wire format and freeze a catalog that sudorouter
+    // changes underneath us; with only the proxy connection present, scode
+    // resolves unknown aliases through passthrough and takes each model's wire
+    // format from the capabilities it reads off sudorouter `/v1/models`.
     try {
       const baseUrl = env.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1'
       const apiKey = env.ANTHROPIC_API_KEY || ''
-      const allModels = ensureOpenAIModelConfig(
-        await buildAllModelsConfig(baseUrl),
-        env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview',
-        env.MOSS_MODEL_PROVIDER_PROTOCOL === 'openai-responses' || env.MOSS_MODEL_PROVIDER_PROTOCOL === 'anthropic-messages'
-          ? env.MOSS_MODEL_PROVIDER_PROTOCOL
-          : 'openai-completions',
-      )
       const scodeConfig = {
         auth_modes: { proxy: { 'moss-proxy': { baseUrl, apiKey } } },
-        models: allModels,
       }
       secretData['sudocode.json'] = JSON.stringify(scodeConfig, null, 2)
       secretMounts.push({ key: 'sudocode.json', mountPath: posixPath.join(scodeHomeDir, 'sudocode.json') })
-      process.stderr.write(`[K8sBackend] Packed ${Object.keys(allModels).length} models into sudocode.json secret\n`)
+      process.stderr.write(
+        `[K8sBackend] Wrote sudocode.json secret (proxy connection only; models resolved dynamically via sudorouter)\n`,
+      )
     } catch (e) {
       process.stderr.write(`[K8sBackend] Failed to build sudocode.json: ${e}\n`)
     }
@@ -254,9 +326,8 @@ export class K8sBackend implements SessionBackend {
 
     // Skills: pack each enabled skill's SKILL.md into the Secret and mount it at
     // the workspace skills dir scode discovers (`<cwd>/.nexus/sudocode/skills`).
-    // NOTE (PoC): a flat Secret can only carry the top-level SKILL.md manifest,
-    // not a skill's nested asset tree (scripts/, references/); those need the
-    // image bake / a PVC in production.
+    // Scripts and references are copied into the writable workspace after the
+    // pod becomes ready, keeping binary/large payloads out of the Secret.
     const workspaceSkillsDir = posixPath.join(safeCwd, '.nexus', 'sudocode', 'skills')
     let skillIdx = 0
     for (const link of workspaceSkillLinks) {
@@ -308,12 +379,13 @@ export class K8sBackend implements SessionBackend {
     const kubectlBase = buildKubectlBaseArgs(namespace, kubeconfig)
 
     // ---- Volumes / mounts (cross-node correct) ----
-    // emptyDir: pod-local writable HOME / workspace / scode config dir.
+    // HOME and scode config remain ephemeral; an opted-in workspace survives pod cleanup.
     // secret:   read-only config + skill files delivered from moss.
     // (scode itself ships in the image — no node-local hostPath.)
+    const workspaceStorage = buildWorkspaceStorage(options.sessionId, namespace, this.defaults.workspaceStorageClass, this.defaults.workspaceStorageSize)
     const volumes: PodVolume[] = [
       { name: 'home', emptyDir: {} },
-      { name: 'workspace', emptyDir: {} },
+      workspaceStorage.volume,
       { name: 'scode-cfg', emptyDir: {} },
       { name: 'scode-secret', secret: { secretName } },
     ]
@@ -356,7 +428,7 @@ export class K8sBackend implements SessionBackend {
     process.stderr.write(`\n[K8sBackend] Creating gvisor pod for session ${options.sessionId}:\n`)
     process.stderr.write(`  pod: ${podName}  secret: ${secretName}  ns: ${namespace}  runtimeClass: ${runtimeClassName}\n`)
     process.stderr.write(`  image: ${image}  (scode baked in)\n`)
-    process.stderr.write(`  cwd (emptyDir): ${safeCwd}\n`)
+    process.stderr.write(`  cwd (${workspaceStorage.claim ? 'persistentVolumeClaim' : 'emptyDir'}): ${safeCwd}\n`)
     process.stderr.write(`  HOME (emptyDir): ${configDir}\n`)
     process.stderr.write(`  SUDO_CODE_CONFIG_HOME (emptyDir + secret): ${scodeHomeDir}\n`)
     process.stderr.write(`  secret files: ${secretMounts.map(m => m.mountPath).join(', ')}\n`)
@@ -365,12 +437,17 @@ export class K8sBackend implements SessionBackend {
     // Namespace first — on a customer cluster the target ns may not exist yet
     // (our k3s installer pre-creates it, so this is a no-op there).
     await ensureNamespace(kubeconfig, namespace)
+    if (workspaceStorage.claim) await ensureWorkspaceClaim(kubectlBase, workspaceStorage.claim)
     // Secret next — the pod mounts it, so it must exist before the pod starts.
     // (Secrets are mutable, so a plain apply is correct there; the pod is not.)
     await kubectlApply(kubectlBase, secretManifest)
     await applyPodManifest(kubectlBase, podManifest, podName)
     try {
       await waitPodRunning(kubectlBase, podName, podReadyTimeoutSec)
+      const workspace = createPodWorkspaceAccess({ kubectlBase, podName, cwd: safeCwd })
+      for (const asset of skillAssets) {
+        await workspace.writeFile(asset.path, asset.content, asset.mode)
+      }
     } catch (err) {
       // Pod never came up — reap both so we don't leak the Secret (auth token).
       await deletePod(kubectlBase, podName).catch(() => {})
@@ -380,36 +457,20 @@ export class K8sBackend implements SessionBackend {
 
     // Bridge ACP via `kubectl exec -i`. The local kubectl process's stdio IS
     // the pod's exec stdio — feed it straight into acpBridge, same as docker.
-    const execArgs = [
-      ...kubectlBase,
-      'exec',
-      '-i',
-      podName,
-      '--',
-      'scode',
-      'acp',
-      '--output-format', 'json',
-      '--permission-mode', 'danger-full-access',
-      '--auth', 'proxy',
-      '--model', model,
-    ]
+    const execArgs = buildK8sExecArgs(kubectlBase, podName, model, options.dangerouslySkipPermissions === true)
 
-    // With MOSS_SPAWN_VIA_NEXUS on, nexus runs that same kubectl and owns the
-    // process record; otherwise this process does, exactly as before.
-    const viaNexus = await maybeStartViaNexus({
+    // Nexus owns this kubectl process and exposes its ACP session mailbox.
+    const transport = await startViaNexus({
       execArgs,
       env,
       cwd: safeCwd,
-      agentId: options.assistantName || 'scode-standard',
+      agentId,
       model,
       ownerId: options.userId,
-    })
-
-    const child: AcpChildProcessLike = viaNexus ?? spawn('kubectl', execArgs, {
-      cwd: safeCwd,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
+    }).catch(async error => {
+      await deletePod(kubectlBase, podName).catch(() => {})
+      await deleteSecret(kubectlBase, secretName).catch(() => {})
+      throw error
     })
 
     const runtimeInfo: SessionRuntimeInfo = {
@@ -431,7 +492,7 @@ export class K8sBackend implements SessionBackend {
       : undefined
 
     const handle = createAcpBridgeHandle({
-      child,
+      transport,
       sessionId: options.sessionId,
       cwd: safeCwd,
       model,
@@ -453,7 +514,7 @@ export class K8sBackend implements SessionBackend {
     const cleanup = () => {
       if (cleanedUp) return
       cleanedUp = true
-      // Delete the pod (emptyDir workspace/config go with it) and the Secret.
+      // Delete the pod and Secret. A workspace PVC is intentionally retained.
       // Best-effort, detached. Mirrors docker `rm -f`.
       deletePod(kubectlBase, podName).catch(err => {
         process.stderr.write(`[K8sBackend] pod delete failed (${podName}): ${err}\n`)
@@ -463,7 +524,7 @@ export class K8sBackend implements SessionBackend {
       })
     }
 
-    child.once('close', () => cleanup())
+    handle.onExit(() => cleanup())
 
     const originalDestroy = handle.destroy.bind(handle)
     handle.destroy = async (force = false) => {
@@ -478,23 +539,6 @@ export class K8sBackend implements SessionBackend {
   }
 }
 
-/**
- * Nexus owns the agent process by default; `MOSS_SPAWN_VIA_NEXUS=0|false|off`
- * is the escape hatch back to spawning it here.
- *
- * Default-on so a deployment cannot quietly fall back to the direct launch and
- * end up with agents that exist nowhere outside this process. A deployment that
- * has no external nexus is still handled — {@link maybeStartViaNexus} returns
- * null for embedded mode and the local path runs unchanged.
- */
-function isSpawnViaNexusEnabled(): boolean {
-  const raw = process.env.MOSS_SPAWN_VIA_NEXUS
-  if (raw === undefined) return true
-  const value = raw.trim().toLowerCase()
-  return !(value === '0' || value === 'false' || value === 'off' || value === '')
-}
-
-/** A SpawnSpec env is a string map; ProcessEnv allows undefined values. */
 function toStringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(env)) {
@@ -503,34 +547,18 @@ function toStringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   return out
 }
 
-/**
- * Hand the launch to nexus rather than running it here.
- *
- * The pod and its Secret are still created by moss above — nexus executes a
- * subprocess and has no Kubernetes concept of its own. What moves is only the
- * final step: `kubectl exec` runs on the nexus host, so the agent gets a real
- * `/proc/{pid}` record, a mailbox and a kernel-owned identity, while scode
- * itself keeps running inside the gvisor pod.
- *
- * Returns null whenever the flag is off or nexus is not in external mode, so
- * the local-spawn path stays exactly what it was.
- */
-async function maybeStartViaNexus(input: {
+/** Start one managed session using its authenticated controller identity. */
+async function startViaNexus(input: {
   execArgs: string[]
   env: NodeJS.ProcessEnv
   cwd: string
   agentId: string
   model: string
   ownerId?: string
-}): Promise<NexusSpawnHandle | null> {
-  if (!isSpawnViaNexusEnabled()) return null
-
+}): Promise<NexusAcpTransport> {
   const config = resolveNexusConfigFromEnv()
   if (config.mode !== 'external') {
-    process.stderr.write(
-      '[K8sBackend] MOSS_SPAWN_VIA_NEXUS is set but nexus mode is embedded — spawning locally\n',
-    )
-    return null
+    throw new Error('Kubernetes sessions require an external Nexus daemon with acp-mailbox/1')
   }
 
   const asMoss = () =>
@@ -546,10 +574,10 @@ async function maybeStartViaNexus(input: {
   const identity = await mintSessionIdentity(config.endpoint, config.tls, input.ownerId)
   const starter = identity ? NexusVfsClient.withMtls(config.endpoint, identity.tls) : asMoss()
 
-  let sessionId: string
-  let osPid: number | null
+  const agent = new ManagedAgentClient(starter, config.authToken)
+  let session: Awaited<ReturnType<ManagedAgentClient['startSession']>>
   try {
-    ;({ sessionId, osPid } = await new ManagedAgentClient(starter, config.authToken).startSession({
+    session = await agent.startSession({
       agentId: input.agentId,
       model: input.model,
       ...ownerField(identity, input.ownerId),
@@ -559,23 +587,24 @@ async function maybeStartViaNexus(input: {
         env: toStringEnv(input.env),
         cwd: input.cwd,
       },
-    }))
+    })
   } catch (error) {
     starter.close()
     throw error
   }
-  // The credential's job ended with that call; the owner is in the session's
-  // process record now. The byte tunnel goes back to moss's own identity,
-  // which is what it has always used, so the credential can stay short-lived
-  // instead of having to outlive the longest session anyone might run.
-  if (identity) starter.close()
+  // The same authenticated actor owns control-plane creation and all session
+  // frames. Switching back to moss's principal would forge a different sender.
+  return new NexusAcpTransport(agent, session)
+}
 
-  process.stderr.write(
-    `[K8sBackend] nexus start_session ok (session=${sessionId}, os_pid=${osPid ?? 'n/a'}` +
-      `${identity ? `, owner proven by ${identity.subjectId}` : ''})\n`,
-  )
-  const agent = new ManagedAgentClient(identity ? asMoss() : starter, config.authToken)
-  return new NexusSpawnHandle(agent, sessionId, osPid)
+/** Use permission modes supported by the pinned scode runtime for cloud sessions. */
+export function buildK8sExecArgs(kubectlBase: string[], podName: string, model: string, isDangerouslySkipPermissions: boolean): string[] {
+  return [
+    ...kubectlBase, 'exec', '-i', podName, '--', 'scode', 'acp',
+    '--output-format', 'json',
+    '--permission-mode', isDangerouslySkipPermissions ? 'danger-full-access' : 'workspace-write',
+    '--auth', 'proxy', '--model', model,
+  ]
 }
 
 export function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] {
@@ -735,7 +764,7 @@ async function kubectlApply(kubectlBase: string[], manifest: Record<string, unkn
     child.on('error', reject)
     child.on('close', code => {
       if (code === 0) return resolve()
-      reject(new Error(`kubectl apply failed (code ${code}): ${stderr.trim()}`))
+      reject(formatKubectlApplyError(code, stderr))
     })
     child.stdin?.end(JSON.stringify(manifest))
   })
@@ -750,6 +779,19 @@ async function kubectlApply(kubectlBase: string[], manifest: Record<string, unkn
  * infrastructure, so the correct resolution is to replace it rather than to retry
  * an apply that can never succeed.
  */
+/** Preserve actionable API errors without exposing manifests echoed by kubectl. */
+export function formatKubectlApplyError(code: number | null, stderr: string): Error {
+  const reason = /Error from server \((\w+)\)/.exec(stderr)?.[1]
+  const allowedReasons = new Set([
+    'Forbidden', 'Unauthorized', 'NotFound', 'AlreadyExists', 'Invalid', 'BadRequest',
+    'Timeout', 'ServerTimeout', 'InternalError', 'ServiceUnavailable', 'Gone',
+  ])
+  const detail = isImmutablePodSpecError(new Error(stderr))
+    ? 'pod spec field is immutable'
+    : reason && allowedReasons.has(reason) ? 'Kubernetes API ' + reason : 'manifest rejected'
+  return new Error('kubectl apply failed (code ' + code + '): ' + detail)
+}
+
 function isImmutablePodSpecError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return /may not change fields other than|field is immutable/i.test(message)
@@ -886,11 +928,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function buildScodeSettings(options: BackendSpawnOptions): Record<string, unknown> {
-  const settings: Record<string, unknown> = {}
-  if (options.mcpSettings && Object.keys(options.mcpSettings.mcpServers).length > 0) {
-    Object.assign(settings, options.mcpSettings)
-  }
+export function buildScodeSettings(options: BackendSpawnOptions): Record<string, unknown> {
+  const settings: Record<string, unknown> = buildScodeMcpSettings(options.mcpSettings)
   if (options.enabledSkillNames?.includes('cabin-hardware-control')) {
     settings.sandbox = {
       ...(typeof settings.sandbox === 'object' && settings.sandbox !== null ? settings.sandbox : {}),

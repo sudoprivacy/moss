@@ -105,6 +105,9 @@ exit 99
       encoding: "utf8",
       env: {
         ...process.env,
+        // Git Bash otherwise copies directories for ln -s on Windows, so the
+        // rollback test would never exercise the production symlink switch.
+        ...(process.platform === "win32" ? { MSYS: "winsymlinks:nativestrict" } : {}),
         ACTION_LOG: actionLog,
         CONFIG_BACKUP: configBackup,
         CONFIG_PATH: configPath,
@@ -174,7 +177,7 @@ describe("packaged Server E2E smoke", () => {
         scenario,
       );
     }
-  });
+  }, process.platform === "win32" ? 60_000 : 5_000);
 
   it("detects rollback behavior removed from the test-local function copy", () => {
     const installer = readFileSync(resolve(root, "deploy/install.sh"), "utf8");
@@ -237,7 +240,7 @@ describe("packaged Server E2E smoke", () => {
         expectRollbackResult(result, scenario);
       }, mutation.name).toThrow();
     }
-  });
+  }, process.platform === "win32" ? 60_000 : 5_000);
 
   it("gates release asset upload on the packaged smoke test", () => {
     const workflow = readFileSync(

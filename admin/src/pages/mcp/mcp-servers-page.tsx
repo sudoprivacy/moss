@@ -577,7 +577,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
 
   // JSON 模式实时解析
   useEffect(() => {
-    if (configMode !== 'json') return
+    if (!isCreateDialogOpen || configMode !== 'json') return
     const timer = setTimeout(async () => {
       try {
         JSON.parse(jsonConfig)
@@ -590,7 +590,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
       }
     }, 500)
     return () => clearTimeout(timer)
-  }, [jsonConfig, configMode])
+  }, [jsonConfig, configMode, isCreateDialogOpen])
 
   function openCreateDialog() {
     setEditingServer(null)

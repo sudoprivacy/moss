@@ -61,7 +61,13 @@ function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
 function mapRuntime(row: SqlRow): SessionRuntimeInfo {
   const rawType = String(row.runtime_type)
   const type: SessionRuntimeInfo['type'] =
-    rawType === 'docker' ? 'docker' : rawType === 'k8s' ? 'k8s' : 'host'
+    rawType === 'docker'
+      ? 'docker'
+      : rawType === 'k8s'
+        ? 'k8s'
+        : rawType === 'cohost'
+          ? 'cohost'
+          : 'host'
   const mode =
     row.docker_mode === 'user'
       ? 'user'
@@ -125,7 +131,14 @@ function mapAttempt(row: SqlRow): AttemptRecord {
     attemptId: String(row.attempt_id),
     sessionId: String(row.session_id),
     generation: Number(row.generation),
-    backendType: String(row.backend_type) === 'docker' ? 'docker' : 'host',
+    backendType:
+      String(row.backend_type) === 'docker'
+        ? 'docker'
+        : String(row.backend_type) === 'k8s'
+          ? 'k8s'
+          : String(row.backend_type) === 'cohost'
+            ? 'cohost'
+            : 'host',
     runtimeState: String(row.runtime_state) as AttemptRuntimeState,
     serverInstanceId:
       typeof row.server_instance_id === 'string' ? row.server_instance_id : null,
@@ -3649,6 +3662,7 @@ export class DirectConnectStore {
     if (updates.finished_at !== undefined) { sets.push('finished_at = ?'); params.push(updates.finished_at) }
     if (sets.length === 0) return
     let where = 'id = ?'
+    params.push(id)
     if (updates.status !== undefined && opts?.expectedStatuses?.length) {
       const placeholders = opts.expectedStatuses.map(() => '?').join(', ')
       where += ` AND status IN (${placeholders})`
@@ -3658,7 +3672,6 @@ export class DirectConnectStore {
         params.push(opts.ownerInstanceId)
       }
     }
-    params.push(id)
     await this.driver.run(
       `UPDATE wiki_build_jobs SET ${sets.join(', ')} WHERE ${where}`,
       params,

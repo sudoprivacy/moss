@@ -281,7 +281,8 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     defaultRuntime:
       process.env.MOSS_DEFAULT_RUNTIME === 'host' ||
       process.env.MOSS_DEFAULT_RUNTIME === 'docker' ||
-      process.env.MOSS_DEFAULT_RUNTIME === 'k8s'
+      process.env.MOSS_DEFAULT_RUNTIME === 'k8s' ||
+      process.env.MOSS_DEFAULT_RUNTIME === 'cohost'
         ? process.env.MOSS_DEFAULT_RUNTIME
         : raw.runtimeDefaults.type,
     engine: raw.runtimeDefaults.engine,
@@ -347,6 +348,8 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         ? process.env.MOSS_K8S_IMAGE_PULL_SECRETS.split(',').map(s => s.trim()).filter(Boolean)
         : raw.k8s.imagePullSecrets,
       cpuLimit: raw.k8s.cpuLimit,
+      workspaceStorageClass: process.env.MOSS_K8S_WORKSPACE_STORAGE_CLASS || raw.k8s.workspaceStorageClass,
+      workspaceStorageSize: process.env.MOSS_K8S_WORKSPACE_STORAGE_SIZE || raw.k8s.workspaceStorageSize,
       memoryLimit: raw.k8s.memoryLimit,
       podReadyTimeoutSec: readIntEnv('MOSS_K8S_POD_READY_TIMEOUT_SEC', raw.k8s.podReadyTimeoutSec)!,
       labels: raw.k8s.labels,

@@ -35,6 +35,13 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       res.end(JSON.stringify({ data: { skills: [{ id: 'client-skill', name: 'client-skill' }], next_cursor: null, has_more: false } }))
     } else { res.writeHead(404); res.end() }
   })
+  // Register cleanup before bundling: a failed build must not leave the HTTP
+  // listener alive and hang the entire Node test runner.
+  t.after(async () => {
+    hub.closeAllConnections()
+    if (hub.listening) await new Promise<void>(resolveClose => hub.close(() => resolveClose()))
+    await rm(root, { recursive: true, force: true })
+  })
   hub.listen(0, '127.0.0.1'); await once(hub, 'listening')
   const hubUrl = `http://127.0.0.1:${(hub.address() as { port: number }).port}`
   const configPath = join(root, 'server.json')
@@ -86,7 +93,7 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
     }
     const a = accounts.a!, b = accounts.b!
     const installSkill = (token: string, version = '') => ok('POST', '/api/v1/skills/install', token, { skillName: 'shared-skill', sourceUrl: `${hubUrl}/skill.zip`, version, skillMeta: { id: 'skill-one', name: 'shared-skill' } })
-    const installAgent = (token: string) => ok('POST', '/api/v1/agents/install', token, { assistantName: 'shared-agent', sourceUrl: `${hubUrl}/agent.zip`, assistantMeta: { id: 'agent-one', name: 'shared-agent', skills: ['skill-one'] }, selectedSkillIds: ['skill-one'] })
+    const installAgent = (token: string) => ok('POST', '/api/v1/agent-templates/install', token, { assistantName: 'shared-agent', sourceUrl: `${hubUrl}/agent.zip`, assistantMeta: { id: 'agent-one', name: 'shared-agent', skills: ['skill-one'] }, selectedSkillIds: ['skill-one'] })
     await t.test('a rejected package never creates an installation', async () => {
       const failed = await request('POST', '/api/v1/skills/install', b.admin, { skillName: 'broken', sourceUrl: `${hubUrl}/skill.zip`, checksum: 'incorrect', skillMeta: { id: 'broken', name: 'broken' } })
       assert.ok(failed.status >= 400)
@@ -100,7 +107,7 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
         assert.deepEqual(await ok('GET', `/api/v1/${type}/installed`, b.admin), [])
         assert.deepEqual(await ok('GET', `/api/v1/${type}/installed`, b.super), [])
       }
-      assert.equal((await request('GET', '/api/v1/agents/installed/agent-one/download', b.user)).status, 404)
+      assert.equal((await request('GET', '/api/v1/agent-templates/installed/agent-one/download', b.user)).status, 404)
       // Rejected before launching any model or runner.
       assert.equal((await request('POST', '/api/v1/sessions', b.user, { assistant_name: 'agent-one' })).status, 404)
     })
@@ -112,11 +119,26 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       assert.equal(aSkills[0].id, bSkills[0].id)
       assert.notEqual(aSkills[0].meta.installation_id, bSkills[0].meta.installation_id)
     })
+    await t.test('template URL aliases keep organization permissions and archive identity', async () => {
+      for (const segment of ['agents', 'agent-templates']) {
+        assert.equal((await request('GET', `/api/v1/${segment}/installed`)).status, 401)
+        const installed = await ok('GET', `/api/v1/${segment}/installed`, a.admin)
+        assert.equal(installed[0].id, 'agent-one')
+        assert.equal((await request('PATCH', `/api/v1/${segment}/meta`, a.user, { assistantName: 'agent-one', updates: { rules: 'denied' } })).status, 403)
+        assert.equal((await request('GET', `/api/v1/${segment}/tenant/missing/download`, b.user)).status, 404)
+      }
+      const oldArchive = await ok('GET', '/api/v1/agents/installed/agent-one/download', a.admin)
+      const newArchive = await ok('GET', '/api/v1/agent-templates/installed/agent-one/download', a.admin)
+      const [oldZip, newZip] = await Promise.all([JSZip.loadAsync(oldArchive), JSZip.loadAsync(newArchive)])
+      assert.equal(await oldZip.file('system.md')!.async('string'), await newZip.file('system.md')!.async('string'))
+      assert.equal((await request('GET', '/api/v1/agents/private-archives', a.user)).status, 200)
+      assert.equal((await request('GET', '/api/v1/agent-templates/private-archives', a.user)).status, 404)
+    })
     await t.test('settings, version and uninstall are organization-local', async () => {
-      await ok('PATCH', '/api/v1/agents/meta', a.admin, { assistantName: 'agent-one', updates: { rules: 'A prompt only' } })
-      assert.equal((await ok('GET', '/api/v1/agents/installed/agent-one/rules', b.admin)).rules, 'Original shared prompt')
-      assert.equal((await ok('GET', '/api/v1/agents/installed/agent-one/rules', a.admin)).rules, 'A prompt only')
-      const zip = await JSZip.loadAsync(await ok('GET', '/api/v1/agents/installed/agent-one/download', a.admin))
+      await ok('PATCH', '/api/v1/agent-templates/meta', a.admin, { assistantName: 'agent-one', updates: { rules: 'A prompt only' } })
+      assert.equal((await ok('GET', '/api/v1/agent-templates/installed/agent-one/rules', b.admin)).rules, 'Original shared prompt')
+      assert.equal((await ok('GET', '/api/v1/agent-templates/installed/agent-one/rules', a.admin)).rules, 'A prompt only')
+      const zip = await JSZip.loadAsync(await ok('GET', '/api/v1/agent-templates/installed/agent-one/download', a.admin))
       assert.equal(await zip.file('system.md')!.async('string'), 'A prompt only')
       await installSkill(a.admin, '2')
       assert.notEqual((await ok('GET', '/api/v1/skills/installed', b.admin))[0].version, '2')
@@ -125,10 +147,10 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       const skillPackage = await JSZip.loadAsync(await ok('GET', '/api/v1/skills/installed/skill-one/download', a.admin))
       assert.equal(JSON.parse(await skillPackage.file('_moss_meta.json')!.async('string')).enabled, false)
       assert.equal((await request('POST', '/api/v1/skills/uninstall', a.admin, { skillName: 'skill-one' })).status, 409)
-      await ok('POST', '/api/v1/agents/uninstall', a.admin, { assistantName: 'agent-one' })
+      await ok('POST', '/api/v1/agent-templates/uninstall', a.admin, { assistantName: 'agent-one' })
       await ok('POST', '/api/v1/skills/uninstall', a.admin, { skillName: 'skill-one' })
-      assert.deepEqual(await ok('GET', '/api/v1/agents/installed', a.admin), [])
-      assert.equal((await ok('GET', '/api/v1/agents/installed', b.admin)).length, 1)
+      assert.deepEqual(await ok('GET', '/api/v1/agent-templates/installed', a.admin), [])
+      assert.equal((await ok('GET', '/api/v1/agent-templates/installed', b.admin)).length, 1)
       assert.ok(Buffer.isBuffer(await ok('GET', '/api/v1/skills/installed/skill-one/download', b.user)))
     })
     await t.test('catalog browsing and installation are available to ordinary users and isolated per user', async () => {
@@ -153,6 +175,13 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
         assert.match(resource.runtimeRef, /^moss-prepared:/)
         const bytes = await ok('GET', resource.downloadRef, a.user)
         assert.ok(Buffer.isBuffer(bytes))
+        if (resource.kind === 'agents') {
+          assert.match(resource.downloadRef, /\/agent-templates\//)
+          assert.match(resource.runtimeRef, /:agents:/)
+          const legacyRef = resource.downloadRef.replace('/agent-templates/', '/agents/')
+          assert.deepEqual(await ok('GET', legacyRef, a.user), bytes)
+          assert.equal((await request('GET', legacyRef, b.user)).status, 404)
+        }
         assert.equal((await request('GET', resource.downloadRef, peer)).status, 404)
         assert.equal((await request('GET', resource.downloadRef, b.user)).status, 404)
       }
@@ -181,11 +210,11 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       }
     })
     await t.test('private/custom resources cannot be read or managed from another organization', async () => {
-      const agent = await ok('POST', '/api/v1/agents/tenant/create', a.admin, { name: 'private-agent', display_name: 'Private A', rules: 'A private prompt', visible_to: null })
+      const agent = await ok('POST', '/api/v1/agent-templates/tenant/create', a.admin, { name: 'private-agent', display_name: 'Private A', rules: 'A private prompt', visible_to: null })
       const skill = await ok('POST', '/api/v1/skills/tenant/upload', a.admin, { entries: [{ path: 'SKILL.md', contentBase64: Buffer.from('---\nname: private-skill\ndescription: private\n---\nprivate').toString('base64') }], visible_to: null })
       const custom = await ok('POST', '/api/v1/skills/custom', a.user, { file: skillZip.toString('base64'), name: 'custom-skill', displayName: 'Custom A' })
       assert.match((await ok('GET', `/api/v1/skills/tenant/${skill.id}/content`, a.user)).content, /private/)
-      assert.equal((await ok('GET', `/api/v1/agents/tenant/${agent.data.id}/rules`, a.user)).rules, 'A private prompt')
+      assert.equal((await ok('GET', `/api/v1/agent-templates/tenant/${agent.data.id}/rules`, a.user)).rules, 'A private prompt')
       for (const [type, id] of [['agents', agent.data.id], ['skills', skill.id]]) {
         const own = await ok('GET', `/api/v1/${type}/tenant?status=approved`, a.user)
         assert.ok(own.some((row: any) => row.id === id), 'The tenant catalog includes accessible resources before a desktop download')
@@ -203,9 +232,9 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
         }
         assert.equal((await request('GET', `/api/v1/skills/installed/${custom.id}/download`, token)).status, 404)
       }
-      assert.equal((await request('GET', `/api/v1/agents/tenant/${agent.data.id}/rules`, b.admin)).status, 404)
-      assert.equal((await request('POST', `/api/v1/admin/agents/tenant/${agent.data.id}/approve`, b.admin, { approved: false })).status, 404)
-      assert.equal((await request('PATCH', '/api/v1/agents/meta', b.admin, { assistantName: 'agent-one', updates: { enabledSkills: [skill.id] } })).status, 404)
+      assert.equal((await request('GET', `/api/v1/agent-templates/tenant/${agent.data.id}/rules`, b.admin)).status, 404)
+      assert.equal((await request('POST', `/api/v1/admin/agent-templates/tenant/${agent.data.id}/approve`, b.admin, { approved: false })).status, 404)
+      assert.equal((await request('PATCH', '/api/v1/agent-templates/meta', b.admin, { assistantName: 'agent-one', updates: { enabledSkills: [skill.id] } })).status, 404)
       assert.ok(Buffer.isBuffer(await ok('GET', `/api/v1/skills/installed/${custom.id}/download`, a.user)))
       const beforeTenantInstall = (await ok('GET', '/api/v1/skills/installed', a.user)).length
       await ok('POST', '/api/v1/client/catalog/install', a.user, { kind: 'skills', id: skill.id, source: 'tenant' })
@@ -215,12 +244,10 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       await ok('POST', `/api/v1/admin/skills/tenant/${publication.id}/approve`, a.admin, { approved: true })
       assert.ok(Buffer.isBuffer(await ok('GET', `/api/v1/skills/tenant/${publication.id}/download`, a.admin)))
       // A same-name private object in B cannot overwrite A's package.
-      await ok('POST', '/api/v1/agents/tenant/create', b.admin, { name: 'private-agent', display_name: 'Private B', rules: 'B private prompt' })
-      assert.equal((await ok('GET', `/api/v1/agents/tenant/${agent.data.id}/rules`, a.admin)).rules, 'A private prompt')
+      await ok('POST', '/api/v1/agent-templates/tenant/create', b.admin, { name: 'private-agent', display_name: 'Private B', rules: 'B private prompt' })
+      assert.equal((await ok('GET', `/api/v1/agent-templates/tenant/${agent.data.id}/rules`, a.admin)).rules, 'A private prompt')
     })
   } finally {
     if (child.exitCode === null) { child.kill(); await once(child, 'exit') }
-    await new Promise<void>(resolveClose => hub.close(() => resolveClose()))
-    await rm(root, { recursive: true, force: true })
   }
 })

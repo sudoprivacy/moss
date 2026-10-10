@@ -25,25 +25,25 @@ async function createPendingTenantAssistant(
   ruleFile: string,
   rules = 'initial rules',
 ): Promise<{ id: string; assistantDir: string }> {
-  const create = await fetch(`${fixture.baseUrl}/api/v1/agents/create`, {
+  const create = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/create`, {
     method: 'POST', headers: { ...authHeaders(fixture), 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, displayName: name, rules }),
   })
   expect(create.status).toBe(200)
-  const installed = await (await fetch(`${fixture.baseUrl}/api/v1/agents/installed`, { headers: authHeaders(fixture) })).json() as Array<{ id: string; name: string; source: string }>
+  const installed = await (await fetch(`${fixture.baseUrl}/api/v1/agent-templates/installed`, { headers: authHeaders(fixture) })).json() as Array<{ id: string; name: string; source: string }>
   const custom = installed.find(agent => agent.name === name)!
   const metaPath = join(custom.source, '_moss_meta.json')
   const meta = JSON.parse(await readFile(metaPath, 'utf8'))
   await writeFile(metaPath, JSON.stringify({ ...meta, ruleFile }), 'utf8')
   await writeFile(join(custom.source, 'system.md'), rules, 'utf8')
-  const response = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/publish`, {
+  const response = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/publish`, {
     method: 'POST',
     headers: { ...authHeaders(fixture), 'Content-Type': 'application/json' },
     body: JSON.stringify({ assistantId: custom.id }),
   })
   expect(response.status).toBe(200)
   const result = await response.json() as { id: string }
-  const rows = await (await fetch(`${fixture.baseUrl}/api/v1/agents/tenant`, { headers: authHeaders(fixture) })).json() as Array<{ id: string; file_path: string }>
+  const rows = await (await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant`, { headers: authHeaders(fixture) })).json() as Array<{ id: string; file_path: string }>
   const assistantDir = rows.find(row => row.id === result.id)!.file_path
   return { id: result.id, assistantDir }
 }
@@ -160,7 +160,7 @@ afterEach(async () => {
 describe('tenant assistant routes fixture', () => {
   it('fixture smoke', async () => {
     const fixture = await startFixture()
-    const response = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant`, {
+    const response = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant`, {
       headers: authHeaders(fixture),
     })
 
@@ -174,12 +174,12 @@ describe('tenant assistant routes fixture', () => {
     const outsidePath = join(assistantDir, '..', 'outside.md')
     await writeFile(outsidePath, 'outside content', 'utf8')
 
-    const getResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${id}/rules`, {
+    const getResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${id}/rules`, {
       headers: authHeaders(fixture),
     })
     expect(getResponse.status, fixture.stderrOutput.join('')).toBe(400)
 
-    const patchResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${id}`, {
+    const patchResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${id}`, {
       method: 'PATCH',
       headers: authHeaders(fixture),
       body: (() => {
@@ -203,7 +203,7 @@ describe('tenant assistant routes fixture', () => {
       expect(uploaded.status).toBe(200)
       skillIds.push((await uploaded.json() as { id: string }).id)
     }
-    const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/create`, {
+    const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/create`, {
       method: 'POST',
       headers: { ...authHeaders(fixture), 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -221,7 +221,7 @@ describe('tenant assistant routes fixture', () => {
     const created = await createResponse.json() as { data: { id: string; avatar: string } }
     expect(created.data.avatar).toBe('https://example.test/avatar.png')
 
-    const patchResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${created.data.id}`, {
+    const patchResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${created.data.id}`, {
       method: 'PATCH',
       headers: { ...authHeaders(fixture), 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -235,7 +235,7 @@ describe('tenant assistant routes fixture', () => {
     })
     expect(patchResponse.status, fixture.stderrOutput.join('')).toBe(200)
 
-    const listResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant`, {
+    const listResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant`, {
       headers: authHeaders(fixture),
     })
     const assistants = await listResponse.json() as Array<{ id: string; avatar: string; display_name: string; enabled: number }>
@@ -253,7 +253,7 @@ describe('tenant assistant routes fixture', () => {
     createForm.set('display_name', 'Null Object Agent')
     createForm.set('visible_to', 'null')
     createForm.set('workflow', 'null')
-    const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/create`, {
+    const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/create`, {
       method: 'POST',
       headers: authHeaders(fixture),
       body: createForm,
@@ -264,7 +264,7 @@ describe('tenant assistant routes fixture', () => {
     const patchForm = new FormData()
     patchForm.set('visible_to', 'null')
     patchForm.set('workflow', 'null')
-    const patchResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${created.data.id}`, {
+    const patchResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${created.data.id}`, {
       method: 'PATCH',
       headers: authHeaders(fixture),
       body: patchForm,
@@ -283,7 +283,7 @@ describe('tenant assistant routes fixture', () => {
       Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64'),
     ], 'avatar.png', { type: 'image/png' }))
 
-    const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/create`, {
+    const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/create`, {
       method: 'POST',
       headers: authHeaders(fixture),
       body: form,
@@ -296,7 +296,7 @@ describe('tenant assistant routes fixture', () => {
     expect(created.data.categories).toEqual(['分类'])
     expect(created.data.avatar).toStartWith('https://api.example.test/uploads/tenant-assistant-avatars/')
 
-    const listResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant`, {
+    const listResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant`, {
       headers: authHeaders(fixture),
     })
     const assistants = await listResponse.json() as Array<{ id: string; avatar: string }>
@@ -311,7 +311,7 @@ describe('tenant assistant routes fixture', () => {
     createForm.set('avatar', new File([
       Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64'),
     ], 'avatar.png', { type: 'image/png' }))
-    const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/create`, {
+    const createResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/create`, {
       method: 'POST',
       headers: authHeaders(fixture),
       body: createForm,
@@ -321,14 +321,14 @@ describe('tenant assistant routes fixture', () => {
 
     const removeForm = new FormData()
     removeForm.set('remove_avatar', 'true')
-    const removeResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${created.data.id}`, {
+    const removeResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${created.data.id}`, {
       method: 'PATCH',
       headers: authHeaders(fixture),
       body: removeForm,
     })
     expect(removeResponse.status, fixture.stderrOutput.join('')).toBe(200)
 
-    const listResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant`, {
+    const listResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant`, {
       headers: authHeaders(fixture),
     })
     const assistants = await listResponse.json() as Array<{ id: string; avatar: string | null }>
@@ -343,7 +343,7 @@ describe('tenant assistant routes fixture', () => {
     form.set('avatar', new File([
       Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64'),
     ], 'avatar.png', { type: 'image/png' }))
-    const response = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${id}`, {
+    const response = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${id}`, {
       method: 'PATCH',
       headers: authHeaders(fixture),
       body: form,
@@ -361,7 +361,7 @@ describe('tenant assistant routes fixture', () => {
     form.set('avatar', new File([
       Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64'),
     ], 'avatar.png', { type: 'image/png' }))
-    const response = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${id}`, {
+    const response = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${id}`, {
       method: 'PATCH',
       headers: authHeaders(fixture),
       body: form,
@@ -369,7 +369,7 @@ describe('tenant assistant routes fixture', () => {
     expect(response.status).toBe(200)
 
     await chmod(metaPath, 0o644)
-    const listResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant`, {
+    const listResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant`, {
       headers: authHeaders(fixture),
     })
     const assistants = await listResponse.json() as Array<{ id: string; avatar: string }>
@@ -381,7 +381,7 @@ describe('tenant assistant routes fixture', () => {
 
   it('returns 415 for unsupported tenant request content types', async () => {
     const fixture = await startFixture()
-    const response = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/create`, {
+    const response = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/create`, {
       method: 'POST',
       headers: { ...authHeaders(fixture), 'Content-Type': 'text/plain' },
       body: 'not supported',
@@ -393,13 +393,13 @@ describe('tenant assistant routes fixture', () => {
     const fixture = await startFixture()
     const { id, assistantDir } = await createPendingTenantAssistant(fixture, 'safe-agent', 'system.md')
 
-    const getResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${id}/rules`, {
+    const getResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${id}/rules`, {
       headers: authHeaders(fixture),
     })
     expect(getResponse.status, fixture.stderrOutput.join('')).toBe(200)
     expect((await getResponse.json() as { rules: string }).rules).toBe('initial rules')
 
-    const patchResponse = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${id}`, {
+    const patchResponse = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${id}`, {
       method: 'PATCH',
       headers: authHeaders(fixture),
       body: (() => {
@@ -410,7 +410,7 @@ describe('tenant assistant routes fixture', () => {
     })
     expect(patchResponse.status, fixture.stderrOutput.join('')).toBe(200)
     expect(await readFile(join(assistantDir, 'system.md'), 'utf8')).toBe('initial rules')
-    const updated = await fetch(`${fixture.baseUrl}/api/v1/agents/tenant/${id}/rules`, { headers: authHeaders(fixture) })
+    const updated = await fetch(`${fixture.baseUrl}/api/v1/agent-templates/tenant/${id}/rules`, { headers: authHeaders(fixture) })
     expect((await updated.json() as { rules: string }).rules).toBe('updated rules')
   })
 })

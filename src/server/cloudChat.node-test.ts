@@ -3,11 +3,159 @@ import { test } from 'node:test'
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { writeAssistantOverrideAgentsMd } from './sharedAgentMemory.js'
+import { appendSharedAgentMemory, readSharedAgentMemory, writeAssistantOverrideAgentsMd } from './sharedAgentMemory.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
+import { RuntimeService } from './runtimeService.js'
+import { DatabaseSync } from 'node:sqlite'
+import { SqliteDriver } from './db/driver.js'
+import { createCatalogTestRepository } from './testing/compatibilityRepositories.js'
+import { withOrganizationResources } from './catalog/organizationResources.js'
+import { createUserAgent, resetUserAgentStoreForTests } from './userAgentStore.js'
+import { defaultAgentName, userCreatedAgentName } from './agentIdentity.js'
+import { getSessionConfigDir } from './runtimePaths.js'
+import { buildWorkspaceInstructionsSecret, buildScodeSettings as buildK8sSettings } from './backends/k8sBackend.js'
+import { buildScodeSettings as buildLocalSettings } from './backends/scodeBackend.js'
+import { buildScodeSettings as buildDockerSettings } from './backends/dockerBackend.js'
+import type { BackendSpawnOptions } from './sessionManager.js'
+import type { AttemptRecord, ServerConfig, SessionRecord } from './types.js'
+
+for (const [name, build] of [
+  ['local', (input: BackendSpawnOptions) => buildLocalSettings(input, '/bundled/plugins')],
+  ['docker', (input: BackendSpawnOptions) => buildDockerSettings(input, '/bundled/plugins')],
+  ['kubernetes', buildK8sSettings],
+] as const) {
+  void test(`${name} runtime opts into MCP discovery only for authorized session servers`, () => {
+    const input = { sessionId: 'fixture', enabledSkillNames: ['cabin-hardware-control'] } as BackendSpawnOptions
+    for (const mcpSettings of [undefined, { mcpServers: {} }]) {
+      const settings = build({ ...input, mcpSettings })
+      assert.equal(settings.experimental, undefined)
+      assert.equal(settings.mcpServers, undefined)
+    }
+    const mcpSettings = { mcpServers: {
+      'authorized-remote': { type: 'http', url: 'https://qa.example/mcp', headers: { 'X-QA': 'fixture' } },
+      'authorized-local': { type: 'stdio', command: 'node', args: ['qa-mcp.js'] },
+    } }
+    const before = JSON.stringify(mcpSettings)
+    const settings = build({ ...input, mcpSettings })
+    assert.deepEqual(settings.experimental, { mcpConfigServers: true })
+    assert.deepEqual(settings.mcpServers, mcpSettings.mcpServers)
+    assert.deepEqual(settings.sandbox, { enabled: false, enabledPlatforms: ['macos'], allowUnsandboxedCommands: true })
+    if (name !== 'kubernetes') assert.deepEqual(settings.plugins, { bundledRoot: '/bundled/plugins' })
+    assert.equal(JSON.stringify(mcpSettings), before)
+  })
+}
+
+void test('personal cloud Agents retain memory and receive pod instructions without a catalog entry', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'moss-personal-cloud-'))
+  const db = new DatabaseSync(':memory:')
+  createCatalogTestRepository(db)
+  resetUserAgentStoreForTests()
+  const orgId = 'org-one'
+  const userId = 'user-one'
+  const checkpoint = new Error('stop before external model lookup')
+  let created: SessionRecord
+  const config = {
+    runtimeDir: root,
+    rootDir: root,
+    defaultRuntime: 'k8s',
+    engine: 'scode',
+    dbBackend: 'sqlite',
+    maxSessions: 0,
+  } as ServerConfig
+  const service = new RuntimeService({
+    config,
+    serverInstanceId: 'fixture',
+    store: {
+      driver: new SqliteDriver(db),
+      listSessions: async () => [],
+      createSession: async (input: SessionRecord) => {
+        created = { ...input, endedAt: null, createdAt: Date.now(), lastActiveAt: Date.now() }
+        return created
+      },
+      getSession: async () => created,
+      getNextGeneration: async () => 1,
+      createAttempt: async (input: AttemptRecord) => ({ ...input, attemptId: 'test-attempt' }),
+      setCurrentAttempt: async () => {},
+    } as never,
+    authService: {
+      getTokenLimits: async () => ({ userLimit: null, departmentLimit: null }),
+      buildVisibilityFilter: async () => ({ isAdmin: true, userId }),
+      issueWikiSession: () => ({ token: 'fixture-token' }),
+      getUserOrNull: async () => ({ id: userId, name: 'Fixture User', role: 'user' }),
+      getUserDepartmentAncestorIds: async () => null,
+      getOrganizationSystemSettings: async () => {
+        throw checkpoint
+      },
+    } as never,
+  })
+  const runtime = service as unknown as {
+    spawnAttempt: () => Promise<AttemptRecord>
+    spawnAttemptInResourceScope: (session: SessionRecord) => Promise<AttemptRecord>
+  }
+  runtime.spawnAttempt = async () => ({}) as AttemptRecord
+  try {
+    const own = await createUserAgent({ orgId, userId, displayName: 'Project Assistant' })
+    for (const ref of [userCreatedAgentName(own.id), defaultAgentName(userId)]) {
+      const session = await service.createSession({
+        orgId,
+        userId,
+        role: 'user',
+        scopes: [],
+        assistantName: ref,
+        dangerouslySkipPermissions: false,
+      })
+      assert.equal(session.runtime.k8sMode, 'user')
+      const home = session.runtime.configDir!
+      assert.equal(home, getSessionConfigDir(config, 'different-session', userId, 'user', orgId))
+      assert.notEqual(
+        home,
+        getSessionConfigDir(config, 'different-session', userId, 'user', 'other-org'),
+      )
+      await appendSharedAgentMemory({
+        configDir: home,
+        assistantName: ref,
+        content: 'My project color is olive-fixture',
+        source: 'explicit',
+      })
+      await withOrganizationResources(
+        { orgId, userId, snapshot: { orgId, resources: [] } },
+        async () => {
+          await assert.rejects(
+            runtime.spawnAttemptInResourceScope(session),
+            (error) => error === checkpoint,
+          )
+        },
+      )
+      const manifest = JSON.parse(
+        await readFile(
+          join(root, 'sessions', session.sessionId, 'attempt-0001', 'manifest.json'),
+          'utf8',
+        ),
+      )
+      assert.match(manifest.session.sharedMemory, /olive-fixture/)
+      const secret = await buildWorkspaceInstructionsSecret(session.cwd, ref)
+      assert.match(secret.data['AGENTS.md']!, /olive-fixture/)
+      if (ref === userCreatedAgentName(own.id))
+        assert.match(secret.data['AGENTS.md']!, /Project Assistant/)
+    }
+    const other = await createUserAgent({ orgId, userId, displayName: 'Other Assistant' })
+    assert.equal(
+      await readSharedAgentMemory(
+        getSessionConfigDir(config, 'any-session', userId, 'user', orgId),
+        userCreatedAgentName(other.id),
+      ),
+      null,
+    )
+  } finally {
+    resetUserAgentStoreForTests()
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 void test('application role separates model identity and preserves user AGENTS.md', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'moss-role-'))
@@ -32,15 +180,16 @@ void test('startup failures are actionable, safe, and distinct for new attempts'
   assert.equal(first.failure.isRetryable, false)
   assert.match(first.message, /organization administrator/)
   assert.notEqual(first.failure.attemptId, second.failure.attemptId)
-  const runner = new SessionStartupError(new Error('secret internal path /private/key'), 's', 'attempt-1')
-  assert.equal(runner.failure.attemptId, 'attempt-1')
+  const attemptId = '00000000-0000-4000-8000-000000000001'
+  const runner = new SessionStartupError(new Error('secret internal path /private/key'), 's', attemptId)
+  assert.equal(runner.failure.attemptId, attemptId)
   assert.equal(runner.failure.isRetryable, true)
   assert.doesNotMatch(runner.message, /private|secret/)
 })
 
 void test('artifact MCP protocol rejects invalid JSON and accepts valid declarations', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'moss-mcp-'))
-  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', resolve('node_modules/tsx/dist/loader.mjs'), resolve('src/server/artifactMcp.ts')], cwd: workspace, stderr: 'pipe' })
+  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', pathToFileURL(resolve('node_modules/tsx/dist/loader.mjs')).href, resolve('src/server/artifactMcp.ts')], cwd: workspace, stderr: 'pipe' })
   const client = new Client({ name: 'regression-test', version: '1' })
   try {
     await client.connect(transport)

@@ -62,6 +62,8 @@ const BUN = [
   'lbReadiness.test.ts',
   'modelListCache.test.ts',
   'podWorkspace.test.ts',
+  'sessionWorkspace.test.ts',
+  'skillAssets.test.ts',
   'publicSystemConfig.test.ts',
   'recharge.test.ts',
   'runtimeScodePaths.test.ts',

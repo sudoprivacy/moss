@@ -2064,7 +2064,18 @@ export const MIGRATIONS: PgMigration[] = [
     ALTER TABLE users ALTER COLUMN local_execution_allowed SET DEFAULT 1;
     ALTER TABLE users ALTER COLUMN local_execution_allowed SET NOT NULL;
   ` },
-  // Zone 系迁移自 v11 起（v5-v9 已被 dev 主线的 enterprise/compatibility 系
+  { version: 10, name: 'user-created-agents', sql: `
+    CREATE TABLE IF NOT EXISTS user_agents (
+      id TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_agents_owner
+      ON user_agents (org_id, user_id, created_at);
+  ` },
+  // Zone 系迁移自 v11 起（v5-v10 已被 dev 主线的 enterprise/compatibility 系
   // 占用；两侧原都从 v5 起编号，合并时 dev 已发布编号不可动）。zone DDL 全部
   // 幂等（IF NOT EXISTS），已按旧编号应用过的库重跑无害。
   { version: 11, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },

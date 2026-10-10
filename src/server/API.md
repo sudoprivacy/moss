@@ -618,7 +618,7 @@ unique email, so a phone-only account gets the platform's synthetic form, which
   "attemptId": "uuid-or-null",
   "execution": {
     "requestedLocation": "cloud",
-    "runtimeType": "host|docker|k8s",
+    "runtimeType": "host|docker|k8s|cohost",
     "sessionStatus": "active"
   },
   "createdAt": 0,
@@ -638,8 +638,7 @@ unique email, so a phone-only account gets the platform's synthetic form, which
   "cwd": "/abs/path/project",
   "dangerously_skip_permissions": true,
   "runtime": {
-    "type": "host",
-    "hostMode": "user"
+    "type": "cohost"
   }
 }
 ```
@@ -944,3 +943,23 @@ agent，并在 `prompt_template` 中明确要求 agent 将 payload 视为数据�
 - `AuthService.verifyAccessToken()` 已经是进程内调用，server 不再反向 fetch 外部 auth-center。
 - `admin/dist` 由同一个进程直接挂在 `/admin`。
 - 单库模式下，auth / users / api_keys / sessions / runtime events 共用同一个 SQLite 文件。
+
+
+## Organization model account availability
+
+`GET /api/v1/model-account/access` uses the same authenticated organization context as the dashboard. It reads local identity, account binding and payment configuration only; it never calls SudoRouter. Clients should use this endpoint to authorize the recharge entry independently of balance/usage retrieval.
+
+```json
+{"success":true,"data":{"mode":"organization_shared","currency":"USD","org_id":"example-org","account_status":"ready","can_manage":true,"can_recharge":true}}
+```
+
+`can_recharge` is true only for an active administrator of the current organization when organization payment is enabled. Members and platform super administrators cannot use organization self-service recharge. Payment endpoints continue to enforce their own authorization; hiding/showing a menu grants no permission.
+
+`GET /api/v1/model-account` retains its existing fields and adds:
+
+- `balance_status`: `available`, `unavailable`, `pending` (no Router account yet), or `not_applicable` (personal member view).
+- `member_usage_status`: `available`, `unavailable`, or `pending` (no bound member Token yet).
+
+An upstream query failure returns available portions of the dashboard with HTTP 200. Unavailable organization amounts are omitted and unavailable member data is `null`; clients must not substitute zero or organization totals for missing personal usage. Authentication/organization access errors remain errors. Token queries still validate account and Token scope before returning any data. Clients should show a retryable unavailable state, separately from pending provisioning. Access and payment requests must not wait for dashboard refresh; an optional refresh failure must not overwrite a successfully created QR code or confirmed payment status.
+
+Fuiou platform keys accept raw Base64 DER (PKCS8/SPKI or PKCS1), complete PEM and PEM containing escaped newlines. Configuration validation and the payment adapter use the same RSA parser. Invalid or non-RSA values are rejected before saving, including when payment is disabled. Existing credentials may be reformatted only if the underlying key is unchanged; replacing or clearing historical payment keys is still rejected. No data migration is required.

@@ -1,5 +1,12 @@
 import { SessionStartupError } from './sessionStartup.js'
 import { withOrganizationResources, requireOrganizationResource, resolveOrganizationSkillIds, snapshotOrganizationResources, pinSessionResourceSnapshot } from './catalog/organizationResources.js'
+import {
+  defaultAgentName,
+  isDefaultAgentName,
+  isUserCreatedAgentName,
+  isUserOwnedAgentName,
+} from './agentIdentity.js'
+import { requirePersonalAgent } from './personalAgentAccess.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { randomUUID } from 'crypto'
 import { accessSync, constants, existsSync } from 'fs'
@@ -50,6 +57,7 @@ import {
 import { errorMessage } from '../utils/errors.js'
 import { getUserModelPreference } from './userModelPreference.js'
 import { getModelProviderApiKey, getModelsForSelection } from './modelListCache.js'
+import { resolveModelSelection } from './modelProviders.js'
 import type { AuthProxyServer } from './authProxy/authProxyServer.js'
 import {
   appendSharedAgentMemory,
@@ -638,7 +646,15 @@ export class RuntimeService {
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
     if (this.draining) throw new ServerDrainingError()
     return withOrganizationResources(await this.resourceScope(input), async () => {
-      if (input.assistantName) {
+      // Every session belongs to an agent. Without one chosen, it belongs to the
+      // user's own — not to nobody, which is what left this cohort ungroupable
+      // in the sidebar and with `memory_mode: session`, i.e. no memory of the
+      // last conversation.
+      if (!input.assistantName) {
+        input = { ...input, assistantName: defaultAgentName(input.userId) }
+      }
+      await requirePersonalAgent(input.orgId, input.userId, input.assistantName!)
+      if (input.assistantName && !isUserOwnedAgentName(input.assistantName)) {
         const resource = await requireOrganizationResource('agent', input.assistantName)
         if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
         const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
@@ -713,6 +729,9 @@ export class RuntimeService {
             hostMode: assistantRuntime.memoryMode,
           }
         }
+        if (runtimeType === 'k8s' && input.runtime?.k8sMode === undefined) {
+          runtimeInput = { ...runtimeInput, k8sMode: assistantRuntime.memoryMode }
+        }
       } catch (error) {
         console.warn(
           `[RuntimeService] failed to resolve assistant memory_mode for ${input.assistantName}:`,
@@ -750,7 +769,10 @@ export class RuntimeService {
         input.userId,
         runtime.type === 'docker'
           ? runtime.dockerMode
-          : runtime.hostMode || 'session',
+          : runtime.type === 'k8s'
+            ? runtime.k8sMode
+            : runtime.hostMode || 'session',
+        isUserOwnedAgentName(input.assistantName) ? input.orgId : undefined,
       )
     const transcriptPath = getTranscriptPath(
       this.options.config.runtimeDir,
@@ -1814,19 +1836,32 @@ export class RuntimeService {
     // below still runs. Without this, a reused session signs a token with
     // `assistant_id: null`, which makes every assistant-gated agent endpoint
     // (corp-app send, enabled wikis, …) 403 with "insufficient scope".
-    let effectiveAssistantName = options.assistantName ?? session.assistantName ?? undefined
-    if (effectiveAssistantName) {
+    // Sessions created before every session had an agent carry no name, so the
+    // same rule is applied here too rather than letting a relaunch of an old
+    // conversation be the one spawn that belongs to nobody.
+    let effectiveAssistantName =
+      options.assistantName ?? session.assistantName ?? defaultAgentName(session.userId)
+    // A user's own agent is not in the catalog — asking for it would 404 a
+    // session that is perfectly valid.
+    if (effectiveAssistantName && !isUserOwnedAgentName(effectiveAssistantName)) {
       const resource = await requireOrganizationResource('agent', effectiveAssistantName)
       effectiveAssistantName = resource.id
       if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
     }
-    let assistantDisplayName = options.assistantDisplayName
-    if (!assistantDisplayName && effectiveAssistantName) {
-      try {
-        const { resolveAssistantDisplayName } = await import('./agentStore.js')
-        assistantDisplayName = await resolveAssistantDisplayName(effectiveAssistantName)
-      } catch {
-        assistantDisplayName = effectiveAssistantName
+    const personalAgent = await requirePersonalAgent(session.orgId, session.userId, effectiveAssistantName)
+    let assistantDisplayName = personalAgent?.displayName ?? options.assistantDisplayName
+    // The implicit default agent has no display name to resolve: its name is
+    // derived from a user id, so resolving it would surface `user-<uuid>` as the
+    // thing the agent calls itself. An agent the user made does have one — the
+    // name they typed — but it lives in their own store, not the catalog.
+    if (!assistantDisplayName && effectiveAssistantName && !isDefaultAgentName(effectiveAssistantName)) {
+      if (!isUserCreatedAgentName(effectiveAssistantName)) {
+        try {
+          const { resolveAssistantDisplayName } = await import('./agentStore.js')
+          assistantDisplayName = await resolveAssistantDisplayName(effectiveAssistantName)
+        } catch {
+          assistantDisplayName = effectiveAssistantName
+        }
       }
     }
 
@@ -2013,8 +2048,10 @@ export class RuntimeService {
       try {
         const { findAssistantDir, readAssistantMeta } = await import('./agentStore.js')
         const found = await findAssistantDir(effectiveAssistantName)
+        let isMemoryEnabled = isUserOwnedAgentName(effectiveAssistantName)
         if (found) {
           const meta = await readAssistantMeta(found.dir)
+          isMemoryEnabled = meta?.memory_mode === 'user'
           const ids = Array.isArray(meta?.enabledWikis)
             ? meta.enabledWikis.filter((v: unknown): v is string => typeof v === 'string')
             : []
@@ -2055,61 +2092,59 @@ export class RuntimeService {
             }
             if (collectedApps.length > 0) availableCorpApps = collectedApps
           }
+        }
 
-          if (
-            meta?.memory_mode === 'user' &&
-            session.runtime.configDir &&
-            session.userId
-          ) {
-            const user = await this.authService.getUserOrNull(
-              session.userId,
-              session.orgId,
-            )
-            const departmentName = user?.departmentId
-              ? (await this.authService
-                  .listDepartments(session.orgId))
-                  .departments.find(d => d.id === user.departmentId)?.name ?? null
-              : null
-            const userProfileMemory = buildUserProfileMemory({
-              // Prefer the human display name; fall back to the login username.
-              userName: user?.displayName?.trim() || user?.name || null,
-              role: user?.role ?? null,
-              departmentName,
-              email: user?.email ?? null,
-            })
-            if (userProfileMemory) {
-              await appendSharedAgentMemory({
-                configDir: session.runtime.configDir,
-                assistantName: effectiveAssistantName,
-                content: userProfileMemory,
-                source: 'profile',
-              }).catch(() => {})
-            }
-            sharedMemory = await readSharedAgentMemory(
-              session.runtime.configDir,
-              effectiveAssistantName,
-            )
-          }
-
-          if (session.runtime.configDir) {
-            await writeAssistantOverrideAgentsMd({
+        if (isMemoryEnabled && session.runtime.configDir && session.userId) {
+          const user = await this.authService.getUserOrNull(
+            session.userId,
+            session.orgId,
+          )
+          const departmentName = user?.departmentId
+            ? (await this.authService
+                .listDepartments(session.orgId))
+                .departments.find(d => d.id === user.departmentId)?.name ?? null
+            : null
+          const userProfileMemory = buildUserProfileMemory({
+            // Prefer the human display name; fall back to the login username.
+            userName: user?.displayName?.trim() || user?.name || null,
+            role: user?.role ?? null,
+            departmentName,
+            email: user?.email ?? null,
+          })
+          if (userProfileMemory) {
+            await appendSharedAgentMemory({
               configDir: session.runtime.configDir,
-              // scode reads AGENTS.md from the workspace it runs in, not from configDir —
-              // without this the assistant identity never reaches the agent.
-              workspace: session.cwd,
               assistantName: effectiveAssistantName,
-              assistantDisplayName,
-              assistantRules: await import('./agentStore.js').then(m =>
+              content: userProfileMemory,
+              source: 'profile',
+            }).catch(() => {})
+          }
+          sharedMemory = await readSharedAgentMemory(
+            session.runtime.configDir,
+            effectiveAssistantName,
+          )
+        }
+
+        if (session.runtime.configDir) {
+          await writeAssistantOverrideAgentsMd({
+            configDir: session.runtime.configDir,
+            // scode reads AGENTS.md from the workspace it runs in, not from configDir —
+            // without this the assistant identity never reaches the agent.
+            workspace: session.cwd,
+            assistantName: effectiveAssistantName,
+            assistantDisplayName,
+            assistantRules: isUserOwnedAgentName(effectiveAssistantName)
+              ? null
+              : await import('./agentStore.js').then(m =>
                 m.getAssistantSystemPrompt(effectiveAssistantName!),
               ),
-              sharedMemory,
-            }).catch(err => {
-              console.warn(
-                `[RuntimeService] failed to write assistant override AGENTS.md for ${effectiveAssistantName}:`,
-                err,
-              )
-            })
-          }
+            sharedMemory,
+          }).catch(err => {
+            console.warn(
+              `[RuntimeService] failed to write assistant override AGENTS.md for ${effectiveAssistantName}:`,
+              err,
+            )
+          })
         }
       } catch (err) {
         console.warn(
@@ -2311,8 +2346,10 @@ export class RuntimeService {
     // Build environment for runner from system settings
     const systemSettings = await this.authService.getOrganizationSystemSettings(session.orgId)
     const userModelKey = session.userId
-      ? (await this.authService.getUserModelCredential(session.userId))?.sudorouterKey
+      ? (await this.authService.getUserModelCredential(session.userId, session.orgId))?.sudorouterKey
       : undefined
+    const sharedBilling = this.authService.getOrganizationBillingService?.()
+    const isSharedModelAccount = Boolean(session.orgId && sharedBilling && await sharedBilling.isShared(session.orgId))
 
     // Get user model preference in main process (runner doesn't have DB access)
     // Model priority: user preference > system settings > default
@@ -2328,6 +2365,8 @@ export class RuntimeService {
     // A selected Provider is a routing boundary.  Do not fall back to the
     // process-global endpoint when its catalog cannot be resolved: that would
     // make an unavailable/stale selection call a different Provider.
+    const requestedProvider = !isCabinSession ? resolveModelSelection(systemSettings.modelProviders, systemSettings.defaultModelProviderId, systemSettings.model, requestedModel).provider : null
+    if (isSharedModelAccount && requestedProvider && (requestedProvider.id === 'legacy-default' || requestedProvider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl) && !userModelKey) throw new Error('组织成员模型凭据不可用，请联系管理员')
     const providerCatalog = !isCabinSession
       ? await getModelsForSelection(requestedModel, {
         settings: systemSettings,
@@ -2354,8 +2393,6 @@ export class RuntimeService {
     runnerEnv = applyRunnerZoneContext(runnerEnv, p1aRunnerZoneContext)
     if (providerCatalog) {
       runnerEnv.MOSS_MODEL_PROVIDER_ID = providerCatalog.selection.provider.id
-      runnerEnv.MOSS_MODEL_PROVIDER_PROTOCOL = providerCatalog.selection.provider.protocol
-      runnerEnv.MOSS_PROVIDER_MODELS_JSON = JSON.stringify(providerCatalog.models)
       runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
       runnerEnv.ANTHROPIC_BASE_URL = providerCatalog.selection.provider.baseUrl
     }
@@ -2372,7 +2409,8 @@ export class RuntimeService {
     // configured Provider must never receive a process-global or legacy key;
     // local unauthenticated endpoints intentionally run with no credential.
     const isLegacyProvider = providerCatalog?.selection.provider.id === 'legacy-default'
-    const sessionApiKey = isLegacyProvider
+    const isManagedRouter = isSharedModelAccount && (isLegacyProvider || providerCatalog?.selection.provider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl)
+    const sessionApiKey = isManagedRouter ? userModelKey : isLegacyProvider
       ? userModelKey || providerApiKey
       : providerApiKey
     if (providerCatalog) {

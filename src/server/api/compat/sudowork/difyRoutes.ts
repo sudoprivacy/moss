@@ -31,7 +31,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     }
   }
 
-  app.get('/api/v1/agents/:assistantId/enhancement', async context => {
+  app.get('/api/v1/agent-templates/:assistantId/enhancement', async context => {
     const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     try {
@@ -41,7 +41,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     }
   })
 
-  app.post('/api/v1/agents/:assistantId/enhancement/invoke', async context => {
+  app.post('/api/v1/agent-templates/:assistantId/enhancement/invoke', async context => {
     const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
@@ -56,7 +56,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     }
   })
 
-  app.post('/api/v1/agents/:assistantId/enhancement/invoke-stream', async context => {
+  app.post('/api/v1/agent-templates/:assistantId/enhancement/invoke-stream', async context => {
     const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
@@ -82,7 +82,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     return new Response(stream, { status: 200, headers: streamHeaders(options.upstreamBaseUrl) })
   })
 
-  app.post('/api/v1/agents/:assistantId/chat', async context => {
+  app.post('/api/v1/agent-templates/:assistantId/chat', async context => {
     const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
@@ -115,10 +115,10 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     })
   })
 
-  app.post('/api/v1/agents/:assistantId/chat/:taskId/stop', context => jsonOperation(context, requestContext, async runtime =>
+  app.post('/api/v1/agent-templates/:assistantId/chat/:taskId/stop', context => jsonOperation(context, requestContext, async runtime =>
     options.runtime.stopChat({ ...runtime, taskId: context.req.param('taskId') })))
 
-  app.get('/api/v1/agents/:assistantId/conversations', context => jsonOperation(context, requestContext, async runtime =>
+  app.get('/api/v1/agent-templates/:assistantId/conversations', context => jsonOperation(context, requestContext, async runtime =>
     options.runtime.listConversations({
       ...runtime,
       lastId: context.req.query('last_id') || undefined,
@@ -126,7 +126,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
       sortBy: context.req.query('sort_by') as 'created_at' | '-created_at' | 'updated_at' | '-updated_at' | undefined,
     })))
 
-  app.patch('/api/v1/agents/:assistantId/conversations/:conversationId', async context => {
+  app.patch('/api/v1/agent-templates/:assistantId/conversations/:conversationId', async context => {
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
     return jsonOperation(context, requestContext, async runtime => options.runtime.renameConversation({
       ...runtime,
@@ -136,7 +136,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     }))
   })
 
-  app.delete('/api/v1/agents/:assistantId/conversations/:conversationId', async context => {
+  app.delete('/api/v1/agent-templates/:assistantId/conversations/:conversationId', async context => {
     const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     try {
@@ -147,7 +147,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     }
   })
 
-  app.get('/api/v1/agents/:assistantId/conversations/:conversationId/messages', context =>
+  app.get('/api/v1/agent-templates/:assistantId/conversations/:conversationId/messages', context =>
     jsonOperation(context, requestContext, async runtime => options.runtime.listMessages({
       ...runtime,
       conversationId: context.req.param('conversationId'),
@@ -155,7 +155,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
       limit: optionalNumber(context.req.query('limit')),
     })))
 
-  app.post('/api/v1/agents/:assistantId/messages/:messageId/feedback', async context => {
+  app.post('/api/v1/agent-templates/:assistantId/messages/:messageId/feedback', async context => {
     const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)
@@ -173,18 +173,18 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     }
   })
 
-  app.get('/api/v1/agents/:assistantId/messages/:messageId/suggested', context =>
+  app.get('/api/v1/agent-templates/:assistantId/messages/:messageId/suggested', context =>
     jsonOperation(context, requestContext, async runtime => options.runtime.suggested({
       ...runtime, messageId: context.req.param('messageId'),
     })))
 
-  app.get('/api/v1/agents/:assistantId/parameters', context =>
+  app.get('/api/v1/agent-templates/:assistantId/parameters', context =>
     jsonOperation(context, requestContext, runtime => options.runtime.parameters(runtime)))
 
-  app.get('/api/v1/agents/:assistantId/meta', context =>
+  app.get('/api/v1/agent-templates/:assistantId/meta', context =>
     jsonOperation(context, requestContext, runtime => options.runtime.meta(runtime)))
 
-  app.post('/api/v1/agents/:assistantId/files', context => multipartOperation(
+  app.post('/api/v1/agent-templates/:assistantId/files', context => multipartOperation(
     context,
     requestContext,
     (runtime, file) => options.runtime.uploadFile({
@@ -192,7 +192,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     }),
   ))
 
-  app.post('/api/v1/agents/:assistantId/audio-to-text', context => multipartOperation(
+  app.post('/api/v1/agent-templates/:assistantId/audio-to-text', context => multipartOperation(
     context,
     requestContext,
     (runtime, file) => options.runtime.audioToText({
@@ -200,7 +200,7 @@ export function registerSudoworkDifyRuntimeRoutes(app: Hono, options: DifyRuntim
     }),
   ))
 
-  app.post('/api/v1/agents/:assistantId/text-to-audio', async context => {
+  app.post('/api/v1/agent-templates/:assistantId/text-to-audio', async context => {
     const runtime = await requestContext(context)
     if (runtime instanceof Response) return runtime
     const body = await context.req.json<Record<string, unknown>>().catch(() => null)

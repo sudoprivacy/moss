@@ -791,7 +791,7 @@ export async function resolveAssistantDisplayName(
 
 /**
  * Get only hub-installed agents (installed by admin from Hub).
- * Used by /api/v1/agents/installed endpoint for client sync.
+ * Used by /api/v1/agent-templates/installed endpoint for client sync.
  */
 export async function getHubInstalledAssistants(): Promise<InstalledAssistantInfo[]> {
   if (getOrganizationResourceScope()) return (await getInstalledAssistants()).filter(agent => agent.isHubInstalled)
