@@ -258,11 +258,13 @@ export class OrganizationBillingService {
       if (!token?.router_token_id || token.status === 'revoked') return true
       // Activation does not undo an administrator's independent Key suspension.
       if (status === 'active') return true
-      await this.db.run("UPDATE organization_model_tokens SET status = 'disabled', updated_at = ? WHERE id = ?", [Date.now(), token.id])
       const reference = `identity:${token.id}:${status}:${randomUUID()}`
       await this.operation(orgId, 'identity-key-disable', reference, { tokenId: token.router_token_id, status: 'disabled' }, true,
-        () => this.router.setTokenStatus(token.router_user_id, token.router_token_id!, 'disabled', reference), memberId)
-      if (status === 'deleted') await this.db.run("UPDATE organization_model_tokens SET status = 'revoked', updated_at = ? WHERE id = ?", [Date.now(), token.id])
+        async () => {
+          const current = await this.router.setTokenStatus(token.router_user_id, token.router_token_id!, 'disabled', reference)
+          await this.db.run('UPDATE organization_model_tokens SET status = ?, updated_at = ? WHERE id = ?', [status === 'deleted' ? 'revoked' : 'disabled', Date.now(), token.id])
+          return current
+        }, memberId)
       return true
     })
   }
@@ -299,12 +301,11 @@ export class OrganizationBillingService {
     if (!member || member.org_id !== actor.orgId || status === 'enabled' && member.status !== 'active') throw new OrganizationBillingError('MEMBER_UNAVAILABLE', '成员未激活或不属于当前组织', 409)
     return this.exclusive(`member:${actor.orgId}:${memberId}`, async () => {
       const token = await this.requireToken(actor.orgId, memberId)
-      if (status === 'disabled') await this.db.run("UPDATE organization_model_tokens SET status = 'disabled', updated_at = ? WHERE id = ?", [Date.now(), token.id])
-      await this.operation(actor.orgId, 'token-status', reference, { tokenId: token.router_token_id, status }, true,
-        () => this.router.setTokenStatus(token.router_user_id, token.router_token_id!, status, reference), memberId, actor.userId)
-      const current = (await this.router.listTokens(token.router_user_id, token.router_token_id!))[0]
-      if (!current) throw new OrganizationBillingError('KEY_UNAVAILABLE', '成员 Key 状态不可用', 503)
-      await this.db.run('UPDATE organization_model_tokens SET status = ?, updated_at = ? WHERE id = ?', [current.admin_status === 'disabled' ? 'disabled' : 'ready', Date.now(), token.id])
+      const current = await this.operation(actor.orgId, 'token-status', reference, { tokenId: token.router_token_id, status }, true, async () => {
+        const changed = await this.router.setTokenStatus(token.router_user_id, token.router_token_id!, status, reference)
+        await this.db.run('UPDATE organization_model_tokens SET status = ?, updated_at = ? WHERE id = ?', [changed.admin_status === 'disabled' ? 'disabled' : 'ready', Date.now(), token.id])
+        return changed
+      }, memberId, actor.userId)
       return current
     })
   }
@@ -340,12 +341,11 @@ export class OrganizationBillingService {
       const token = await this.token(actor.orgId, '', 'service')
       if (!token?.router_token_id) throw new OrganizationBillingError('KEY_UNAVAILABLE', '默认服务 Key 尚未就绪', 409)
       if ('status' in change) {
-        if (change.status === 'disabled') await this.db.run("UPDATE organization_model_tokens SET status = 'disabled', updated_at = ? WHERE id = ?", [Date.now(), token.id])
-        await this.operation(actor.orgId, 'service-status', reference, { tokenId: token.router_token_id, status: change.status }, true,
-          () => this.router.setTokenStatus(token.router_user_id, token.router_token_id!, change.status, reference), undefined, actor.userId)
-        const current = (await this.router.listTokens(token.router_user_id, token.router_token_id!))[0]
-        if (!current) throw new OrganizationBillingError('KEY_UNAVAILABLE', '默认服务 Key 状态不可用', 503)
-        await this.db.run('UPDATE organization_model_tokens SET status = ?, updated_at = ? WHERE id = ?', [current.admin_status === 'disabled' ? 'disabled' : 'ready', Date.now(), token.id])
+        const current = await this.operation(actor.orgId, 'service-status', reference, { tokenId: token.router_token_id, status: change.status }, true, async () => {
+          const changed = await this.router.setTokenStatus(token.router_user_id, token.router_token_id!, change.status, reference)
+          await this.db.run('UPDATE organization_model_tokens SET status = ?, updated_at = ? WHERE id = ?', [changed.admin_status === 'disabled' ? 'disabled' : 'ready', Date.now(), token.id])
+          return changed
+        }, undefined, actor.userId)
         return current
       }
       const delta = usdMicrosToQuota(parseUsd(change.amountUsd, false), account.quota_per_usd) * (change.direction === 'decrease' ? -1 : 1)
@@ -360,12 +360,12 @@ export class OrganizationBillingService {
     await this.exclusive(`account:${actor.orgId}`, async () => {
       const account = await this.requireAccount(actor.orgId)
       if (!account.router_user_id || !['ready', 'disabled'].includes(account.status)) throw new OrganizationBillingError('ACCOUNT_PENDING', '组织开户尚未完成', 409)
-      if (status === 'disabled') await this.db.run("UPDATE organization_model_accounts SET status = 'disabled', updated_at = ? WHERE org_id = ?", [Date.now(), actor.orgId])
       // The reused old status endpoint sets an absolute state, so replay is safe.
-      await this.operation(actor.orgId, 'account-status', reference, { accountId: account.router_user_id, status }, true,
-        () => this.router.setAccountStatus(account.router_user_id!, status).then(() => ({ status })), undefined, actor.userId)
-      const current = await this.router.getAccount(account.router_user_id)
-      await this.db.run('UPDATE organization_model_accounts SET status = ?, updated_at = ? WHERE org_id = ?', [current.status === 1 ? 'ready' : 'disabled', Date.now(), actor.orgId])
+      await this.operation(actor.orgId, 'account-status', reference, { accountId: account.router_user_id, status }, true, async () => {
+        await this.router.setAccountStatus(account.router_user_id!, status)
+        await this.db.run('UPDATE organization_model_accounts SET status = ?, updated_at = ? WHERE org_id = ?', [status === 'enabled' ? 'ready' : 'disabled', Date.now(), actor.orgId])
+        return { status }
+      }, undefined, actor.userId)
       return true
     })
   }

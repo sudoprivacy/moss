@@ -208,7 +208,9 @@ export class SudoworkSystemConfigService {
       login_method: loginMethodToNumber(await this.getLoginMethod(orgId)),
       sms_configured: await this.isSmsConfigured(),
       sms_status: await this.options.getSmsReadiness?.(),
-      login_method_inherited: orgId ? (await this.options.policies.getOrganization(orgId)).loginMethod === undefined : false,
+      login_method_inherited: orgId
+        ? (await this.options.policies.getOrganization(orgId)).loginMethodInherited === true
+        : false,
       third_party_auth: await this.thirdPartyAuth(true, orgId),
       log_report: {
         enabled: flag(logReport.enabled),
@@ -352,6 +354,7 @@ export class SudoworkSystemConfigService {
         throw new SudoworkSystemConfigError(400, '三方认证配置未启用')
       }
       patch.loginMethod = body.login_method
+      if (orgId) patch.loginMethodInherited = false
     }
 
     let nextLogKey: string | undefined
@@ -442,6 +445,7 @@ export class SudoworkSystemConfigService {
     if (body.inherit_login_method === true) {
       if (!orgId) throw new SudoworkSystemConfigError(400, '只有组织策略可跟随平台默认')
       delete scoped.patch.loginMethod
+      scoped.patch.loginMethodInherited = true
       scoped.inheritedKeys.push('loginMethod')
     }
     return {

@@ -115,9 +115,10 @@ describe("invited phone registration", () => {
     const created = await auth.createOrganization({ name: "Gateway" });
     const orgId = created.organization.id;
     const identities = createIdentityTestRepository(raw, {}, db.driver);
-    const profile = await identities.getOrganizationProfile(orgId);
-    assert(profile);
-    await identities.putOrganizationProfile({ ...profile, loginMethod: "sms" });
+    await auth.putOrganizationClientPolicy(orgId, {
+      loginMethod: "sms",
+      loginMethodInherited: false,
+    }, "test");
     await auth.createOrganizationIdentityService().createInvitations(
       { orgId, count: 1, initialCreditUnits: 200 }, () => "GATEWAY",
     );
@@ -169,9 +170,10 @@ describe("invited phone registration", () => {
     const created = await auth.createOrganization({ name: "Acme" });
     const orgId = created.organization.id;
     const repository = createIdentityTestRepository(raw, {}, db.driver);
-    const profile = await repository.getOrganizationProfile(orgId);
-    assert(profile);
-    await repository.putOrganizationProfile({ ...profile, loginMethod: "sms" });
+    await auth.putOrganizationClientPolicy(orgId, {
+      loginMethod: "sms",
+      loginMethodInherited: false,
+    }, "test");
     const organizations = auth.createOrganizationIdentityService();
     await organizations.createInvitations({ orgId, count: 1 }, () => "JOINME");
 
@@ -207,9 +209,10 @@ describe("invited phone registration", () => {
     const created = await auth.createOrganization({ name: "Acme" });
     const orgId = created.organization.id;
     const repository = createIdentityTestRepository(raw, {}, db.driver);
-    const profile = await repository.getOrganizationProfile(orgId);
-    assert(profile);
-    await repository.putOrganizationProfile({ ...profile, loginMethod: "sms" });
+    await auth.putOrganizationClientPolicy(orgId, {
+      loginMethod: "sms",
+      loginMethodInherited: false,
+    }, "test");
     const organizations = auth.createOrganizationIdentityService();
     await organizations.createInvitations({ orgId, count: 1 }, () => "ONCE01");
 

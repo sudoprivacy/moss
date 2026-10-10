@@ -136,7 +136,7 @@ function providerIdentity(patch: Partial<OAuth2Identity> = {}): OAuth2Identity {
   }
 }
 
-void test('resolver precedence includes numeric zero, string policies and inherited profile values', async t => {
+void test('resolver precedence includes numeric zero, string policies, explicit inheritance and legacy profile values', async t => {
   const { identities, policies } = await setup(t)
   const profile = (await identities.getOrganizationProfile('org-a'))!
   await identities.putOrganizationProfile({ ...profile, loginMethod: 'cas' })
@@ -157,9 +157,11 @@ void test('resolver precedence includes numeric zero, string policies and inheri
   }
   await policies.putPlatform({ loginMethod: null }, 'root')
   await policies.putOrganization('org-a', { loginMethod: 1 }, 'root')
-  assert.equal((await resolveEffectiveLoginMethod(sources, 'org-a', { ignoreOrganizationPolicy: true })), 'cas')
+  assert.equal((await resolveEffectiveLoginMethod(sources, 'org-a', { ignoreOrganizationPolicy: true })), 'sms')
   await policies.putOrganization('org-a', { loginMethod: 'invalid' }, 'root')
   assert.equal((await resolveEffectiveLoginMethod(sources, 'org-a')), 'cas')
+  await policies.putOrganization('org-a', { loginMethodInherited: true }, 'root')
+  assert.equal((await resolveEffectiveLoginMethod(sources, 'org-a')), 'sms')
 })
 
 void test('saving organization SMS policy gates native password, SMS and refresh without changing profile', async t => {
@@ -208,17 +210,18 @@ void test('native and configuration defaults agree when the organization has no 
   await assert.rejects(service.issueTokenFromPassword(passwordInput), forbidden)
 })
 
-void test('clearing an organization override restores its legacy profile when platform policy is absent', async t => {
-  const { service, identities, policies, config, setCasPolicy } = await setup(t)
+void test('explicitly following the platform ignores the legacy profile when platform policy is absent', async t => {
+  const { service, identities, policies, config, setCasPolicy } = await setup(t, 'sms')
   await setCasPolicy('org-b')
   await identities.putOrganizationProfile({ ...(await identities.getOrganizationProfile('org-b'))!, loginMethod: 'cas' })
   await config.update({ ...scopedRoot, orgId: 'org-b' }, { login_method: 1 })
   assert.equal((await policies.getOrganization('org-b')).loginMethod, 1)
   await config.update({ ...scopedRoot, orgId: 'org-b' }, { inherit_login_method: true })
   assert.equal((await policies.getOrganization('org-b')).loginMethod, undefined)
-  assert.equal((await config.getLoginMethod('org-b')), 'cas')
+  assert.equal((await policies.getOrganization('org-b')).loginMethodInherited, true)
+  assert.equal((await config.getLoginMethod('org-b')), 'sms')
   t.mock.method(OAuth2Bridge.prototype, 'resolve', async () => providerIdentity({ extOrgId: 'external-b' }))
-  assert.equal((await service.issueTokenFromOAuth2({ params: {} })).organization?.id, 'org-b')
+  await assert.rejects(service.issueTokenFromOAuth2({ params: {} }), forbidden)
 })
 
 void test('first OAuth login provisions CAS profile, aliases and wallets and can refresh', async t => {
@@ -386,6 +389,15 @@ void test('an explicitly saved organization choice stays independent when the pl
   assert.equal(await config.getLoginMethod('org-b'), 'password')
   await config.update(scopedRoot, { inherit_login_method: true })
   assert.equal(await config.getLoginMethod('org-a'), 'password')
+  assert.equal((await policies.getOrganization('org-a')).loginMethodInherited, true)
+})
+
+void test('new native organizations explicitly inherit the runtime platform login method', async t => {
+  const { service, identities, policies, config } = await setup(t, 'sms')
+  const created = await service.createOrganization({ name: 'Inherited Org', idempotencyKey: 'inherited-org' })
+  assert.equal((await identities.getOrganizationProfile(created.organization.id))?.loginMethod, 'password')
+  assert.equal((await policies.getOrganization(created.organization.id)).loginMethodInherited, true)
+  assert.equal(await config.getLoginMethod(created.organization.id), 'sms')
 })
 
 void test('public organization discovery is scoped and invalid codes do not return platform defaults', async t => {
