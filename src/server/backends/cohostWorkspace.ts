@@ -1,6 +1,6 @@
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { posix } from 'node:path'
-import { cohostRepositoryPath, readCohostSessionState } from './cohostSessionState.js'
+import { cohostRepositoryPath } from './cohostSessionState.js'
 import type { WorkspaceFileAccess, WorkspaceRemoteEntry } from './podWorkspace.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { resolveCohostNexusConfig } from '../nexus/nexusEnvConfig.js'
@@ -9,6 +9,7 @@ import { sessionAgentName } from '../agentIdentity.js'
 import type { RuntimeService } from '../runtimeService.js'
 import type { SessionRecord } from '../types.js'
 import { ResourceAccessError } from '../catalog/resourceError.js'
+import { readLiveManagedExecution } from './liveManagedExecution.js'
 
 /** Validate both HTTP paths and daemon dirents before constructing an RPC path. */
 export function cohostWorkspacePath(root: string, relativePath: string): string {
@@ -26,30 +27,29 @@ export function cohostWorkspacePath(root: string, relativePath: string): string 
 /** Use the owned execution daemon's workspace, including its authorization and hooks. */
 export function createCohostWorkspaceAccess(
   session: SessionRecord,
-  runtime: Pick<RuntimeService, 'ensureSessionReady'>,
+  runtime: Pick<RuntimeService, 'connectInternalChannel'>,
   connect = connectCohostWorkspace,
 ): WorkspaceFileAccess {
   const withWorkspace = async <T>(operation: (client: NexusVfsClient, token: string, root: string) => Promise<T>): Promise<T> => {
-    await runtime.ensureSessionReady(session.sessionId)
-    const state = await readCohostSessionState(session.cwd)
-    if (!state) throw new ResourceAccessError(503, 'Cohost workspace is not ready')
+    const channel = await runtime.connectInternalChannel(session.sessionId)
+    const { processId, binding } = await readLiveManagedExecution(channel, session.sessionId)
     const { client, authToken } = await connect(session.userId)
     try {
-      const descriptor = await new ManagedAgentClient(client, authToken).getSession(state.sessionId)
+      const descriptor = await new ManagedAgentClient(client, authToken).getSession(processId)
       const expectedAgent = session.assistantName ? sessionAgentName(session.userId, session.assistantName) : undefined
-      if (!expectedAgent || descriptor.owner_id !== session.userId || descriptor.agent_id !== expectedAgent ||
-          descriptor.session_id !== state.sessionId || descriptor.durable_session_id !== state.durableSessionId) {
+      if (!expectedAgent || binding.ownerId !== session.userId || binding.agentId !== expectedAgent || descriptor.owner_id !== session.userId || descriptor.agent_id !== expectedAgent ||
+          descriptor.session_id !== processId || descriptor.durable_session_id !== binding.durableSessionId) {
         throw new ResourceAccessError(403, 'Cohost workspace owner does not match the session')
       }
-      const processRoot = `/proc/${state.sessionId}/workspace`
+      const processRoot = `/proc/${processId}/workspace`
       if (descriptor.workspace_path.replace(/\/+$/, '') !== processRoot) {
         throw new ResourceAccessError(503, 'Invalid cohost workspace descriptor')
       }
       const expectedRepository = cohostRepositoryPath(expectedAgent, session.sessionId)
-      if (state.repositoryPath && state.repositoryPath !== expectedRepository) {
+      if (binding.repositoryPath !== expectedRepository && binding.repositoryPath !== session.cwd) {
         throw new ResourceAccessError(403, 'Cohost repository does not belong to this session')
       }
-      const root = state.repositoryPath ?? processRoot
+      const root = binding.repositoryPath === expectedRepository ? expectedRepository : processRoot
       return await operation(client, authToken, root)
     } finally { client.close() }
   }

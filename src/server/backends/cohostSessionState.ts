@@ -1,9 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { readFile, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
 
 export interface CohostSessionState {
-  sessionId: string
   durableSessionId: string
   repositoryPath?: string
 }
@@ -16,7 +14,7 @@ export function cohostRepositoryPath(agentId: string, sessionId: string): string
   return `/agents/${agentId}/workspaces/${sessionId}`
 }
 
-/** The host-side session locator contains no credentials. */
+/** Locator written by earlier cohost deployments, read only during migration. */
 export function cohostSessionStatePath(cwd: string): string {
   return join(cwd, '.moss', 'cohost-session.json')
 }
@@ -30,24 +28,22 @@ export async function readCohostSessionState(cwd: string): Promise<CohostSession
     throw error
   }
   const value = JSON.parse(raw) as Partial<CohostSessionState>
-  for (const id of [value.sessionId, value.durableSessionId]) {
-    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
-      throw new Error('Invalid cohost session state')
-    }
+  if (typeof value.durableSessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value.durableSessionId)) {
+    throw new Error('Invalid cohost session state')
   }
   if (value.repositoryPath !== undefined &&
       (typeof value.repositoryPath !== 'string' ||
        !/^\/agents\/[^/\\\0]+\/workspaces\/[A-Za-z0-9_-]{1,128}$/.test(value.repositoryPath))) {
     throw new Error('Invalid cohost repository path')
   }
-  return value as CohostSessionState
+  return {
+    durableSessionId: value.durableSessionId,
+    ...(value.repositoryPath ? { repositoryPath: value.repositoryPath } : {}),
+  }
 }
 
-/** Atomic replacement preserves the durable ID across process and host restarts. */
-export async function writeCohostSessionState(cwd: string, state: CohostSessionState): Promise<void> {
-  const path = cohostSessionStatePath(cwd)
-  await mkdir(join(cwd, '.moss'), { recursive: true })
-  const pending = `${path}.${randomUUID()}.pending`
-  await writeFile(pending, JSON.stringify(state), { mode: 0o600 })
-  await rename(pending, path)
+/** Remove the old locator only after its identity is committed to the shared store. */
+export async function removeCohostSessionState(cwd: string): Promise<void> {
+  try { await unlink(cohostSessionStatePath(cwd)) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
 }

@@ -1,5 +1,3 @@
-import type { AttemptRecord } from './types.js'
-
 /**
  * A-9: single source of truth for the non-terminal runtime states. The
  * owner-predicates in db.ts (touchAttemptHeartbeat / markAttemptStopped)
@@ -16,7 +14,7 @@ export const ALIVE_ATTEMPT_STATES = ['starting', 'running', 'detached'] as const
  *  write time, so a timestamp-only check keeps a just-lost attempt "alive"
  *  and blocks its respawn (the fencing self-block this predicate fixes). */
 export function isAttemptHeartbeatFresh(
-  attempt: Pick<AttemptRecord, 'runtimeState' | 'lastHeartbeatAt'>,
+  attempt: { runtimeState: string; lastHeartbeatAt: number | null },
   heartbeatTimeoutMs: number,
 ): boolean {
   return (

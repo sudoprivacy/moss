@@ -1,3 +1,5 @@
+import type { CohostSessionBinding } from './runtime/cohostSessionRepository.js'
+
 export type RunnerClientMessage =
   | {
       type: 'stdin'
@@ -18,6 +20,8 @@ export type RunnerServerMessage =
       sessionId: string
       runtimeType: 'host' | 'docker' | 'k8s' | 'cohost'
       state: string
+      managedProcessId?: string
+      cohostSessionBinding?: CohostSessionBinding
     }
   | {
       type: 'stdout'

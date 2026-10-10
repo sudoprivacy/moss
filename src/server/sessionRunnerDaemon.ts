@@ -11,6 +11,8 @@ import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import type { RunnerClientMessage, RunnerServerMessage } from './runnerProtocol.js'
 import type { RunnerManifest } from './types.js'
 import type { BackendHandle } from './sessionManager.js'
+import { removeCohostSessionState } from './backends/cohostSessionState.js'
+import type { SessionAttemptFence } from './storage/sessionAttemptFence.js'
 
 type SocketWithBuffer = net.Socket & {
   __buffer?: string
@@ -114,6 +116,19 @@ export class SessionRunnerDaemon {
   #finalized = false
   #recentStderr: string[] = []
   #pendingStdin: string[] = []  // Buffer for messages arriving before handle is ready
+  readonly #spawnController = new AbortController()
+  private get ownerInstanceId(): string | undefined {
+    return this.manifest.attempt.serverInstanceId ?? this.manifest.config.instanceId
+  }
+  private get attemptFence(): SessionAttemptFence {
+    return { attemptId: this.manifest.attempt.attemptId, ownerInstanceId: this.ownerInstanceId }
+  }
+  readonly #onSignal = () => {
+    this.#stopping = true
+    if (!this.#stopReasonExplicit) this.#stopReason = 'process_shutdown'
+    this.#spawnController.abort(new Error('Session runner is stopping'))
+    void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
+  }
 
   constructor(private readonly manifest: RunnerManifest, store: DirectConnectStore) {
     this.#store = store
@@ -155,6 +170,8 @@ export class SessionRunnerDaemon {
   }
 
   async start(): Promise<void> {
+    process.once('SIGTERM', this.#onSignal)
+    process.once('SIGINT', this.#onSignal)
     try {
       await mkdir(this.manifest.attempt.runtimeDir, { recursive: true })
       if (!isNamedPipePath(this.manifest.attempt.attachPath)) {
@@ -175,12 +192,16 @@ export class SessionRunnerDaemon {
         })
       })
       await this.#store.updateAttemptRunner(this.manifest.attempt.attemptId, process.pid)
+      const cohostSessionBinding = this.manifest.session.runtime.type === 'cohost'
+        ? await this.#store.cohostSessions.get(this.manifest.session.sessionId) : undefined
 
       const handle = await withOrganizationResources({
         orgId: this.manifest.session.orgId, userId: this.manifest.session.userId,
         snapshot: this.manifest.session.resources ?? { orgId: this.manifest.session.orgId, resources: [] },
       }, () => this.#backend.spawn({
         sessionId: this.manifest.session.sessionId,
+        signal: this.#spawnController.signal,
+        cohostSessionBinding,
         resumeSessionId: this.manifest.session.resumeFromTranscript
           ? this.manifest.session.transcriptSessionId
           : undefined,
@@ -210,7 +231,21 @@ export class SessionRunnerDaemon {
         mcpSettings: this.manifest.session.mcpSettings,
       }))
 
+      if (this.#spawnController.signal.aborted) {
+        await handle.destroy(true)
+        this.#spawnController.signal.throwIfAborted()
+      }
+
       this.#handle = handle
+      if (handle.cohostSessionBinding) {
+        const isBound = await this.#store.cohostSessions.bind(this.manifest.session.sessionId,
+          this.manifest.attempt.attemptId, handle.cohostSessionBinding, this.ownerInstanceId)
+        if (!isBound) throw new Error('Cohost session binding refused: attempt lost ownership or native history changed')
+        this.#spawnController.signal.throwIfAborted()
+        await removeCohostSessionState(this.manifest.session.cwd).catch(error => {
+          process.stderr.write(`[SessionRunnerDaemon] Could not remove migrated cohost locator: ${String(error)}\n`)
+        })
+      }
       this.manifest.session.runtime.containerName = handle.runtime.containerName
       this.manifest.session.runtime.configDir = handle.runtime.configDir
       if (handle.runtime.containerMode) {
@@ -272,11 +307,14 @@ export class SessionRunnerDaemon {
       }
 
       this.#state = 'running'
+      if (handle.managedProcessId) this.#broadcast(this.#runnerHello())
       await this.#heartbeat('running')
       await this.#store.setSessionLifecycle(
         this.manifest.session.sessionId,
         'active',
         'active',
+        true,
+        this.attemptFence,
       )
       await this.#store.addEvent(
         this.manifest.session.sessionId,
@@ -345,7 +383,7 @@ export class SessionRunnerDaemon {
           exitSignal: signal,
           stopReason: this.#stopping ? this.#stopReason : 'runtime_exit',
           errorText,
-        }, this.manifest.config.instanceId)
+        }, this.ownerInstanceId)
         // Lifecycle marks:
         //   terminate (client-initiated delete)    -> status=terminated, desired=terminated
         //   idle / busy-ceiling / process stop    -> status=ended, desired=ACTIVE
@@ -359,32 +397,13 @@ export class SessionRunnerDaemon {
         //   natural exit code=0 (no stopping)     -> status=ended, desired=ended
         //   non-zero exit (no stopping)           -> status=failed, desired=active
         //     keeps last user intent active so client can retry.
-        const isRecoverableStop =
-          this.#stopReason === 'idle_timeout' ||
-          this.#stopReason === 'idle_busy_timeout' ||
-          this.#stopReason === 'process_shutdown'
-        let nextStatus: 'ended' | 'failed' | 'terminated'
-        let nextDesired: 'active' | 'ended' | 'terminated'
-        if (this.#stopping) {
-          if (isRecoverableStop) {
-            nextStatus = 'ended'
-            nextDesired = 'active'
-          } else {
-            nextStatus = 'terminated'
-            nextDesired = 'terminated'
-          }
-        } else if (code === 0) {
-          nextStatus = 'ended'
-          nextDesired = 'ended'
-        } else {
-          nextStatus = 'failed'
-          nextDesired = 'active'
-        }
+        const { status: nextStatus, desired: nextDesired } = this.#terminalLifecycle(code)
         if (stillOwner) {
           await this.#store.markSessionEnded(
             this.manifest.session.sessionId,
             nextStatus,
             nextDesired,
+            this.attemptFence,
           )
         } else {
           process.stderr.write(
@@ -408,25 +427,19 @@ export class SessionRunnerDaemon {
         void this.shutdown()
       })
 
-      process.once('SIGTERM', () => {
-        this.#stopping = true
-        // Service managers signal the entire process group on restart. A
-        // process stop does not change the user's intent to keep the session.
-        if (!this.#stopReasonExplicit) this.#stopReason = 'process_shutdown'
-        void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
-      })
-      process.once('SIGINT', () => {
-        this.#stopping = true
-        if (!this.#stopReasonExplicit) this.#stopReason = 'process_shutdown'
-        void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
-      })
     } catch (error) {
-      await this.#fail(error, 'startup_failed')
-      throw error
+      let failure = error
+      try { await this.#handle?.destroy(true) }
+      catch (cleanupError) { failure = new AggregateError([error, cleanupError], 'Failed runner startup could not clean up its execution') }
+      await this.#fail(failure, 'startup_failed')
+      throw failure
     }
   }
 
   async shutdown(): Promise<void> {
+    this.#spawnController.abort(new Error('Session runner is shutting down'))
+    process.removeListener('SIGTERM', this.#onSignal)
+    process.removeListener('SIGINT', this.#onSignal)
     clearInterval(this.#heartbeatTimer)
     if (this.#idleTimer) {
       clearTimeout(this.#idleTimer)
@@ -469,17 +482,13 @@ export class SessionRunnerDaemon {
           this.manifest.session.sessionId,
           'active',
           'active',
+          true,
+          this.attemptFence,
         )
       }
       return undefined
     }).catch(() => {})
-    this.#send(socket, {
-      type: 'hello',
-      attemptId: this.manifest.attempt.attemptId,
-      sessionId: this.manifest.session.sessionId,
-      runtimeType: this.manifest.session.runtime.type,
-      state: this.#state,
-    })
+    this.#send(socket, this.#runnerHello())
     this.#applicationHello.replay(message => this.#send(socket, message))
     socket.on('data', chunk => {
       const text = Buffer.from(chunk).toString('utf8')
@@ -500,6 +509,18 @@ export class SessionRunnerDaemon {
       this.#clients.delete(socket)
       this.#armIdleTimer()
     })
+  }
+
+  #runnerHello(): Extract<RunnerServerMessage, { type: 'hello' }> {
+    return {
+      type: 'hello',
+      attemptId: this.manifest.attempt.attemptId,
+      sessionId: this.manifest.session.sessionId,
+      runtimeType: this.manifest.session.runtime.type,
+      state: this.#state,
+      ...(this.#handle?.managedProcessId ? { managedProcessId: this.#handle.managedProcessId } : {}),
+      ...(this.#handle?.cohostSessionBinding ? { cohostSessionBinding: this.#handle.cohostSessionBinding } : {}),
+    }
   }
 
   #handleClientLine(socket: SocketWithBuffer, line: string): void {
@@ -543,13 +564,9 @@ export class SessionRunnerDaemon {
   }
 
   /**
-   * Heartbeat + fencing check. In multi-instance mode (MOSS_INSTANCE_ID
-   * configured → manifest.config.instanceId set) the conditional UPDATE only
-   * lands while this attempt still belongs to THIS owner and is 'running';
-   * false means another instance claimed it (failover) or it was stopped —
-   * exit via the same SIGTERM path the shutdown message uses so the onExit
-   * chain records terminal state. Single-instance mode (no instanceId in the
-   * manifest) keeps the unconditional legacy update and never fences.
+   * The attempt's leaseholder identity fences its heartbeat. A refused update
+   * means ownership changed or execution stopped; cancel pending recovery and
+   * exit through the signal path that records the terminal state.
    */
   async #heartbeat(state: 'running' = 'running'): Promise<void> {
     // A-3: a DB hiccup (e.g. a PG blip) must reject here WITHOUT crashing the
@@ -561,7 +578,7 @@ export class SessionRunnerDaemon {
       ok = await this.#store.touchAttemptHeartbeat(
         this.manifest.attempt.attemptId,
         state,
-        this.manifest.config.instanceId,
+        this.ownerInstanceId,
       )
     } catch (err) {
       this.#heartbeatFailures++
@@ -654,6 +671,7 @@ export class SessionRunnerDaemon {
       clearTimeout(this.#busyCeilingTimer)
       this.#busyCeilingTimer = null
     }
+    if (this.#finalized || this.#spawnController.signal.aborted) return
     if (this.#clients.size > 0) {
       this.#detachedSince = null
       this.#detachedBusySince = null
@@ -676,6 +694,8 @@ export class SessionRunnerDaemon {
           this.manifest.session.sessionId,
           'detached',
           'active',
+          true,
+          this.attemptFence,
         )
       }
       return undefined
@@ -814,12 +834,23 @@ export class SessionRunnerDaemon {
     )
   }
 
+  #terminalLifecycle(code: number | null): { status: 'ended' | 'failed' | 'terminated'; desired: 'active' | 'ended' | 'terminated' } {
+    if (this.#stopping) {
+      const isRecoverable = this.#stopReason === 'idle_timeout' ||
+        this.#stopReason === 'idle_busy_timeout' || this.#stopReason === 'process_shutdown'
+      return isRecoverable ? { status: 'ended', desired: 'active' } : { status: 'terminated', desired: 'terminated' }
+    }
+    return code === 0 ? { status: 'ended', desired: 'ended' } : { status: 'failed', desired: 'active' }
+  }
+
   async #fail(error: unknown, stopReason: string): Promise<void> {
     if (this.#finalized) {
       return
     }
     this.#finalized = true
-    this.#state = 'failed'
+    const lifecycle = this.#terminalLifecycle(null)
+    this.#state = lifecycle.status === 'failed' ? 'failed' : 'stopped'
+    if (this.#stopping) stopReason = this.#stopReason
     const message = error instanceof Error ? error.stack || error.message : String(error)
     this.#rememberStderr(message)
     await appendFile(this.manifest.attempt.stderrLogPath, `${message}\n`, 'utf8').catch(() => {})
@@ -840,16 +871,17 @@ export class SessionRunnerDaemon {
     let stillOwner = true
     try {
       stillOwner = await this.#store.markAttemptStopped(this.manifest.attempt.attemptId, {
-        runtimeState: 'failed',
+        runtimeState: this.#state,
         stopReason,
         errorText: message,
-      }, this.manifest.config.instanceId)
+      }, this.ownerInstanceId)
     } catch (dbErr) {
       process.stderr.write(`[SessionRunnerDaemon] #fail markAttemptStopped failed: ${dbErr}\n`)
     }
     if (stillOwner) {
       try {
-        await this.#store.markSessionEnded(this.manifest.session.sessionId, 'failed', 'active')
+        await this.#store.markSessionEnded(this.manifest.session.sessionId, lifecycle.status, lifecycle.desired,
+          this.attemptFence)
       } catch (dbErr) {
         process.stderr.write(`[SessionRunnerDaemon] #fail markSessionEnded failed: ${dbErr}\n`)
       }
@@ -869,7 +901,7 @@ export class SessionRunnerDaemon {
       process.stderr.write(`[SessionRunnerDaemon] #fail addEvent failed: ${dbErr}\n`)
     }
     await writeStatus(this.manifest.attempt.statusPath, {
-      state: 'failed',
+      state: this.#state,
       pid: process.pid,
       attemptId: this.manifest.attempt.attemptId,
       error: message,

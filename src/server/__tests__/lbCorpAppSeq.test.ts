@@ -7,7 +7,7 @@
 // is structurally impossible here, and the async driver's synchronous SQLite
 // path does not interleave, so this file does NOT and CANNOT detect a real
 // concurrency race. The genuine race (PostgreSQL READ COMMITTED, two pools
-// behind an LB) and its unique-index + 23505-retry resolution are covered in
+// behind an LB) and its app-scoped transaction lock are covered in
 // pgBackend.test.ts. This file only anchors single-writer correctness.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";

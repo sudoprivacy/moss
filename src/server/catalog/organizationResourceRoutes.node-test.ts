@@ -7,6 +7,7 @@ import { once } from 'node:events'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
 import JSZip from 'jszip'
+import { waitForFixtureReady } from '../testing/fixtureReady.js'
 
 type Result = { status: number; data: any }
 void test('real HTTP: A/B installs, private resources and super-admin organization switching', { timeout: 90_000 }, async t => {
@@ -60,17 +61,11 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
   child.stdout.on('data', chunk => { output += chunk })
   child.stderr.on('data', chunk => { errors += chunk })
   try {
-    const port = await new Promise<number>((resolvePort, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Fixture timeout: ${errors}`)), 20_000)
-      child.stdout.on('data', () => {
-        const match = output.match(/TENANT_TEST_READY:(\d+)/)
-        if (match) { clearTimeout(timer); resolvePort(Number(match[1])) }
-      })
-      child.on('exit', code => { clearTimeout(timer); reject(new Error(`Fixture exit ${code}: ${errors}`)) })
-    })
+    const port = await waitForFixtureReady(child, /TENANT_TEST_READY:(\d+)/,
+      () => ({ output, errors }), t.signal)
     const base = `http://127.0.0.1:${port}`
     async function request(method: string, path: string, token?: string, body?: unknown): Promise<Result> {
-      const response = await fetch(base + path, { method, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) })
+      const response = await fetch(base + path, { method, signal: t.signal, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) })
       return { status: response.status, data: response.headers.get('content-type')?.includes('application/zip') ? Buffer.from(await response.arrayBuffer()) : await response.json() }
     }
     async function ok(method: string, path: string, token?: string, body?: unknown) {
