@@ -83,6 +83,8 @@ jobs:
             --moduleResolution nodenext --target es2022 --skipLibCheck \
             scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts \
             scripts/e2e/cohost-session-recovery.ts \
+            scripts/e2e/cohost-real-model-workflow.ts scripts/e2e/cohost-model-bootstrap.ts \
+            scripts/e2e/server-session-live.ts \
             scripts/e2e/embedded-nexus-live.ts scripts/e2e/broker-upgrade-live.ts scripts/e2e/external-broker-live.ts
 
       # Nothing in this repo has ever type-checked: bun executes TypeScript

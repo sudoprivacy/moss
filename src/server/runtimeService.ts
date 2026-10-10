@@ -660,11 +660,21 @@ export class RuntimeService {
     })
   }
 
+  private assertCohostDeploymentAccess(runtimeType: string, userId: string | undefined): void {
+    const configured = process.env.MOSS_COHOST_ALLOWED_USERS
+    if (runtimeType !== 'cohost' || configured === undefined) return
+    const allowed = new Set(configured.split(',').map(value => value.trim()).filter(Boolean))
+    if (!userId || !allowed.has(userId)) {
+      throw new ResourceAccessError(403, '此运行环境暂未向当前账号开放')
+    }
+  }
+
   private async createSessionInResourceScope(input: SessionCreateInput): Promise<SessionRecord> {
     // Graceful drain: reject before writing any session row (avoids a stranded
     // status='failed' half-created record that spawnAttempt-level rejection
     // would leave behind).
     if (this.draining) throw new ServerDrainingError()
+    this.assertCohostDeploymentAccess(input.runtime?.type || this.options.config.defaultRuntime, input.userId)
     const active = await this.store.listSessions({
       orgId: input.orgId,
       activeOnly: true,
@@ -1692,6 +1702,7 @@ export class RuntimeService {
     const scope = await this.resourceScope(session)
     return withOrganizationResources(scope, async () => {
       await this.assertWithinTokenQuota(session.userId, session.orgId)
+      this.assertCohostDeploymentAccess(session.runtime.type, session.userId)
       const effectiveAssistant = options.assistantName ?? session.assistantName
       if (effectiveAssistant) {
         const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')

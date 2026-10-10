@@ -800,6 +800,7 @@ async function main() {
     "host session detail route",
   );
   await capture("13-host-session-chat", [
+    "运行时",
     "对话历史",
     hostSession.sessionId,
     "Reply with this exact token and no additional text",
@@ -819,6 +820,7 @@ async function main() {
     "Docker session detail route",
   );
   await capture("14-docker-session-chat", [
+    "运行时",
     "对话历史",
     dockerSession.sessionId,
     "Reply with this exact token and no additional text",
