@@ -26,4 +26,6 @@ fi
 grep -Fq "nexusd-cohost v${TAG#nexusd-cohost-v} " "$WORK/binary-version.txt"
 grep -Fq 'plugin-abi 7' "$WORK/binary-version.txt"
 bun build --target=node scripts/e2e/cohost-session-recovery.ts --outfile "$WORK/recovery.mjs"
+bun build --target=node scripts/e2e/cohost-model-bootstrap.ts --outfile "$WORK/model-bootstrap.mjs"
+export MOSS_COHOST_MODEL_BOOTSTRAP="$WORK/model-bootstrap.mjs"
 node "$WORK/recovery.mjs"

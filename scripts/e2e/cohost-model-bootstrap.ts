@@ -22,6 +22,7 @@ const rpc = (method: string, params: unknown): Promise<any> => new Promise((reso
   node[method](params, new grpc.Metadata(), { deadline: Date.now() + 25_000 }, (error: Error | null, value: any) => error ? reject(error) : resolve(value))
 })
 try {
+  await new Promise<void>((resolve, reject) => vfs.waitForReady(Date.now() + 60_000, (error: Error | undefined) => error ? reject(error) : resolve()))
   if (frontDoor && !existsSync(join(frontDoor, 'agent-key.pem'))) {
     const subject = `moss-front-door-${randomUUID()}`
     const identity = await rpc('mintAgent', { subject_id: subject, display_name: subject })
