@@ -27,7 +27,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import {
   freePort, login, mintNexusUserKey, mossApi, nexusApi, sleep, startMoss, startNexus,
-  zonesE2eEnvReady,
+  stopModelDiscoveryStub, zonesE2eEnvReady,
   type MossProcess, type NexusProcess,
 } from './p0Harness.js'
 import { startNexusFaultProxy, type NexusFaultProxy } from './nexusFaultProxy.js'
@@ -123,6 +123,8 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
     if (moss) await moss.stop()
     if (nexusProxy) await nexusProxy.stop()
     if (nexus) await nexus.stop()
+    // stub 的 keep-alive 句柄不关会挂住 node:test 进程退出
+    await stopModelDiscoveryStub()
   })
 
   it('scenario 1: creating an org leaves a pending default binding while nexus is offline', async () => {

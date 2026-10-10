@@ -38,14 +38,15 @@ setGlobalDispatcher(new Agent({
 export const NEXUS_REPO = process.env.MOSS_E2E_NEXUS_REPO ?? 'C:/work/sudo_workspace_v3/nexus'
 export const MOSS_REPO = process.env.MOSS_E2E_MOSS_REPO ?? 'C:/work/sudo_workspace_v3/moss'
 
-let modelDiscoveryStub: Promise<number> | null = null
+let modelDiscoveryStub: Promise<{ port: number; close: () => void }> | null = null
 
 /** 静态模型目录 stub：任意 /models 返回默认模型清单（平台默认
  * claude-sonnet-4-6 与 runtimeService 的 env-fallback
  * gemini-3-flash-preview 都要覆盖——session 的默认模型链两值都可能出现）。
- * 进程级单例：moss 多次重启（场景 3/8/A-2）期间端口保持不变。 */
-function ensureModelDiscoveryStub(): Promise<number> {
-  modelDiscoveryStub ??= new Promise<number>((resolve, reject) => {
+ * 进程级单例：moss 多次重启（场景 3/8/A-2）期间端口保持不变；
+ * closeAll 由测试 after() 调用——keep-alive 句柄不关会挂住 node:test 进程。 */
+function ensureModelDiscoveryStub(): Promise<{ port: number; close: () => void }> {
+  modelDiscoveryStub ??= new Promise((resolve, reject) => {
     void (async () => {
       const port = await freePort()
       const server = createHttpServer((_req, res) => {
@@ -55,10 +56,16 @@ function ensureModelDiscoveryStub(): Promise<number> {
         }))
       })
       server.on('error', reject)
-      server.listen(port, '127.0.0.1', () => resolve(port))
+      server.listen(port, '127.0.0.1', () => resolve({ port, close: () => server.close() }))
     })()
   })
   return modelDiscoveryStub
+}
+
+export async function stopModelDiscoveryStub(): Promise<void> {
+  const stub = modelDiscoveryStub
+  modelDiscoveryStub = null
+  if (stub) (await stub).close()
 }
 
 /**
@@ -320,7 +327,7 @@ export async function startMoss(
   // → session 创建 503。E2E 离线环境预置平台 settings（USERPROFILE/HOME
   // 已重定向到 tmp/home，settings 路径即 tmp/home/.moss/settings.json），
   // 把 provider 指向本进程的静态 stub。幂等：每次 startMoss 重写同内容。
-  const stubPort = await ensureModelDiscoveryStub()
+  const stubPort = (await ensureModelDiscoveryStub()).port
   mkdirSync(join(tmp, 'home', '.moss'), { recursive: true })
   writeFileSync(join(tmp, 'home', '.moss', 'settings.json'), JSON.stringify({
     modelProviders: [{
