@@ -452,6 +452,7 @@ export class AuthService {
       this.identityRepository,
       this.unifiedIdentity,
       this.organizationBilling,
+      this.clientPolicies,
     )
   }
 
@@ -1842,6 +1843,7 @@ export class AuthService {
     if (this.organizationBilling) {
       const created = await this.unifiedIdentity.createOrganization({ ...input, code: input.code ?? undefined, modelBilling: input.modelBilling ?? { initialAmountUsd: '0.00', defaultMemberLimitUsd: null } },
         onlineCommandContext(input.idempotencyKey ?? `organization:${randomUUID()}`))
+      await this.ensureOrganizationInheritsLoginMethod(created.organizationId)
       // Identity creation succeeds independently of external provisioning; its durable status is visible in the model account page.
       await this.organizationBilling.retryOrganization(created.organizationId, input.name).catch(() => {})
       const org = (await this.db.getOrganization(created.organizationId))!
@@ -1873,12 +1875,20 @@ export class AuthService {
       await this.identityRepository.allocateNumericAlias('enterprise', id, id)
       await this.identityRepository.ensureWallet('organization', id)
     })
+    await this.ensureOrganizationInheritsLoginMethod(id)
     return {
       organization: {
         ...(await this.projectOrganization({ id, name, extOrgId, createdAt }))!,
         userCount: 0,
         departmentCount: 0,
       },
+    }
+  }
+
+  private async ensureOrganizationInheritsLoginMethod(orgId: string): Promise<void> {
+    const policy = await this.clientPolicies.getOrganization(orgId)
+    if (policy.loginMethod === undefined && policy.loginMethodInherited === undefined) {
+      await this.clientPolicies.putOrganization(orgId, { loginMethodInherited: true }, 'system')
     }
   }
 

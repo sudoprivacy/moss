@@ -370,7 +370,10 @@ void describe('Sudowork 系统配置统一服务', () => {
       const roundTripped = (await service.getAdminConfig(scopedRoot)) as Record<string, unknown>
       await service.update(scopedRoot, { ...roundTripped, inherit_login_method: true, scode_auto_model: 'org-b-model' })
 
-      assert.deepEqual((await policies.getOrganization(orgB.organizationId)), { scodeAutoModel: 'org-b-model' })
+      assert.deepEqual((await policies.getOrganization(orgB.organizationId)), {
+        scodeAutoModel: 'org-b-model',
+        loginMethodInherited: true,
+      })
     } finally {
       db.close()
     }
@@ -442,7 +445,7 @@ void describe('Sudowork 系统配置统一服务', () => {
     }
   })
 
-  void test('主动跟随默认时恢复组织 profile 的 CAS，显式选择仍保留 override', async () => {
+  void test('主动跟随默认时忽略旧组织 profile，显式选择仍保留 override', async () => {
     const { db, identities, org, service, policies } = await setup()
     try {
       const profile = (await identities.getOrganizationProfile(org.organizationId))
@@ -467,7 +470,8 @@ void describe('Sudowork 系统配置统一服务', () => {
       assert.equal((await service.getLoginMethod(org.organizationId)), 'password')
       await service.update(actor, { inherit_login_method: true })
       assert.equal((await policies.getOrganization(org.organizationId)).loginMethod, undefined)
-      assert.equal((await service.getLoginMethod(org.organizationId)), 'cas')
+      assert.equal((await policies.getOrganization(org.organizationId)).loginMethodInherited, true)
+      assert.equal((await service.getLoginMethod(org.organizationId)), 'password')
       assert.deepEqual((await policies.getPlatform()), {})
 
       await policies.putPlatform({ loginMethod: 1 }, 'root')

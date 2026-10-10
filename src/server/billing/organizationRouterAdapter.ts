@@ -152,7 +152,11 @@ export class OrganizationRouterAdapter implements OrganizationRouterPort {
     const payload = await this.request('/api/user/token/status', 'PUT', {
       id: tokenId, status: status === 'enabled' ? 'enable' : 'disabled', comment: `Moss member status ${reference}`,
     })
-    return this.validateToken(payload.data, userId, tokenId)
+    const token = this.validateToken(payload.data, userId, tokenId)
+    if (token.admin_status !== status) {
+      throw new RouterRequestError('Router Key status does not match the requested state', 'unknown')
+    }
+    return token
   }
   async adjustTokenQuota(userId: number, tokenId: number, delta: number, reference: string): Promise<RouterToken> {
     const token = await this.getToken(userId, tokenId)

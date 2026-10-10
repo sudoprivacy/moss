@@ -8,6 +8,7 @@ import {
   type OrganizationProfile,
 } from './identityRepository.js'
 import { UnifiedIdentityService, type CreateUnifiedUserInput } from './unifiedIdentityService.js'
+import type { ClientPolicyRepository } from '../configuration/clientPolicyRepository.js'
 
 export class IdentityDomainError extends Error {
   constructor(readonly code: string, message: string) {
@@ -39,6 +40,7 @@ export class OrganizationIdentityService {
     private readonly repository: IdentityRepository,
     private readonly unifiedIdentity: UnifiedIdentityService,
     private readonly modelBilling?: { isShared(orgId: string): Promise<boolean>; beforeMemberChange(orgId: string, userId: string, status: string, targetOrgId?: string): Promise<void> },
+    private readonly clientPolicies?: Pick<ClientPolicyRepository, 'getOrganization' | 'putOrganization'>,
   ) {}
 
   createOrganization(input: {
@@ -64,6 +66,16 @@ export class OrganizationIdentityService {
   async createOrganizationAsync(input: Parameters<OrganizationIdentityService['createOrganization']>[0], context: CommandContext, actor?: IdentityActor) {
     if (actor) this.assertSuperAdmin(actor)
     const created = await this.unifiedIdentity.createOrganization(input, context)
+    if (input.loginMethod === undefined && this.clientPolicies) {
+      const policy = await this.clientPolicies.getOrganization(created.organizationId)
+      if (policy.loginMethod === undefined && policy.loginMethodInherited === undefined) {
+        await this.clientPolicies.putOrganization(
+          created.organizationId,
+          { loginMethodInherited: true },
+          actor?.userId ?? 'system',
+        )
+      }
+    }
     const organization = await this.authDb.getOrganization(created.organizationId)
     const profile = await this.repository.getOrganizationProfile(created.organizationId)
     const wallet = await this.repository.getWallet('organization', created.organizationId)

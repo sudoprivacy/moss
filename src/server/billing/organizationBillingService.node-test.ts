@@ -153,6 +153,49 @@ void test('service Key and organization status do not alter member limits; old s
   } finally { await c.db.close() }
 })
 
+void test('failed or mismatched status operations preserve every local enabled state', async () => {
+  let failure: 'none' | 'rejected' | 'unknown' | 'mismatch' = 'none'
+  const c = await setup(0, fetcher => async (input, init) => {
+    const path = new URL(String(input)).pathname
+    const isTokenStatus = path === '/api/user/token/status' && init?.method === 'PUT'
+    const isAccountStatus = path === '/api/user/manage' && init?.method === 'POST'
+    if ((isTokenStatus || isAccountStatus) && failure === 'rejected') {
+      return Response.json({ success: false, error: { code: 'UNSUPPORTED' } }, { status: 404 })
+    }
+    if ((isTokenStatus || isAccountStatus) && failure === 'unknown') {
+      throw new Error('connection failed before confirmation')
+    }
+    const response = await fetcher(input, init)
+    if (isTokenStatus && failure === 'mismatch') {
+      const payload = await response.json() as Record<string, any>
+      return Response.json({ ...payload, data: { ...payload.data, admin_status: 'enabled', status: 'enabled' } })
+    }
+    return response
+  })
+  try {
+    await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '10', defaultMemberLimitUsd: '2' })
+    await c.service.ensureMember('org-a', 'member-a')
+    await c.service.ensureMember('org-a', 'member-b')
+
+    failure = 'rejected'
+    await assert.rejects(c.service.beforeMemberChange('org-a', 'member-b', 'deleted'))
+    assert.equal((await c.service.token('org-a', 'member-b'))?.status, 'ready')
+    await assert.rejects(c.service.setMemberStatus(actor, 'member-a', 'disabled', 'member-rejected'))
+    assert.equal((await c.service.token('org-a', 'member-a'))?.status, 'ready')
+
+    failure = 'unknown'
+    await assert.rejects(c.service.manageService(actor, 'service-unknown', { status: 'disabled' }))
+    assert.equal((await c.service.token('org-a', '', 'service'))?.status, 'ready')
+
+    await assert.rejects(c.service.setAccountStatus(actor, 'disabled', 'account-unknown'))
+    assert.equal((await c.service.account('org-a'))?.status, 'ready')
+
+    failure = 'mismatch'
+    await assert.rejects(c.service.setMemberStatus(actor, 'member-a', 'disabled', 'member-mismatch'))
+    assert.equal((await c.service.token('org-a', 'member-a'))?.status, 'ready')
+  } finally { await c.db.close() }
+})
+
 void test('member logs expose only their token records and filtered totals', async () => {
   const queries: URL[] = []
   const c = await setup(0, fetcher => async (input, init) => {
