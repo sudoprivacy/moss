@@ -22,9 +22,9 @@ import {
   buildScodeMcpSettings,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
-import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
-import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
+import { ownerField } from '../nexus/sessionIdentity.js'
+import { connectSessionRuntime } from '../nexus/sessionConnection.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { NexusAcpTransport } from './nexusAcpTransport.js'
 
@@ -561,20 +561,8 @@ async function startViaNexus(input: {
     throw new Error('Kubernetes sessions require an external Nexus daemon with acp-mailbox/1')
   }
 
-  const asMoss = () =>
-    config.tls
-      ? NexusVfsClient.withMtls(config.endpoint, config.tls)
-      : new NexusVfsClient(config.endpoint)
-
-  // Prove who the session is for instead of stating it. The call that plants
-  // the session is made as a credential minted for this user and carries no
-  // `owner_id`, so nexus reads the owner off the certificate. `null` means
-  // there was nothing to mint with, and then the body still stands — which is
-  // what lets this take effect per credential instead of as a flag day.
-  const identity = await mintSessionIdentity(config.endpoint, config.tls, input.ownerId)
-  const starter = identity ? NexusVfsClient.withMtls(config.endpoint, identity.tls) : asMoss()
-
-  const agent = new ManagedAgentClient(starter, config.authToken)
+  const { identity, client: starter, authToken } = await connectSessionRuntime(config, input.ownerId)
+  const agent = new ManagedAgentClient(starter, authToken)
   let session: Awaited<ReturnType<ManagedAgentClient['startSession']>>
   try {
     session = await agent.startSession({

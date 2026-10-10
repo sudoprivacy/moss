@@ -1,10 +1,10 @@
-import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
+import type { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { posix } from 'node:path'
 import { cohostRepositoryPath } from './cohostSessionState.js'
 import type { WorkspaceFileAccess, WorkspaceRemoteEntry } from './podWorkspace.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { resolveCohostNexusConfig } from '../nexus/nexusEnvConfig.js'
-import { mintSessionIdentity } from '../nexus/sessionIdentity.js'
+import { connectSessionRuntime } from '../nexus/sessionConnection.js'
 import { sessionAgentName } from '../agentIdentity.js'
 import type { RuntimeService } from '../runtimeService.js'
 import type { SessionRecord } from '../types.js'
@@ -96,13 +96,7 @@ export function createCohostWorkspaceAccess(
 }
 
 async function connectCohostWorkspace(ownerId: string): Promise<{ client: NexusVfsClient; authToken: string }> {
-  const config = resolveCohostNexusConfig()
-  const identity = await mintSessionIdentity(config.endpoint, config.tls, ownerId)
-  const tls = identity?.tls ?? config.tls
-  return {
-    client: tls ? NexusVfsClient.withMtls(config.endpoint, tls) : new NexusVfsClient(config.endpoint),
-    authToken: config.authToken,
-  }
+  return connectSessionRuntime(resolveCohostNexusConfig(), ownerId)
 }
 
 async function rejectWorkspaceLinks(client: NexusVfsClient, token: string, root: string, path: string): Promise<void> {

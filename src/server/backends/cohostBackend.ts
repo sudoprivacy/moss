@@ -1,5 +1,3 @@
-import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
-
 import type {
   BackendHandle,
   BackendSpawnOptions,
@@ -12,7 +10,8 @@ import { createAcpBridgeHandle } from './acpBridge.js'
 import { NexusAcpTransport } from './nexusAcpTransport.js'
 import { resolveCohostNexusConfig } from '../nexus/nexusEnvConfig.js'
 import { isUnknownManagedSession, ManagedAgentClient } from '../nexus/managedAgentClient.js'
-import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
+import { ownerField } from '../nexus/sessionIdentity.js'
+import { connectSessionRuntime } from '../nexus/sessionConnection.js'
 import { syncWorkspaceSkills, type WorkspaceSkillLink } from '../../utils/scodeBridge.js'
 import { cohostRepositoryPath, readCohostSessionState } from './cohostSessionState.js'
 import { startCohostExecution } from './cohostRecovery.js'
@@ -61,13 +60,8 @@ export class CohostBackend implements SessionBackend {
     // Keep the recorded repository identity when resuming existing native history.
     const repositoryPath = saved ? saved.repositoryPath ?? options.cwd : expectedRepository
 
-    const identity = await mintSessionIdentity(config.endpoint, config.tls, options.userId)
-    const client = identity
-      ? NexusVfsClient.withMtls(config.endpoint, identity.tls)
-      : config.tls
-        ? NexusVfsClient.withMtls(config.endpoint, config.tls)
-        : new NexusVfsClient(config.endpoint)
-    const agent = new ManagedAgentClient(client, config.authToken)
+    const { identity, client, authToken } = await connectSessionRuntime(config, options.userId)
+    const agent = new ManagedAgentClient(client, authToken)
 
     let session
     let isResume = !!saved
@@ -83,7 +77,7 @@ export class CohostBackend implements SessionBackend {
       session = execution.session
       isResume = execution.isResume
       if (!session.durableSessionId) throw new Error('Cohost daemon did not return a durable session ID')
-      await client.mkdir(repositoryPath, config.authToken, { parents: true, existOk: true })
+      await client.mkdir(repositoryPath, authToken, { parents: true, existOk: true })
       options.signal?.throwIfAborted()
     } catch (error) {
       let failure = error
