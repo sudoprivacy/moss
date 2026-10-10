@@ -419,6 +419,17 @@ async function main() {
   });
   assert(me?.user?.status === "active", "authenticated user is not active");
 
+  if (process.env.MOSS_E2E_EXPECT_COHOST_DENIED === "1") {
+    const before = await request("/api/v1/sessions", { headers: authorization(token) });
+    const denied = await request("/api/v1/sessions", {
+      method: "POST", headers: authorization(token),
+      body: JSON.stringify({ runtime: { type: "cohost" } }),
+    }, 403);
+    assert(denied.startup?.isRetryable === false, "restricted runtime must be a final access denial");
+    const after = await request("/api/v1/sessions", { headers: authorization(token) });
+    assert(JSON.stringify(before) === JSON.stringify(after), "denied cohost creation changed the session list");
+  }
+
   const summaries = [];
   for (const runtime of options.runtimes) {
     let sessionId = "";
