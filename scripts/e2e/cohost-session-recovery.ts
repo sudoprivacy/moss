@@ -7,6 +7,7 @@ import { createServer } from 'node:http'
 import { createServer as reservePort } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 
 import grpc from '@grpc/grpc-js'
 import protoLoader from '@grpc/proto-loader'
@@ -15,6 +16,11 @@ import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { ManagedAgentClient, type StartSessionResult } from '../../src/server/nexus/managedAgentClient.js'
 import { mintSessionIdentity, ownerField } from '../../src/server/nexus/sessionIdentity.js'
 import { connectController } from './cohost-controller-live.js'
+import { startCohostExecution } from '../../src/server/backends/cohostRecovery.js'
+import { SqliteDriver } from '../../src/server/db/driver.js'
+import { CohostSessionRepository } from '../../src/server/runtime/cohostSessionRepository.js'
+import { COHOST_SESSION_SCHEMA } from '../../src/server/storage/cohostSessionSchema.js'
+import { cohostRepositoryPath } from '../../src/server/backends/cohostSessionState.js'
 
 const binary = resolve(process.env.NEXUSD_COHOST_BIN ?? 'bin/cohost/nexusd-cohost')
 const artifacts = process.env.MOSS_COHOST_ARTIFACTS ?? join(tmpdir(), 'moss-cohost-evidence')
@@ -30,6 +36,25 @@ let daemonLog = ''
 let operator: NexusVfsClient | undefined
 let node: any
 let vfs: any
+let bindingStore: CohostSessionRepository | undefined
+let bindingDriver: SqliteDriver | undefined
+const bindingPath = join(work, 'moss-bindings.db')
+
+function openBindings(): CohostSessionRepository {
+  const db = new DatabaseSync(bindingPath)
+  db.exec(`
+    PRAGMA journal_mode=WAL;
+    PRAGMA synchronous=FULL;
+    PRAGMA foreign_keys=ON;
+    CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, user_id TEXT, runtime_type TEXT,
+      current_attempt_id TEXT, deleted_at INTEGER);
+    CREATE TABLE IF NOT EXISTS session_attempts (attempt_id TEXT PRIMARY KEY, server_instance_id TEXT,
+      runtime_state TEXT);
+  `)
+  db.exec(COHOST_SESSION_SCHEMA)
+  bindingDriver = new SqliteDriver(db)
+  return new CohostSessionRepository(bindingDriver)
+}
 
 /** Script only the model; all credential, transport, approval and file operations are real. */
 const provider = createServer(async (request, response) => {
@@ -147,12 +172,12 @@ try {
     daemon.once('error', error => { daemonLog += String(error) })
     await waitFor('founder topology', async () => daemonLog.slice(offset).includes('Static topology applied') ? true : undefined, 60_000)
   }
-  async function stopDaemon() {
+  async function stopDaemon(signal: NodeJS.Signals) {
     const running = daemon!
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { running.kill('SIGKILL'); reject(new Error('Daemon shutdown timed out')) }, 20_000)
       running.once('exit', () => { clearTimeout(timer); resolve() })
-      running.kill('SIGTERM')
+      running.kill(signal)
     })
   }
   async function mountModel() {
@@ -207,53 +232,157 @@ try {
   const a = await consumer(ownerA)
   const b = await consumer(ownerB)
   assert.notEqual(a.identity.subjectId, b.identity.subjectId)
+  const orphanAgent = `orphan-${ownerA}`
+  const orphanRepository = `/agents/${orphanAgent}/workspaces/${randomUUID()}`
+  await operator.mkdir(orphanRepository, '', { parents: true, existOk: true })
+  const orphanInput = { agentId: orphanAgent, model, repos: [{ alias: 'workspace', hostPath: orphanRepository }] }
+  const orphan = await startCohostExecution(a.agent, orphanInput,
+    { ownerId: ownerA, repositoryPath: orphanRepository, controllerId: a.identity.subjectId })
+  const originalReply = await startCohostExecution(a.agent, orphanInput,
+    { ownerId: ownerA, repositoryPath: orphanRepository, controllerId: a.identity.subjectId })
+  assert.equal(originalReply.session.sessionId, orphan.session.sessionId, 'a lost creation reply must not start a second process')
+  const replacement = await consumer(ownerA)
+  const recoveredOrphan = await startCohostExecution(replacement.agent, orphanInput,
+    { ownerId: ownerA, repositoryPath: orphanRepository, controllerId: replacement.identity.subjectId })
+  assert.equal(recoveredOrphan.isResume, true, 'a replacement controller must recover the owned orphan')
+  assert.equal(recoveredOrphan.session.durableSessionId, orphan.session.durableSessionId)
+  assert.notEqual(recoveredOrphan.session.sessionId, orphan.session.sessionId)
+  const orphanController = connectController({ agent: replacement.agent, ...recoveredOrphan.session }, new Set())
+  try {
+    await orphanController.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
+    await orphanController.rpc('session/load', { sessionId: recoveredOrphan.session.durableSessionId, cwd: '/', mcpServers: [] })
+  } finally {
+    await replacement.agent.cancel(recoveredOrphan.session.sessionId)
+    await orphanController.close()
+  }
   const proofs: any[] = []
+  bindingStore = openBindings()
+  const memoryMarkers = new Map<string, string>()
   for (const [owner, current] of [[ownerA, a], [ownerB, b]] as const) {
     const other = current === a ? b : a
     const agentId = `agent-${owner}`
+    const mossSessionId = randomUUID()
+    const repositoryPath = cohostRepositoryPath(agentId, mossSessionId)
+    await operator.mkdir(repositoryPath, '', { parents: true, existOk: true })
+    const attemptId = randomUUID()
+    await bindingDriver!.run('INSERT INTO sessions (session_id, user_id, runtime_type, current_attempt_id) VALUES (?, ?, ?, ?)',
+      [mossSessionId, owner, 'cohost', attemptId])
+    await bindingDriver!.run('INSERT INTO session_attempts (attempt_id, server_instance_id, runtime_state) VALUES (?, ?, ?)',
+      [attemptId, 'moss-owner', 'running'])
     const start = (resumeSessionId?: string) => current.agent.startSession({ agentId, model, resumeSessionId,
+      repos: [{ hostPath: repositoryPath, alias: 'workspace' }],
       ...ownerField(current.identity, owner) })
     const first = await start()
     assert(first.durableSessionId)
     assert.notEqual(first.sessionId, first.durableSessionId)
     const sid = first.durableSessionId
+    assert.equal(await bindingStore.bind(mossSessionId, attemptId,
+      { ownerId: owner, agentId, durableSessionId: sid, repositoryPath }, 'moss-owner'), true)
     const root = `/agents/${agentId}/recovery-${randomUUID()}`
     const output = `${root}/subtotal.json`
     const final = `${root}/total.json`
     const order = { code: `ORDER_${randomUUID()}`, subtotal: 200 + Math.floor(Math.random() * 100), output }
+    const memoryPath = `/agents/${agentId}/memory/MEMORY.md`
+    const memoryMarker = `NATIVE_AGENT_MEMORY_${randomUUID()}`
+    memoryMarkers.set(owner, memoryMarker)
+    const memory = `# Customer preferences\n- Shipping preference: ${memoryMarker}\n`
+    await operator.mkdir(`/agents/${agentId}/memory`, '', { parents: true, existOk: true })
+    await operator.write(memoryPath, Buffer.from(memory), '')
+    const shutdownSignal = current === b ? 'SIGKILL' : 'SIGTERM'
     const allowed = new Set([output, final])
-    let controller = connectController({ agent: current.agent, sessionEndpoint: first.sessionEndpoint }, allowed)
+    let controller = connectController({ agent: current.agent, sessionEndpoint: first.sessionEndpoint, sessionId: first.sessionId }, allowed)
     let active: StartSessionResult = first
     try {
       await controller.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
       assert.equal((await controller.rpc('session/new', { cwd: '/', mcpServers: [] })).sessionId, sid)
       await controller.rpc('session/setPermissionMode', { sessionId: sid, permissionMode: 'prompt' })
+      const initialRequestStart = requests.length
       assert.equal((await controller.rpc('session/prompt', { sessionId: sid,
         prompt: [{ type: 'text', text: `MOSS_RECOVERY_ORDER ${JSON.stringify(order)}\nWrite the subtotal to the named file.` }] })).stopReason, 'end_turn')
       assert.deepEqual(JSON.parse((await operator.read(output, '')).toString()), { code: order.code, subtotal: order.subtotal })
+      assert(requests.slice(initialRequestStart).every(request => JSON.stringify(request.system).includes(memoryMarker)),
+        'the real model system prompt must load this agent memory')
+      for (const [otherOwner, marker] of memoryMarkers) {
+        if (otherOwner !== owner) assert(requests.slice(initialRequestStart).every(request => !JSON.stringify(request.system).includes(marker)),
+          'another owner agent memory must not reach this model')
+      }
       controller.assertHealthy()
       assert(controller.approvals > 0, 'real write must reach the Moss permission controller')
       const before = await readSession(sid)
       assert.equal(before.filter(m => m.role === 'user').length, 1)
+      if (owner === ownerA) {
+        for (const isSameAgent of [true, false]) {
+          const peer = await consumer(owner)
+          const peerAgent = isSameAgent ? agentId : `sibling-${agentId}`
+          const peerSession = await peer.agent.startSession({ agentId: peerAgent, model, ...ownerField(peer.identity, owner) })
+          assert.notEqual(peerSession.durableSessionId, sid)
+          const peerOutput = `/agents/${peerAgent}/peer-${randomUUID()}.json`
+          const peerOrder = { code: `PEER_${randomUUID()}`, subtotal: 421, output: peerOutput }
+          const peerController = connectController({ agent: peer.agent, ...peerSession }, new Set([peerOutput]))
+          try {
+            await peerController.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
+            assert.equal((await peerController.rpc('session/new', { cwd: '/', mcpServers: [] })).sessionId, peerSession.durableSessionId)
+            await peerController.rpc('session/setPermissionMode', { sessionId: peerSession.durableSessionId, permissionMode: 'prompt' })
+            const peerStart = requests.length
+            assert.equal((await peerController.rpc('session/prompt', { sessionId: peerSession.durableSessionId,
+              prompt: [{ type: 'text', text: `MOSS_RECOVERY_ORDER ${JSON.stringify(peerOrder)}\nWrite the subtotal to the named file.` }] })).stopReason, 'end_turn')
+            assert.deepEqual(JSON.parse((await operator.read(peerOutput, '')).toString()), { code: peerOrder.code, subtotal: peerOrder.subtotal })
+            peerController.assertHealthy()
+            assert(peerController.approvals > 0)
+            assert(requests.slice(peerStart).every(request => JSON.stringify(request.system).includes(memoryMarker) === isSameAgent),
+              'same-owner sessions share memory only when they belong to the same agent')
+            assert(requests.slice(peerStart).every(request => !JSON.stringify(request.messages).includes(order.code)),
+              'a new session must not inherit another session transcript')
+            assert.deepEqual(await readSession(sid), before, 'peer execution must not modify the original session')
+          } finally { await peer.agent.cancel(peerSession.sessionId); await peerController.close() }
+        }
+      }
       await assert.rejects(start(sid), /still running/, 'a live transcript must reject a second writer')
-      await current.agent.cancel(first.sessionId)
-      await controller.close()
-      await assert.rejects(current.client.call('managed_agent.get_session_v1',
-        JSON.stringify({ session_id: first.sessionId }), ''), /unknown session_id/,
-      'cancel must remove the old managed process')
-      await assert.rejects(other.agent.startSession({ agentId, model, resumeSessionId: sid,
-        ...ownerField(other.identity, current === a ? ownerB : ownerA) }), /ownership|bindings/, 'another owner must not restore this transcript')
-      await stopDaemon()
+      if (shutdownSignal === 'SIGTERM') {
+        await current.agent.cancel(first.sessionId)
+        await controller.close()
+        await assert.rejects(current.client.call('managed_agent.get_session_v1',
+          JSON.stringify({ session_id: first.sessionId }), ''), /unknown session_id/,
+        'cancel must remove the old managed process')
+      }
+      await stopDaemon(shutdownSignal)
       await bootDaemon()
       await mountModel()
-      active = await waitFor('released writer lease', async () => {
-        try { return await start(sid) }
-        catch (error) { if (/still running/.test(String(error))) return undefined; throw error }
-      })
+      if (shutdownSignal === 'SIGKILL') {
+        let closeTimer: ReturnType<typeof setTimeout> | undefined
+        try {
+          const reason = await Promise.race([controller.closed, new Promise<never>((_resolve, reject) => {
+            closeTimer = setTimeout(() => reject(new Error('Moss controller retained an obsolete execution')), 45_000)
+          })])
+          assert.match(reason?.message ?? '', /execution disappeared/, 'Moss must end the old attachment after a native crash')
+        } finally { clearTimeout(closeTimer) }
+        await controller.close()
+        await assert.rejects(current.client.call('managed_agent.get_session_v1',
+          JSON.stringify({ session_id: first.sessionId }), ''), /unknown session_id/,
+        'daemon recovery must not restore an obsolete live process')
+      }
+      assert.deepEqual(JSON.parse((await operator.read(output, '')).toString()), { code: order.code, subtotal: order.subtotal })
+      assert.equal((await operator.read(memoryPath, '')).toString(), memory, 'agent memory survives daemon recovery')
+      await bindingDriver!.close()
+      bindingStore = openBindings()
+      const binding = await bindingStore.get(mossSessionId)
+      assert.deepEqual(binding, { ownerId: owner, agentId, durableSessionId: sid, repositoryPath }, 'another Moss process can recover without a host locator')
+      const recoveryStarted = Date.now()
+      const recovered = await startCohostExecution(current.agent,
+        { agentId, model, resumeSessionId: binding!.durableSessionId,
+          repos: [{ hostPath: binding!.repositoryPath, alias: 'workspace' }], ...ownerField(current.identity, owner) },
+        { ownerId: owner, repositoryPath: binding!.repositoryPath, controllerId: current.identity.subjectId })
+      active = recovered.session
+      const recoveryMs = Date.now() - recoveryStarted
+      assert.equal(recovered.isResume, true)
       assert.notEqual(active.sessionId, first.sessionId)
       assert.equal(active.durableSessionId, sid)
+      assert.equal(await bindingStore.bind(mossSessionId, attemptId,
+        { ownerId: owner, agentId, durableSessionId: active.durableSessionId!, repositoryPath }, 'moss-owner'), true)
+      const durableColumns = await bindingDriver!.all<{ name: string }>('PRAGMA table_info(cohost_sessions)')
+      assert.deepEqual(durableColumns.map(column => column.name), ['session_id', 'owner_user_id', 'native_agent_id', 'durable_session_id', 'repository_path'])
       assert.notEqual(active.sessionEndpoint.channel_id, first.sessionEndpoint.channel_id)
-      controller = connectController({ agent: current.agent, sessionEndpoint: active.sessionEndpoint }, allowed)
+      controller = connectController({ agent: current.agent, sessionEndpoint: active.sessionEndpoint, sessionId: active.sessionId }, allowed)
       await controller.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
       await controller.rpc('session/load', { sessionId: sid, cwd: '/', mcpServers: [] })
       assert.deepEqual(await readSession(sid), before, 'loading must preserve exact previous messages')
@@ -265,10 +394,27 @@ try {
       controller.assertHealthy()
       assert(controller.approvals > 0)
       assert(requests.slice(requestStart).every(request => JSON.stringify(request.messages).includes(order.code)), 'restored model requests must include the original order')
+      assert(requests.slice(requestStart).every(request => JSON.stringify(request.system).includes(memoryMarker)),
+        'agent memory must be loaded again after native recovery')
       const after = await readSession(sid)
       assert.deepEqual(after.slice(0, before.length), before, 'previous messages must remain an exact prefix')
       assert.equal(after.filter(m => m.role === 'user').length, 2, 'resume must add exactly one user turn')
-      proofs.push({ owner, durable: sid, oldPid: first.sessionId, newPid: active.sessionId, code: order.code })
+      await current.agent.cancel(active.sessionId)
+      await controller.close()
+      await waitFor('owner validation after writer lease release', async () => {
+        try {
+          await other.agent.startSession({ agentId, model, resumeSessionId: sid,
+            ...ownerField(other.identity, current === a ? ownerB : ownerA) })
+          assert.fail('another owner must not restore this transcript')
+        } catch (error) {
+          if (/still running/.test(String(error))) return undefined
+          assert.match(String(error), /ownership|bindings/)
+          return true
+        }
+      }, 90_000)
+      assert.deepEqual(await readSession(sid), after, 'a refused owner must not alter native history')
+      proofs.push({ owner, durable: sid, oldPid: first.sessionId, newPid: active.sessionId, code: order.code,
+        shutdownSignal, isActiveDaemonCrash: shutdownSignal === 'SIGKILL', memoryPath, memoryMarker, recoveryMs })
     } finally {
       await controller.close()
       try { await current.agent.cancel(active.sessionId) }
@@ -278,13 +424,21 @@ try {
   assert.notEqual(proofs[0].durable, proofs[1].durable)
   writeFileSync(join(work, 'acceptance.json'), JSON.stringify({ binary, checks: [
     'mTLS owner credentials', 'real controller approval', 'native transcript stream', 'second writer refusal',
-    'wrong owner refusal', 'process restart with model startup hook', 'same durable ID and new pid/channel', 'exact prior history', 'dependent file write',
+    'wrong owner refusal', 'daemon restart with model startup hook', 'active daemon crash', 'persisted files and agent memory',
+    'same durable ID and new pid/channel', 'exact prior history', 'dependent file write',
+    'lost creation reply without duplicate execution', 'replacement controller discovers and resumes owned orphan',
+    'obsolete execution detected on reconnect',
+    'native agent memory injected before and after restart', 'other owner agent memory absent from system prompt',
+    'same agent concurrent sessions share native memory', 'same owner different agents have separate native memory',
+    'concurrent session transcripts remain independent',
+    'Moss process restart restores shared native binding without host locator', 'durable binding has no PID or channel',
   ], proofs, modelRequests: requests.length }, null, 2))
-  console.log(`PASS: two Moss owners stop and resume exact durable conversations; evidence=${work}`)
+  console.log(`PASS: two Moss owners recover exact conversations, files and memory after daemon stop/crash; evidence=${work}`)
 } catch (error) {
   console.error(`Recovery acceptance failed; evidence=${work}`, error)
   throw error
 } finally {
+  await bindingDriver?.close()
   writeFileSync(join(work, 'daemon.log'), daemonLog)
   for (const client of clients) client.close()
   operator?.close()

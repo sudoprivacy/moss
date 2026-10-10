@@ -6,7 +6,7 @@
 // Covers the items the sqlite-only dev loop cannot prove: the full pg_schema
 // DDL, IDENTITY + RETURNING id, BIGINT typeParser normalisation, the
 // json_array_elements co-owner branch, LIKE-on-text, the corp-app seq unique
-// index + 23505 retry under concurrent inserts, claimAttempt CAS / fencing on
+// index + app-scoped serialization under concurrent inserts, claimAttempt CAS / fencing on
 // PG, tryRunExclusive advisory-lock mutual exclusion across two pools, and
 // the AuthCenterDb shared-store (postgres) construction form.
 import { describe, it, before, after } from "node:test";
@@ -51,6 +51,32 @@ import { createEnterpriseApi } from "../api/enterprise.js";
 import { withOrganizationResources, saveOrganizationInstallation, listOrganizationResources, updateOrganizationResource, requireOrganizationResource, removeOrganizationResource } from '../catalog/organizationResources.js';
 
 const PG_URL = process.env.MOSS_PG_TEST_URL ?? "";
+
+/** Observe actual lock readiness and release the holder even when an assertion fails. */
+async function withHeldExclusive<T>(
+  acquire: (body: () => Promise<T>) => Promise<T | null>,
+  prepare: () => Promise<T>,
+  observe: () => Promise<void>,
+): Promise<T | null> {
+  let release!: () => void;
+  let markReady!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const ready = new Promise<void>(resolve => { markReady = resolve; });
+  const holder = acquire(async () => {
+    const value = await prepare();
+    markReady();
+    await gate;
+    return value;
+  });
+  try {
+    await Promise.race([ready, holder.then(() => { throw new Error('Lock holder exited before test readiness'); })]);
+    await observe();
+  } finally {
+    release();
+    await holder;
+  }
+  return holder;
+}
 
 describe('organization installations on PG', { skip: !PG_URL }, () => {
   it('concurrent installs are unique, config merges are serialized and organizations stay independent', async () => {
@@ -272,7 +298,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -847,7 +873,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     });
   });
 
-  describe("corp_app_inbound seq race (unique index + 23505 retry)", () => {
+  describe("corp_app_inbound sequence serialization", () => {
     it("concurrent inserts from two pools stay unique and monotonic", async () => {
       await fix.driver.run(
         `INSERT INTO corp_apps (id, org_id, type, name, app_key, config_json, created_by, created_at, updated_at)
@@ -865,24 +891,30 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           org_id: "o1",
           text: `m${n}-${i}`,
         });
-        // Fire both sides concurrently; the single-statement MAX+1 races under
-        // READ COMMITTED, the unique index rejects the loser, and the retry
-        // loop re-runs it against the winner's committed row.
+        // The database lock covers both pools; every callback must be retained.
         const batches = await Promise.all(
           [fix.store, store2].map((s, i) =>
             Promise.all(
-              Array.from({ length: 8 }, (_, n) => s.appendCorpAppInbound(msg(n, i))),
+              Array.from({ length: 32 }, (_, n) => s.appendCorpAppInbound(msg(n, i))),
             ),
           ),
         );
         const all = batches.flat();
-        assert.equal(all.length, 16);
-        assert.equal(new Set(all).size, 16, "no duplicate seq across pools");
+        assert.equal(all.length, 64);
+        assert.equal(new Set(all).size, 64, "no duplicate seq across pools");
         assert.deepEqual(
           [...all].sort((x, y) => x - y),
-          Array.from({ length: 16 }, (_, i) => i + 1),
-          "seq covers 1..16 with no gaps",
+          Array.from({ length: 64 }, (_, i) => i + 1),
+          "seq covers 1..64 with no gaps",
         );
+        const rows = await fix.store.listCorpAppInbound('app-seq', 0, 500);
+        assert.equal(rows.length, 64);
+        assert.equal(new Set(rows.map(row => row.text)).size, 64, 'no callback was dropped');
+        await assert.rejects(fix.driver.transaction(async () => {
+          assert.equal(await fix.store.appendCorpAppInbound(msg(32, 0)), 65);
+          throw new Error('rollback this message');
+        }), /rollback this message/);
+        assert.equal(await store2.appendCorpAppInbound(msg(32, 1)), 65, 'rollback consumes no durable sequence');
       } finally {
         await pool2.end();
       }
@@ -914,20 +946,14 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
       const pool2 = new Pool({ connectionString: url, max: 2 });
       const driver2 = new PgDriver(pool2 as unknown as PgPoolLike);
       try {
-        let release!: () => void;
-        const gate = new Promise<void>(resolve => { release = resolve });
-        const holder = fix.driver.tryRunExclusive("lock-test", async () => {
-          await gate;
-          return "held";
-        });
-        // Give the holder's transaction time to actually take the lock.
-        await new Promise(r => setTimeout(r, 200));
-        const loser = await driver2.tryRunExclusive("lock-test", async () => "should-not-run");
-        assert.equal(loser, null, "contending run must be rejected, not queued");
-        const outsider = await driver2.tryRunExclusive("lock-test-other", async () => "ok");
-        assert.equal(outsider, "ok", "different key is not blocked");
-        release();
-        assert.equal(await holder, "held");
+        const held = await withHeldExclusive(body => fix.driver.tryRunExclusive('lock-test', body),
+          async () => 'held', async () => {
+            const loser = await driver2.tryRunExclusive('lock-test', async () => 'should-not-run');
+            assert.equal(loser, null, 'contending run must be rejected, not queued');
+            const outsider = await driver2.tryRunExclusive('lock-test-other', async () => 'ok');
+            assert.equal(outsider, 'ok', 'different key is not blocked');
+          });
+        assert.equal(held, 'held');
         // Lock released with the transaction → the key is takeable again.
         const after = await driver2.tryRunExclusive("lock-test", async () => "re-taken");
         assert.equal(after, "re-taken");
@@ -943,16 +969,14 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
       const pool2 = new Pool({ connectionString: url, max: 2 });
       const driver2 = new PgDriver(pool2 as unknown as PgPoolLike);
       try {
-        let release!: () => void;
-        const gate = new Promise<void>(resolve => { release = resolve });
-        const holder = fix.driver.tryRunExclusiveSession("sess-lock", async () => { await gate; return "held"; });
-        await new Promise(r => setTimeout(r, 200));
-        const loser = await driver2.tryRunExclusiveSession("sess-lock", async () => "should-not-run");
-        assert.equal(loser, null, "contending session run must be rejected, not queued");
-        const other = await driver2.tryRunExclusiveSession("sess-lock-other", async () => "ok");
-        assert.equal(other, "ok", "a different key is not blocked");
-        release();
-        assert.equal(await holder, "held");
+        const held = await withHeldExclusive(body => fix.driver.tryRunExclusiveSession('sess-lock', body),
+          async () => 'held', async () => {
+            const loser = await driver2.tryRunExclusiveSession('sess-lock', async () => 'should-not-run');
+            assert.equal(loser, null, 'contending session run must be rejected, not queued');
+            const other = await driver2.tryRunExclusiveSession('sess-lock-other', async () => 'ok');
+            assert.equal(other, 'ok', 'a different key is not blocked');
+          });
+        assert.equal(held, 'held');
         const after = await driver2.tryRunExclusiveSession("sess-lock", async () => "re-taken");
         assert.equal(after, "re-taken", "lock is takeable again after fn returns");
       } finally {
@@ -966,22 +990,35 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
       const driver2 = new PgDriver(pool2 as unknown as PgPoolLike);
       try {
         const name = `sesslock_${Math.random().toString(36).slice(2)}`;
-        let release!: () => void;
-        const gate = new Promise<void>(resolve => { release = resolve });
-        const holder = fix.driver.tryRunExclusiveSession("sess-vis", async () => {
-          await fix.store.createConfigItem({ name, pinyin: "p", scope: "user" });
-          await gate; // still "inside" fn
-          return "done";
-        });
-        await new Promise(r => setTimeout(r, 200));
-        const rows = await driver2.all("SELECT 1 AS x FROM config_items WHERE name = ?", [name]);
-        assert.equal(rows.length, 1, "a row committed inside fn must be visible to another connection mid-run");
-        release();
-        assert.equal(await holder, "done");
+        const held = await withHeldExclusive(body => fix.driver.tryRunExclusiveSession('sess-vis', body),
+          async () => {
+            await fix.store.createConfigItem({ name, pinyin: 'p', scope: 'user' });
+            return 'done';
+          }, async () => {
+            const rows = await driver2.all('SELECT 1 AS x FROM config_items WHERE name = ?', [name]);
+            assert.equal(rows.length, 1, 'a row committed inside fn must be visible to another connection mid-run');
+          });
+        assert.equal(held, 'done');
       } finally {
         await pool2.end();
       }
     });
+  });
+
+  it('releases real locks after a failed observer or failed preparation', async () => {
+    const peer = await openPeer(dbName);
+    try {
+      for (const method of ['tryRunExclusive', 'tryRunExclusiveSession'] as const) {
+        const key = `lock-cleanup-${method}`;
+        await assert.rejects(withHeldExclusive(body => fix.driver[method](key, body),
+          async () => 'held', async () => { assert.fail('injected observer failure'); }), /injected observer failure/);
+        assert.equal(await peer.driver[method](key, async () => 'reused'), 'reused');
+        await assert.rejects(withHeldExclusive(body => fix.driver[method](key, body),
+          async () => { throw new Error('injected preparation failure'); }, async () => { assert.fail('observer must not run'); }),
+        /injected preparation failure/);
+        assert.equal(await peer.driver[method](key, async () => 'reused'), 'reused');
+      }
+    } finally { await peer.pool.end(); }
   });
 
   describe("AuthCenterDb shared-store construction on PG", () => {
@@ -1150,6 +1187,8 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         await driver.exec(`
           CREATE TABLE _migrations (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at BIGINT NOT NULL);
           INSERT INTO _migrations (version, name, applied_at) VALUES (1, 'initial-schema', 0);
+          CREATE TABLE sessions (session_id TEXT PRIMARY KEY);
+          INSERT INTO sessions (session_id) VALUES ('retained-session');
           CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, ext_org_id TEXT, created_at BIGINT NOT NULL);
           -- Real pre-a18659f v1 databases carry enterprises (v1 SQL creates it);
           -- v5's ALTER TABLE ... ADD COLUMN is not table-idempotent, so the
@@ -1185,8 +1224,14 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           INSERT INTO config_items (scope, org_id) VALUES ('user', NULL);
           CREATE TABLE channel_sessions (id TEXT PRIMARY KEY);
         `);
-        // v1 recorded as applied → applyPgSchema runs only v2 + v3.
+        // v1 recorded as applied: later migrations extend the retained identities.
         await applyPgSchema(driver);
+        assert.deepEqual(await driver.all('SELECT session_id FROM sessions'), [{ session_id: 'retained-session' }]);
+        await driver.run('INSERT INTO cohost_sessions (session_id, owner_user_id, native_agent_id, durable_session_id, repository_path) VALUES (?, ?, ?, ?, ?)',
+          ['retained-session', 'u1', 'retained-agent', 'retained-native-id', '/agents/retained-agent/workspaces/retained-session']);
+        await assert.rejects(driver.run('INSERT INTO cohost_sessions (session_id, owner_user_id, native_agent_id, durable_session_id, repository_path) VALUES (?, ?, ?, ?, ?)',
+          ['missing-session', 'u2', 'other-agent', 'other-native-id', '/agents/other-agent/workspaces/missing-session']),
+          (error: unknown) => (error as { code?: string }).code === '23503');
 
         const migratedAvailability = await driver.get<{ availability: string }>(`
           SELECT availability FROM config_items WHERE scope = 'user' AND org_id IS NULL LIMIT 1
@@ -1224,7 +1269,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         // Re-run is a no-op: every migration remains applied exactly once.
         await applyPgSchema(driver);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         const localGrants = await driver.all<{ id: string; local_execution_allowed: number }>('SELECT id, local_execution_allowed FROM users ORDER BY id');
         assert.deepEqual(localGrants.map(row => [row.id, Number(row.local_execution_allowed)]), [['local-allowed', 1], ['local-denied', 0]]);
         await driver.run('UPDATE users SET local_execution_allowed = 0 WHERE id = ?', ['local-allowed']);

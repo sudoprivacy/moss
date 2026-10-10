@@ -10,6 +10,35 @@ import { createAcpBridgeHandle } from './acpBridge.js'
 import { readSharedAgentMemory } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
 
+void test('a connection lost before runner subscriptions still reports one terminal exit', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'moss-early-acp-exit-'))
+  let events!: import('./acpTransport.js').AcpTransportEvents
+  let sends = 0
+  const failure = new Error('Managed execution disappeared; resume the durable session')
+  const transport: import('./acpTransport.js').AcpMessageTransport = {
+    connected: false,
+    start(value) { events = value; events.onClose(null, null, failure) },
+    async send() { sends++ },
+    async close() { events.onClose(null, null, failure) },
+  }
+  const handle = createAcpBridgeHandle({ transport, sessionId: 'early-exit', cwd, model: 'fixture',
+    enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
+  const exits: unknown[] = []
+  const errors: string[] = []
+  try {
+    handle.onStderrLine(line => errors.push(line))
+    handle.onExit((code, signal) => exits.push({ code, signal }))
+    const unsubscribe = handle.onExit(() => assert.fail('Unsubscribed listener must not receive a replay'))
+    unsubscribe()
+    await new Promise(resolve => setImmediate(resolve))
+    await handle.destroy()
+    assert.deepEqual(exits, [{ code: null, signal: null }])
+    assert.deepEqual(errors, [failure.message + '\n'])
+    assert.equal(handle.isBusy?.(), false)
+    assert.equal(sends, 0, 'A stopped connection must not begin a handshake')
+  } finally { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) }
+})
+
 void test('cohost prompts use the Nexus repository while host transcript state stays local', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'moss-cohost-workspace-'))
   const sent: any[] = []

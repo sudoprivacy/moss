@@ -2178,6 +2178,7 @@ export class RuntimeService {
       },
       attempt: {
         attemptId: attempt.attemptId,
+        serverInstanceId: attempt.serverInstanceId ?? this.options.serverInstanceId,
         generation,
         runtimeDir: attemptDir,
         attachPath,

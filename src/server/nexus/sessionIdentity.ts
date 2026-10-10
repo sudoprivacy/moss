@@ -15,24 +15,14 @@ import { NexusZoneApiClient, type NexusVfsTlsConfig } from '@nexus-ai-fs/vfs-cli
 import type { NexusTlsConfig } from './nexusEnvConfig.js'
 
 /**
- * How long a minted credential stays valid.
- *
- * The daemon signs whatever is asked for — there is no server-side ceiling
- * despite the RPC's documentation, verified by asking for a century and
- * getting one — so this number is the only bound that exists, and it belongs
- * here rather than in a caller's hopes.
- *
- * It only has to outlive one RPC. The credential is used for `start_session`
- * and then dropped: afterwards the owner is recorded in the session's process
- * record, and nothing re-asserts identity on the byte tunnel. Tying the
- * credential to the session's lifetime instead would force a validity long
- * enough for the longest session anyone might run, which is the opposite of
- * what a session credential is for. If the tunnel ever authenticates per
- * operation, the answer is to re-mint, not to widen this.
+ * A credential is held only by its execution's controller. Its actor ID is
+ * also a mailbox participant, so replacing it requires a fresh execution
+ * endpoint with the same durable session. A reconnect refused after expiry
+ * ends the old attempt; recovery mints a new credential.
  */
 const VALIDITY_SECS = 300
 
-/** mTLS material for one `start_session`, held in memory and never written down. */
+/** mTLS material for one execution controller, held in memory and never written down. */
 export type SessionIdentity = {
   tls: NexusVfsTlsConfig
   /** The `session-<uuid>` the daemon minted, for logs. */

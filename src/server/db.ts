@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto'
 import { mkdirSync } from 'fs'
 import { dirname } from 'path'
 import { DatabaseSync } from 'node:sqlite'
-import { PgDriver, SqliteDriver, isUniqueViolation, escapeLike, type DbDriver, type PgPoolLike, type SqlParam } from './db/driver.js'
+import { PgDriver, SqliteDriver, escapeLike, type DbDriver, type PgPoolLike, type SqlParam } from './db/driver.js'
 import { applyPgSchema } from './db/pg_schema.js'
 import { McpStore } from './mcp/db.js'
 import { ensureCabinTables } from './cabin/store.js'
@@ -25,6 +25,10 @@ import type { SessionRuntimeInfo } from './sessionManager.js'
 import { channelCredentialIdentity } from '../channels/types.js'
 import { resolveRuntimeScodePath } from './runtimeScodePath.js'
 import { ALIVE_ATTEMPT_STATES } from './attemptLiveness.js'
+import { runInTransaction } from './storage/sqliteUnitOfWork.js'
+import { COHOST_SESSION_SCHEMA } from './storage/cohostSessionSchema.js'
+import { CohostSessionRepository } from './runtime/cohostSessionRepository.js'
+import { sessionAttemptFenceSql, type SessionAttemptFence } from './storage/sessionAttemptFence.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -270,7 +274,28 @@ export class DirectConnectStore {
       PRAGMA synchronous=FULL;
       PRAGMA foreign_keys=ON;
       PRAGMA busy_timeout=5000;
+    `)
+    // A new database has no legacy table-rebuild migrations. Commit its schema
+    // once with FULL durability instead of syncing every individual DDL write.
+    const isFreshDatabase = !this.db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' LIMIT 1",
+    ).get()
+    try {
+      const initialize = (): void => {
+        this.initializeSqliteTables()
+        this.db!.exec(COHOST_SESSION_SCHEMA)
+      }
+      if (isFreshDatabase) runInTransaction(this.db, initialize)
+      else initialize()
+    } catch (error) {
+      this.db.close()
+      throw error
+    }
+  }
 
+  private initializeSqliteTables(): void {
+    if (!this.db) throw new Error('SQLite database handle is unavailable')
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         session_id TEXT PRIMARY KEY,
         transcript_session_id TEXT NOT NULL,
@@ -1709,7 +1734,7 @@ export class DirectConnectStore {
   async createAttempt(input: {
     sessionId: string
     generation: number
-    backendType: 'host' | 'docker' | 'k8s'
+    backendType: SessionRuntimeInfo['type']
     resumeTranscriptSessionId: string
     serverInstanceId: string
     containerName?: string
@@ -1822,8 +1847,10 @@ export class DirectConnectStore {
     status: SessionStatus,
     desiredState: DesiredSessionState,
     onlyWhenDesiredActive?: boolean,
+    fence?: SessionAttemptFence,
   ): Promise<void> {
     const ts = now()
+    const ownership = sessionAttemptFenceSql(fence)
     // A2: optional predicate for callers that must never overwrite a user
     // terminate — the spawn-complete write (runtimeService.spawnAttempt) races
     // a concurrent terminateSession; the conditional UPDATE lands only while
@@ -1832,7 +1859,8 @@ export class DirectConnectStore {
       UPDATE sessions
       SET status = ?, desired_state = ?, last_active_at = ?
       WHERE session_id = ?${onlyWhenDesiredActive ? ` AND desired_state = 'active'` : ''}
-    `, [status, desiredState, ts, sessionId])
+        ${ownership.clause}
+    `, [status, desiredState, ts, sessionId, ...ownership.params])
   }
 
   /**
@@ -1854,8 +1882,10 @@ export class DirectConnectStore {
     sessionId: string,
     status: SessionStatus,
     desiredState: DesiredSessionState,
+    fence?: SessionAttemptFence,
   ): Promise<void> {
     const ts = now()
+    const ownership = sessionAttemptFenceSql(fence)
     // A user terminate is final. desired_state is the authoritative record of
     // that intent (the same reasoning behind setSessionLifecycle's
     // onlyWhenDesiredActive and mayStampDaemonLifecycle), so once it reads
@@ -1875,7 +1905,8 @@ export class DirectConnectStore {
       UPDATE sessions
       SET status = ?, desired_state = ?, ended_at = ?, last_active_at = ?
       WHERE session_id = ? AND desired_state <> 'terminated'
-    `, [status, desiredState, ts, ts, sessionId])
+        ${ownership.clause}
+    `, [status, desiredState, ts, ts, sessionId, ...ownership.params])
   }
 
   async touchSessionActivity(sessionId: string): Promise<void> {
@@ -1923,6 +1954,10 @@ export class DirectConnectStore {
       patch.transcriptPath,
       sessionId,
     ])
+  }
+
+  get cohostSessions(): CohostSessionRepository {
+    return new CohostSessionRepository(this.driver)
   }
 
   async updateSessionMetadata(
@@ -3917,18 +3952,9 @@ export class DirectConnectStore {
     received_at?: number
     payload_json?: string | null
   }): Promise<number> {
-    // seq is the per-corp-app monotonic poll cursor for consumers
-    // (`seq > sinceSeq`). Single-statement atomic increment: with multiple
-    // instances receiving callbacks behind an LB, the old two-step
-    // SELECT MAX → INSERT let two concurrent inserts pick the same seq (the
-    // consumer cursor then skips the later row — silent message loss). As
-    // ONE statement SQLite (WAL, single writer) serialises the self-read
-    // under the write lock. On PostgreSQL (P1) READ COMMITTED snapshots
-    // still race: the (corp_app_id, seq) unique index rejects the duplicate
-    // (SQLSTATE 23505) and the loop below re-runs the statement — the new
-    // snapshot sees the winner's committed row and picks MAX+1, so the
-    // cursor never skips a message. Deliberately NOT ON CONFLICT DO NOTHING:
-    // a silently skipped row (rowCount 0) is exactly the message-loss bug.
+    // Inbound rows are the sequence SSOT. SQLite serializes this statement
+    // under its write lock. PostgreSQL serializes appenders for this app in
+    // one transaction before taking the INSERT's READ COMMITTED snapshot.
     const id = randomUUID()
     const params = [
       id,
@@ -3943,9 +3969,8 @@ export class DirectConnectStore {
       msg.received_at ?? now(),
       msg.payload_json ?? null,
     ]
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await this.driver.run(`
+    const append = async (): Promise<number> => {
+      const row = await this.driver.get<{ seq: number }>(`
           INSERT INTO corp_app_inbound (
             id, corp_app_id, org_id, seq, from_user, msg_type, text,
             media_id, file_name, received_at, payload_json
@@ -3953,21 +3978,17 @@ export class DirectConnectStore {
             ?, ?, ?,
             (SELECT COALESCE(MAX(seq), 0) + 1 FROM corp_app_inbound WHERE corp_app_id = ?),
             ?, ?, ?, ?, ?, ?, ?
-          )
+          ) RETURNING seq
         `, params)
-        break
-      } catch (err) {
-        // SQLite never reaches here (single-writer serialisation); this is
-        // the PostgreSQL concurrent-callback race resolved by retry.
-        if (attempt < 8 && isUniqueViolation(err)) continue
-        throw err
-      }
+      if (!row) throw new Error('Inbound message insertion did not return its sequence')
+      return row.seq
     }
-    const r = await this.driver.get<{ seq: number }>(
-      `SELECT seq FROM corp_app_inbound WHERE id = ?`,
-      [id],
-    )
-    return r?.seq ?? 0
+    if (this.driver.kind === 'sqlite') return append()
+    return this.driver.transaction(async () => {
+      await this.driver.get('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+        [`moss:corp-app-inbound:${msg.corp_app_id}`])
+      return append()
+    })
   }
 
   /** List inbound messages with seq > sinceSeq, oldest first. */

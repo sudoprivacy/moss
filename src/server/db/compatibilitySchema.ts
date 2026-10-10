@@ -7,19 +7,22 @@ import { ensurePlatformIntegrationSettingsSchema } from '../configuration/platfo
 import { ensureOrganizationModelSettingsSchema } from '../configuration/organizationModelSettingsRepository.js'
 import { ensureDifySchema } from '../dify/difySchema.js'
 import { ensureIdentitySchema } from '../identity/identityRepository.js'
+import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 
 export function ensureSqliteCompatibilityDomainSchemas(
   db: DatabaseSync,
   options: { legacyClientCronEnabled?: boolean } = {},
 ): void {
-  ensureIdentitySchema(db, options)
-  ensureCatalogSchema(db)
-  ensureConfigAvailabilitySchema(db)
-  ensureClientPolicySchema(db)
-  ensureOrganizationModelSettingsSchema(db)
-  ensurePlatformIntegrationSettingsSchema(db)
-  ensureDifySchema(db)
-  ensureBillingSchema(db)
+  runInTransaction(db, () => {
+    ensureIdentitySchema(db, options)
+    ensureCatalogSchema(db)
+    ensureConfigAvailabilitySchema(db)
+    ensureClientPolicySchema(db)
+    ensureOrganizationModelSettingsSchema(db)
+    ensurePlatformIntegrationSettingsSchema(db)
+    ensureDifySchema(db)
+    ensureBillingSchema(db)
+  })
 }
 
 export function ensureCompatibilityCounterTable(db: DatabaseSync): void {
@@ -32,8 +35,9 @@ export function ensureCompatibilityCounterTable(db: DatabaseSync): void {
 }
 
 export function ensureCompatibilityCoreSchema(db: DatabaseSync): void {
-  ensureCompatibilityCounterTable(db)
-  db.exec(`
+  runInTransaction(db, () => {
+    ensureCompatibilityCounterTable(db)
+    db.exec(`
     INSERT INTO compatibility_id_counters (counter_key, last_value)
     SELECT 'resource_numeric_aliases:' || namespace,
            MAX(COALESCE(MAX(legacy_id), 0), 1999999999)
@@ -58,5 +62,6 @@ export function ensureCompatibilityCoreSchema(db: DatabaseSync): void {
     GROUP BY activity_type
     ON CONFLICT(counter_key) DO UPDATE SET
       last_value = MAX(compatibility_id_counters.last_value, excluded.last_value);
-  `)
+    `)
+  })
 }

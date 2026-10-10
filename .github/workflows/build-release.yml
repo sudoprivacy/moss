@@ -178,7 +178,7 @@ jobs:
         with:
           node-version: '22.22.1'
       - run: bun install --frozen-lockfile
-      - name: Verify two owners, writer exclusion and exact history after resume
+      - name: Verify owner isolation, active daemon crash and exact durable recovery
         run: bash scripts/e2e/run-cohost-recovery.sh
         env:
           GH_TOKEN: ${{ github.token }}

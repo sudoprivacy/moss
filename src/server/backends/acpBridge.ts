@@ -94,6 +94,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const stdoutListeners = new Set<(line: string) => void>()
   const stderrListeners = new Set<(line: string) => void>()
   const exitListeners = new Set<(code: number | null, signal: NodeJS.Signals | null) => void>()
+  let terminalExit: { code: number | null; signal: NodeJS.Signals | null; error?: Error } | undefined
 
   let rpcId = 1
   let acpSessionId: string | null = null
@@ -1107,6 +1108,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
   // Initial hello and start handshake
   process.nextTick(() => {
+    if (terminalExit) return
     process.stderr.write(`[AcpBridge] Emitting initial hello and starting handshake...\n`)
     const hello = JSON.stringify({
       type: 'hello',
@@ -1132,6 +1134,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       for (const listener of stderrListeners) listener(line)
     },
     onClose(code, signal, error) {
+      if (terminalExit) return
+      terminalExit = { code, signal, error }
       setBusy(false)
       const failure = error ?? new Error('ACP connection closed')
       for (const pending of pendingRpcRequests.values()) {
@@ -1142,6 +1146,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       pendingPromptIds.clear()
       pendingPermissions.clear()
       pendingAskUserQuestions.clear()
+      if (error) for (const listener of stderrListeners) listener(`${error.message}\n`)
       for (const listener of exitListeners) listener(code, signal)
     },
   })
@@ -1319,9 +1324,16 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       })
     },
     onStdoutLine(l) { stdoutListeners.add(l); flushStdout(); return () => stdoutListeners.delete(l) },
-    onStderrLine(l) { stderrListeners.add(l); return () => stderrListeners.delete(l) },
+    onStderrLine(l) {
+      stderrListeners.add(l)
+      if (terminalExit?.error) l(`${terminalExit.error.message}\n`)
+      return () => stderrListeners.delete(l)
+    },
     onExit(l) {
       exitListeners.add(l)
+      if (terminalExit) queueMicrotask(() => {
+        if (exitListeners.has(l)) l(terminalExit!.code, terminalExit!.signal)
+      })
       return () => exitListeners.delete(l)
     },
     isBusy: () => busy,

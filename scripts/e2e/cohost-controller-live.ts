@@ -8,6 +8,7 @@ import type { ManagedAgentClient } from '../../src/server/nexus/managedAgentClie
 export function connectController(s: {
   agent: ManagedAgentClient
   sessionEndpoint: NexusSessionEndpoint
+  sessionId?: string
 }, allowed: ReadonlySet<string>, allowExplore = false) {
   const pending = new Map<string, { resolve(value: any): void, reject(error: Error): void }>()
   let nextId = 0
@@ -16,8 +17,11 @@ export function connectController(s: {
   const children = new Map<string, string[]>()
   let unexpected: string | undefined
   const updates: any[] = []
+  let onClosed!: (error: Error | undefined) => void
+  const closed = new Promise<Error | undefined>(resolve => { onClosed = resolve })
   const transport = s.agent.openSession(s.sessionEndpoint, {
     onClose(error) {
+      onClosed(error)
       for (const request of pending.values()) request.reject(error ?? new Error('session closed'))
       pending.clear()
     },
@@ -65,7 +69,7 @@ export function connectController(s: {
         else request.resolve(m.result ?? {})
       }
     },
-  })
+  }, s.sessionId)
   transport.start()
   async function rpc(method: string, params: unknown, budget = 120_000): Promise<any> {
     const id = `moss-live-${++nextId}`
@@ -84,6 +88,7 @@ export function connectController(s: {
   return {
     rpc,
     updates,
+    closed,
     get approvals() { return approvals },
     get exploreDelegations() { return exploreDelegations },
     assertHealthy() {

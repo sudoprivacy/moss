@@ -1,11 +1,12 @@
 import type { NexusSessionTransport, SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
-import type { ManagedAgentClient, StartSessionResult } from '../nexus/managedAgentClient.js'
+import { isUnknownManagedSession, type ManagedAgentClient, type StartSessionResult } from '../nexus/managedAgentClient.js'
 import type { AcpMessageTransport, AcpTransportEvents } from './acpTransport.js'
 
 /** Both Nexus hosting modes expose this same message connection. */
 export class NexusAcpTransport implements AcpMessageTransport {
   private mailbox?: NexusSessionTransport
   private isClosing = false
+  private closing?: Promise<void>
   constructor(private readonly agent: ManagedAgentClient, readonly session: StartSessionResult) {}
   get connected(): boolean { return this.mailbox?.connected ?? false }
   start(events: AcpTransportEvents): void {
@@ -20,18 +21,23 @@ export class NexusAcpTransport implements AcpMessageTransport {
         events.onClose(null, null, error)
         if (!this.isClosing) void this.close().catch(failure => events.onStderr(`${String(failure)}\n`))
       },
-    })
+    }, this.session.sessionId)
     this.mailbox.start()
   }
   send(message: SessionRpcMessage): Promise<void> {
     return this.mailbox?.send(message) ?? Promise.reject(new Error('Session transport has not started'))
   }
-  async close(): Promise<void> {
-    if (this.isClosing) return
+  close(): Promise<void> {
+    if (this.closing) return this.closing
     this.isClosing = true
+    this.closing = this.closeResources()
+    return this.closing
+  }
+  private async closeResources(): Promise<void> {
     try { await this.mailbox?.close() }
     finally {
       try { await this.agent.cancel(this.session.sessionId) }
+      catch (error) { if (!isUnknownManagedSession(error, this.session.sessionId)) throw error }
       finally { this.agent.close() }
     }
   }

@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mayStampDaemonLifecycle, SessionRunnerDaemon } from "../sessionRunnerDaemon.js";
 import { PluginManager } from "../../channels/gateway/PluginManager.js";
 import { spyOn } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
@@ -19,6 +19,214 @@ import { RuntimeBackend } from '../backends/runtimeBackend.js';
 import type { RunnerManifest } from '../types.js';
 import type { BackendHandle } from '../sessionManager.js';
 import type { DirectConnectStore } from '../db.js';
+import { readLiveManagedExecution } from '../backends/liveManagedExecution.js';
+import type { InternalSessionChannel } from '../internalSessionChannel.js';
+import { cohostSessionStatePath } from '../backends/cohostSessionState.js';
+
+describe('Runner cancellation during recovery', () => {
+  for (const isTermination of [false, true]) {
+    it(`cancels a pending spawn and preserves ${isTermination ? 'termination' : 'restart'} intent`, { timeout: 30_000 }, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'moss-runner-start-stop-'));
+      const attachPath = process.platform === 'win32' ? `\\\\.\\pipe\\moss-runner-start-stop-${randomUUID()}` : join(root, 'runner.sock');
+      const listeners = process.listeners('SIGTERM');
+      let lifecycle: unknown;
+      let reason: string | undefined;
+      const events: string[] = [];
+      const store = {
+        cohostSessions: { get: async () => undefined },
+        updateAttemptRunner: async () => {}, touchAttemptHeartbeat: async () => true,
+        isOpen: () => true,
+        addEvent: async (_session: string, _attempt: string, event: string) => { events.push(event); },
+        getSession: async () => ({ status: 'starting', desiredState: 'active' }),
+        setSessionLifecycle: async () => {},
+        markAttemptStopped: async (_id: string, value: { stopReason: string }) => { reason = value.stopReason; return true; },
+        markSessionEnded: async (_id: string, status: string, desiredState: string) => { lifecycle = { status, desiredState }; },
+        close: async () => {},
+      };
+      const manifest = {
+        config: { heartbeatTimeoutMs: 30_000, idleTimeoutMs: 0 },
+        session: { sessionId: 'test-session', userId: 'owner', orgId: 'org', runtime: { type: 'cohost' }, cwd: root },
+        attempt: { attemptId: 'attempt', runtimeDir: root, attachPath, statusPath: join(root, 'status.json'), stderrLogPath: join(root, 'stderr.log') },
+      } as RunnerManifest;
+      let onSpawn!: () => void;
+      const spawned = new Promise<void>(resolve => { onSpawn = resolve; });
+      const spawn = spyOn(RuntimeBackend.prototype, 'spawn').mockImplementation(options => new Promise((_resolve, reject) => {
+        assert.ok(options.signal);
+        options.signal.addEventListener('abort', () => reject(options.signal!.reason), { once: true });
+        onSpawn();
+      }));
+      const daemon = new SessionRunnerDaemon(manifest, store as unknown as DirectConnectStore);
+      let socket: ReturnType<typeof createConnection> | undefined;
+      let kill: ReturnType<typeof spyOn> | undefined;
+      try {
+        const started = daemon.start();
+        const rejected = assert.rejects(started, /runner is stopping/);
+        await spawned;
+        const onSignal = process.listeners('SIGTERM').find(listener => !listeners.includes(listener));
+        assert.ok(onSignal);
+        if (isTermination) {
+          kill = spyOn(process, 'kill').mockImplementation(() => { onSignal('SIGTERM'); return true; });
+          socket = createConnection(attachPath);
+          await new Promise<void>((resolve, reject) => { socket!.once('connect', resolve); socket!.once('error', reject); });
+          socket.write(JSON.stringify({ type: 'shutdown' }) + '\n');
+        } else onSignal('SIGTERM');
+        await rejected;
+        assert.equal(reason, isTermination ? 'terminated' : 'process_shutdown');
+        assert.deepEqual(lifecycle, isTermination ? { status: 'terminated', desiredState: 'terminated' } : { status: 'ended', desiredState: 'active' });
+        assert.ok(!events.includes('attempt_started'));
+        assert.equal(JSON.parse(await readFile(manifest.attempt.statusPath, 'utf8')).state, 'stopped');
+        assert.deepEqual(process.listeners('SIGTERM'), listeners);
+      } finally {
+        socket?.destroy(); kill?.mockRestore(); spawn.mockRestore();
+        await daemon.shutdown();
+        assert.ok(root.startsWith(join(tmpdir(), 'moss-runner-start-stop-')));
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+describe('Cohost runner execution identity', () => {
+  it('publishes the live process to early and late attachments without persisting it', { timeout: 30_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'moss-runner-identity-'));
+    const attachPath = process.platform === 'win32'
+      ? `\\\\.\\pipe\\moss-runner-identity-${randomUUID()}`
+      : join(root, 'runner.sock');
+    const originalListeners = new Map((['SIGTERM', 'SIGINT'] as const).map(signal => [signal, process.listeners(signal)]));
+    const events: unknown[] = [];
+    const binding = { ownerId: 'test-user', agentId: 'test', durableSessionId: 'native-durable', repositoryPath: '/agents/test/workspaces/test-session' };
+    await mkdir(join(root, '.moss'));
+    await writeFile(cohostSessionStatePath(root), JSON.stringify({ ...binding, sessionId: 'obsolete-pid' }));
+    let onBound!: () => void;
+    let releaseBinding!: () => void;
+    const bound = new Promise<void>(resolve => { onBound = resolve; });
+    const bindingCommit = new Promise<void>(resolve => { releaseBinding = resolve; });
+    const store = {
+      cohostSessions: { get: async () => binding,
+      bind: async (_sid: string, _aid: string, candidate: unknown, owner: string) => {
+        assert.deepEqual(candidate, binding);
+        assert.equal(owner, 'test-owner');
+        onBound();
+        await bindingCommit;
+        return true;
+      } },
+      updateAttemptRunner: async () => {}, touchAttemptHeartbeat: async () => true,
+      addEvent: async (...args: unknown[]) => { events.push(args); },
+      isOpen: () => true, getSession: async () => ({ status: 'active', desiredState: 'active' }),
+      setSessionLifecycle: async () => {}, markAttemptStopped: async () => true,
+      markSessionEnded: async () => {}, close: async () => {},
+    };
+    const manifest = {
+      config: { heartbeatTimeoutMs: 30_000, idleTimeoutMs: 0, instanceId: 'obsolete-config-owner' },
+      session: { sessionId: 'test-session', userId: 'test-user', orgId: 'test-org', runtime: { type: 'cohost' }, cwd: root },
+      attempt: { attemptId: 'test-attempt', serverInstanceId: 'test-owner', runtimeDir: root, attachPath, statusPath: join(root, 'status.json') },
+    } as RunnerManifest;
+    let onExit: (code: number | null, signal: NodeJS.Signals | null) => void = () => {};
+    const handle = {
+      runtime: manifest.session.runtime, managedProcessId: 'native-live-process', cohostSessionBinding: binding,
+      onStdoutLine: () => {}, onStderrLine: () => {},
+      onExit: (callback: typeof onExit) => { onExit = callback; },
+      destroy: () => { onExit(0, 'SIGTERM'); },
+    } as unknown as BackendHandle;
+    let releaseSpawn!: (handle: BackendHandle) => void;
+    let onSpawn!: () => void;
+    const spawned = new Promise<void>(resolve => { onSpawn = resolve; });
+    const spawn = spyOn(RuntimeBackend.prototype, 'spawn').mockImplementation(options => {
+      assert.deepEqual(options.cohostSessionBinding, binding);
+      onSpawn();
+      return new Promise(resolve => { releaseSpawn = resolve; });
+    });
+    const daemon = new SessionRunnerDaemon(manifest, store as unknown as DirectConnectStore);
+    const sockets: ReturnType<typeof createConnection>[] = [];
+    try {
+      const started = daemon.start();
+      await spawned;
+      const early = createConnection(attachPath);
+      sockets.push(early);
+      let isReady = false;
+      const processReady = readLiveManagedExecution(early as unknown as InternalSessionChannel, 'test-session')
+        .then(execution => { isReady = true; return execution; });
+      const starting = await new Promise<Record<string, unknown>>((resolve, reject) => {
+        early.once('data', bytes => resolve(JSON.parse(bytes.toString().trim())));
+        early.once('error', reject);
+      });
+      assert.equal(starting.state, 'starting');
+      assert.equal(starting.managedProcessId, undefined);
+      releaseSpawn(handle);
+      await bound;
+      assert.equal(isReady, false, 'runner must not advertise an execution before its durable binding commits');
+      assert.ok(await readFile(cohostSessionStatePath(root), 'utf8'), 'legacy recovery data survives until the shared commit');
+      releaseBinding();
+      assert.deepEqual(await processReady, { processId: 'native-live-process', binding });
+      await started;
+      await assert.rejects(readFile(cohostSessionStatePath(root), 'utf8'), { code: 'ENOENT' });
+      const late = createConnection(attachPath);
+      sockets.push(late);
+      assert.deepEqual(await readLiveManagedExecution(late as unknown as InternalSessionChannel, 'test-session'),
+        { processId: 'native-live-process', binding });
+      assert.ok(!(await readFile(manifest.attempt.statusPath, 'utf8')).includes('native-live-process'));
+      assert.ok(!JSON.stringify(events).includes('native-live-process'));
+    } finally {
+      releaseSpawn(handle);
+      releaseBinding();
+      for (const socket of sockets) socket.destroy();
+      await daemon.shutdown();
+      spawn.mockRestore();
+      for (const [signal, original] of originalListeners) {
+        for (const listener of process.listeners(signal)) {
+          if (!original.includes(listener)) process.removeListener(signal, listener);
+        }
+      }
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try { if (JSON.parse(await readFile(manifest.attempt.statusPath, 'utf8')).state === 'stopped') break; } catch {}
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.ok(root.startsWith(join(tmpdir(), 'moss-runner-identity-')));
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Cohost binding publication failures', () => {
+  for (const failure of ['fenced', 'store', 'cleanup'] as const) {
+    it(`cleans up a started execution after ${failure} failure before publishing readiness`, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'moss-runner-binding-failure-'));
+      const attachPath = process.platform === 'win32' ? `\\\\.\\pipe\\moss-binding-${randomUUID()}` : join(root, 'runner.sock');
+      const storeError = new Error('binding store unavailable');
+      const cleanupError = new Error('execution cancellation denied');
+      const events: string[] = [];
+      let destroys = 0;
+      const store = {
+        cohostSessions: { get: async () => undefined, bind: async () => {
+          if (failure !== 'fenced') throw storeError;
+          return false;
+        } },
+        updateAttemptRunner: async () => {}, touchAttemptHeartbeat: async () => true, isOpen: () => true,
+        addEvent: async (_sid: string, _aid: string, event: string) => { events.push(event); },
+        markAttemptStopped: async () => true, markSessionEnded: async () => {}, close: async () => {},
+      };
+      const manifest = {
+        config: { heartbeatTimeoutMs: 30_000, idleTimeoutMs: 0, instanceId: 'host-a' },
+        session: { sessionId: 'moss-session', userId: 'owner', orgId: 'org', runtime: { type: 'cohost' }, cwd: root },
+        attempt: { attemptId: 'attempt', attachPath, runtimeDir: root, statusPath: join(root, 'status.json'),
+          stderrLogPath: join(root, 'stderr.log') },
+      } as RunnerManifest;
+      const spawn = spyOn(RuntimeBackend.prototype, 'spawn').mockResolvedValue({
+        runtime: manifest.session.runtime, cohostSessionBinding: { ownerId: 'owner', agentId: 'owner', durableSessionId: 'native', repositoryPath: '/agents/owner/workspaces/moss-session' },
+        destroy: async () => { destroys++; if (failure === 'cleanup') throw cleanupError; },
+      } as unknown as BackendHandle);
+      const daemon = new SessionRunnerDaemon(manifest, store as unknown as DirectConnectStore);
+      try {
+        await assert.rejects(daemon.start(), error => failure === 'fenced' ? /lost ownership/.test(String(error)) :
+          failure === 'store' ? error === storeError : error instanceof AggregateError &&
+            error.errors[0] === storeError && error.errors[1] === cleanupError);
+        assert.equal(destroys, 1);
+        assert.ok(!events.includes('attempt_started'));
+        assert.equal(JSON.parse(await readFile(manifest.attempt.statusPath, 'utf8')).state, 'failed');
+      } finally { spawn.mockRestore(); await daemon.shutdown(); await rm(root, { recursive: true, force: true }); }
+    });
+  }
+});
 
 describe('Runner shutdown preserves conversation intent', () => {
   for (const scenario of ['SIGTERM', 'SIGINT', 'protocol', 'deleted', 'fenced'] as const) {

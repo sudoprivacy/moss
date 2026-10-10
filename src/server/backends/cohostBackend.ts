@@ -11,10 +11,11 @@ import { buildAvailableSkillSnapshot, buildSessionEnv, getAssistantRuntimeConfig
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { NexusAcpTransport } from './nexusAcpTransport.js'
 import { resolveCohostNexusConfig } from '../nexus/nexusEnvConfig.js'
-import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
+import { isUnknownManagedSession, ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { mintSessionIdentity, ownerField } from '../nexus/sessionIdentity.js'
 import { syncWorkspaceSkills, type WorkspaceSkillLink } from '../../utils/scodeBridge.js'
-import { cohostRepositoryPath, readCohostSessionState, writeCohostSessionState } from './cohostSessionState.js'
+import { cohostRepositoryPath, readCohostSessionState } from './cohostSessionState.js'
+import { startCohostExecution } from './cohostRecovery.js'
 
 /**
  * Session backend for a co-hosted sudocode runtime.
@@ -26,6 +27,7 @@ import { cohostRepositoryPath, readCohostSessionState, writeCohostSessionState }
  */
 export class CohostBackend implements SessionBackend {
   async spawn(options: BackendSpawnOptions): Promise<BackendHandle> {
+    options.signal?.throwIfAborted()
     const assistantConfig = await getAssistantRuntimeConfig(options.assistantName)
     const enabledSkills = options.assistantName
       ? [...new Set([...assistantConfig.enabledSkills, ...(options.enabledSkillNames ?? [])])]
@@ -46,14 +48,18 @@ export class CohostBackend implements SessionBackend {
     // example during the 0.2.23 rollout), so give it an explicit connection
     // namespace instead of silently moving Moss's vault connection with it.
     const config = resolveCohostNexusConfig()
-    const saved = options.resumeSessionId ? await readCohostSessionState(options.cwd) : undefined
+    const saved = options.cohostSessionBinding ??
+      (options.resumeSessionId ? await readCohostSessionState(options.cwd) : undefined)
     const agentId = requireAgentId(options)
+    if (options.cohostSessionBinding && (options.cohostSessionBinding.agentId !== agentId || options.cohostSessionBinding.ownerId !== options.userId)) {
+      throw new Error('Cohost binding does not belong to this agent')
+    }
     const expectedRepository = cohostRepositoryPath(agentId, options.sessionId)
-    if (saved?.repositoryPath && saved.repositoryPath !== expectedRepository) {
+    if (saved?.repositoryPath && saved.repositoryPath !== expectedRepository && saved.repositoryPath !== options.cwd) {
       throw new Error('Cohost repository does not belong to this session')
     }
     // Keep the recorded repository identity when resuming existing native history.
-    const repositoryPath = saved ? saved.repositoryPath : expectedRepository
+    const repositoryPath = saved ? saved.repositoryPath ?? options.cwd : expectedRepository
 
     const identity = await mintSessionIdentity(config.endpoint, config.tls, options.userId)
     const client = identity
@@ -64,25 +70,30 @@ export class CohostBackend implements SessionBackend {
     const agent = new ManagedAgentClient(client, config.authToken)
 
     let session
+    let isResume = !!saved
     try {
-      session = await agent.startSession({
+      const execution = await startCohostExecution(agent, {
         agentId,
         model,
         ...ownerField(identity, options.userId),
-        repos: [{ hostPath: repositoryPath ?? options.cwd, alias: 'workspace' }],
+        repos: [{ hostPath: repositoryPath, alias: 'workspace' }],
         resumeSessionId: saved?.durableSessionId,
-      })
+      }, { ownerId: options.userId!, repositoryPath, controllerId: identity?.subjectId },
+      { signal: options.signal, isResumeRequired: !!options.resumeSessionId || !!saved })
+      session = execution.session
+      isResume = execution.isResume
       if (!session.durableSessionId) throw new Error('Cohost daemon did not return a durable session ID')
-      if (repositoryPath) await client.mkdir(repositoryPath, config.authToken, { parents: true, existOk: true })
-      await writeCohostSessionState(options.cwd, {
-        sessionId: session.sessionId,
-        durableSessionId: session.durableSessionId,
-        ...(repositoryPath ? { repositoryPath } : {}),
-      })
+      await client.mkdir(repositoryPath, config.authToken, { parents: true, existOk: true })
+      options.signal?.throwIfAborted()
     } catch (error) {
-      if (session) await agent.cancel(session.sessionId).catch(() => {})
-      agent.close()
-      throw error
+      let failure = error
+      try { if (session) await agent.cancel(session.sessionId) }
+      catch (cleanupError) {
+        if (!session || !isUnknownManagedSession(cleanupError, session.sessionId)) {
+          failure = new AggregateError([error, cleanupError], 'Failed cohost startup could not clean up its execution')
+        }
+      } finally { agent.close() }
+      throw failure
     }
 
     process.stderr.write(
@@ -106,7 +117,7 @@ export class CohostBackend implements SessionBackend {
       model,
       modelProviderId: env.MOSS_MODEL_PROVIDER_ID,
       transcriptPath: options.transcriptPath,
-      resumeSessionId: saved?.durableSessionId,
+      resumeSessionId: isResume ? session.durableSessionId : undefined,
       assistantName: options.assistantName,
       assistantDisplayName: options.assistantDisplayName,
       enabledSkillNames: enabledSkills,
@@ -116,6 +127,8 @@ export class CohostBackend implements SessionBackend {
       runtime,
     })
     handle.availableSkills = availableSkills
+    handle.managedProcessId = session.sessionId
+    handle.cohostSessionBinding = { ownerId: options.userId!, agentId, durableSessionId: session.durableSessionId!, repositoryPath }
     return handle
   }
 }
