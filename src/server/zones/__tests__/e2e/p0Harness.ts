@@ -226,7 +226,11 @@ export async function startNexus(
           label: 'moss-e2e',
           subject_type: 'service',
           subject_id: 'moss-e2e',
-          zone_id: 'root',
+          // zoneless admin（#3871）：provisioning key 需跨 org-zone 操作，
+          // 带任何 zone_id 都会被 7903b539e9 的 token 硬边界拒绝
+          // （ZONE_OUT_OF_TOKEN_SCOPE）。空串经 create_key 走 zoneless
+          // 分支；与部署实例 kernel CLI 铸造的 zones=[] 形态一致。
+          zone_id: '',
           is_admin: true,
         }),
       })
