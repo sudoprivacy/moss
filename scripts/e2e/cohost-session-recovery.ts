@@ -14,7 +14,8 @@ import protoLoader from '@grpc/proto-loader'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 
 import { ManagedAgentClient, type StartSessionResult } from '../../src/server/nexus/managedAgentClient.js'
-import { mintSessionIdentity, ownerField } from '../../src/server/nexus/sessionIdentity.js'
+import { ownerField } from '../../src/server/nexus/sessionIdentity.js'
+import { connectSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
 import { connectController } from './cohost-controller-live.js'
 import { startCohostExecution } from '../../src/server/backends/cohostRecovery.js'
 import { SqliteDriver } from '../../src/server/db/driver.js'
@@ -221,11 +222,11 @@ try {
   }
   const mossTls = { ca: join(frontDoor, 'ca.pem'), cert: join(frontDoor, 'agent.pem'), key: join(frontDoor, 'agent-key.pem') }
   async function consumer(owner: string) {
-    const identity = await mintSessionIdentity(endpoint, mossTls, owner)
+    const { identity, client, authToken } = await connectSessionRuntime({ endpoint, tls: mossTls,
+      authToken: 'sk-deployment-token-must-not-override-the-user' }, owner)
     assert(identity, 'Moss must prove the session owner with a minted credential')
-    const client = NexusVfsClient.withMtls(endpoint, identity.tls)
     clients.push(client)
-    return { agent: new ManagedAgentClient(client, ''), client, identity }
+    return { agent: new ManagedAgentClient(client, authToken), client, identity }
   }
   const ownerA = `owner-a-${randomUUID()}`
   const ownerB = `owner-b-${randomUUID()}`
@@ -273,6 +274,7 @@ try {
       repos: [{ hostPath: repositoryPath, alias: 'workspace' }],
       ...ownerField(current.identity, owner) })
     const first = await start()
+    assert.equal((await current.agent.getSession(first.sessionId)).owner_id, owner)
     assert(first.durableSessionId)
     assert.notEqual(first.sessionId, first.durableSessionId)
     const sid = first.durableSessionId
@@ -423,7 +425,8 @@ try {
   }
   assert.notEqual(proofs[0].durable, proofs[1].durable)
   writeFileSync(join(work, 'acceptance.json'), JSON.stringify({ binary, checks: [
-    'mTLS owner credentials', 'real controller approval', 'native transcript stream', 'second writer refusal',
+    'mTLS owner credentials', 'production connection proves the owner with a configured deployment token',
+    'real controller approval', 'native transcript stream', 'second writer refusal',
     'wrong owner refusal', 'daemon restart with model startup hook', 'active daemon crash', 'persisted files and agent memory',
     'same durable ID and new pid/channel', 'exact prior history', 'dependent file write',
     'lost creation reply without duplicate execution', 'replacement controller discovers and resumes owned orphan',
