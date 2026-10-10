@@ -53,6 +53,11 @@ void test('personal cloud Agents retain memory and receive pod instructions with
   const root = await mkdtemp(join(tmpdir(), 'moss-personal-cloud-'))
   const db = new DatabaseSync(':memory:')
   createCatalogTestRepository(db)
+  // spawn 路径经 store.driver 直查 sessions.home_zone_id（P1a runner
+  // generation 对账，feat/contract-zone）——mock store 的 driver 背后就
+  // 是这个 :memory: 库；建空表让查询读出"无 zone"而非 no such table，
+  // 错误才能按用例意图传到 checkpoint。
+  db.exec('CREATE TABLE IF NOT EXISTS sessions (session_id TEXT PRIMARY KEY, home_zone_id TEXT)')
   resetUserAgentStoreForTests()
   const orgId = 'org-one'
   const userId = 'user-one'
