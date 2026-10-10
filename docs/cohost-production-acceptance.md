@@ -59,12 +59,16 @@ MOSS_COHOST_LIVE=1 bun scripts/e2e/server-session-live.ts \
 
 This checks real login, model selection, session creation, dependent model
 turns, WebSocket reattachment, the persisted HTTP transcript and termination.
+Set `MOSS_SESSION_LEGACY_RUNTIME=1` to exercise the legacy `runtime_type` request
+field as well. Both request formats must select the requested runtime.
 The account's model preference is set to gpt-6-luna. Use a fresh account and
 disable it after acceptance. Evidence may contain conversation data and belongs
 in private storage.
 
-CI typechecks the live scripts. The packaged installer E2E also checks that an
-unlisted co-host account receives 403 without a new session row. Existing native
+CI typechecks the live scripts. The packaged installer E2E checks that an
+unlisted co-host account receives 403 without a new session row. It also submits
+both k8s request formats to an installation without a cluster and checks that
+they fail as k8s instead of starting the default runtime. Existing native
 co-host CI exercises two owners and daemon restart recovery. Run the real model
 scripts locally before committing changes to their workflow.
 
@@ -76,6 +80,9 @@ reduced estimated history from 11,355 to 3,136 tokens; the continued and restore
 turns retained the exact order and packing values. An isolated Moss candidate on
 that VM also passed the deployed session API workflow and the unlisted-account
 403 check. Its database was separate from customer data.
+The same candidate passed the k8s API workflow with the production's existing
+gvisor image. Use a separate namespace and ServiceAccount for a candidate with
+its own database: the primary server's orphan sweep otherwise removes its pods.
 
 The primary broker's production snapshot passed reads with 0.8.4 and again after
 returning to 0.8.0. The actual broker upgrade preserved its CA, Vault master key,

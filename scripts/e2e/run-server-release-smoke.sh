@@ -213,7 +213,7 @@ if [ -n "$SCODE_VERSION" ]; then
   grep -Fq "${SCODE_VERSION#v}" "$DIAGNOSTICS_DIR/runtime-scode-version.txt"
 fi
 
-MOSS_E2E_EXPECT_COHOST_DENIED=1 node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" \
+MOSS_E2E_EXPECT_COHOST_DENIED=1 MOSS_E2E_EXPECT_K8S_UNAVAILABLE=1 node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" \
   --base-url "http://127.0.0.1:$PORT" \
   --username "$ADMIN_USERNAME" \
   --password "$ADMIN_PASSWORD" \

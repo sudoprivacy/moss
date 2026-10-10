@@ -431,6 +431,24 @@ async function main() {
   }
 
   const summaries = [];
+  if (process.env.MOSS_E2E_EXPECT_K8S_UNAVAILABLE === "1") {
+    for (const body of [{ runtime: { type: "k8s" } }, { runtime_type: "k8s" }]) {
+      const failed = await request("/api/v1/sessions", {
+        method: "POST", headers: authorization(token), body: JSON.stringify(body),
+      }, 503);
+      const sessionId = failed.startup?.sessionId;
+      assert(sessionId, "unavailable k8s must return its failed session id");
+      try {
+        const detail = await request("/api/v1/sessions", { headers: authorization(token) });
+        const session = detail.sessions?.find(row => row.sessionId === sessionId);
+        assert(session?.runtime?.type === "k8s", "explicit k8s request fell back to another runtime");
+      } finally {
+        await request(`/api/v1/sessions/${sessionId}/terminate`, {
+          method: "POST", headers: authorization(token), body: "{}",
+        });
+      }
+    }
+  }
   for (const runtime of options.runtimes) {
     let sessionId = "";
     try {

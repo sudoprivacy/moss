@@ -11,13 +11,17 @@ assert(baseUrl && credentialsFile && evidence && runtimes.length)
 assert(runtimes.every(type => ['cohost', 'k8s'].includes(type)))
 const credentials = JSON.parse(readFileSync(credentialsFile, 'utf8'))
 assert.equal(credentials.fixture_owner, 'pc3-production-acceptance-20261010', 'Use an isolated acceptance account')
-mkdirSync(evidence, { recursive: true })
+mkdirSync(evidence, { recursive: true, mode: 0o700 })
+const legacyRuntime = process.env.MOSS_SESSION_LEGACY_RUNTIME === '1'
 let token = ''
 async function request(path: string, method = 'GET', body?: unknown, expected = 200) {
   const response = await fetch(`${baseUrl}${path}`, {
     method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(180_000),
   })
+  if (response.status !== expected) {
+    writeFileSync(join(evidence, 'http-failure.private.json'), JSON.stringify({ method, path, status: response.status, response: await response.text() }), { mode: 0o600 })
+  }
   assert.equal(response.status, expected, `${method} ${path} returned ${response.status}`)
   return response.json() as Promise<any>
 }
@@ -79,7 +83,7 @@ for (const type of runtimes) {
   const units = 7 + Math.floor(Math.random() * 13)
   const subtotal = units * 29 + 47
   try {
-    const created = await request('/api/v1/sessions', 'POST', { runtime: { type }, title: `PC3 live acceptance ${code}` })
+    const created = await request('/api/v1/sessions', 'POST', { ...(legacyRuntime ? { runtime_type: type } : { runtime: { type } }), title: `PC3 live acceptance ${code}` })
     sessionId = created.session_id
     assert(sessionId); assert.equal(created.runtime.type, type)
     controller = conversation(created.ws_url, `${type}-first`)
@@ -100,6 +104,6 @@ for (const type of runtimes) {
     if (sessionId) await request(`/api/v1/sessions/${sessionId}/terminate`, 'POST', {})
   }
 }
-const proof = { passed: true, real_model: true, user_id: me.user.id, base_url: baseUrl, runtimes: reports }
+const proof = { passed: true, real_model: true, user_id: me.user.id, base_url: baseUrl, request_format: legacyRuntime ? 'runtime_type' : 'runtime.type', runtimes: reports }
 writeFileSync(join(evidence, 'acceptance.json'), JSON.stringify(proof, null, 2))
 console.log(JSON.stringify(proof))
