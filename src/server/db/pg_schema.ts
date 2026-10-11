@@ -34,6 +34,7 @@ import { COHOST_SESSION_SCHEMA } from '../storage/cohostSessionSchema.js'
  * additionally make a re-run after a crash safe.
  */
 import type { DbDriver } from './driver.js'
+import { ZONE_BINDING_TABLES_DDL } from '../zones/binding/schema.js'
 import { ORGANIZATION_MODEL_SETTINGS_SCHEMA } from '../configuration/organizationModelSettingsRepository.js'
 
 /** Initial full schema (all stores, migrated-final shape). */
@@ -66,7 +67,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at BIGINT NOT NULL,
   last_active_at BIGINT NOT NULL,
   ended_at BIGINT,
-  deleted_at BIGINT
+  deleted_at BIGINT,
+  home_zone_id TEXT,
+  home_zone_observed_at TEXT,
+  home_zone_observed_revision TEXT,
+  home_zone_sync_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_attempts (
@@ -82,6 +87,10 @@ CREATE TABLE IF NOT EXISTS session_attempts (
   resume_transcript_session_id TEXT NOT NULL,
   started_at BIGINT NOT NULL,
   last_heartbeat_at BIGINT,
+  -- M-5：run 生命周期对账标记（终态 attempt 的 Nexus run 已发 cancel）。
+  -- 注：P1a 对本表的 execution_zone_id 是 ALTER 单写；本列采用与 sessions
+  -- 表 P1a 列相同的 CREATE+ALTER 双写（新库直建全列更稳）。
+  nexus_run_ended_at BIGINT,
   stopped_at BIGINT,
   exit_code BIGINT,
   exit_signal TEXT,
@@ -654,6 +663,7 @@ CREATE TABLE IF NOT EXISTS users (
   department_id TEXT REFERENCES departments(id),
   role TEXT NOT NULL DEFAULT 'user',
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  membership_revision BIGINT NOT NULL DEFAULT 0,
   password_hash TEXT,
   password_updated_at BIGINT,
   last_login_at BIGINT,
@@ -1999,7 +2009,47 @@ interface PgMigration {
   sql: string
 }
 
-const MIGRATIONS: PgMigration[] = [
+/** §8.7 zone binding 三表：DDL 与 SQLite 侧同源（zones/binding/schema.ts，
+ *  双方言兼容文本），不在本文件复制第二份。 */
+const MIGRATION_0005_ZONE_BINDING = ZONE_BINDING_TABLES_DDL
+
+/** P1a expand-only（§8.10）：home Zone 投影 + runner generation execution zone。 */
+const MIGRATION_0006_SESSION_ZONE = `
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_id TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_observed_at TEXT;
+ALTER TABLE session_attempts ADD COLUMN IF NOT EXISTS execution_zone_id TEXT;
+`
+
+const MIGRATION_0007_SESSION_ZONE_REVISION = `
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_observed_revision TEXT;
+`
+
+/** H-2 + branch audit expand-only columns (membership, outbox idempotency, session sync). */
+const MIGRATION_0008_ZONE_MEMBERSHIP = `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE zone_binding_outbox ADD COLUMN IF NOT EXISTS grant_source_id TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_sync_error TEXT;
+`
+
+/** B-3 expand-only：org_zone_bindings 的 observed 快照列（老 PG 库补齐；
+ *  fresh install 由 MIGRATION_0005 的双方言 DDL 直接带列）。 */
+const MIGRATION_0009_ZONE_BINDING_OBSERVED = `
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_display_name TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_zone_status TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_revision TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_grant_status TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_grant_source TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS grant_expires_at BIGINT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_at BIGINT;
+`
+
+/** M-5 expand-only：session_attempts 的 Nexus run 生命周期对账标记
+ *  （老 PG 库补齐；fresh install 由 CREATE TABLE 直接带列）。 */
+const MIGRATION_0010_SESSION_ATTEMPT_RUN_END = `
+ALTER TABLE session_attempts ADD COLUMN IF NOT EXISTS nexus_run_ended_at BIGINT;
+`
+
+export const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
   { version: 3, name: 'audit-fixes-2026-09', sql: MIGRATION_0003_FIXES },
@@ -2026,6 +2076,15 @@ const MIGRATIONS: PgMigration[] = [
       ON user_agents (org_id, user_id, created_at);
   ` },
   { version: 11, name: 'cohost-session-bindings', sql: COHOST_SESSION_SCHEMA },
+  // Zone 系迁移自 v12 起（v5-v10 被 dev 主线的 enterprise/compatibility 系占用，
+  // v11 被 dev 的 cohost-session-bindings 占用；dev 已发布编号不可动）。zone DDL
+  // 全部幂等（IF NOT EXISTS），已按旧编号应用过的库重跑无害。
+  { version: 12, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },
+  { version: 13, name: 'session-zone-p1a', sql: MIGRATION_0006_SESSION_ZONE },
+  { version: 14, name: 'session-zone-observed-revision-p1a', sql: MIGRATION_0007_SESSION_ZONE_REVISION },
+  { version: 15, name: 'zone-membership-h2', sql: MIGRATION_0008_ZONE_MEMBERSHIP },
+  { version: 16, name: 'zone-binding-observed', sql: MIGRATION_0009_ZONE_BINDING_OBSERVED },
+  { version: 17, name: 'session-attempt-run-end', sql: MIGRATION_0010_SESSION_ATTEMPT_RUN_END },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

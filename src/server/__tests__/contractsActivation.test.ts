@@ -10,18 +10,22 @@ import { buildNexusArgs } from '../nexus/nexusManager.js'
 const root = resolve(import.meta.dir, '../../..')
 const candidateVersion = '0.2.1'
 const baselineVersion = '0.2.0'
-const contentSha = '273fd4097cbc33c1c049c39bb1fb60cef2663e2b'
+// Pin target: sudostack feat/contract-zone 364ce40 ("restore the zone-v1 family
+// npm package exports lost in the mainline merge"). The 0.2.1 candidate content
+// is the C-era lineage plus the restored zone-v1 family; digests below are the
+// measured values at this revision.
+const contentSha = '364ce40e04dc3fbef111429af05ca238684105b5'
 const contentShortSha = contentSha.slice(0, 7)
 const mergeSha = 'dc9cf01acf61dff586d292d15710332d35a5f811'
 const previousCandidateContentSha = '30da0ddd953268ff8a9a0f0980276300ab153003'
 const previousActivationSha = '60bd8dda6fb2d348ec8571b9b1a4eaa535e36dc5'
 const retiredPinSha = '45304cf15d1e8d02814e46b7b2fe0b3c30c1709c'
 const dependencySpec = `github:sudoprivacy/sudostack#${contentSha}`
-const lockIntegrity = 'sha512-Z/cwfFmCElZxS0Dik5cH8ThmRAwireEYV1fNqzhSln+twc9RBVGBfZvCHSiUXQMKpAFIovsSm0F1ueF998foIg=='
-const candidateManifestSha256 = '956a19cbc6b42ebc3c4e1c9ebe93e0842e1c295d1f6465e0d42d532d45785a9b'
-const compatibilitySha256 = 'a27553991ab8bd57d66bc12aaca4b08f52cd8def13a1f971d698fa3f435b35ad'
-const baselineSha256 = '9ec2cffbcb19f3e728a6691176ed739bab6de52a56b60abe4217420d2ce0c17c'
-const tarballSha256 = '1c6b2794de3572bffb59e3dd3f0a504c68a23fd2531c7838773bf78d01469c5e'
+const lockIntegrity = 'sha512-eqBLrvNf1Fotk1ljUrLX/xamjzKC6+6LwblJH75b9pwe7/U9noIUUNuszSLUvOVm+gWF6Kd38zPKjOAgcUIpXg=='
+const candidateManifestSha256 = '0cad9da45d55f7952638cccf31c0ca0233dc1621b6864e307dba3bbe2b2cca1c'
+const compatibilitySha256 = '8256655fc5789344102d4295daa08c1519aac818fdf2c175cb916b38a848d756'
+const baselineSha256 = '364c68731c754e563dcea8855aae0263e7014fa4f8e1aeb3331c37959164aed7'
+const tarballSha256 = 'd8786d0910721bb3b78da20d76273bbb7a064364647e1b29866a708f4ac99e1f'
 const serverNodeVersion = '22.22.1'
 
 function readJson<T>(path: string): T {
@@ -193,10 +197,10 @@ describe('@sudo/contracts evaluation pin', () => {
       const [metadata] = JSON.parse(packed.stdout) as PackMetadata[]
       expect(metadata).toEqual(expect.objectContaining({
         files: expect.any(Array),
-        shasum: '5774dcb821d483bf8848ba0bda511ec728ae6cf9',
-        size: 39_541,
+        shasum: 'fe88a343dac352ef476b0905103caeb8475b5e3a',
+        size: 66_714,
       }))
-      expect(metadata.files).toHaveLength(43)
+      expect(metadata.files).toHaveLength(64)
       expect(sha256(resolve(packDir, metadata.filename))).toBe(tarballSha256)
     } finally {
       rmSync(packDir, { recursive: true, force: true })

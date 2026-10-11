@@ -16,6 +16,12 @@ import { enableConfigs } from '../utils/config.js'
 import { initHubConfig } from './hubConfig.js'
 import { NexusManager } from './nexus/nexusManager.js'
 import { NexusClient } from './nexus/nexusClient.js'
+import { NexusZoneClient } from './nexus/nexusZoneClient.js'
+import { resolveZoneBindingConfig } from './zones/binding/config.js'
+import { ZoneBindingReconciler } from './zones/binding/bindingService.js'
+import { ZoneManagementService } from './zones/binding/managementService.js'
+import { endZoneRunsForSettledAttempts, reconcilePendingNexusSessions } from './zones/runtime/sessionZoneBridge.js'
+import { setSharedZoneDelegation } from './zones/binding/delegationService.js'
 import { getConfigStore } from './configStore/configStore.js'
 import { sendTencentSms } from './auth/smsTencent.js'
 import { initConfigStore } from './configStore/configStore.js'
@@ -623,6 +629,79 @@ async function finishStandaloneServerStartup(
     void runtime.gcOrphanedK8sPods()
   }, Math.max(60_000, config.heartbeatTimeoutMs * 2))
   k8sGcTimer.unref?.()
+
+  // Zone binding outbox reconciler (§8.7): converges default bindings to
+  // Nexus Zone + Org ZoneGrant. Same shared driver as AuthCenterDb, so the
+  // lease/fence writes ride the same pool. Skipped entirely when the /v2
+  // management endpoint is not configured — bindings stay pending, which is
+  // the specified offline behavior.
+  const zoneBindingConfig = resolveZoneBindingConfig()
+  if (zoneBindingConfig.zoneBindingEnabled) {
+    // 低-7：runner 路径（runnerZoneContext）与 API 路径共享同一个 delegation
+    // 实例——registry 复用与 membership revoke 钩子对 runner 生效。
+    if (authService.zoneDelegation) {
+      setSharedZoneDelegation(authService.zoneDelegation)
+    }
+    const zoneBindingReconciler = new ZoneBindingReconciler({
+      driver: store.driver,
+      client: new NexusZoneClient(zoneBindingConfig),
+      config: zoneBindingConfig,
+    })
+    // B-3：observed 快照对账（desired↔observed 展示链的持久化回写）。
+    // 低频分支：每 10 轮（≈5 分钟）一批，错误仅日志，下轮重试——与同
+    // timer 内既有错误处理模式一致。
+    const zoneObservedManagement = new ZoneManagementService({
+      driver: store.driver,
+      client: new NexusZoneClient(zoneBindingConfig),
+      config: zoneBindingConfig,
+    })
+    let zoneObservedTickCount = 0
+    // 低-15⑤：补写轮防重入（上一轮黑洞超时时 pass 不堆叠）。
+    let sessionsBackfillInFlight = false
+    const zoneBindingTimer = setInterval(() => {
+      // P1a（§8.10 R5.1）：Nexus session 权威写入补写（离线期创建的 session）。
+      if (!sessionsBackfillInFlight) {
+        sessionsBackfillInFlight = true
+        void reconcilePendingNexusSessions(store.driver, new NexusZoneClient(zoneBindingConfig))
+          .then((written) => {
+            if (written > 0) console.log(`[ZoneBinding] nexus sessions backfilled: ${written}`)
+          })
+          .catch(() => { /* 下一轮重试 */ })
+          .finally(() => { sessionsBackfillInFlight = false })
+      }
+      // M-5：run 生命周期对账——终态 attempt 的 Nexus run 补发 cancel
+      // （正常结束/idle/terminate/drain/崩溃残留/幽灵 run 全路径的唯一
+      // 完备收敛；失败下轮重试）。
+      void endZoneRunsForSettledAttempts(store.driver, new NexusZoneClient(zoneBindingConfig), 20)
+        .then((ended) => {
+          if (ended > 0) console.log(`[ZoneBinding] ended settled nexus runs: ${ended}`)
+        })
+        .catch(() => { /* 下一轮重试 */ })
+      void zoneBindingReconciler.reconcileOnce().then(
+        (result) => {
+          if (result.claimed > 0) {
+            console.log(
+              `[ZoneBinding] reconciled: claimed=${result.claimed} completed=${result.completed} retried=${result.retried} failed=${result.failed}`,
+            )
+          }
+        },
+        (err: unknown) => {
+          process.stderr.write(
+            `[ZoneBinding] reconcile pass failed: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+        },
+      )
+      zoneObservedTickCount += 1
+      if (zoneObservedTickCount % 10 === 0) {
+        void zoneObservedManagement.reconcileObservedSnapshot().catch((err: unknown) => {
+          process.stderr.write(
+            `[ZoneBinding] observed reconcile failed: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+        })
+      }
+    }, 30_000)
+    zoneBindingTimer.unref?.()
+  }
 
   let stopped = false
   const stop = async () => {

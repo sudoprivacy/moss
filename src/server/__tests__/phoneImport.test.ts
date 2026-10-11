@@ -60,6 +60,8 @@ describe('phone import', () => {
     // Nothing survived the rehearsal — neither the users nor the org it created.
     assert.equal(await db.getUserByPhone(ALICE.phone), null)
     assert.equal(await auth.findOrganizationByName('Acme'), null)
+    assert.equal((raw.prepare('SELECT COUNT(*) AS n FROM org_zone_bindings').get() as { n: number }).n, 0)
+    assert.equal((raw.prepare('SELECT COUNT(*) AS n FROM zone_binding_outbox').get() as { n: number }).n, 0)
 
     const real = await importPhoneUsers(auth, request)
     assert.deepEqual(real.summary, { ...rehearsal.summary })

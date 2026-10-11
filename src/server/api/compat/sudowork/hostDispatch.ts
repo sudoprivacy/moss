@@ -7,6 +7,7 @@ import {
   mapMossOperationsPath,
   MOSS_OPERATIONS_LEGACY_ROUTES,
 } from './sharedOperationalRoutes.js'
+import { AuthServiceError } from '../../../auth/service.js'
 
 type FetchCallback = (request: Request) => Response | Promise<Response>
 
@@ -63,6 +64,28 @@ export function createHostDispatch(options: HostDispatchOptions): RequestListene
       void sudoworkHandler(request, response)
       return
     }
-    void options.mossHandler(request, response)
+    // mossHandler 是巨型 async 路由，任何路由逃逸的异常（例如 404
+    // AuthServiceError——2026-09-21 P0 E2E 实证：PATCH /api/v1/users/:id 对
+    // 不存在用户抛 404）在此前被 void 丢弃 → unhandledRejection → node 24
+    // 默认击穿整个进程（一个 4xx 请求即可打死 server）。此处兜底：
+    // AuthServiceError 保留其原 statusCode（低-14④——4xx 是"回答"不是
+    // "故障"，统一 500 是语义退化）；其余异常转 500；响应已开始时只能
+    // 记录并断开连接。
+    void Promise.resolve(options.mossHandler(request, response)).catch((error: unknown) => {
+      if (!response.headersSent) {
+        const status = error instanceof AuthServiceError && error.statusCode >= 400 && error.statusCode < 600
+          ? error.statusCode
+          : 500
+        response.writeHead(status, { 'Content-Type': 'application/json' })
+        response.end(JSON.stringify({ error: error instanceof Error ? error.message : 'internal server error' }))
+      } else {
+        response.destroy()
+      }
+      if (typeof (error as { stack?: string })?.stack === 'string') {
+        process.stderr.write(`[hostDispatch] unhandled route error: ${(error as Error).stack}\n`)
+      } else {
+        process.stderr.write(`[hostDispatch] unhandled route error: ${String(error)}\n`)
+      }
+    })
   }
 }

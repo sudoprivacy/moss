@@ -17,6 +17,12 @@ import {
   getSystemSettings,
   updateOrganizationSystemSettings,
 } from '../systemSettings.js'
+import { NexusZoneClient } from '../nexus/nexusZoneClient.js'
+import { resolveZoneBindingConfig } from '../zones/binding/config.js'
+import { ZoneDelegationService } from '../zones/binding/delegationService.js'
+import { detachAllBindingsForOrg } from '../zones/binding/bindingRepository.js'
+import { ADMIN_ROLES, type AuthRole } from './roles.js'
+export type { AuthRole } from './roles.js'
 import {
   newApplicationNo,
   type CreditApplication,
@@ -96,8 +102,6 @@ import { DifyAdministrationService, type DifyAdministrationSecretPort } from '..
 import { DifyRepository } from '../dify/difyRepository.js'
 import type { QmsOrganizationDirectory } from '../qms/qmsAuthorization.js'
 
-export type AuthRole = 'super_admin' | 'admin' | 'dept_admin' | 'user'
-
 /**
  * The human-facing name for a user: the optional `displayName` when set,
  * otherwise the login `name` (username). Used for the outgoing login-response
@@ -115,8 +119,6 @@ function resolveDisplayName(user: { name: string; displayName?: string | null })
  * mint/edit other `super_admin` accounts. Everything that previously checked
  * `role === 'admin'` for *capability* should check membership here instead.
  */
-const ADMIN_ROLES = new Set<string>(['admin', 'super_admin'])
-
 function isSuperAdmin(role: string): boolean {
   return role === 'super_admin'
 }
@@ -355,6 +357,9 @@ export class AuthService {
   private readonly oauth2Bridge: OAuth2Bridge
   private readonly identityRepository: IdentityRepository
   private readonly unifiedIdentity: UnifiedIdentityService
+  // Zone delegation（§5.4/§6.4）：/v2 endpoint 未配置时为 null，全部钩子
+  // 空跳过——不影响无 Zone 部署的现有行为。
+  readonly zoneDelegation: ZoneDelegationService | null
   private readonly clientPolicies: ClientPolicyRepository
   private readonly loginPolicyDefaults: { loginMethod: LoginPolicyMethod } = { loginMethod: 'password' }
   private sudorouterAccountReader?: Pick<SudorouterAccountService, 'getAccount'>
@@ -386,6 +391,14 @@ export class AuthService {
       },
       isShared: orgId => this.organizationBilling?.isShared(orgId) ?? Promise.resolve(false),
     })
+    const zoneBindingConfig = resolveZoneBindingConfig()
+    this.zoneDelegation = zoneBindingConfig.zoneBindingEnabled
+      ? new ZoneDelegationService({
+          driver: this.db.driver,
+          client: new NexusZoneClient(zoneBindingConfig),
+          config: zoneBindingConfig,
+        })
+      : null
     this.cleanupTimer = setInterval(() => {
       void this.db.cleanupExpiredRevokedTokens()
     }, REVOKED_TOKENS_CLEANUP_INTERVAL_MS)
@@ -451,6 +464,14 @@ export class AuthService {
       this.db,
       this.identityRepository,
       this.unifiedIdentity,
+      // 低-6：跨 org 移动的 membership revoke 钩子——identity 路径的
+      // moveUserOrganization 此前完全不触发 delegation revoke（安全兜底是
+      // nexus verify 复查，此处主动 revoke 只加速收敛）。
+      this.zoneDelegation
+        ? (fromOrgId: string, userId: string) => {
+            void this.zoneDelegation?.revokeForUser(fromOrgId, userId).catch(() => {})
+          }
+        : undefined,
       this.organizationBilling,
       this.clientPolicies,
     )
@@ -1526,6 +1547,7 @@ export class AuthService {
         departmentId: null,
         role: 'user',
         status: 'active',
+        membershipRevision: 0,
         localAuth: false,
         tokenLimit: null,
         createdAt,
@@ -1944,8 +1966,14 @@ export class AuthService {
       throw new AuthServiceError(404, 'Unknown organization')
     }
     try {
+      // Org delete 只撤销访问，不自动 deprovision Zone 数据（§8.7 验收）。
+      // 低-4/G-1：binding detach 与 org DELETE 同一事务——detach intent 走
+      // outbox（reconciler 异步 revoke grant，不再是不写 outbox 的裸 UPDATE
+      // 导致 grant 残留）；FK 失败（org 非空）时连 detach 一并回滚，非空
+      // org 的试探删除（常规 409 路径）不会误毁 binding。
       if (await this.organizationBilling?.isShared(org.id)) throw new AuthServiceError(409, '组织含有模型账户及资金记录，不能删除')
       await this.db.driver.transaction(async () => {
+        await detachAllBindingsForOrg(this.db.driver, { orgId: org.id, now: Date.now() })
         await this.identityRepository.deleteOrganizationRecords(org.id)
         await this.db.deleteOrganization(org.id)
       })
@@ -1958,6 +1986,11 @@ export class AuthService {
         )
       }
       throw err
+    }
+    // 已发 delegation 主动 revoke（best-effort；nexus membership 复查兜底）——
+    // 网络调用保持在事务外。
+    if (this.zoneDelegation) {
+      void this.zoneDelegation.revokeForOrg(org.id).catch(() => {})
     }
     return { ok: true }
   }
@@ -2487,6 +2520,12 @@ export class AuthService {
 
     await this.organizationBilling?.beforeMemberChange(user.orgId, user.id, patch.status ?? user.status)
     await withExtIdConflict(() => this.db.updateUser(user.id, patch))
+    // Membership 变化（role downgrade / suspend 等）→ 旧 delegation 的下一
+    // 次访问必须拒绝。nexus verify 的 membership 复查是安全兜底；这里的
+    // 主动 revoke 只加速收敛，best-effort 不阻塞管理操作。
+    if (this.zoneDelegation && (patch.role !== undefined || patch.status !== undefined)) {
+      void this.zoneDelegation.revokeForUser(nextOrgId, user.id).catch(() => {})
+    }
     return {
       user: sanitizeUser((await this.db.getUserByIdAndOrg(user.id, nextOrgId)) ?? user),
     }

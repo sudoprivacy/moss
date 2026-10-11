@@ -11,13 +11,18 @@
 // the AuthCenterDb shared-store (postgres) construction form.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Pool } from "pg";
 import { PgDriver, type PgPoolLike } from "../db/driver.js";
-import { applyPgSchema } from "../db/pg_schema.js";
+import { applyPgSchema, MIGRATIONS } from "../db/pg_schema.js";
+import { ZoneManagementService, ZoneManagementError } from "../zones/binding/managementService.js";
 import { DirectConnectStore, forPostgresDirectConnectStore } from "../db.js";
 import { CronStore } from "../services/cron/CronStore.js";
 import { AuthCenterDb } from "../authCenter/db.js";
+import { lookupMembership } from "../zones/binding/membershipLookup.js";
 import { createAuthService, isUniqueViolationOn } from "../auth/service.js";
 import { EventTriggerStore } from "../services/eventTrigger/EventTriggerStore.js";
 import { IdentityRepository } from "../identity/identityRepository.js";
@@ -295,11 +300,64 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
   });
 
   describe("pg_schema + type normalisation", () => {
+    it("runs the zone backfill CLI against real PG with deployment and batch checks", async () => {
+      const orgId = randomUUID();
+      await fix.driver.run("INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)", [orgId, "PG backfill legacy", Date.now()]);
+      const url = PG_URL.replace(/\/[^/?]+(\?|$)/, `/${dbName}$1`);
+      const invoke = (args: string[]) => spawnSync(process.execPath, [join("node_modules", "tsx", "dist", "cli.mjs"), "scripts/zone-backfill.ts", "--database-url", url, ...args], { cwd: process.cwd(), encoding: "utf8", timeout: 60000 });
+      const dry = invoke(["--deployment", "local", "--json"]);
+      assert.equal(dry.status, 0, dry.stderr);
+      assert.equal((JSON.parse(dry.stdout) as { plan: { items: Array<{ orgId: string; status: string }> } }).plan.items.find(item => item.orgId === orgId)?.status, "would-create");
+      const applied = invoke(["--deployment", "local", "--batch-size", "1", "--apply", "--json"]);
+      assert.equal(applied.status, 0, applied.stderr);
+      assert.ok((JSON.parse(applied.stdout) as { created: string[] }).created.includes(orgId));
+      const rerun = invoke(["--deployment", "local", "--apply", "--json"]);
+      assert.equal(rerun.status, 0, rerun.stderr);
+      assert.equal((JSON.parse(rerun.stdout) as { created: string[] }).created.length, 0);
+      const mismatch = invoke(["--deployment", "different", "--apply"]);
+      assert.equal(mismatch.status, 2);
+      assert.match(mismatch.stderr, /deployment mismatch/);
+    });
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      // M-9：迁移版本列表以 pg_schema 的 MIGRATIONS 为 SSOT——新增迁移时
+      // 此断言自动跟随，不再出现"加迁移忘改硬编码数组"的失配。
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), MIGRATIONS.map(m => m.version).sort((a, b) => a - b));
     });
+
+    it("addBinding duplicate conflict resolves as structured 409 on real PG (中-5: PG 事务 abort 后诊断查询在事务外执行)", async () => {
+      const orgId = randomUUID();
+      await fix.driver.run("INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)", [orgId, "PG addBinding dup", Date.now()]);
+      const svc = new ZoneManagementService({
+        driver: fix.driver,
+        client: null,
+        config: {
+          zoneBindingEnabled: true,
+          nexusV2BaseUrl: "http://127.0.0.1:1",
+          nexusV2ServiceToken: "",
+          nexusDeploymentId: "local",
+          nexusV2TimeoutMs: 50,
+          internalApiToken: "",
+          requireZone: false,
+        },
+      });
+      const zoneId = "org-pgdup0000000000000000000000";
+      const first = await svc.addBinding({ orgId, zoneId, purpose: "shared" });
+      assert.equal(first.desired_state, "bound");
+      // PgDriver.transaction 无 SAVEPOINT：INSERT 撞 UNIQUE 后事务即 aborted——
+      // 若诊断查询被放进事务回调内会 25P02 得 500；catch 包 transaction 的
+      // 结构保证冲突解析为结构化 409（SQLite 语句级失败不 abort 事务，
+      // 该差异只有真 PG 能验证）。
+      await assert.rejects(
+        svc.addBinding({ orgId, zoneId, purpose: "shared" }),
+        (error: unknown) => error instanceof ZoneManagementError
+          && error.status === 409
+          && error.code === "BINDING_ALREADY_EXISTS"
+          && error.message.includes("无需重复创建"),
+      );
+    });
+
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
       const { sessionId } = await seedSession(fix.store, "a");
@@ -1030,6 +1088,33 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
       await authDb.setConfig("jwt_secret", "test-secret-value");
       assert.equal(await authDb.getConfig("jwt_secret"), "test-secret-value");
     });
+
+    it("increments membership revision atomically only for actual role/status changes", async () => {
+      const authDb = new AuthCenterDb(fix.store);
+      const suffix = Math.random().toString(36).slice(2);
+      const orgId = randomUUID();
+      const userId = randomUUID();
+      await authDb.createOrganization(orgId, "Membership PG", Date.now());
+      await authDb.createUser({
+        id: userId, orgId, email: `${suffix}@membership.test`, name: "member",
+        displayName: null, departmentId: null, role: "user", status: "active",
+        localAuth: true, tokenLimit: null, createdAt: Date.now(), passwordHash: null,
+        passwordUpdatedAt: null, lastLoginAt: null, extUserId: null, phone: null,
+      });
+
+      await authDb.updateUser(userId, { name: "profile-only" });
+      assert.equal((await lookupMembership(fix.driver, userId, orgId))?.revision, 0);
+      await Promise.all([
+        authDb.updateUser(userId, { role: "admin" }),
+        authDb.updateUser(userId, { role: "admin" }),
+      ]);
+      assert.equal((await lookupMembership(fix.driver, userId, orgId))?.revision, 1);
+      await authDb.updateUser(userId, { status: "disabled" });
+      await authDb.updateUser(userId, { status: "disabled" });
+      assert.deepEqual(await lookupMembership(fix.driver, userId, orgId), {
+        status: "disabled", role: "admin", revision: 2,
+      });
+    });
   });
 
   describe("HA fixes: LIKE escaping through prepare() (C-7)", () => {
@@ -1206,6 +1291,8 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
             updated_at BIGINT NOT NULL
           );
           CREATE TABLE users (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, local_auth BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL);
+          CREATE TABLE sessions (session_id TEXT PRIMARY KEY);
+          CREATE TABLE session_attempts (attempt_id TEXT PRIMARY KEY);
           INSERT INTO organizations (id, name, created_at) VALUES ('local-org', 'Local migration', 1);
           INSERT INTO users (id, org_id, email, name, local_auth, created_at) VALUES
             ('local-allowed', 'local-org', 'allowed@example.test', 'allowed', 1, 1),
@@ -1266,10 +1353,11 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           assert.equal(Number(r!.n), 1, `${tbl}.${col} must exist after v2`);
         }
 
-        // Re-run is a no-op: every migration remains applied exactly once.
+        // Re-run is a no-op: all published migrations remain recorded once.
         await applyPgSchema(driver);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        // M-9：同上——版本列表断言跟随 MIGRATIONS SSOT。
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), MIGRATIONS.map(m => m.version).sort((a, b) => a - b));
         const localGrants = await driver.all<{ id: string; local_execution_allowed: number }>('SELECT id, local_execution_allowed FROM users ORDER BY id');
         assert.deepEqual(localGrants.map(row => [row.id, Number(row.local_execution_allowed)]), [['local-allowed', 1], ['local-denied', 0]]);
         await driver.run('UPDATE users SET local_execution_allowed = 0 WHERE id = ?', ['local-allowed']);
