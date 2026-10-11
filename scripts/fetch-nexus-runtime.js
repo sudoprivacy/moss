@@ -13,15 +13,6 @@
  * `bun scripts/fetch-nexus-runtime.js` 独立运行（便于单独验证与手动重取）。
  *
  * 版本来源：src/server/nexus/runtime-versions.json；升级版本时必须同步更新下方 SHA256 表。
- *
- * 本地构建约定（zone-v1 mixed-version 收敛，未上线）：当前 pin
- * nexusd-cluster 0.1.6 / nexus-vault 0.1.4 是从各仓 feat/contract-zone HEAD
- * 本地构建的产物版本（构建注入 NEXUSD_BUILD_VERSION=0.1.6；vault 为 crate
- * 版本标记），不经任何外部发布源分发。产物直接放置在 bin/nexus/ 下并由
- * .nexusd-version / plugins/.vault-version marker 记录版本——marker 与 pin
- * 一致即跳过下载。下方 SHA256 表保留官方 0.1.5/0.5.44 条目仅作历史记录：
- * 0.1.6/0.1.4 在 COS/GitHub 上不存在，即使 marker 丢失触发下载也会 404
- * 回退（non-fatal warn），不会落盘覆盖本地产物。
  */
 import { execFileSync } from 'child_process'
 import { createHash } from 'crypto'
@@ -50,19 +41,27 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = process.cwd()
 
 // COS 桶来源：sudowork packages/common/src/cos.ts（sudowork 侧基础设施；moss 仓库无引用）。
-// 已本机实测 6 个 win/mac 制品 200 + sha256 MATCH。升级版本时按平台矩阵逐条复测对齐。
+// 升级版本时按平台矩阵逐条复测对齐。
 const COS_RUNTIME = 'https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com'
 const COS_LEGACY = 'https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com'
 
-// sha256 真源（实测值）。仅列 build.js 触发平台（win/mac）所需；Linux 由
-// server.Dockerfile.local 内联 sha 各自维护。升级 runtime-versions.json 版本时必须同步此表。
+// sha256 真源 = nexusd-cluster v0.8.2 / nexus-vault v0.5.71 官方 release 产物实测值：
+// - nexusd：与 nexi-lab/nexus-vfs release v0.8.2 的 SHA256SUMS.txt 逐条一致，
+//   并经 CI 三平台（linux-x86_64/macos-aarch64/windows-x86_64）双镜像下载交叉验证；
+// - vault：release 无 SUMS 文件，GitHub 官方资产逐个下载实测，CI 双镜像 got 值一致。
+// Linux 条目供 CI runtime-live（ubuntu）使用；win/mac 供本地 build:node 使用；
+// server.Dockerfile.local 的内联 sha 与此表同源。升级 runtime-versions.json 时必须同步此表。
 const SHA256 = {
-  'nexus-vault-macos-arm64.tar.gz': '8ad59f175c9079709ced75dabea5b90fe89ea6d133c8cb37e5153f1ab0a0e67b',
-  'nexus-vault-macos-x86_64.tar.gz': '7bce4cfa6de33f886b8bdc6ca9fd3c6f6f1cd732358d0a361179f54c2bd64111',
-  'nexus-vault-windows-x86_64.zip': '23619d44c877dbd377dca96fdef944efe14553f9e4a4580f668df29eb504c603',
-  'nexusd-cluster-macos-aarch64.tar.gz': 'be41487657e10955f37395c8c671f0c820359c148c2afb86c5d10162822f53ab',
-  'nexusd-cluster-macos-x86_64.tar.gz': 'f8e9aceed8f02192621b27a71040708d30a89b1eccde86c1a5a2190328b38d8b',
-  'nexusd-cluster-windows-x86_64.zip': '65199f632da8e75de0da4e7be6e3389891b71c1a854d096b9f604890436a9156',
+  'nexus-vault-linux-x86_64.tar.gz': '2f7f32d3b2dde51fa5947cb635d4c0072a98cb0d7256287f8d8c8a42a556de16',
+  'nexus-vault-linux-aarch64.tar.gz': 'b322d142abcffcb210af961dde0dfc5817f752fd27c1c07f2ea4a305e1fca6f3',
+  'nexus-vault-macos-arm64.tar.gz': '815c52881295f4577eddfce7cf707270938edce9ee64181f0df615f69b9717cb',
+  'nexus-vault-macos-x86_64.tar.gz': '4fecb251ef787e3fc6a1408cedd72ab2001f8901d6ef8f8071cfdaec28b79450',
+  'nexus-vault-windows-x86_64.zip': 'dbfb23bc2722ebf1f24c53225ea90ff7942ea92111c6e0cfcdf99503837050f3',
+  'nexusd-cluster-macos-aarch64.tar.gz': 'aeb464e7b6cb9bad10a41a1b1e3c1b22dcc47768c8432101942282592bd8d55e',
+  'nexusd-cluster-macos-x86_64.tar.gz': 'e27989e73e05dc9c53fb7e21a59cd0b8f687d5c32e29c72fe0c3cc4ce9620d8e',
+  'nexusd-cluster-windows-x86_64.zip': '4eca66fc4b2dc8704d2eba698ea0ddb8ad4997042631131896f0442243b72a38',
+  'nexusd-cluster-linux-x86_64.tar.gz': '626b2bc12425debacf3d50ae3ad61aa72d164b99beeef3b646cb29f01e4023a2',
+  'nexusd-cluster-linux-aarch64.tar.gz': 'fd0f1b826de38be4db67441069d8c0d1cb29c4c7757c535a2d7dda0480ff783f',
 }
 
 const GITHUB = 'https://github.com/nexi-lab/nexus/releases/download'
@@ -77,6 +76,8 @@ function loadVersions() {
 // vault：arch token 用 arm64/x86_64（与 nexusd 的 aarch64 不同，勿混用）。仅列 fetch 支持三平台。
 function vaultArtifact(platform, arch) {
   return {
+    'linux-x64': 'nexus-vault-linux-x86_64.tar.gz',
+    'linux-arm64': 'nexus-vault-linux-aarch64.tar.gz',
     'darwin-arm64': 'nexus-vault-macos-arm64.tar.gz',
     'darwin-x64': 'nexus-vault-macos-x86_64.tar.gz',
     'win32-x64': 'nexus-vault-windows-x86_64.zip',
@@ -108,9 +109,9 @@ function vaultUrls(ver, artifact) {
 
 function nexusdUrls(ver, artifact) {
   return [
-    { label: 'COS Runtime', url: `${COS_RUNTIME}/nexusd-cluster/release/v${ver}/${artifact}` },
-    { label: 'Legacy COS', url: `${COS_LEGACY}/nexusd-cluster/release/v${ver}/${artifact}` },
-    { label: 'GitHub', url: `${GITHUB}/nexusd-cluster-v${ver}/${artifact}` },
+    { label: 'COS Runtime', url: `${COS_RUNTIME}/nexus-vfs/release/v${ver}/${artifact}` },
+    { label: 'Legacy COS', url: `${COS_LEGACY}/nexus-vfs/release/v${ver}/${artifact}` },
+    { label: 'GitHub', url: `https://github.com/nexi-lab/nexus-vfs/releases/download/v${ver}/${artifact}` },
   ]
 }
 
