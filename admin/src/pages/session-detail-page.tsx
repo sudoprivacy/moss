@@ -321,6 +321,8 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
   }
 
   const { session, usage, context } = data
+  const runtimeImage = session.runtime.type === 'k8s' ? session.runtime.k8sImage
+    : session.runtime.type === 'docker' ? session.runtime.dockerImage : undefined
   const statusInfo = statusConfig[session.status] || { label: session.status, variant: 'outline' as const }
 
   const canResume = ['ended', 'terminated', 'failed', 'lost'].includes(session.status)
@@ -409,7 +411,7 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Container className="size-4" />
-                Docker 运行时
+                    运行时
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -418,10 +420,10 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
                   <span className="text-muted-foreground">类型</span>
                   <Badge variant="secondary">{session.runtime.type}</Badge>
                 </div>
-                {session.runtime.dockerImage && (
+                {runtimeImage && (
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">镜像</span>
-                    <span className="text-right text-xs font-mono">{session.runtime.dockerImage}</span>
+                    <span className="text-right text-xs font-mono">{runtimeImage}</span>
                   </div>
                 )}
                 {session.runtime.dockerMode && (

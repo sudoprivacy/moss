@@ -187,7 +187,7 @@ sudo env \
 # Keep the agent/skill Hub hermetic. Model discovery deliberately follows the
 # configured Provider's OpenAI-compatible /v1/models endpoint through the
 # ANTHROPIC_BASE_URL supplied to the installer above.
-printf 'MOSS_HUB_API_BASE_URL=http://127.0.0.1:%s\nANTHROPIC_API_KEY=%s\n' \
+printf 'MOSS_HUB_API_BASE_URL=http://127.0.0.1:%s\nANTHROPIC_API_KEY=%s\nMOSS_COHOST_ALLOWED_USERS=ci-unlisted-account\n' \
   "$MOCK_PORT" "$MOCK_API_KEY" \
   | sudo tee -a "$INSTALL_DIR/moss-server.env" >/dev/null
 sudo systemctl restart "$SERVICE_NAME.service"
@@ -213,7 +213,7 @@ if [ -n "$SCODE_VERSION" ]; then
   grep -Fq "${SCODE_VERSION#v}" "$DIAGNOSTICS_DIR/runtime-scode-version.txt"
 fi
 
-node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" \
+MOSS_E2E_EXPECT_COHOST_DENIED=1 MOSS_E2E_EXPECT_K8S_UNAVAILABLE=1 node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" \
   --base-url "http://127.0.0.1:$PORT" \
   --username "$ADMIN_USERNAME" \
   --password "$ADMIN_PASSWORD" \

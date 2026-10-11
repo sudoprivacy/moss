@@ -1147,7 +1147,9 @@ function parseRuntimeOptions(body: JsonBody) {
           ? 'docker'
           : body.runtime_type === 'cohost'
             ? 'cohost'
-            : 'host',
+            : body.runtime_type === 'k8s'
+              ? 'k8s'
+              : 'host',
       dockerImage:
         typeof body.docker_image === 'string' ? body.docker_image : undefined,
       dockerMode:
@@ -1173,9 +1175,11 @@ function parseRuntimeOptions(body: JsonBody) {
       ? 'docker'
       : runtime.type === 'cohost'
         ? 'cohost'
-        : runtime.type === 'host'
-          ? 'host'
-          : undefined
+        : runtime.type === 'k8s'
+          ? 'k8s'
+          : runtime.type === 'host'
+            ? 'host'
+            : undefined
   if (!type) {
     return undefined
   }

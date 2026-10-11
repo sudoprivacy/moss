@@ -36,7 +36,7 @@ export function normalizeWorkspaceRelativePath(value: string | null): string {
 export function resolveSessionWorkspaceAccess(
   session: SessionRecord,
   config: ServerConfig,
-  runtime: Pick<RuntimeService, 'ensureSessionReady'>,
+  runtime: Pick<RuntimeService, 'ensureSessionReady' | 'connectInternalChannel'>,
   createAccess = createPodWorkspaceAccess,
 ): WorkspaceFileAccess | null {
   if (session.runtime?.type === 'cohost') return createCohostWorkspaceAccess(session, runtime)

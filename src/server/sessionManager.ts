@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import os from 'os'
 import type { WebSocket } from 'ws'
 import type { SessionIndexEntry } from './types.js'
+import type { CohostSessionBinding } from './runtime/cohostSessionRepository.js'
 
 export type SessionRuntimeType = 'host' | 'docker' | 'k8s' | 'cohost'
 
@@ -99,7 +100,10 @@ export type SessionCreateOptions = {
 
 export type BackendSpawnOptions = {
   sessionId: string
+  /** Cancel pending execution recovery when its runner stops. Never serialized. */
+  signal?: AbortSignal
   resumeSessionId?: string
+  cohostSessionBinding?: CohostSessionBinding
   cwd: string
   transcriptPath?: string
   dangerouslySkipPermissions?: boolean
@@ -153,6 +157,9 @@ export type BackendAvailableSkill = {
 }
 
 export type BackendHandle = {
+  /** Current ManagedAgentService process identity; never included in durable runtime metadata. */
+  managedProcessId?: string
+  cohostSessionBinding?: CohostSessionBinding
   workDir: string
   runtime: SessionRuntimeInfo
   availableSkills?: BackendAvailableSkill[]

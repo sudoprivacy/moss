@@ -52,9 +52,7 @@ export function beginImmediateWithBoundedWait(db: DatabaseSync): void {
  * Cross-dialect unique-constraint violation test (SQLite raises an error whose
  * message contains "UNIQUE constraint failed"; PostgreSQL raises SQLSTATE
  * 23505 with "duplicate key value violates unique constraint"). Used by call
- * sites that translate a conflict into a domain result or a retry (e.g. the
- * corp-app inbound seq race, which relies on the unique index under PG READ
- * COMMITTED where the single-statement increment still races).
+ * sites that translate a conflict into a domain result.
  */
 export function isUniqueViolation(err: unknown): boolean {
   if (err != null && typeof err === 'object') {

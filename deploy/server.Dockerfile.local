@@ -89,8 +89,8 @@ RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)
       *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
     esac \
     && case "$TARGETARCH" in \
-      amd64) NEXUS_SHA256="626b2bc12425debacf3d50ae3ad61aa72d164b99beeef3b646cb29f01e4023a2" ;; \
-      arm64) NEXUS_SHA256="fd0f1b826de38be4db67441069d8c0d1cb29c4c7757c535a2d7dda0480ff783f" ;; \
+      amd64) NEXUS_SHA256="c1a68a14e636dbe3a408947b05c74765e28a16bfb0c7f129b9c39e62986372ff" ;; \
+      arm64) NEXUS_SHA256="48777cdf40a04623c77df5de4de89735a8b286288e7bd5955fbf22c0cef63444" ;; \
     esac \
     && curl -fsSL "https://github.com/nexi-lab/nexus-vfs/releases/download/v${NEXUSD_CLUSTER_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
     && echo "${NEXUS_SHA256}  nexus.tar.gz" | sha256sum -c - \

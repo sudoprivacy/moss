@@ -1049,6 +1049,7 @@ export type RunnerManifest = {
   }
   attempt: {
     attemptId: string
+    serverInstanceId?: string
     generation: number
     runtimeDir: string
     attachPath: string

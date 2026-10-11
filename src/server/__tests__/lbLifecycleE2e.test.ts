@@ -99,7 +99,7 @@ async function startFixture(extraEnv: Record<string, string> = {}): Promise<LbFi
 
   const stderrOutput: string[] = []
   const stderrReader = fixtureProcess.stderr.getReader()
-  void (async () => {
+  const stderrDrained = (async () => {
     const decoder = new TextDecoder()
     while (true) {
       const result = await stderrReader.read()
@@ -115,7 +115,10 @@ async function startFixture(extraEnv: Record<string, string> = {}): Promise<LbFi
     const decoder = new TextDecoder()
     while (true) {
       const result = await stdoutReader.read()
-      if (result.done) throw new Error(`Fixture did not become ready: ${combinedOutput}`)
+      if (result.done) {
+        await stderrDrained
+        throw new Error(`Fixture did not become ready: ${combinedOutput}${stderrOutput.join('')}`)
+      }
       const chunk = decoder.decode(result.value, { stream: true })
       output.push(chunk)
       combinedOutput += chunk
@@ -128,8 +131,8 @@ async function startFixture(extraEnv: Record<string, string> = {}): Promise<LbFi
   const port = await Promise.race([
     readReady(),
     fixtureProcess.exited.then(async () => {
-      const stderr = await new Response(fixtureProcess.stderr).text()
-      throw new Error(`Fixture exited before readiness: ${stderr}`)
+      await stderrDrained
+      throw new Error(`Fixture exited before readiness: ${stderrOutput.join('')}`)
     }),
   ])
 

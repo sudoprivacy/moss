@@ -1,4 +1,5 @@
 import { ORGANIZATION_RESOURCE_PG_SCHEMA } from '../catalog/organizationResourceSchema.js'
+import { COHOST_SESSION_SCHEMA } from '../storage/cohostSessionSchema.js'
 /**
  * PostgreSQL schema for moss (HA P1-2e).
  *
@@ -403,9 +404,8 @@ CREATE TABLE IF NOT EXISTS corp_app_inbound (
   received_at BIGINT NOT NULL,
   payload_json TEXT
 );
--- Per-app monotonic poll cursor. On PG READ COMMITTED the single-statement
--- MAX(seq)+1 insert still races under concurrent LB callbacks; this unique
--- index is the hard backstop and appendCorpAppInbound retries on 23505.
+-- Per-app monotonic poll cursor. Appenders hold a transaction advisory lock
+-- while assigning MAX(seq)+1; the unique index protects the durable invariant.
 CREATE UNIQUE INDEX IF NOT EXISTS corp_app_inbound_seq_uniq
   ON corp_app_inbound (corp_app_id, seq);
 
@@ -2075,15 +2075,16 @@ export const MIGRATIONS: PgMigration[] = [
     CREATE INDEX IF NOT EXISTS idx_user_agents_owner
       ON user_agents (org_id, user_id, created_at);
   ` },
-  // Zone 系迁移自 v11 起（v5-v10 已被 dev 主线的 enterprise/compatibility 系
-  // 占用；两侧原都从 v5 起编号，合并时 dev 已发布编号不可动）。zone DDL 全部
-  // 幂等（IF NOT EXISTS），已按旧编号应用过的库重跑无害。
-  { version: 11, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },
-  { version: 12, name: 'session-zone-p1a', sql: MIGRATION_0006_SESSION_ZONE },
-  { version: 13, name: 'session-zone-observed-revision-p1a', sql: MIGRATION_0007_SESSION_ZONE_REVISION },
-  { version: 14, name: 'zone-membership-h2', sql: MIGRATION_0008_ZONE_MEMBERSHIP },
-  { version: 15, name: 'zone-binding-observed', sql: MIGRATION_0009_ZONE_BINDING_OBSERVED },
-  { version: 16, name: 'session-attempt-run-end', sql: MIGRATION_0010_SESSION_ATTEMPT_RUN_END },
+  { version: 11, name: 'cohost-session-bindings', sql: COHOST_SESSION_SCHEMA },
+  // Zone 系迁移自 v12 起（v5-v10 被 dev 主线的 enterprise/compatibility 系占用，
+  // v11 被 dev 的 cohost-session-bindings 占用；dev 已发布编号不可动）。zone DDL
+  // 全部幂等（IF NOT EXISTS），已按旧编号应用过的库重跑无害。
+  { version: 12, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },
+  { version: 13, name: 'session-zone-p1a', sql: MIGRATION_0006_SESSION_ZONE },
+  { version: 14, name: 'session-zone-observed-revision-p1a', sql: MIGRATION_0007_SESSION_ZONE_REVISION },
+  { version: 15, name: 'zone-membership-h2', sql: MIGRATION_0008_ZONE_MEMBERSHIP },
+  { version: 16, name: 'zone-binding-observed', sql: MIGRATION_0009_ZONE_BINDING_OBSERVED },
+  { version: 17, name: 'session-attempt-run-end', sql: MIGRATION_0010_SESSION_ATTEMPT_RUN_END },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

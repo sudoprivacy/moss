@@ -83,6 +83,8 @@ jobs:
             --moduleResolution nodenext --target es2022 --skipLibCheck \
             scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts \
             scripts/e2e/cohost-session-recovery.ts \
+            scripts/e2e/cohost-real-model-workflow.ts scripts/e2e/cohost-model-bootstrap.ts \
+            scripts/e2e/server-session-live.ts \
             scripts/e2e/embedded-nexus-live.ts scripts/e2e/broker-upgrade-live.ts scripts/e2e/external-broker-live.ts
 
       # Nothing in this repo has ever type-checked: bun executes TypeScript
@@ -176,7 +178,7 @@ jobs:
         with:
           node-version: '22.22.1'
       - run: bun install --frozen-lockfile
-      - name: Verify two owners, writer exclusion and exact history after resume
+      - name: Verify owner isolation, active daemon crash and exact durable recovery
         run: bash scripts/e2e/run-cohost-recovery.sh
         env:
           GH_TOKEN: ${{ github.token }}

@@ -62,11 +62,11 @@ const SHA256 = {
   'nexus-vault-macos-arm64.tar.gz': '4d0a0814c94bc9dff4934331885d2d811ee51a13c9c661377fef0f9ca6f4c018',
   'nexus-vault-macos-x86_64.tar.gz': '6380f3435ea549db9f0c7399ea402600a07efce0f73df94a1bce54b966385525',
   'nexus-vault-windows-x86_64.zip': '2c8b0818a148a5e9d84b584ef577b62309eaff20a559b7c7c4f0a3a31a1e22cd',
-  'nexusd-cluster-macos-aarch64.tar.gz': 'aeb464e7b6cb9bad10a41a1b1e3c1b22dcc47768c8432101942282592bd8d55e',
-  'nexusd-cluster-macos-x86_64.tar.gz': 'e27989e73e05dc9c53fb7e21a59cd0b8f687d5c32e29c72fe0c3cc4ce9620d8e',
-  'nexusd-cluster-windows-x86_64.zip': '4eca66fc4b2dc8704d2eba698ea0ddb8ad4997042631131896f0442243b72a38',
-  'nexusd-cluster-linux-x86_64.tar.gz': '626b2bc12425debacf3d50ae3ad61aa72d164b99beeef3b646cb29f01e4023a2',
-  'nexusd-cluster-linux-aarch64.tar.gz': 'fd0f1b826de38be4db67441069d8c0d1cb29c4c7757c535a2d7dda0480ff783f',
+  'nexusd-cluster-macos-aarch64.tar.gz': 'cb0690cdb40eefbed99ca72ed5a40a60855193aa3baaab94af59044111eb2cd9',
+  'nexusd-cluster-macos-x86_64.tar.gz': '8d5d5ed28681a8e6639c1ee095962cd1dba4a0c7d47337536760688a2744775f',
+  'nexusd-cluster-windows-x86_64.zip': 'ba5b2b52b76459878d4c9ebacfb3c2bfe5ee9f33e60cf2c4839b348f93ddd155',
+  'nexusd-cluster-linux-x86_64.tar.gz': 'c1a68a14e636dbe3a408947b05c74765e28a16bfb0c7f129b9c39e62986372ff',
+  'nexusd-cluster-linux-aarch64.tar.gz': '48777cdf40a04623c77df5de4de89735a8b286288e7bd5955fbf22c0cef63444',
 }
 
 const GITHUB = 'https://github.com/nexi-lab/nexus/releases/download'

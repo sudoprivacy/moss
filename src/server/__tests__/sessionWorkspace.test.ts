@@ -58,6 +58,7 @@ describe('workspace access during runtime startup', () => {
       session,
       config,
       {
+        connectInternalChannel: async () => { throw new Error('Kubernetes workspace must not open a cohost channel') },
         ensureSessionReady: async (id) => {
           expect(id).toBe(session.sessionId)
           onStartupJoined()
@@ -102,6 +103,7 @@ describe('workspace access during runtime startup', () => {
       { ...session, status: 'ended' },
       config,
       {
+        connectInternalChannel: async () => { throw new Error('Kubernetes workspace must not open a cohost channel') },
         ensureSessionReady: async () => {
           restores++
           return { session, attempt: {} } as never

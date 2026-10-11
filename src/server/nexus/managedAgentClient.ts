@@ -1,5 +1,6 @@
 /** Managed session control plane and the shared conversation transport. */
 import { NexusSessionTransport, type NexusVfsClient, type NexusSessionEndpoint, type SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
+import { z } from 'zod'
 
 /**
  * Raw subprocess spec. The launch-logic SSOT stays moss-side: nexus executes
@@ -26,6 +27,60 @@ export type StartSessionResult = {
   workspacePath?: string
 }
 
+export interface ManagedSessionSnapshot {
+  session_id: string
+  agent_id: string
+  owner_id: string
+  workspace_path: string
+  state?: string
+  durable_session_id?: string
+  session_endpoint?: NexusSessionEndpoint
+}
+
+const managedRegistrySchema = z.array(z.object({
+  pid: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  name: z.string().min(1),
+  owner_id: z.string().min(1),
+  repos: z.array(z.object({ alias: z.string(), mount_path: z.string() })).default([]),
+}))
+
+const managedSessionSchema: z.ZodType<ManagedSessionSnapshot> = z.object({
+  session_id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  agent_id: z.string().min(1),
+  owner_id: z.string().min(1),
+  workspace_path: z.string().min(1),
+  state: z.enum(['registered', 'warming_up', 'ready', 'busy', 'awaiting_input', 'terminated']).optional(),
+  durable_session_id: z.string().min(1).optional(),
+  session_endpoint: z.object({
+    protocol: z.literal('acp-mailbox/1'), channel_id: z.string().min(1),
+    agent: z.string().min(1), controller: z.string().min(1),
+    transcript: z.string().regex(/^\/conversations\/[a-f0-9]{32}\/transcript$/),
+  }).optional(),
+})
+
+/** Recognize only the pinned managed-session RPC's explicit writer-lease refusal. */
+export function isManagedSessionBusy(error: unknown): boolean {
+  const failure = rpcFailure(error)
+  return failure?.message === 'managed_agent.start_session_v1: internal: spawn agent runtime: co-host: session is still running; stop it before resuming'
+}
+
+/** A reaped process is already stopped; authentication and other failures remain errors. */
+export function isUnknownManagedSession(error: unknown, processId: string): boolean {
+  const failure = rpcFailure(error)
+  return failure?.message === `managed_agent.get_session_v1: invalid argument: unknown session_id ${JSON.stringify(processId)}` ||
+    failure?.message === `managed_agent.cancel_v1: invalid argument: unknown session_id ${JSON.stringify(processId)}`
+}
+
+function rpcFailure(error: unknown): { message: string } | undefined {
+  if (!(error instanceof Error)) return undefined
+  try {
+    const body: unknown = JSON.parse(error.message)
+    if (body && typeof body === 'object' && 'code' in body && body.code === -32603 &&
+      'message' in body && typeof body.message === 'string') return { message: body.message }
+  } catch {}
+  return undefined
+}
+
 export class ManagedAgentClient {
   constructor(
     private readonly client: NexusVfsClient,
@@ -44,9 +99,8 @@ export class ManagedAgentClient {
 
   /**
    * Ask nexus to plant a session and launch `spec`. `agentId` is the static
-   * agent profile id; `ownerId` / `zoneId` are the identity the descriptor is
-   * stamped with — nexus takes them from the request as-is, so moss states the
-   * owning user honestly rather than letting them default to `system` / `root`.
+   * agent profile id. A delegated credential proves the owner; `ownerId` is
+   * used only by the existing non-delegated local daemon contract.
    */
   async startSession(input: {
     agentId: string
@@ -108,21 +162,63 @@ export class ManagedAgentClient {
   }
 
   /** Read the daemon's ownership and workspace record without starting a session. */
-  async getSession(sessionId: string): Promise<{
-    session_id: string
-    agent_id: string
-    owner_id: string
-    workspace_path: string
-    durable_session_id?: string
-  }> {
-    return this.call('managed_agent.get_session_v1', { session_id: sessionId })
+  async getSession(sessionId: string): Promise<ManagedSessionSnapshot> {
+    return managedSessionSchema.parse(await this.call<unknown>('managed_agent.get_session_v1', { session_id: sessionId }))
+  }
+
+  /** Discover an owned live execution from the daemon's existing registry, without persisting a PID. */
+  async findSession(input: { ownerId: string; agentId: string; repositoryPath?: string; durableSessionId?: string }): Promise<ManagedSessionSnapshot | undefined> {
+    if (!input.repositoryPath && !input.durableSessionId) throw new Error('A durable session or repository is required')
+    const records = managedRegistrySchema.parse(await this.call<unknown>(
+      'agent_list', { owner_id: input.ownerId, kind: 'managed' }))
+    const candidates = records.filter(record => record.name === input.agentId && record.owner_id === input.ownerId &&
+      (!input.repositoryPath || record.repos?.some(repo => repo.alias === 'workspace' && repo.mount_path === input.repositoryPath)))
+    const snapshots = await Promise.all(candidates.map(async record => {
+      try {
+        const snapshot = await this.getSession(record.pid)
+        if (snapshot.session_id !== record.pid || snapshot.agent_id !== input.agentId || snapshot.owner_id !== input.ownerId) {
+          throw new Error('Managed execution does not belong to the requested owner and agent')
+        }
+        return !input.durableSessionId || snapshot.durable_session_id === input.durableSessionId ? snapshot : undefined
+      } catch (error) {
+        if (isUnknownManagedSession(error, record.pid)) return undefined
+        throw error
+      }
+    }))
+    const matches = snapshots.filter((snapshot): snapshot is ManagedSessionSnapshot => snapshot !== undefined)
+    if (matches.length > 1) throw new Error('Multiple managed executions share this durable session or repository')
+    return matches[0]
   }
 
   openSession(endpoint: NexusSessionEndpoint, events: {
     onMessage(message: SessionRpcMessage): void
     onClose(error: Error | undefined): void
-  }): NexusSessionTransport {
-    return new NexusSessionTransport({ client: this.client, authToken: this.authToken, endpoint, ...events })
+  }, managedProcessId?: string): NexusSessionTransport {
+    const client: Pick<NexusVfsClient, 'streamReadAt' | 'streamWrite'> = managedProcessId ? {
+      streamWrite: this.client.streamWrite.bind(this.client),
+      streamReadAt: async (...args) => {
+        try { return await this.client.streamReadAt(...args) }
+        catch (error) {
+          // A retained conversation can outlive its process. Reconnect only
+          // while the daemon still owns this exact execution and channel.
+          let snapshot: ManagedSessionSnapshot
+          try { snapshot = await this.getSession(managedProcessId) }
+          catch (failure) {
+            if (isUnknownManagedSession(failure, managedProcessId)) {
+              throw new Error('Managed execution disappeared; resume the durable session', { cause: failure })
+            }
+            throw failure
+          }
+          if (snapshot.session_id !== managedProcessId || snapshot.state === 'terminated' ||
+            !snapshot.session_endpoint || Object.entries(endpoint).some(([key, value]) =>
+              snapshot.session_endpoint![key as keyof NexusSessionEndpoint] !== value)) {
+            throw new Error('Managed execution channel changed; resume the durable session', { cause: error })
+          }
+          throw error
+        }
+      },
+    } : this.client
+    return new NexusSessionTransport({ client, authToken: this.authToken, endpoint, ...events })
   }
 
   close(): void { this.client.close() }

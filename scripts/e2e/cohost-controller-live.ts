@@ -1,5 +1,6 @@
 /** Real Moss session transport, approved file work and a dependent next turn. */
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { SessionRpcMessage, NexusSessionEndpoint } from '@nexus-ai-fs/vfs-client'
 import type { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
 
@@ -7,14 +8,20 @@ import type { ManagedAgentClient } from '../../src/server/nexus/managedAgentClie
 export function connectController(s: {
   agent: ManagedAgentClient
   sessionEndpoint: NexusSessionEndpoint
-}, allowed: ReadonlySet<string>) {
+  sessionId?: string
+}, allowed: ReadonlySet<string>, allowExplore = false) {
   const pending = new Map<string, { resolve(value: any): void, reject(error: Error): void }>()
   let nextId = 0
   let approvals = 0
+  let exploreDelegations = 0
+  const children = new Map<string, string[]>()
   let unexpected: string | undefined
   const updates: any[] = []
+  let onClosed!: (error: Error | undefined) => void
+  const closed = new Promise<Error | undefined>(resolve => { onClosed = resolve })
   const transport = s.agent.openSession(s.sessionEndpoint, {
     onClose(error) {
+      onClosed(error)
       for (const request of pending.values()) request.reject(error ?? new Error('session closed'))
       pending.clear()
     },
@@ -23,16 +30,33 @@ export function connectController(s: {
       if (m.method === 'session/request_permission') {
         const call = m.params.toolCall
         const raw = typeof call.rawInput === 'string' ? JSON.parse(call.rawInput) : call.rawInput
+        // ACP permission updates omit title; the preceding tool-call update
+        // carries it. Match its exact input before using that name.
+        const title = call.title ?? [...updates].reverse().find(update =>
+          update.sessionUpdate === 'tool_call' && isDeepStrictEqual(update.rawInput, raw),
+        )?.title
         const path = raw?.path ?? raw?.file_path
-        const ok = allowed.has(path)
-        if (!ok) unexpected = `unexpected approval path ${String(path)}`
+        const explore = allowExplore && (raw?.agent ?? raw?.subagent_type) === 'Explore'
+        const childStatus = allowExplore && (
+          title === 'pid_output' && children.has(raw?.pid)
+          || title === 'pid_status' && (children.has(raw?.pid) || !raw?.pid && children.size > 0)
+        )
+        const childFile = allowExplore && title === 'read_file' && [...children.values()].some(paths => paths.includes(path))
+        const childDiscovery = allowExplore && title === 'ToolSearch' && typeof raw?.query === 'string'
+        const ok = allowed.has(path) || explore || childStatus || childFile || childDiscovery
+        if (!ok) unexpected = `unexpected approval ${String(title)} path ${String(path)}`
         const option = m.params.options.find((o: any) => o.kind === (ok ? 'allow_once' : 'reject_once'))
         if (!option) throw new Error('permission request has no matching one-call option')
         if (ok) approvals += 1
+        if (explore) exploreDelegations += 1
         void transport.send({ jsonrpc: '2.0', id: m.id,
           result: { outcome: { outcome: 'selected', optionId: option.optionId } } })
       } else if (m.method === 'session/update') {
         updates.push(m.params.update)
+        const output = m.params.update?.rawOutput
+        if (allowExplore && output?.subagentType === 'Explore' && typeof output.agentId === 'string' && typeof output.outputFile === 'string') {
+          children.set(output.agentId, [output.outputFile, output.manifestFile].filter((path): path is string => typeof path === 'string'))
+        }
       } else if (m.method) {
         unexpected = `unexpected controller request ${m.method}`
         if (m.id !== undefined) void transport.send({ jsonrpc: '2.0', id: m.id,
@@ -45,7 +69,7 @@ export function connectController(s: {
         else request.resolve(m.result ?? {})
       }
     },
-  })
+  }, s.sessionId)
   transport.start()
   async function rpc(method: string, params: unknown, budget = 120_000): Promise<any> {
     const id = `moss-live-${++nextId}`
@@ -64,7 +88,9 @@ export function connectController(s: {
   return {
     rpc,
     updates,
+    closed,
     get approvals() { return approvals },
+    get exploreDelegations() { return exploreDelegations },
     assertHealthy() {
       if (unexpected) throw new Error(unexpected)
       if (updates.some(u => u.sessionUpdate === 'tool_call_update' && u.status === 'failed')) {
