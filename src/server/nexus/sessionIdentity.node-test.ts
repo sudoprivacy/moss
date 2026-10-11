@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { NexusVfsClient, NexusZoneApiClient } from '@nexus-ai-fs/vfs-client'
 
-import { mintSessionIdentity, ownerField, type SessionIdentity } from './sessionIdentity.js'
+import { mintSessionIdentity, renewSessionCredential, ownerField, type SessionIdentity } from './sessionIdentity.js'
 import { connectSessionRuntime } from './sessionConnection.js'
 import { ManagedAgentClient } from './managedAgentClient.js'
 
@@ -22,6 +22,7 @@ import { ManagedAgentClient } from './managedAgentClient.js'
  */
 
 const identity: SessionIdentity = {
+  credential: { subjectId: 'session-00000000-0000-0000-0000-000000000000', certPem: Buffer.alloc(0), keyPem: Buffer.alloc(0), caPem: Buffer.alloc(0) },
   subjectId: 'session-00000000-0000-0000-0000-000000000000',
   tls: { ca: Buffer.alloc(0), cert: Buffer.alloc(0), key: Buffer.alloc(0) },
 }
@@ -76,6 +77,10 @@ void test('delegated execution and file requests never carry the deployment toke
       },
       read: async (_path: string, token: string) => { calls.push({ method: 'read', token }); return Buffer.from('owned-file') },
       close: () => {},
+      maintainSessionCredential: (credential: { subjectId: string }, options: { validitySecs: number }) => {
+        assert.equal(credential.subjectId, identity.subjectId)
+        assert.equal(options.validitySecs, 300)
+      },
     }
   })
   const connection = await connectSessionRuntime({ endpoint: 'https://runtime:8444', tls: operatorTls,
@@ -89,6 +94,32 @@ void test('delegated execution and file requests never carry the deployment toke
     assert.deepEqual(calls.map(call => call.token), ['', ''])
     assert.equal('owner_id' in calls[0]!.params!, false)
   } finally { connection.client.close() }
+})
+
+void test('closing a controller cancels its in-flight credential renewal and closes the issuer', async t => {
+  const abort = new AbortController()
+  let closeCount = 0
+  t.mock.method(NexusZoneApiClient, 'withMtls', () => ({
+    renewSessionAgent: async (credential: unknown) => {
+      assert.equal(credential, identity.credential)
+      await new Promise<never>((_resolve, reject) => {
+        abort.signal.addEventListener('abort', () => reject(abort.signal.reason), { once: true })
+      })
+    },
+    close: () => { closeCount++ },
+  }))
+  const promise = renewSessionCredential('https://runtime:8444', { ca: '/ca', cert: '/cert', key: '/key' }, identity.credential, abort.signal)
+  const rejected = assert.rejects(promise)
+  abort.abort()
+  await rejected
+  assert.equal(closeCount, 2, 'abort closes the live RPC and finally releases the issuer')
+})
+
+void test('an already closed controller does not open a credential issuer', async t => {
+  const abort = new AbortController()
+  abort.abort()
+  t.mock.method(NexusZoneApiClient, 'withMtls', () => { throw new Error('unexpected issuer dial') })
+  await assert.rejects(renewSessionCredential('https://runtime:8444', { ca: '/ca', cert: '/cert', key: '/key' }, identity.credential, abort.signal), { name: 'AbortError' })
 })
 
 void test('a failed owner credential cannot fall back to the operator connection', async t => {

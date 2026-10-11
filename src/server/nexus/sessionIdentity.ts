@@ -10,23 +10,23 @@
  * an empty body is not a disagreement, so the certificate decides alone.
  */
 
-import { NexusZoneApiClient, type NexusVfsTlsConfig } from '@nexus-ai-fs/vfs-client'
+import { NexusZoneApiClient, type NexusVfsTlsConfig, type SessionCredential } from '@nexus-ai-fs/vfs-client'
 
 import type { NexusTlsConfig } from './nexusEnvConfig.js'
 
 /**
- * A credential is held only by its execution's controller. Its actor ID is
- * also a mailbox participant, so replacing it requires a fresh execution
- * endpoint with the same durable session. A reconnect refused after expiry
- * ends the old attempt; recovery mints a new credential.
+ * Credentials remain in the execution controller's memory. Renewal preserves
+ * its signed actor and owner while replacing the key and certificate. Once
+ * expiry or revocation ends that lease, recovery starts a new controller.
  */
-const VALIDITY_SECS = 300
+export const SESSION_CREDENTIAL_VALIDITY_SECS = 300
 
 /** mTLS material for one execution controller, held in memory and never written down. */
 export type SessionIdentity = {
-  tls: NexusVfsTlsConfig
+  credential: SessionCredential
+  readonly tls: NexusVfsTlsConfig
   /** The `session-<uuid>` the daemon minted, for logs. */
-  subjectId: string
+  readonly subjectId: string
 }
 
 /**
@@ -47,17 +47,40 @@ export async function mintSessionIdentity(
 
   const zoneApi = NexusZoneApiClient.withMtls(endpoint, tls)
   try {
-    const credential = await zoneApi.mintSessionAgent(ownerId, { validitySecs: VALIDITY_SECS })
+    const credential = await zoneApi.mintSessionAgent(ownerId, { validitySecs: SESSION_CREDENTIAL_VALIDITY_SECS })
     return {
-      subjectId: credential.subjectId,
-      tls: {
-        ca: credential.caPem,
-        cert: credential.certPem,
-        key: credential.keyPem,
-        serverName: tls.serverName,
+      credential,
+      get subjectId() { return credential.subjectId },
+      get tls() {
+        return {
+          ca: credential.caPem,
+          cert: credential.certPem,
+          key: credential.keyPem,
+          serverName: tls.serverName,
+        }
       },
     }
   } finally {
+    zoneApi.close()
+  }
+}
+
+/** Renew through the minter, cancelling the issuer RPC when its controller closes. */
+export async function renewSessionCredential(
+  endpoint: string,
+  tls: NexusTlsConfig,
+  current: SessionCredential,
+  signal: AbortSignal,
+): Promise<SessionCredential> {
+  signal.throwIfAborted()
+  const zoneApi = NexusZoneApiClient.withMtls(endpoint, tls)
+  const onAbort = (): void => { zoneApi.close() }
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    signal.throwIfAborted()
+    return await zoneApi.renewSessionAgent(current, { validitySecs: SESSION_CREDENTIAL_VALIDITY_SECS })
+  } finally {
+    signal.removeEventListener('abort', onAbort)
     zoneApi.close()
   }
 }
