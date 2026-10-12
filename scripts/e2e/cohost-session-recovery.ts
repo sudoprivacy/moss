@@ -277,6 +277,9 @@ try {
     assert.equal((await current.agent.getSession(first.sessionId)).owner_id, owner)
     assert(first.durableSessionId)
     assert.notEqual(first.sessionId, first.durableSessionId)
+    assert.match(first.sessionId, /^\d+\.\d+$/, 'cohost runtime uses native OS PID.local_id')
+    assert.equal(Number(first.sessionId.split('.')[0]), daemon!.pid, 'runtime PID decodes to the execution daemon')
+    await operator.mkdir(`/proc/${first.sessionId}/tasks/recovery-check/nested`, '', { parents: true, existOk: true })
     const sid = first.durableSessionId
     assert.equal(await bindingStore.bind(mossSessionId, attemptId,
       { ownerId: owner, agentId, durableSessionId: sid, repositoryPath }, 'moss-owner'), true)
@@ -346,6 +349,7 @@ try {
         await assert.rejects(current.client.call('managed_agent.get_session_v1',
           JSON.stringify({ session_id: first.sessionId }), ''), /unknown session_id/,
         'cancel must remove the old managed process')
+        assert.equal(await operator.stat(`/proc/${first.sessionId}`, ''), null, 'cancel reaps a procfs view with dynamic children')
       }
       await stopDaemon(shutdownSignal)
       await bootDaemon()
@@ -369,6 +373,9 @@ try {
       bindingStore = openBindings()
       const binding = await bindingStore.get(mossSessionId)
       assert.deepEqual(binding, { ownerId: owner, agentId, durableSessionId: sid, repositoryPath }, 'another Moss process can recover without a host locator')
+      // PID values may be reused after a process or container restart. Check the old
+      // view before starting a replacement; the fresh channel identifies its attachment.
+      assert.equal(await operator.stat(`/proc/${first.sessionId}`, ''), null, 'old process view must disappear before recovery')
       const recoveryStarted = Date.now()
       const recovered = await startCohostExecution(current.agent,
         { agentId, model, resumeSessionId: binding!.durableSessionId,
@@ -377,8 +384,10 @@ try {
       active = recovered.session
       const recoveryMs = Date.now() - recoveryStarted
       assert.equal(recovered.isResume, true)
-      assert.notEqual(active.sessionId, first.sessionId)
+      assert.match(active.sessionId, /^\d+\.\d+$/)
+      assert.equal(Number(active.sessionId.split('.')[0]), daemon!.pid)
       assert.equal(active.durableSessionId, sid)
+      await operator.mkdir(`/proc/${active.sessionId}/tasks/recovery-check/nested`, '', { parents: true, existOk: true })
       assert.equal(await bindingStore.bind(mossSessionId, attemptId,
         { ownerId: owner, agentId, durableSessionId: active.durableSessionId!, repositoryPath }, 'moss-owner'), true)
       const durableColumns = await bindingDriver!.all<{ name: string }>('PRAGMA table_info(cohost_sessions)')
@@ -403,6 +412,9 @@ try {
       assert.equal(after.filter(m => m.role === 'user').length, 2, 'resume must add exactly one user turn')
       await current.agent.cancel(active.sessionId)
       await controller.close()
+      assert.equal(await operator.stat(`/proc/${active.sessionId}`, ''), null, 'restored runtime cleanup removes its dynamic children')
+      assert.equal((await operator.read(memoryPath, '')).toString(), memory, 'runtime cleanup retains persistent agent memory')
+      assert.deepEqual(JSON.parse((await operator.read(final, '')).toString()), { code: order.code, total: order.subtotal + 13 })
       await waitFor('owner validation after writer lease release', async () => {
         try {
           await other.agent.startSession({ agentId, model, resumeSessionId: sid,
@@ -428,7 +440,8 @@ try {
     'mTLS owner credentials', 'production connection proves the owner with a configured deployment token',
     'real controller approval', 'native transcript stream', 'second writer refusal',
     'wrong owner refusal', 'daemon restart with model startup hook', 'active daemon crash', 'persisted files and agent memory',
-    'same durable ID and new pid/channel', 'exact prior history', 'dependent file write',
+    'same durable ID and fresh channel with native OS-scoped PID', 'exact prior history', 'dependent file write',
+    'native OS PID.local_id decodes to execution daemon', 'cancel removes dynamic procfs children without deleting durable targets',
     'lost creation reply without duplicate execution', 'replacement controller discovers and resumes owned orphan',
     'obsolete execution detected on reconnect',
     'native agent memory injected before and after restart', 'other owner agent memory absent from system prompt',
