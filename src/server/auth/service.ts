@@ -1,3 +1,6 @@
+import { ExternalProviderService } from '../externalProviders/service.js'
+import { ExternalTaskStore } from '../externalProviders/store.js'
+import { pilotPolicyFromEnvironment } from '../externalProviders/policy.js'
 import { migratePhonePasswords } from '../identity/phonePasswordMigration.js'
 import { randomUUID } from 'crypto'
 import { z } from 'zod'
@@ -658,6 +661,18 @@ export class AuthService {
       identities: this.identityRepository,
       uploads,
       buildVisibility: actor => this.buildSudoworkVisibilityFilter(actor),
+    })
+  }
+
+  createExternalProviderService(secrets: import('../externalProviders/administration.js').ExternalSecretPort): ExternalProviderService {
+    return new ExternalProviderService(new ExternalTaskStore(this.db.driver), {
+      catalog: new CatalogRepository(this.db.driver), identities: this.identityRepository, secrets,
+      policy: pilotPolicyFromEnvironment(),
+      members: async orgId => (await this.db.listUsersByOrg(orgId)).filter(user => user.status === 'active').map(user => ({ id: user.id, name: user.displayName || user.name || user.email })),
+      isActive: async actor => {
+        const user = await this.db.getUserByIdAndOrg(actor.userId, actor.orgId)
+        return user?.status === 'active'
+      },
     })
   }
 

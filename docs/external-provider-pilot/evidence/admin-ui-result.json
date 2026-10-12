@@ -1,0 +1,28 @@
+{
+  "checks": [
+    "platform administrator enabled pilot and endpoint through UI",
+    "connection tested, definition uploaded, member selected and draft saved",
+    "ordinary user cannot manage or execute draft",
+    "administrator reviewed and published through UI",
+    "ordinary user received 42 from real Dify",
+    "ordinary user received 50 from real Dify",
+    "history survives reload and both turns share provider conversation",
+    "disable removes user availability",
+    "editing and credential replacement require reapproval",
+    "saved key test and archive preserve user history"
+  ],
+  "pageErrors": [],
+  "history": [
+    {
+      "status": "succeeded",
+      "answer": "42"
+    },
+    {
+      "status": "succeeded",
+      "answer": "50"
+    }
+  ],
+  "secret_storage": "real local Nexus vault",
+  "rotation": "rewrote existing authorized App key; did not create a remote Dify key",
+  "login": "isolated AuthService users and encrypted WebUI sessions"
+}

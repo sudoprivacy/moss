@@ -1,3 +1,5 @@
+import { dispatchExternalProvider, isExternalProviderRoute } from './externalProviders/routes.js'
+import { ExternalProviderError } from './externalProviders/policy.js'
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { AgentManager, canUpgradeAgentRuntime, managedSessionAgentName } from './agentManager.js'
@@ -2054,6 +2056,9 @@ export function startServer(
     } catch { return undefined }
   }) : null
 
+  const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient) : null
+  void externalProviders?.store.ready.catch(() => logger.error('External provider task store initialization failed'))
+
   // Cron Service - scheduled task execution engine
   const cronService = new CronService(runtime.store.driver, {
     runtimeService: runtime,
@@ -3615,6 +3620,19 @@ export function startServer(
       }
       if (!auth) {
         throw new HttpError(401, 'Unauthorized')
+      }
+
+      if (isExternalProviderRoute(pathname)) {
+        res.setHeader('Cache-Control', 'no-store')
+        const result = await dispatchExternalProvider(externalProviders, auth, req.method ?? 'GET', url,
+          req.method === 'POST' ? await readJsonBody(req) : {}, () => {
+            if (!['admin', 'super_admin'].includes(auth!.role)) throw new ExternalProviderError(403, 'ADMIN_REQUIRED')
+            try { authService.requireScope(auth!, 'admin:users') } catch { throw new ExternalProviderError(403, 'ADMIN_REQUIRED') }
+          }, () => {
+            if (auth!.role !== 'super_admin') throw new ExternalProviderError(403, 'PLATFORM_ADMIN_REQUIRED')
+          })
+        writeJson(res, result.status, result.body)
+        return
       }
 
       const resourceAuth = auth
@@ -11282,6 +11300,7 @@ export function startServer(
     port: null,
     ready,
     stop: async () => {
+      await externalProviders?.close()
       wikiJobExecutor.stop()
       sourceSyncWorker.stop()
       cronService.stop()

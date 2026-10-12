@@ -1,0 +1,6 @@
+{
+  "phase": "nexus-persistence-passed",
+  "secretPort": "real local Nexus vault",
+  "restarted": true,
+  "plainKeyInBinding": false
+}

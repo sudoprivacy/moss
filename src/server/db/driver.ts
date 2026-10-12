@@ -197,7 +197,8 @@ export class SqliteDriver implements DbDriver {
         throw error
       }
     }
-    if (this.activeTx !== null) await this.waitOutTx() // serialize concurrent top-level txns
+    // Recheck after the await: another awakened waiter may have acquired the handle.
+    while (this.activeTx !== null) await this.waitOutTx()
     const run = (async () => {
       beginImmediateWithBoundedWait(this.db)
       try {
