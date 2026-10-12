@@ -898,6 +898,11 @@ export class AuthService {
     if (await this.db.isTokenRevoked(auth.jti)) {
       return null
     }
+    // Role changes invalidate the issued grants immediately. Refresh/login
+    // issues a new token with the current role; internal scoped tokens keep
+    // their original limits while their owner's role remains unchanged.
+    const user = await this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
+    if (!user || user.status !== 'active' || user.role !== auth.role) return null
     return auth
   }
 

@@ -73,6 +73,15 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
     assert.equal((await request('PATCH', `/api/v1/sessions/${created.data.sessionId}`, a.user,
       { client_metadata: { agent_manager_actor_id: b.userId } })).status, 400)
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, b.admin)).status, 403)
+    const bootInA = (await ok('POST', '/api/v1/auth/switch-org', boot, { org_id: a.orgId })).access_token
+    await ok('PATCH', `/api/v1/users/${adminId}`, bootInA, { role: 'user' })
+    assert.equal((await request('GET', '/api/v1/agents', a.admin)).status, 401,
+      'a role change immediately invalidates the previous management token')
+    assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, a.admin)).status, 401)
+    const downgraded = await login('a-admin')
+    assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, downgraded)).status, 403,
+      'the persisted management actor metadata cannot replace current permission')
+    assert((await ok('GET', '/api/v1/agents', downgraded)).agents.every((agent: any) => agent.ownerId === adminId))
   } finally {
     const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
     if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await exited }
