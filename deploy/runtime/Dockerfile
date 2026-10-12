@@ -126,7 +126,8 @@ RUN COHOST_VERSION="$(node -p 'require("/tmp/moss-runtime-versions.json")["nexus
     tar -xzf /tmp/cohost/nexusd-cohost-linux-x64.tar.gz -C /tmp/cohost && \
     install -m 0755 /tmp/cohost/nexusd-cohost-linux-x64/nexusd-cohost /usr/local/bin/nexusd-cohost && \
     curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/vault-v${VAULT_VERSION}/nexus-vault-linux-x86_64.tar.gz" -o /tmp/vault.tar.gz && \
-    echo '60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914  /tmp/vault.tar.gz' | sha256sum -c - && \
+    VAULT_SHA256="$(node -p 'require("/tmp/moss-runtime-versions.json")["artifact-sha256"]["nexus-vault-linux-x86_64.tar.gz"]')" && \
+    echo "$VAULT_SHA256  /tmp/vault.tar.gz" | sha256sum -c - && \
     tar -xzf /tmp/vault.tar.gz -C /opt/scode-plugins && \
     test -f /opt/scode-plugins/libnexus_vault.so.sig && \
     nexusd-cohost --version && \

@@ -12,7 +12,7 @@
  * 由 scripts/build.js 在 `--target=node` 且 win32/darwin 且非 CI 时调用；也可
  * `bun scripts/fetch-nexus-runtime.js` 独立运行（便于单独验证与手动重取）。
  *
- * 版本来源：src/server/nexus/runtime-versions.json；升级版本时必须同步更新下方 SHA256 表。
+ * Versions and artifact checksums share src/server/nexus/runtime-versions.json.
  */
 import { execFileSync } from 'child_process'
 import { createHash } from 'crypto'
@@ -45,27 +45,14 @@ const REPO_ROOT = process.cwd()
 const COS_RUNTIME = 'https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com'
 const COS_LEGACY = 'https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com'
 
-// sha256 真源（实测值）。仅列 build.js 触发平台（win/mac）所需；Linux 由
-// server.Dockerfile.local 内联 sha 各自维护。升级 runtime-versions.json 版本时必须同步此表。
-const SHA256 = {
-  'nexus-vault-linux-x86_64.tar.gz': '60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914',
-  'nexus-vault-linux-aarch64.tar.gz': '2954afa5a5732451188b6e84a6d143805e3afebc77f67f4a1e8feebc67648f04',
-  'nexus-vault-macos-arm64.tar.gz': '4d0a0814c94bc9dff4934331885d2d811ee51a13c9c661377fef0f9ca6f4c018',
-  'nexus-vault-macos-x86_64.tar.gz': '6380f3435ea549db9f0c7399ea402600a07efce0f73df94a1bce54b966385525',
-  'nexus-vault-windows-x86_64.zip': '2c8b0818a148a5e9d84b584ef577b62309eaff20a559b7c7c4f0a3a31a1e22cd',
-  'nexusd-cluster-macos-aarch64.tar.gz': 'cb0690cdb40eefbed99ca72ed5a40a60855193aa3baaab94af59044111eb2cd9',
-  'nexusd-cluster-macos-x86_64.tar.gz': '8d5d5ed28681a8e6639c1ee095962cd1dba4a0c7d47337536760688a2744775f',
-  'nexusd-cluster-windows-x86_64.zip': 'ba5b2b52b76459878d4c9ebacfb3c2bfe5ee9f33e60cf2c4839b348f93ddd155',
-  'nexusd-cluster-linux-x86_64.tar.gz': 'c1a68a14e636dbe3a408947b05c74765e28a16bfb0c7f129b9c39e62986372ff',
-  'nexusd-cluster-linux-aarch64.tar.gz': '48777cdf40a04623c77df5de4de89735a8b286288e7bd5955fbf22c0cef63444',
-}
+// Native installation and both Docker builds consume the same verified pins.
+const RUNTIME_PINS = JSON.parse(readFileSync(join(SCRIPT_DIR, '..', 'src', 'server', 'nexus', 'runtime-versions.json'), 'utf8'))
+const SHA256 = RUNTIME_PINS['artifact-sha256']
 
 const GITHUB = 'https://github.com/nexi-lab/nexus/releases/download'
 
 function loadVersions() {
-  const p = join(SCRIPT_DIR, '..', 'src', 'server', 'nexus', 'runtime-versions.json')
-  const j = JSON.parse(readFileSync(p, 'utf8'))
-  return { vault: j['nexus-vault'], nexusd: j['nexusd-cluster'] }
+  return { vault: RUNTIME_PINS['nexus-vault'], nexusd: RUNTIME_PINS['nexusd-cluster'] }
 }
 
 // ── 平台映射 ──────────────────────────────────────────────────────────────────
