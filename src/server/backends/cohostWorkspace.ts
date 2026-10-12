@@ -3,8 +3,6 @@ import { posix } from 'node:path'
 import { cohostRepositoryPath } from './cohostSessionState.js'
 import type { WorkspaceFileAccess, WorkspaceRemoteEntry } from './podWorkspace.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
-import { resolveCohostNexusConfig } from '../nexus/nexusEnvConfig.js'
-import { connectSessionRuntime } from '../nexus/sessionConnection.js'
 import { sessionAgentName } from '../agentIdentity.js'
 import type { RuntimeService } from '../runtimeService.js'
 import type { SessionRecord } from '../types.js'
@@ -27,13 +25,12 @@ export function cohostWorkspacePath(root: string, relativePath: string): string 
 /** Use the owned execution daemon's workspace, including its authorization and hooks. */
 export function createCohostWorkspaceAccess(
   session: SessionRecord,
-  runtime: Pick<RuntimeService, 'connectInternalChannel'>,
-  connect = connectCohostWorkspace,
+  runtime: Pick<RuntimeService, 'connectInternalChannel' | 'connectCohostRuntime'>,
 ): WorkspaceFileAccess {
   const withWorkspace = async <T>(operation: (client: NexusVfsClient, token: string, root: string) => Promise<T>): Promise<T> => {
     const channel = await runtime.connectInternalChannel(session.sessionId)
     const { processId, binding } = await readLiveManagedExecution(channel, session.sessionId)
-    const { client, authToken } = await connect(session.userId)
+    const { client, authToken } = await runtime.connectCohostRuntime(session.userId)
     try {
       const descriptor = await new ManagedAgentClient(client, authToken).getSession(processId)
       const expectedAgent = session.assistantName ? sessionAgentName(session.userId, session.assistantName) : undefined
@@ -93,10 +90,6 @@ export function createCohostWorkspaceAccess(
       await client.write(path, content, token)
     }),
   }
-}
-
-async function connectCohostWorkspace(ownerId: string): Promise<{ client: NexusVfsClient; authToken: string }> {
-  return connectSessionRuntime(resolveCohostNexusConfig(), ownerId)
 }
 
 async function rejectWorkspaceLinks(client: NexusVfsClient, token: string, root: string, path: string): Promise<void> {
