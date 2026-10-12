@@ -85,6 +85,16 @@ and model configuration; drift remains visible. Peer Moss controllers must be
 drained before an owner upgrade. A stale upgrade lock or failed rollback requires
 operator recovery; it is not automatically deleted without identity evidence.
 
+Owners with session creation and attachment permission may reload their own
+runtime after changing a model credential. Changing another owner's runtime
+requires `admin:settings`, followed by the organization visibility check. The
+detail page uses the same authorization rule as the upgrade endpoint.
+
+Role changes invalidate existing access tokens. SudoWork checks access before
+each conversation control frame and terminal input, including established
+connections. Management metadata identifies the intended actor and does not
+replace current permission.
+
 ## Deployment settings
 
 - `MOSS_WORKSPACE_URL=https://webui.sudoprivacy.com`: shared conversation entry.
@@ -106,3 +116,9 @@ HTTP tests cover organization boundaries, owner runtime roles and reserved
 metadata. SudoWork integration tests cover management workbench access, revoked
 grants and a shared writer lock between manager and owner. Production migration
 requires a published, paired engine release and live gVisor acceptance.
+
+The existing WebUI terminal launches a shell on the WebUI server. Its input
+authorization is covered, but its placement must move to the owner runtime
+before the cloud migration is complete. The old Moss Electron client has a
+chat entry in `ui/`; its installed version needs separate acceptance. Its
+management entry should reuse the Agent manager and SudoWork workbench.
