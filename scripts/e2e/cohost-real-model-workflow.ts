@@ -2,22 +2,26 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import grpc from '@grpc/grpc-js'
 import protoLoader from '@grpc/proto-loader'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
 import { mintSessionIdentity } from '../../src/server/nexus/sessionIdentity.js'
 import { connectController } from './cohost-controller-live.js'
+import { cohostRepositoryPath } from '../../src/server/backends/cohostSessionState.js'
+import { startCohostExecution } from '../../src/server/backends/cohostRecovery.js'
 
 const [tlsRoot, endpoint, evidence] = process.argv.slice(2)
 assert(tlsRoot && endpoint && evidence, 'TLS directory, endpoint and evidence directory are required')
 assert.equal(process.env.MOSS_COHOST_LIVE, '1', 'Explicit live-provider opt-in is required')
 const model = process.env.COHOST_E2E_MODEL ?? 'gpt-6-luna'
+const authMode = process.env.COHOST_E2E_AUTH_MODE ?? 'api-key'
+assert(['api-key', 'proxy', 'subscription'].includes(authMode))
 const code = `ORDER_${randomUUID().replaceAll('-', '')}`
 const owner = `live-${randomUUID()}`
 const agentId = `agent-${owner}`
-const root = `/agents/${agentId}/acceptance`
+const root = cohostRepositoryPath(agentId, randomUUID())
 const input = `${root}/order.json`
 const policy = `${root}/delivery-policy.json`
 const packing = `${root}/packing-policy.json`
@@ -55,8 +59,9 @@ try {
   assert(identity)
   client = NexusVfsClient.withMtls(endpoint, identity.tls)
   agent = new ManagedAgentClient(client, '')
-  session = await agent.startSession({ agentId, model, ownerId: owner })
   await operator.mkdir(root, '', { parents: true, existOk: true })
+  const repos = [{ hostPath: root, alias: 'workspace' }]
+  session = await agent.startSession({ agentId, model, ownerId: owner, repos })
   await operator.write(input, Buffer.from(JSON.stringify({ code, units, unit_price: 29, delivery: 47 })), '')
   const routes = Array.from({ length: 128 }, (_, index) => ({
     quoteCode: index === 83 ? code : `CATALOG_${index}_${randomUUID()}`,
@@ -82,10 +87,12 @@ try {
   const turn = (text: string) => controller!.rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text }] }, 180_000)
   assert.equal((await turn(`Read ${policy} with the file tool, find quoteCode ${code}, and report its handling charge. We will apply that charge after calculating this order's subtotal. Do not use Bash or change files.`)).stopReason, 'end_turn')
   controller.assertHealthy()
-  assert.equal((await turn(`Use one Explore sub-agent to read ${input} and return the code and numeric subtotal (units times unit_price plus delivery). The child must be read-only. Then you, the parent, save ${result} as JSON with code and subtotal. Do not use Bash. Report after saving.`)).stopReason, 'end_turn')
+  assert.equal((await turn(`Use one Explore sub-agent with auth_mode=${authMode} and model=${model} to read ${input} and return the code and numeric subtotal (units times unit_price plus delivery). The child must be read-only. Then you, the parent, save ${result} as JSON with code and subtotal. Do not use Bash. Report after saving.`)).stopReason, 'end_turn')
   controller.assertHealthy()
   const saved = JSON.parse((await operator.read(result, '')).toString())
   assert.deepEqual(saved, { code, subtotal })
+  assert.deepEqual(JSON.parse((await operator.read(posix.join(session.workspacePath!, 'workspace', 'result.json'), '')).toString()), { code, subtotal },
+    'the procfs workspace alias must expose the persistent repository result')
   assert.equal(controller.exploreDelegations, 1, 'one actual child delegation is required')
   assert.equal((await turn(`Read ${packing} with the file tool and review the packing requirements for this order. Report the matching seal count and retain it for the final delivery quote. Do not change files or use Bash.`)).stopReason, 'end_turn')
   controller.assertHealthy()
@@ -104,7 +111,11 @@ try {
   await controller.close()
   controller = undefined
   await agent.cancel(session.sessionId)
-  const resumed = await agent.startSession({ agentId, model, ownerId: owner, resumeSessionId: sessionId })
+  const recovery = await startCohostExecution(agent,
+    { agentId, model, ownerId: owner, resumeSessionId: sessionId, repos },
+    { ownerId: owner, repositoryPath: root })
+  assert.equal(recovery.isResume, true)
+  const resumed = recovery.session
   session = resumed
   assert.equal(resumed.durableSessionId, sessionId)
   controller = connectController({ agent, sessionEndpoint: resumed.sessionEndpoint }, new Set([restored]))
@@ -115,6 +126,8 @@ try {
   assert.equal((await controller.rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text:
     `Continue the delivery quote from your restored conversation. Save ${restored} as JSON with the same code, total and seal_count as the final quote. Use only your conversation memory; do not read any files. Report after saving.` }] }, 180_000)).stopReason, 'end_turn')
   assert.deepEqual(JSON.parse((await operator.read(restored, '')).toString()), { code, total: subtotal + 13, seal_count: sealCount })
+  assert.deepEqual(JSON.parse((await operator.read(posix.join(resumed.workspacePath!, 'workspace', 'resumed.json'), '')).toString()),
+    { code, total: subtotal + 13, seal_count: sealCount }, 'resumed runtime keeps the persistent workspace target')
   controller.assertHealthy()
   assert(controller.approvals > 0)
   approvals += controller.approvals
@@ -122,7 +135,7 @@ try {
   assert(nativeRequests >= 5)
   const report = { passed: true, real_model: true, model, native_nexus_requests: nativeRequests,
     child_verified: true, compaction_verified: true, context_before: compact.before_tokens, context_after: compact.after_tokens, post_compaction_result_verified: true,
-    resume_verified: true, persisted_results: 3, approvals, code }
+    resume_verified: true, workspace_alias_verified: true, persisted_results: 3, approvals, code }
   writeFileSync(join(evidence, 'acceptance.json'), JSON.stringify(report, null, 2))
   console.log(JSON.stringify(report))
 } finally {

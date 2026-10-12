@@ -256,9 +256,8 @@ async function ensureNexusd(version) {
     return
   }
   const expectedSha = SHA256[artifact]
-  if (!expectedSha) {
-    console.warn(`[fetch-nexus] nexusd: no known sha256 for ${artifact}; skip (unsupported platform).`)
-    return
+  if (typeof expectedSha !== 'string' || !/^[0-9a-f]{64}$/.test(expectedSha)) {
+    throw new Error(`Invalid or missing cluster checksum for ${artifact} at v${version}`)
   }
   const binDir = join(REPO_ROOT, 'bin', 'nexus')
   const targetName = platform === 'win32' ? 'nexusd.exe' : 'nexusd'
