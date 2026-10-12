@@ -1681,12 +1681,20 @@ export class DirectConnectStore {
     assistantName?: string
     source?: string
     channelChatId?: string
+    managementActorId?: string
+    managementAgent?: { name: string; displayName: string; ownerName: string }
   }): Promise<SessionRecord> {
     const ts = now()
     const clientMetadata = JSON.stringify({
       implicit_task_id: randomUUID(),
       task_contract: 'implicit-v1',
       requested_execution: 'cloud',
+      ...(input.managementActorId ? { agent_manager_actor_id: input.managementActorId } : {}),
+      ...(input.managementActorId && input.managementAgent ? {
+        agent_manager_agent_name: input.managementAgent.name,
+        agent_manager_display_name: input.managementAgent.displayName,
+        agent_manager_owner_name: input.managementAgent.ownerName,
+      } : {}),
     })
     await this.driver.run(`
       INSERT INTO sessions (

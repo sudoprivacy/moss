@@ -5,6 +5,7 @@ import {
   isDefaultAgentName,
   isUserCreatedAgentName,
   isUserOwnedAgentName,
+  nexusAgentName,
 } from './agentIdentity.js'
 import { requirePersonalAgent } from './personalAgentAccess.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
@@ -68,7 +69,8 @@ import {
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import type { NexusClient } from './nexus/nexusClient.js'
 import { UserPodService } from './runtime/userPodService.js'
-import { resolveNexusConfigFromEnv } from './nexus/nexusEnvConfig.js'
+import { readRuntimeRelease } from './runtime/runtimeRelease.js'
+import { resolveCohostNexusConfig } from './nexus/nexusEnvConfig.js'
 import { resolveCohostConnection as externalCohostConnection, encodeCohostConnection } from './nexus/cohostConnection.js'
 import { connectSessionRuntime, type SessionConnectionConfig } from './nexus/sessionConnection.js'
 import { buildCohostProxyConfig } from './backends/scodeProxyConfig.js'
@@ -440,6 +442,7 @@ const USAGE_CACHE_TTL_MS = 15_000
 
 export class RuntimeService {
   private readonly userPods?: UserPodService
+  private readonly upgradingOwners = new Set<string>()
   readonly store: DirectConnectStore
   readonly authService: AuthService
   private readonly mcpStore: McpStore | null
@@ -474,13 +477,17 @@ export class RuntimeService {
     this.authService = options.authService
     this.userPods = options.userPodService
     const k8s = options.config.k8s
-    if (!this.userPods && k8s?.userRuntimeImage) {
-      const issuer = resolveNexusConfigFromEnv()
+    const release = process.env.MOSS_RUNTIME_MANIFEST_PATH ? readRuntimeRelease(process.env.MOSS_RUNTIME_MANIFEST_PATH) : undefined
+    if (release && !k8s) throw new Error('A shared runtime release requires Kubernetes placement')
+    const userRuntimeImage = release?.image.reference ?? k8s?.userRuntimeImage
+    if (release && k8s?.userRuntimeImage && k8s.userRuntimeImage !== userRuntimeImage) throw new Error('Configured user image differs from the runtime release manifest')
+    if (!this.userPods && k8s && userRuntimeImage) {
+      const issuer = resolveCohostNexusConfig()
       if (issuer.mode !== 'external' || !issuer.tls || !k8s.workspaceStorageClass || !k8s.userRuntimeHost) {
         throw new Error('User runtimes require an external mTLS issuer, retained storage and private compute host')
       }
       this.userPods = new UserPodService({
-        image: k8s.userRuntimeImage, nodeHost: k8s.userRuntimeHost, namespace: k8s.namespace, kubeconfig: k8s.kubeconfig,
+        image: userRuntimeImage, release, nodeHost: k8s.userRuntimeHost, namespace: k8s.namespace, kubeconfig: k8s.kubeconfig,
         storageClass: k8s.workspaceStorageClass, storageSize: k8s.workspaceStorageSize,
         runtimeClassName: k8s.runtimeClassName, cpuLimit: k8s.cpuLimit, memoryLimit: k8s.memoryLimit,
         imagePullPolicy: k8s.imagePullPolicy, imagePullSecrets: k8s.imagePullSecrets,
@@ -661,6 +668,7 @@ export class RuntimeService {
 
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
     if (this.draining) throw new ServerDrainingError()
+    if (this.upgradingOwners.has(input.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
     return withOrganizationResources(await this.resourceScope(input), async () => {
       // Every session belongs to an agent. Without one chosen, it belongs to the
       // user's own — not to nobody, which is what left this cohort ungroupable
@@ -670,6 +678,20 @@ export class RuntimeService {
         input = { ...input, assistantName: defaultAgentName(input.userId) }
       }
       await requirePersonalAgent(input.orgId, input.userId, input.assistantName!)
+      const existingAgent = nexusAgentName(input.assistantName)
+      if (existingAgent) {
+        if ((input.runtime?.type || this.options.config.defaultRuntime) !== 'cohost') {
+          throw new ResourceAccessError(400, 'A Nexus Agent requires its native runtime')
+        }
+        const namespace = await this.readAgentNamespace(input.userId)
+        const owned = namespace?.executions.filter(record => record.ownerId === input.userId && record.name === existingAgent)
+        if (!namespace?.names.includes(existingAgent) || (!namespace.isOwnerConfined && !owned?.length)) {
+          throw new ResourceAccessError(404, 'Agent not available')
+        }
+        if (!namespace.managedNames.includes(existingAgent) && !owned?.some(record => record.kind === 'managed')) {
+          throw new ResourceAccessError(400, 'Agent does not support native conversations')
+        }
+      }
       if (input.assistantName && !isUserOwnedAgentName(input.assistantName)) {
         const resource = await requireOrganizationResource('agent', input.assistantName)
         if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
@@ -707,9 +729,96 @@ export class RuntimeService {
     return connectSessionRuntime(await this.resolveCohostConnection(ownerId), ownerId)
   }
 
+  /** List requests inspect existing boxes and never create another user's runtime. */
+  async readAgentNamespace(ownerId: string) {
+    const config = this.userPods ? await this.userPods.find(ownerId) : externalCohostConnection()
+    if (!config) return undefined
+    const { client, authToken } = await connectSessionRuntime(config, ownerId)
+    try {
+      const { readAgentNamespace } = await import('./nexus/agentNamespace.js')
+      return await readAgentNamespace(client, authToken, ownerId, Boolean(this.userPods))
+    } finally { client.close() }
+  }
+
   /** Close process-local channels while retaining user boxes and durable volumes. */
   async closeRuntimeServices(): Promise<void> {
     await this.userPods?.close()
+  }
+
+  /** Inspect placement and release drift through the namespace-scoped controller identity. */
+  async inspectUserRuntime(ownerId: string) {
+    return this.userPods ? this.userPods.inspect(ownerId) : { ownerId, isPresent: false, isDrifted: false, phase: 'legacy' }
+  }
+
+  /** Reject new traffic while this controller drains an owner's native runtime. */
+  isUserRuntimeUpgrading(ownerId: string): boolean {
+    return this.upgradingOwners.has(ownerId)
+  }
+
+  /** Drain only tracked idle native sessions, replace placement, then resume their durable histories. */
+  async upgradeUserRuntime(ownerId: string, orgId: string, configuration?: Record<string, string>) {
+    if (!this.userPods) throw new ResourceAccessError(409, 'User runtime placement is not enabled')
+    this.assertCohostDeploymentAccess('cohost', ownerId)
+    if (this.upgradingOwners.has(ownerId)) throw new ResourceAccessError(409, 'An owner upgrade is already in progress')
+    if (await this.countLiveOtherInstances()) throw new ResourceAccessError(409, 'Drain peer Moss controllers before upgrading this owner')
+    const owner = await this.authService.getAgentOwner(ownerId, orgId)
+    if (!owner || owner.status !== 'active') throw new ResourceAccessError(409, 'Agent owner is unavailable')
+    this.upgradingOwners.add(ownerId)
+    const paused = new Set<string>()
+    try {
+      const environment = await withOrganizationResources(await this.resourceScope({ orgId, userId: ownerId,
+        role: owner.role, scopes: owner.scopes }), () => this.buildRunnerModelEnvironment({
+        userId: ownerId, orgId, sessionId: 'owner-runtime-upgrade', runtime: { type: 'cohost', engine: 'scode' },
+      }))
+      configuration ??= buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
+        environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!)
+      const sessions = (await this.store.listUserSessions(orgId, ownerId))
+        .filter(session => session.runtime.type === 'cohost' && session.desiredState === 'active')
+      const bindings = await Promise.all(sessions.map(async session => ({ session,
+        binding: await this.store.cohostSessions.get(session.sessionId) })))
+      await this.userPods.upgrade(ownerId, async previous => {
+        if (previous) {
+          const connection = await connectSessionRuntime(previous, ownerId)
+          const { readAgentNamespace } = await import('./nexus/agentNamespace.js')
+          const { ManagedAgentClient } = await import('./nexus/managedAgentClient.js')
+          const agent = new ManagedAgentClient(connection.client, connection.authToken)
+          try {
+            const namespace = await readAgentNamespace(connection.client, connection.authToken, ownerId, true)
+            const processes: string[] = []
+            for (const execution of namespace.executions.filter(record => record.state !== 'terminated')) {
+              if (execution.kind !== 'managed' || execution.state !== 'ready' || !execution.processId) {
+                throw new ResourceAccessError(409, 'Finish active Agent work before upgrading this owner')
+              }
+              const snapshot = await agent.getSession(execution.processId)
+              if (snapshot.owner_id !== ownerId || !bindings.some(({ binding }) => binding?.ownerId === ownerId &&
+                binding.agentId === snapshot.agent_id && binding.durableSessionId === snapshot.durable_session_id)) {
+                throw new ResourceAccessError(409, 'An external Agent session must drain before this upgrade')
+              }
+              processes.push(execution.processId)
+            }
+            for (const processId of processes) await agent.cancel(processId)
+            for (const session of sessions) {
+              await this.terminateSession(session.sessionId, true)
+              paused.add(session.sessionId)
+            }
+            const remaining = await readAgentNamespace(connection.client, connection.authToken, ownerId, true)
+            if (remaining.executions.some(record => record.state !== 'terminated')) throw new ResourceAccessError(409, 'User runtime still has live executions')
+          } finally { agent.close() }
+        } else {
+          for (const session of sessions) {
+            await this.terminateSession(session.sessionId, true)
+            paused.add(session.sessionId)
+          }
+        }
+      }, configuration)
+      return await this.userPods.inspect(ownerId)
+    } finally {
+      this.upgradingOwners.delete(ownerId)
+      for (const sessionId of paused) {
+        await this.store.setSessionLifecycle(sessionId, 'detached', 'active')
+        await this.ensureSessionReadyNonBlocking(sessionId)
+      }
+    }
   }
 
   private async createSessionInResourceScope(input: SessionCreateInput): Promise<SessionRecord> {
@@ -836,6 +945,8 @@ export class RuntimeService {
       assistantName: input.assistantName,
       source: input.source,
       channelChatId: input.channelChatId,
+      managementActorId: input.managementActorId,
+      managementAgent: input.managementAgent,
     })
 
     // Ensure config directory exists for scode sessions (which don't use session-runner which normally creates it)
@@ -1304,7 +1415,7 @@ export class RuntimeService {
     return true
   }
 
-  async terminateSession(sessionId: string): Promise<void> {
+  async terminateSession(sessionId: string, isRuntimeRestart = false): Promise<void> {
     const session = await this.store.getSession(sessionId)
     if (!session) return
     const attempt = await this.store.getCurrentAttempt(sessionId)
@@ -1329,8 +1440,8 @@ export class RuntimeService {
         )
       }
     }
-    await this.store.setSessionLifecycle(sessionId, 'terminated', 'terminated')
-    await this.store.addEvent(sessionId, attempt?.attemptId ?? null, 'session_terminate_requested', {})
+    await this.store.setSessionLifecycle(sessionId, isRuntimeRestart ? 'detached' : 'terminated', isRuntimeRestart ? 'ended' : 'terminated')
+    await this.store.addEvent(sessionId, attempt?.attemptId ?? null, isRuntimeRestart ? 'session_runtime_upgrade_requested' : 'session_terminate_requested', {})
 
     if (attempt?.runnerPid) {
       // Ownership guard: terminate is a REST op and can land on ANY instance
@@ -1387,7 +1498,7 @@ export class RuntimeService {
     if (attempt && attempt.runtimeState !== 'stopped' && attempt.runtimeState !== 'failed' && attempt.runtimeState !== 'lost') {
       await this.store.markAttemptStopped(attempt.attemptId, {
         runtimeState: 'stopped',
-        stopReason: 'terminated',
+        stopReason: isRuntimeRestart ? 'runtime_upgrade' : 'terminated',
       })
     }
   }
@@ -1731,6 +1842,111 @@ export class RuntimeService {
     setTimeout(poll, FENCING_POLL_INTERVAL_MS).unref?.()
   }
 
+  private async buildRunnerModelEnvironment(session: Pick<SessionRecord, 'userId' | 'orgId' | 'sessionId' | 'source' | 'runtime'>): Promise<Record<string, string>> {
+    // Build environment for runner from system settings
+    const systemSettings = await this.authService.getOrganizationSystemSettings(session.orgId)
+    const userModelKey = session.userId
+      ? (await this.authService.getUserModelCredential(session.userId, session.orgId))?.sudorouterKey
+      : undefined
+    const sharedBilling = this.authService.getOrganizationBillingService?.()
+    const isSharedModelAccount = Boolean(session.orgId && sharedBilling && await sharedBilling.isShared(session.orgId))
+    const isManagedModelAccount = await this.authService.isSudorouterManaged?.(session.orgId) ?? isSharedModelAccount
+
+    // Get user model preference in main process (runner doesn't have DB access)
+    // Model priority: user preference > system settings > default
+    const userModelPref = session.userId ? await getUserModelPreference(session.userId) : null
+    const isCabinSession = session.source === 'cabin'
+    const requestedModel = isCabinSession
+      ? (session.runtime.model || this.options.config.cabin.llmModel)
+      : userModelPref?.modelId
+      || systemSettings.model
+      || process.env.MOSS_DEFAULT_MODEL
+      || 'gemini-3-flash-preview'
+
+    // A selected Provider is a routing boundary.  Do not fall back to the
+    // process-global endpoint when its catalog cannot be resolved: that would
+    // make an unavailable/stale selection call a different Provider.
+    const requestedProvider = !isCabinSession ? resolveModelSelection(systemSettings.modelProviders, systemSettings.defaultModelProviderId, systemSettings.model, requestedModel).provider : null
+    if (isManagedModelAccount && requestedProvider && (requestedProvider.id === 'legacy-default' || requestedProvider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl) && !userModelKey) throw new Error('用户模型凭据不可用，请联系管理员')
+    const providerCatalog = !isCabinSession
+      ? await getModelsForSelection(requestedModel, {
+        settings: systemSettings,
+        orgId: session.orgId,
+        userApiKey: userModelKey,
+      })
+      : null
+    const defaultModel = providerCatalog?.selection.modelId || requestedModel
+
+    process.stderr.write(`[RuntimeService] Model selection for session ${session.sessionId}:\n`)
+    process.stderr.write(`  - userId: ${session.userId}\n`)
+    process.stderr.write(`  - userModelPref: ${JSON.stringify(userModelPref)}\n`)
+    process.stderr.write(`  - systemSettings.model: ${systemSettings.model || 'undefined'}\n`)
+    process.stderr.write(`  - defaultModel: ${defaultModel}\n`)
+
+    const runnerEnv: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      MOSS_DEFAULT_MODEL: defaultModel,
+    }
+    if (providerCatalog) {
+      runnerEnv.MOSS_MODEL_PROVIDER_ID = providerCatalog.selection.provider.id
+      runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
+      runnerEnv.ANTHROPIC_BASE_URL = providerCatalog.selection.provider.baseUrl
+    }
+    // A metered deployment keys its credit ledger on a per-user gateway token,
+    // so a session must spend the token of the user who owns it. Falling back to
+    // the shared server key would bill every user to one account and leave each
+    // balance untouched. Users without a token (private / on-prem deployments,
+    // where no metered gateway exists) keep the shared key. Resolved here in the
+    // main process: the runner subprocess has no database.
+    const providerApiKey = providerCatalog
+      ? getModelProviderApiKey(providerCatalog.selection.provider.id, systemSettings.apiKey, session.orgId)
+      : undefined
+    // Per-user Sudorouter keys only apply to the legacy default provider. A
+    // configured Provider must never receive a process-global or legacy key;
+    // local unauthenticated endpoints intentionally run with no credential.
+    const isLegacyProvider = providerCatalog?.selection.provider.id === 'legacy-default'
+    const isManagedRouter = isManagedModelAccount && (isLegacyProvider || providerCatalog?.selection.provider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl)
+    const sessionApiKey = isManagedRouter ? userModelKey : isLegacyProvider
+      ? userModelKey || providerApiKey
+      : providerApiKey
+    if (providerCatalog) {
+      delete runnerEnv.ANTHROPIC_AUTH_TOKEN
+      delete runnerEnv.ANTHROPIC_API_KEY
+    }
+    if (sessionApiKey) {
+      runnerEnv.ANTHROPIC_AUTH_TOKEN = sessionApiKey
+      // 同值补设 API_KEY：runner 子进程 buildSessionEnv 的选值链为
+      // settings.apiKey || ANTHROPIC_API_KEY || ANTHROPIC_AUTH_TOKEN，显式注入
+      // 两个同名值可消除主进程 env 自带 ANTHROPIC_API_KEY 时的优先级翻转
+      runnerEnv.ANTHROPIC_API_KEY = sessionApiKey
+    }
+    if (defaultModel) {
+      runnerEnv.ANTHROPIC_MODEL = defaultModel
+    }
+    if (isCabinSession) {
+      runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
+      runnerEnv.MOSS_DEFAULT_MODEL = session.runtime.model || this.options.config.cabin.llmModel
+      runnerEnv.ANTHROPIC_BASE_URL = this.options.config.cabin.llmBaseUrl
+      runnerEnv.ANTHROPIC_API_KEY = this.options.config.cabin.llmApiKey || process.env.ANTHROPIC_API_KEY || 'local-no-auth'
+      runnerEnv.ANTHROPIC_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
+      runnerEnv.PROXY_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
+      runnerEnv.ANTHROPIC_MODEL = runnerEnv.MOSS_DEFAULT_MODEL
+      if (this.options.config.cabin.controlBaseUrl) {
+        runnerEnv.CABIN_CONTROL_BASE_URL = this.options.config.cabin.controlBaseUrl
+      }
+      if (this.options.config.cabin.controlAuth) {
+        runnerEnv.CABIN_CONTROL_AUTH = this.options.config.cabin.controlAuth
+      }
+      runnerEnv.CABIN_CONTROL_TIMEOUT_MS = String(this.options.config.cabin.controlTimeoutMs)
+      // Intent-first: the skill only emits the structured command; the server performs the
+      // hardware dispatch and authors the confirmation. The LLM never triggers hardware.
+      runnerEnv.CABIN_CONTROL_MODE = 'emit'
+      runnerEnv.CABIN_LOG_FILE = this.options.config.cabin.logFile || join(this.options.config.rootDir, 'logs', 'cabin.jsonl')
+    }
+
+    return runnerEnv
+  }
+
   private async spawnAttempt(
     session: SessionRecord,
     options: {
@@ -1742,6 +1958,7 @@ export class RuntimeService {
     } = {},
   ): Promise<AttemptRecord> {
     if (this.draining) throw new ServerDrainingError()
+    if (this.upgradingOwners.has(session.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
     const scope = await this.resourceScope(session)
     return withOrganizationResources(scope, async () => {
       await this.assertWithinTokenQuota(session.userId, session.orgId)
@@ -2234,105 +2451,7 @@ export class RuntimeService {
     const manifestPath = join(attemptDir, 'manifest.json')
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
-    // Build environment for runner from system settings
-    const systemSettings = await this.authService.getOrganizationSystemSettings(session.orgId)
-    const userModelKey = session.userId
-      ? (await this.authService.getUserModelCredential(session.userId, session.orgId))?.sudorouterKey
-      : undefined
-    const sharedBilling = this.authService.getOrganizationBillingService?.()
-    const isSharedModelAccount = Boolean(session.orgId && sharedBilling && await sharedBilling.isShared(session.orgId))
-
-    // Get user model preference in main process (runner doesn't have DB access)
-    // Model priority: user preference > system settings > default
-    const userModelPref = session.userId ? await getUserModelPreference(session.userId) : null
-    const isCabinSession = session.source === 'cabin'
-    const requestedModel = isCabinSession
-      ? (session.runtime.model || this.options.config.cabin.llmModel)
-      : userModelPref?.modelId
-      || systemSettings.model
-      || process.env.MOSS_DEFAULT_MODEL
-      || 'gemini-3-flash-preview'
-
-    // A selected Provider is a routing boundary.  Do not fall back to the
-    // process-global endpoint when its catalog cannot be resolved: that would
-    // make an unavailable/stale selection call a different Provider.
-    const requestedProvider = !isCabinSession ? resolveModelSelection(systemSettings.modelProviders, systemSettings.defaultModelProviderId, systemSettings.model, requestedModel).provider : null
-    if (isSharedModelAccount && requestedProvider && (requestedProvider.id === 'legacy-default' || requestedProvider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl) && !userModelKey) throw new Error('组织成员模型凭据不可用，请联系管理员')
-    const providerCatalog = !isCabinSession
-      ? await getModelsForSelection(requestedModel, {
-        settings: systemSettings,
-        orgId: session.orgId,
-        userApiKey: userModelKey,
-      })
-      : null
-    const defaultModel = providerCatalog?.selection.modelId || requestedModel
-
-    process.stderr.write(`[RuntimeService] Model selection for session ${session.sessionId}:\n`)
-    process.stderr.write(`  - userId: ${session.userId}\n`)
-    process.stderr.write(`  - userModelPref: ${JSON.stringify(userModelPref)}\n`)
-    process.stderr.write(`  - systemSettings.model: ${systemSettings.model || 'undefined'}\n`)
-    process.stderr.write(`  - defaultModel: ${defaultModel}\n`)
-
-    const runnerEnv: Record<string, string> = {
-      ...process.env as Record<string, string>,
-      MOSS_DEFAULT_MODEL: defaultModel,
-    }
-    if (providerCatalog) {
-      runnerEnv.MOSS_MODEL_PROVIDER_ID = providerCatalog.selection.provider.id
-      runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
-      runnerEnv.ANTHROPIC_BASE_URL = providerCatalog.selection.provider.baseUrl
-    }
-    // A metered deployment keys its credit ledger on a per-user gateway token,
-    // so a session must spend the token of the user who owns it. Falling back to
-    // the shared server key would bill every user to one account and leave each
-    // balance untouched. Users without a token (private / on-prem deployments,
-    // where no metered gateway exists) keep the shared key. Resolved here in the
-    // main process: the runner subprocess has no database.
-    const providerApiKey = providerCatalog
-      ? getModelProviderApiKey(providerCatalog.selection.provider.id, systemSettings.apiKey, session.orgId)
-      : undefined
-    // Per-user Sudorouter keys only apply to the legacy default provider. A
-    // configured Provider must never receive a process-global or legacy key;
-    // local unauthenticated endpoints intentionally run with no credential.
-    const isLegacyProvider = providerCatalog?.selection.provider.id === 'legacy-default'
-    const isManagedRouter = isSharedModelAccount && (isLegacyProvider || providerCatalog?.selection.provider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl)
-    const sessionApiKey = isManagedRouter ? userModelKey : isLegacyProvider
-      ? userModelKey || providerApiKey
-      : providerApiKey
-    if (providerCatalog) {
-      delete runnerEnv.ANTHROPIC_AUTH_TOKEN
-      delete runnerEnv.ANTHROPIC_API_KEY
-    }
-    if (sessionApiKey) {
-      runnerEnv.ANTHROPIC_AUTH_TOKEN = sessionApiKey
-      // 同值补设 API_KEY：runner 子进程 buildSessionEnv 的选值链为
-      // settings.apiKey || ANTHROPIC_API_KEY || ANTHROPIC_AUTH_TOKEN，显式注入
-      // 两个同名值可消除主进程 env 自带 ANTHROPIC_API_KEY 时的优先级翻转
-      runnerEnv.ANTHROPIC_API_KEY = sessionApiKey
-    }
-    if (defaultModel) {
-      runnerEnv.ANTHROPIC_MODEL = defaultModel
-    }
-    if (isCabinSession) {
-      runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
-      runnerEnv.MOSS_DEFAULT_MODEL = session.runtime.model || this.options.config.cabin.llmModel
-      runnerEnv.ANTHROPIC_BASE_URL = this.options.config.cabin.llmBaseUrl
-      runnerEnv.ANTHROPIC_API_KEY = this.options.config.cabin.llmApiKey || process.env.ANTHROPIC_API_KEY || 'local-no-auth'
-      runnerEnv.ANTHROPIC_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
-      runnerEnv.PROXY_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
-      runnerEnv.ANTHROPIC_MODEL = runnerEnv.MOSS_DEFAULT_MODEL
-      if (this.options.config.cabin.controlBaseUrl) {
-        runnerEnv.CABIN_CONTROL_BASE_URL = this.options.config.cabin.controlBaseUrl
-      }
-      if (this.options.config.cabin.controlAuth) {
-        runnerEnv.CABIN_CONTROL_AUTH = this.options.config.cabin.controlAuth
-      }
-      runnerEnv.CABIN_CONTROL_TIMEOUT_MS = String(this.options.config.cabin.controlTimeoutMs)
-      // Intent-first: the skill only emits the structured command; the server performs the
-      // hardware dispatch and authors the confirmation. The LLM never triggers hardware.
-      runnerEnv.CABIN_CONTROL_MODE = 'emit'
-      runnerEnv.CABIN_LOG_FILE = this.options.config.cabin.logFile || join(this.options.config.rootDir, 'logs', 'cabin.jsonl')
-    }
+    const runnerEnv = await this.buildRunnerModelEnvironment(session)
 
     // Inject Auth Proxy token for scode process. The URL must be reachable from
     // wherever the session runs: for the local runner that's loopback, but for
@@ -2361,7 +2480,7 @@ export class RuntimeService {
     if (session.runtime.type === 'cohost') {
       runnerEnv.MOSS_COHOST_CONNECTION = encodeCohostConnection(await this.resolveCohostConnection(
         session.userId,
-        buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || '', defaultModel),
+        buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || '', runnerEnv.MOSS_DEFAULT_MODEL!),
       ))
     }
 

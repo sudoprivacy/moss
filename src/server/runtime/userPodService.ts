@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import { NexusZoneApiClient, userRuntimeServerName, type SessionCredential } from '@nexus-ai-fs/vfs-client'
-import { buildKubectlBaseArgs, kubectlApply, readK8sResource, type K8sResource } from '../backends/k8sResources.js'
+import { buildKubectlBaseArgs, kubectlApply, readK8sResource, deleteK8sResource, observeK8sRuntime, type K8sResource } from '../backends/k8sResources.js'
+import { parseCohostBuild, type RuntimeRelease } from './runtimeRelease.js'
 import type { NexusTlsConfig } from '../nexus/nexusEnvConfig.js'
 import { waitForSessionRuntime, type SessionConnectionConfig } from '../nexus/sessionConnection.js'
 
@@ -27,6 +28,7 @@ export interface UserPodOptions {
   configuration?: (ownerId: string) => Promise<Record<string, string>>
   imagePullPolicy?: string
   imagePullSecrets?: string[]
+  release?: RuntimeRelease
 }
 
 interface UserPodConnection {
@@ -38,6 +40,8 @@ interface UserPodConnection {
 export interface UserPodResources {
   read: (kind: string, name: string) => Promise<K8sResource | undefined>
   write: (manifest: Record<string, unknown>, verb?: 'create' | 'apply') => Promise<void>
+  remove?: (kind: 'pods' | 'secrets', name: string, uid: string) => Promise<void>
+  observe?: (name: string) => Promise<{ version: string; binaryDigest: string }>
 }
 
 function kubernetesResources(options: UserPodOptions): UserPodResources {
@@ -45,6 +49,8 @@ function kubernetesResources(options: UserPodOptions): UserPodResources {
   return {
     read: (kind, name) => readK8sResource(base, kind, name),
     write: (manifest, verb) => kubectlApply(base, manifest, verb),
+    remove: (kind, name, uid) => deleteK8sResource(base, options.namespace, kind, name, uid),
+    observe: name => observeK8sRuntime(base, name),
   }
 }
 
@@ -107,10 +113,13 @@ export function userPodManifests(ownerId: string, options: UserPodOptions) {
         { key: 'backend-config.json', path: 'backend-config.json' },
       ] } }],
   }
-  const digest = createHash('sha256').update(JSON.stringify(spec)).digest('hex')
+  const digest = createHash('sha256').update(JSON.stringify({ spec, release: options.release })).digest('hex')
   return {
     pod: { apiVersion: 'v1', kind: 'Pod', metadata: { ...metadata,
-      annotations: { ...metadata.annotations, [SPEC_ANNOTATION]: digest } }, spec },
+      annotations: { ...metadata.annotations, [SPEC_ANNOTATION]: digest,
+        ...(options.release ? { 'moss.sudo.dev/runtime-release': options.release.releaseId,
+          'moss.sudo.dev/engine-commit': options.release.engine.commit,
+          'moss.sudo.dev/cohost-digest': options.release.cohost.binaryDigest } : {}) } }, spec },
     claim: { apiVersion: 'v1', kind: 'PersistentVolumeClaim', metadata,
       spec: { accessModes: ['ReadWriteOnce'], storageClassName: options.storageClass,
         resources: { requests: { storage: options.storageSize ?? '10Gi' } } } },
@@ -136,11 +145,115 @@ export class UserPodService {
       throw new Error('User Pod compute host must be a hostname or IP address')
     }
     this.runtimeHost = host.hostname
+    if (options.release && options.release.image.reference !== options.image) throw new Error('User runtime image differs from the shared release manifest')
+  }
+
+  /** Report version drift without provisioning a missing runtime. */
+  async inspect(ownerId: string) {
+    const pod = await this.resources.read('pod', userPodName(ownerId))
+    if (pod && pod.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId) throw new Error('User Pod belongs to another owner')
+    const expected = userPodManifests(ownerId, this.options).pod
+    return { ownerId, isPresent: Boolean(pod), isDrifted: Boolean(pod && pod.metadata.annotations?.[SPEC_ANNOTATION] !== expected.metadata.annotations[SPEC_ANNOTATION]),
+      phase: pod?.status?.phase ?? 'absent', expectedImage: this.options.image,
+      observedImageDigest: pod?.status?.containerStatuses?.find(container => container.name === 'runtime')?.imageID ?? null,
+      releaseId: this.options.release?.releaseId ?? null }
+  }
+
+  /** Serialize rollouts across controllers; only the Pod is replaced and the owner PVC is retained. */
+  async upgrade(ownerId: string, drain: (previous?: SessionConnectionConfig) => Promise<void>, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
+    if (this.lifecycle.signal.aborted) throw new Error('User Pod service is closed')
+    if (!this.resources.remove) throw new Error('Runtime replacement is unavailable')
+    const name = userPodName(ownerId)
+    const lockName = `${name}-upgrade`
+    const operation = randomUUID()
+    await this.resources.write({ apiVersion: 'v1', kind: 'Secret', type: 'Opaque',
+      metadata: { name: lockName, namespace: this.options.namespace,
+        annotations: { [OWNER_ANNOTATION]: ownerId, 'moss.sudo.dev/upgrade-operation': operation } }, stringData: {} }, 'create')
+    const lock = await this.resources.read('secret', lockName)
+    if (!lock?.metadata.uid || lock.metadata.annotations?.['moss.sudo.dev/upgrade-operation'] !== operation) throw new Error('Runtime upgrade lock was not acquired')
+    try {
+      const pending = this.connections.get(ownerId)
+      if (pending) await pending
+      const pod = await this.resources.read('pod', name)
+      if (pod && (pod.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId || !pod.metadata.uid)) throw new Error('User Pod belongs to another owner or lacks an identity')
+      const savedSecret = await this.resources.read('secret', name)
+      if (savedSecret && savedSecret.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId) throw new Error('User Pod Secret belongs to another owner')
+      const saved: Record<string, string> = {}
+      for (const key of ['sudocode.json', 'backend-config.json']) {
+        if (savedSecret?.data?.[key]) saved[key] = Buffer.from(savedSecret.data[key], 'base64').toString('utf8')
+      }
+      await drain(pod ? await this.runtimeConnection(ownerId) : undefined)
+      const connection = this.connections.get(ownerId)
+      if (connection) (await connection).close()
+      this.connections.delete(ownerId)
+      if (pod) {
+        await this.resources.remove('pods', name, pod.metadata.uid!)
+        await this.waitForPodRemoval(name)
+      }
+      const next = this.open(ownerId, configuration)
+      this.connections.set(ownerId, next)
+      try { return (await next).config }
+      catch (error) {
+        this.connections.delete(ownerId)
+        if (pod?.spec) {
+          try {
+            const failed = await this.resources.read('pod', name)
+            if (failed) {
+              const expected = userPodManifests(ownerId, this.options).pod
+              if (failed.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId || !failed.metadata.uid ||
+                failed.metadata.annotations?.[SPEC_ANNOTATION] !== expected.metadata.annotations[SPEC_ANNOTATION]) {
+                throw new Error('Runtime rollback refused a replacement with another identity')
+              }
+              await this.resources.remove('pods', name, failed.metadata.uid)
+              await this.waitForPodRemoval(name)
+            }
+            const restored = this.open(ownerId, saved, pod)
+            this.connections.set(ownerId, restored)
+            await restored
+          } catch (rollbackError) {
+            this.connections.delete(ownerId)
+            throw new AggregateError([error, rollbackError], 'Runtime upgrade and rollback failed; the owner volume is retained')
+          }
+        }
+        throw error
+      }
+    } finally {
+      await this.resources.remove('secrets', lockName, lock.metadata.uid)
+    }
+  }
+
+  private async waitForPodRemoval(name: string): Promise<void> {
+    const deadline = Date.now() + 90_000
+    while (await this.resources.read('pod', name)) {
+      if (Date.now() >= deadline) throw new Error('User runtime did not finish draining within 90 seconds')
+      await delay(1000)
+    }
+  }
+
+  private async runtimeConnection(ownerId: string): Promise<SessionConnectionConfig> {
+    const name = userPodName(ownerId)
+    const service = await this.resources.read('service', name)
+    if (service?.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId) throw new Error('User Pod Service belongs to another owner')
+    const serviceSpec = z.object({ type: z.literal('NodePort'), selector: z.record(z.string(), z.string()),
+      ports: z.array(z.object({ name: z.literal('nexus'), port: z.literal(RUNTIME_PORT),
+        targetPort: z.literal(RUNTIME_PORT), nodePort: z.number().int().min(1).max(65535) })).length(1),
+    }).parse(service.spec)
+    if (serviceSpec.selector.app !== APP_LABEL || serviceSpec.selector.runtime !== name) throw new Error('User Pod Service does not select its owned runtime')
+    return { ...this.options.issuer, authToken: '', runtimeEndpoint: `https://${this.runtimeHost}:${serviceSpec.ports[0]!.nodePort}` }
+  }
+
+  /** Discover an existing owner box without creating a Pod or workspace for a list request. */
+  async find(ownerId: string): Promise<SessionConnectionConfig | undefined> {
+    const pod = await this.resources.read('pod', userPodName(ownerId))
+    if (!pod) return undefined
+    if (pod.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId) throw new Error('User Pod belongs to another owner')
+    return this.resolve(ownerId)
   }
 
   async resolve(ownerId: string, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
     if (this.lifecycle.signal.aborted) throw new Error('User Pod service is closed')
     userPodName(ownerId)
+    if (await this.resources.read('secret', `${userPodName(ownerId)}-upgrade`)) throw new Error('User runtime is draining for an upgrade')
     let connection = this.connections.get(ownerId)
     if (connection) {
       const existing = await connection
@@ -155,8 +268,14 @@ export class UserPodService {
     }
   }
 
-  private async open(ownerId: string, suppliedConfiguration?: Record<string, string>): Promise<UserPodConnection> {
+  private async open(ownerId: string, suppliedConfiguration?: Record<string, string>, previousPod?: K8sResource): Promise<UserPodConnection> {
     const manifests = userPodManifests(ownerId, this.options)
+    if (previousPod) {
+      if (previousPod.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId || !previousPod.spec) throw new Error('Runtime rollback requires the observed owner Pod')
+      manifests.pod = { ...manifests.pod, metadata: { ...manifests.pod.metadata,
+        annotations: previousPod.metadata.annotations as typeof manifests.pod.metadata.annotations },
+      spec: previousPod.spec as typeof manifests.pod.spec }
+    }
     const name = manifests.pod.metadata.name
     const assertOwner = async (kind: string) => {
       const existing = await this.resources.read(kind, name)
@@ -226,16 +345,16 @@ export class UserPodService {
       await delay(1000)
     }
     await ensureCreated('service', manifests.service)
-    const service = await assertOwner('service')
-    const serviceSpec = z.object({ type: z.literal('NodePort'), selector: z.record(z.string(), z.string()),
-      ports: z.array(z.object({ name: z.literal('nexus'), port: z.literal(RUNTIME_PORT),
-        targetPort: z.literal(RUNTIME_PORT), nodePort: z.number().int().min(1).max(65535) })).length(1),
-    }).parse(service?.spec)
-    if (serviceSpec.selector.app !== APP_LABEL || serviceSpec.selector.runtime !== name) {
-      throw new Error('User Pod Service does not select its owned runtime')
+    const config = await this.runtimeConnection(ownerId)
+    if (this.options.release && !previousPod) {
+      if (!this.resources.observe) throw new Error('Runtime build verification is unavailable')
+      const observed = await this.resources.observe(name)
+      const build = parseCohostBuild(observed.version)
+      const expected = this.options.release
+      if (build.commit !== expected.engine.commit || build.version !== expected.cohost.version ||
+        build.nexusVersion !== expected.cohost.nexusVersion || build.pluginAbi !== expected.cohost.pluginAbi ||
+        observed.binaryDigest !== expected.cohost.binaryDigest) throw new Error('Running user runtime differs from the verified release manifest')
     }
-    const endpoint = `https://${this.runtimeHost}:${serviceSpec.ports[0]!.nodePort}`
-    const config = { ...this.options.issuer, authToken: '', runtimeEndpoint: endpoint }
     await this.ready(config, ownerId, this.lifecycle.signal)
     let timer: ReturnType<typeof setTimeout> | undefined
     let isActive = true

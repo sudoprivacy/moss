@@ -52,6 +52,9 @@ EXPECTED_FILES=(
   "moss-server-$VERSION-linux-amd64.tar.gz"
   "moss-runtime-$VERSION-linux-amd64.tar.gz"
 )
+if [ -f "$ASSETS_DIR/runtime-release.json" ]; then
+  EXPECTED_FILES+=(runtime-release.json)
+fi
 
 # Scripts also mirrored to the fixed latest/ entrypoint (like install.sh). The
 # k3s companions ride along so an offline operator can grab everything from one

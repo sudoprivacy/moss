@@ -19,6 +19,7 @@ import {
   defaultAgentName,
   isDefaultAgentName,
   isUserCreatedAgentName,
+  nexusAgentName,
   sessionAgentName,
   userCreatedAgentName,
 } from './agentIdentity.js'
@@ -81,6 +82,7 @@ export async function listMyAgents(input: {
     const ref = session.assistantName
     if (!ref) continue
     if (isDefaultAgentName(ref) || isUserCreatedAgentName(ref)) continue
+    if (nexusAgentName(ref) !== undefined) continue
     if (!templateRefs.includes(ref)) templateRefs.push(ref)
   }
 

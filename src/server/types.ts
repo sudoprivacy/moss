@@ -948,6 +948,9 @@ export type SessionSummary = {
 }
 
 export type SessionCreateInput = {
+  /** Verified management actor; never accepted from a session request body. */
+  managementActorId?: string
+  managementAgent?: { name: string; displayName: string; ownerName: string }
   cwd?: string
   dangerouslySkipPermissions: boolean
   userId: string
