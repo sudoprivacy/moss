@@ -26,9 +26,11 @@ void test('cohost state preserves the durable ID and refuses corrupt recovery me
   try {
     assert.equal(await readCohostSessionState(cwd), undefined)
     await mkdir(join(cwd, '.moss'))
-    await writeFile(cohostSessionStatePath(cwd), '{"sessionId":"old-process","durableSessionId":"history-first"}')
-    const durable = await readCohostSessionState(cwd)
-    assert.deepEqual(durable, { durableSessionId: 'history-first' })
+    for (const sessionId of ['old-process', '43210', '43210.7']) {
+      await writeFile(cohostSessionStatePath(cwd), JSON.stringify({ sessionId, durableSessionId: 'history-first' }))
+      const durable = await readCohostSessionState(cwd)
+      assert.deepEqual(durable, { durableSessionId: 'history-first' })
+    }
     await removeCohostSessionState(cwd)
     assert.equal(await readCohostSessionState(cwd), undefined)
     await removeCohostSessionState(cwd)
@@ -45,8 +47,8 @@ void test('workspace requests routed to another Moss host do not require that ho
   const binding = { ownerId: session.userId, agentId, durableSessionId: 'native-durable', repositoryPath: cohostRepositoryPath(agentId, session.sessionId) }
   let closes = 0
   const client = {
-    async call() { return JSON.stringify({ session_id: 'live-pid', owner_id: 'owner', agent_id: agentId,
-      durable_session_id: binding.durableSessionId, workspace_path: '/proc/live-pid/workspace' }) },
+    async call() { return JSON.stringify({ session_id: '43210.7', owner_id: 'owner', agent_id: agentId,
+      durable_session_id: binding.durableSessionId, workspace_path: '/proc/43210.7/workspace' }) },
     async stat() { return { entryType: 0, isDirectory: false } },
     async read(path: string) {
       assert.equal(path, `${binding.repositoryPath}/retained.txt`)
@@ -59,7 +61,7 @@ void test('workspace requests routed to another Moss host do not require that ho
       const channel = new EventEmitter() as InternalSessionChannel
       channel.destroy = () => {}
       setImmediate(() => channel.emit('data', JSON.stringify({ type: 'hello', sessionId: session.sessionId,
-        attemptId: 'attempt', runtimeType: 'cohost', state: 'running', managedProcessId: 'live-pid',
+        attemptId: 'attempt', runtimeType: 'cohost', state: 'running', managedProcessId: '43210.7',
         cohostSessionBinding: binding })+'\n'))
       return channel
     },

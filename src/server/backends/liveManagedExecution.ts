@@ -1,3 +1,4 @@
+import { managedProcessIdSchema } from '../nexus/managedAgentClient.js'
 import type { InternalSessionChannel } from '../internalSessionChannel.js'
 import { ResourceAccessError } from '../catalog/resourceError.js'
 import { parseCohostSessionBinding, type CohostSessionBinding } from '../runtime/cohostSessionRepository.js'
@@ -49,7 +50,7 @@ export async function readLiveManagedExecution(
         }
         if (message.state !== 'running') continue
         const id = message.managedProcessId
-        if (typeof message.attemptId !== 'string' || !message.attemptId || typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) { finish(); return }
+        if (typeof message.attemptId !== 'string' || !message.attemptId || typeof id !== 'string' || !managedProcessIdSchema.safeParse(id).success) { finish(); return }
         let binding: CohostSessionBinding
         try { binding = parseCohostSessionBinding(message.cohostSessionBinding) }
         catch { finish(); return }
