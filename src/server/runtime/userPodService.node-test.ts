@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { NexusZoneApiClient } from '@nexus-ai-fs/vfs-client'
 import { UserPodService, userPodName, type UserPodOptions, type UserPodResources } from './userPodService.js'
 import type { K8sResource } from '../backends/k8sResources.js'
+import type { RuntimeRelease } from './runtimeRelease.js'
 
 const options: UserPodOptions = {
   image: 'runtime:verified', nodeHost: 'compute.internal', namespace: 'private-runtimes', storageClass: 'retained-local',
@@ -216,6 +217,36 @@ void test('a resource with another owner is refused before any credential or vol
   t.after(() => service.close())
   await assert.rejects(service.resolve('alice'), /another owner/)
   assert.equal(kube.writes.length, 0)
+})
+
+void test('a matching requested image cannot hide a running image with another digest', async t => {
+  const kube = platform()
+  const digest = `sha256:${'a'.repeat(64)}`
+  const release: RuntimeRelease = { schemaVersion: 1, releaseId: 'server-v0.1.51',
+    engine: { version: '0.2.28', commit: 'b2e2c57' },
+    cohost: { version: '0.2.28', nexusVersion: '0.8.10', pluginAbi: 7, binaryDigest: digest },
+    issuerVersion: '0.8.10', image: { reference: options.image, digest, digestKind: 'oci-config' },
+    archive: { name: 'runtime.tar.gz', digest } }
+  t.mock.method(NexusZoneApiClient, 'withMtls', () => ({ mintUserRuntime: async () => ({
+    subjectId: 'runtime-alice', caPem: Buffer.alloc(0), certPem: Buffer.alloc(0), keyPem: Buffer.alloc(0),
+  }), close() {} }))
+  kube.resources.observe = async () => ({ version: 'nexusd-cohost v0.2.28 (sudocode b2e2c57, nexus-vfs v0.8.10) (plugin-abi 7)', binaryDigest: digest })
+  const write = kube.resources.write
+  t.mock.method(kube.resources, 'write', async (manifest: Record<string, unknown>, verb?: 'create' | 'apply') => {
+    await write(manifest, verb)
+    if (manifest.kind === 'Pod') kube.objects.get('pod')!.status!.containerStatuses =
+      [{ name: 'runtime', imageID: `sha256:${'b'.repeat(64)}` }]
+  })
+  const service = new UserPodService({ ...options, release }, kube.resources, async () => {})
+  t.after(() => service.close())
+  await assert.rejects(service.resolve('alice'), /runtime image differs/)
+  assert.equal((await service.inspect('alice')).isDrifted, true)
+  const status = kube.objects.get('pod')!.status!
+  status.containerStatuses = [{ name: 'runtime', imageID: `docker.io/library/runtime@${digest}` }]
+  await assert.rejects(service.resolve('alice'), /runtime image differs/, 'a manifest digest cannot substitute for a config digest')
+  status.containerStatuses = [{ name: 'runtime', imageID: digest }]
+  await service.resolve('alice')
+  assert.equal((await service.inspect('alice')).isDrifted, false)
 })
 
 void test('controller restart preserves projected configuration and refuses a live provider change', async t => {

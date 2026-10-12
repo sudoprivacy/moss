@@ -305,7 +305,7 @@ jobs:
             "${secret_args[@]}" \
             -t "my-moss-runtime:$IMAGE_TAG" \
             -f deploy/runtime/Dockerfile .
-          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version 2>&1 | tee dist/scode-version.txt
+          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode version 2>&1 | tee dist/scode-version.txt
           grep -Fq "${SCODE_VERSION#v}" dist/scode-version.txt
           docker run --rm "my-moss-runtime:$IMAGE_TAG" nexusd-cohost --version | tee dist/cohost-version.txt
           COHOST_DIGEST="sha256:$(docker run --rm "my-moss-runtime:$IMAGE_TAG" sha256sum /usr/local/bin/nexusd-cohost | awk '{print $1}')"

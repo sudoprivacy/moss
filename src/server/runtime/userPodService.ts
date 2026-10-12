@@ -153,10 +153,23 @@ export class UserPodService {
     const pod = await this.resources.read('pod', userPodName(ownerId))
     if (pod && pod.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId) throw new Error('User Pod belongs to another owner')
     const expected = userPodManifests(ownerId, this.options).pod
-    return { ownerId, isPresent: Boolean(pod), isDrifted: Boolean(pod && pod.metadata.annotations?.[SPEC_ANNOTATION] !== expected.metadata.annotations[SPEC_ANNOTATION]),
+    return { ownerId, isPresent: Boolean(pod), isDrifted: Boolean(pod && (pod.metadata.annotations?.[SPEC_ANNOTATION] !== expected.metadata.annotations[SPEC_ANNOTATION] ||
+      (this.options.release && pod.status?.phase === 'Running' && !this.isReleaseImage(pod)))),
       phase: pod?.status?.phase ?? 'absent', expectedImage: this.options.image,
       observedImageDigest: pod?.status?.containerStatuses?.find(container => container.name === 'runtime')?.imageID ?? null,
       releaseId: this.options.release?.releaseId ?? null }
+  }
+
+  private isReleaseImage(pod: K8sResource): boolean {
+    const imageId = pod.status?.containerStatuses?.find(container => container.name === 'runtime')?.imageID
+    const release = this.options.release
+    if (!release) return true
+    // Config hashes from loaded image archives differ from registry manifest
+    // hashes. Refuse an ambiguous report instead of comparing unlike digests.
+    const observed = release.image.digestKind === 'oci-config'
+      ? /^(?:docker:\/\/)?(sha256:[a-f0-9]{64})$/.exec(imageId ?? '')?.[1]
+      : /@(sha256:[a-f0-9]{64})$/.exec(imageId ?? '')?.[1]
+    return observed === release.image.digest
   }
 
   /** Serialize rollouts across controllers; only the Pod is replaced and the owner PVC is retained. */
@@ -349,6 +362,8 @@ export class UserPodService {
     await ensureCreated('service', manifests.service)
     const config = await this.runtimeConnection(ownerId)
     if (this.options.release && !previousPod) {
+      const runningPod = await assertOwner('pod')
+      if (!runningPod || !this.isReleaseImage(runningPod)) throw new Error('Running user runtime image differs from the verified release manifest')
       if (!this.resources.observe) throw new Error('Runtime build verification is unavailable')
       const observed = await this.resources.observe(name)
       const build = parseCohostBuild(observed.version)
