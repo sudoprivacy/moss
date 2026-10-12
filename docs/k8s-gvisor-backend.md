@@ -20,6 +20,9 @@ node host used to reach each runtime's Kubernetes NodePort Service.
 user. Session runners receive its resolved connection and reuse the same box.
 The control plane issues short-lived owner credentials; each connection
 validates the runtime server name derived from that owner.
+Placement becomes available after Kubernetes reports the Pod Ready and an
+owner-authenticated Nexus request succeeds. This includes the time needed to
+project and reload a refreshed server certificate when the controller reconnects.
 
 ```mermaid
 flowchart LR
@@ -55,6 +58,13 @@ The [Agent storage matrix](https://s.shareone.vip/s/agent-context-storage-matrix
 owns logical paths, links and durable session format. The
 [Nexus authentication architecture](https://s.shareone.vip/s/nexus-auth-architecture)
 owns credential issuance and runtime confinement.
+
+The real-cluster acceptance scripts are
+[`user-pod-runtime.ts`](../scripts/e2e/user-pod-runtime.ts) for concurrent native
+sessions and owner isolation, and
+[`user-pod-recovery.ts`](../scripts/e2e/user-pod-recovery.ts) for Pod replacement,
+exact durable bytes and resumed model replies. Recovery operates on the first
+script's synthetic owner fixture and retains its PVC and Service.
 
 ## Retaining workspace files across runtime restarts
 

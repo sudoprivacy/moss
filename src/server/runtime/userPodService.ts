@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { NexusZoneApiClient, userRuntimeServerName, type SessionCredential } from '@nexus-ai-fs/vfs-client'
 import { buildKubectlBaseArgs, kubectlApply, readK8sResource, type K8sResource } from '../backends/k8sResources.js'
 import type { NexusTlsConfig } from '../nexus/nexusEnvConfig.js'
-import type { SessionConnectionConfig } from '../nexus/sessionConnection.js'
+import { waitForSessionRuntime, type SessionConnectionConfig } from '../nexus/sessionConnection.js'
 
 const OWNER_ANNOTATION = 'moss.sudo.dev/runtime-owner'
 const SPEC_ANNOTATION = 'moss.sudo.dev/runtime-spec'
@@ -124,10 +124,11 @@ export function userPodManifests(ownerId: string, options: UserPodOptions) {
 /** Coordinates user boxes without storing addresses, credentials or PID presence in SQL. */
 export class UserPodService {
   private readonly connections = new Map<string, Promise<UserPodConnection>>()
-  private isClosed = false
+  private readonly lifecycle = new AbortController()
   private readonly runtimeHost: string
 
-  constructor(private readonly options: UserPodOptions, private readonly resources = kubernetesResources(options)) {
+  constructor(private readonly options: UserPodOptions, private readonly resources = kubernetesResources(options),
+    private readonly ready = waitForSessionRuntime) {
     if (!options.image || !options.storageClass) throw new Error('User Pods require an image and retained storage')
     if (!options.nodeHost) throw new Error('User Pods require a private compute node host')
     const host = new URL(`https://${options.nodeHost}`)
@@ -138,7 +139,7 @@ export class UserPodService {
   }
 
   async resolve(ownerId: string, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
-    if (this.isClosed) throw new Error('User Pod service is closed')
+    if (this.lifecycle.signal.aborted) throw new Error('User Pod service is closed')
     userPodName(ownerId)
     let connection = this.connections.get(ownerId)
     if (connection) {
@@ -215,7 +216,7 @@ export class UserPodService {
     }
     const deadline = Date.now() + 90_000
     while (true) {
-      if (this.isClosed) throw new Error('User Pod service is closed')
+      if (this.lifecycle.signal.aborted) throw new Error('User Pod service is closed')
       const current = await assertOwner('pod')
       if (current?.status?.conditions?.some(condition => condition.type === 'Ready' && condition.status === 'True')) break
       if (current?.status?.phase === 'Failed' || current?.status?.phase === 'Succeeded') {
@@ -234,10 +235,12 @@ export class UserPodService {
       throw new Error('User Pod Service does not select its owned runtime')
     }
     const endpoint = `https://${this.runtimeHost}:${serviceSpec.ports[0]!.nodePort}`
+    const config = { ...this.options.issuer, authToken: '', runtimeEndpoint: endpoint }
+    await this.ready(config, ownerId, this.lifecycle.signal)
     let timer: ReturnType<typeof setTimeout> | undefined
     let isActive = true
     const renew = async () => {
-      if (!isActive || this.isClosed) return
+      if (!isActive || this.lifecycle.signal.aborted) return
       let retryMs = 90_000
       try { await refresh() } catch {
         retryMs = 5_000
@@ -256,14 +259,14 @@ export class UserPodService {
         if (JSON.stringify(configuration) === JSON.stringify(replacement)) return
         await refresh(replacement)
       },
-      config: { ...this.options.issuer, authToken: '', runtimeEndpoint: endpoint },
+      config,
       close: () => { isActive = false; clearTimeout(timer) },
     }
   }
 
   /** Disconnect controller transports while retaining owned Pods and user volumes. */
   async close(): Promise<void> {
-    this.isClosed = true
+    this.lifecycle.abort()
     await Promise.allSettled([...this.connections.values()].map(async connection => (await connection).close()))
     this.connections.clear()
   }
