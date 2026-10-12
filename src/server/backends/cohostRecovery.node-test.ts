@@ -5,9 +5,9 @@ import { ManagedAgentClient, type ManagedSessionSnapshot, type StartSessionResul
 import { startCohostExecution } from './cohostRecovery.js'
 
 const endpoint = { protocol: 'acp-mailbox/1' as const, channel_id: 'channel', agent: 'agent', controller: 'old-controller', transcript: '/conversations/0123456789abcdef0123456789abcdef/transcript' }
-const snapshot: ManagedSessionSnapshot = { session_id: 'pid-old', agent_id: 'agent', owner_id: 'owner',
-  workspace_path: '/proc/pid-old/workspace/', durable_session_id: 'native-session', session_endpoint: endpoint }
-const result: StartSessionResult = { sessionId: 'pid-new', osPid: null, durableSessionId: 'native-session', sessionEndpoint: endpoint }
+const snapshot: ManagedSessionSnapshot = { session_id: '43210.7', agent_id: 'agent', owner_id: 'owner',
+  workspace_path: '/proc/43210.7/workspace/', durable_session_id: 'native-session', session_endpoint: endpoint }
+const result: StartSessionResult = { sessionId: '43210.8', osPid: null, durableSessionId: 'native-session', sessionEndpoint: endpoint }
 const input = { agentId: 'agent', model: 'model' }
 const scope = { ownerId: 'owner', repositoryPath: '/agents/agent/workspaces/moss-id', controllerId: 'new-controller' }
 
@@ -33,7 +33,7 @@ void test('ordinary creation starts once; an owned orphan resumes its original d
   assert.equal((await startCohostExecution(agent, input, scope)).isResume, false)
   existing = snapshot
   assert.equal((await startCohostExecution(agent, input, scope)).isResume, true)
-  assert.deepEqual(cancelled, ['pid-old'])
+  assert.deepEqual(cancelled, ['43210.7'])
   assert.equal(starts[1]?.resumeSessionId, 'native-session')
 })
 
@@ -43,7 +43,7 @@ void test('the original controller recovers a lost creation reply without creati
     cancel: async () => assert.fail('must not cancel the same controller'),
     startSession: async () => assert.fail('must not create a duplicate'),
   }, input, { ...scope, controllerId: endpoint.controller })
-  assert.equal(recovered.session.sessionId, 'pid-old')
+  assert.equal(recovered.session.sessionId, '43210.7')
   assert.equal(recovered.session.durableSessionId, 'native-session')
 })
 
@@ -83,11 +83,11 @@ void test('recovery honors cancellation, its deadline and cleanup after a cancel
   await assert.rejects(startCohostExecution({ findSession: async () => undefined,
     cancel: async id => { cancelled.push(id) }, startSession: async () => { aborted.abort(); return result } },
   input, scope, { signal: aborted.signal }), /abort/i)
-  assert.deepEqual(cancelled, ['pid-new'])
+  assert.deepEqual(cancelled, ['43210.8'])
 })
 
 void test('live discovery checks both registry and execution ownership and refuses ambiguous results', async () => {
-  let records = [{ pid: 'pid-old', name: 'agent', owner_id: 'owner', repos: [{ alias: 'workspace', mount_path: scope.repositoryPath }] }]
+  let records = [{ pid: '43210.7', name: 'agent', owner_id: 'owner', repos: [{ alias: 'workspace', mount_path: scope.repositoryPath }] }]
   let current = snapshot
   const client = new ManagedAgentClient({
     call: async (method: string, raw: string) => {

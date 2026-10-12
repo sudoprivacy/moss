@@ -37,15 +37,19 @@ export interface ManagedSessionSnapshot {
   session_endpoint?: NexusSessionEndpoint
 }
 
+/** OS PID[.local_id], with legacy synthetic IDs accepted during rolling upgrades. */
+export const managedProcessIdSchema = z.string().min(1).max(128)
+  .regex(/^(?:[A-Za-z0-9_-]+|[1-9][0-9]*\.[0-9]+)$/)
+
 const managedRegistrySchema = z.array(z.object({
-  pid: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  pid: managedProcessIdSchema,
   name: z.string().min(1),
   owner_id: z.string().min(1),
   repos: z.array(z.object({ alias: z.string(), mount_path: z.string() })).default([]),
 }))
 
 const managedSessionSchema: z.ZodType<ManagedSessionSnapshot> = z.object({
-  session_id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  session_id: managedProcessIdSchema,
   agent_id: z.string().min(1),
   owner_id: z.string().min(1),
   workspace_path: z.string().min(1),
