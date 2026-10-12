@@ -413,11 +413,8 @@ export function createSecretsApi(db: {
 
     async listUserSecrets(orgId: string, userId: string) {
       try {
-        const secrets = await nexus.listSecrets(`user:${userId}`)
-        // Expose a normalized `enabled` boolean alongside the raw `status`.
-        // nexus stores enablement as status: 'enabled'|'disabled'; clients toggle
-        // on a boolean, so derive it here to keep the contract explicit.
-        const withEnabled = secrets.map(s => ({ ...s, enabled: s.status === 'enabled' }))
+        const secrets = await nexus.listSecretMetadata(`user:${userId}`)
+        const withEnabled = secrets.map(mapSecretListEntry)
         return { success: true, data: withEnabled }
       } catch {
         return { success: false, error: { code: 'secret_store_unavailable', message: '凭据存储服务不可用' } }
