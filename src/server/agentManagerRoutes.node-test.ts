@@ -59,6 +59,10 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
     assert.equal((await request('GET', `/api/v1/agents/persistent-agent?owner_id=${b.userId}`, a.admin)).status, 404)
     assert.equal((await request('POST', '/api/v1/agents/persistent-agent/sessions', a.user, { owner_id: b.userId })).status, 404)
     assert.equal((await request('POST', '/api/v1/agents/worker-agent/sessions', a.admin, { owner_id: a.userId })).status, 403)
+    assert.equal((await ok('POST', `/api/v1/agent-runtimes/${a.userId}/upgrade`, a.user)).runtime.ownerId, a.userId)
+    assert.equal((await request('POST', `/api/v1/agent-runtimes/${b.userId}/upgrade`, a.user)).status, 403)
+    assert.equal((await request('POST', `/api/v1/agent-runtimes/${b.userId}/upgrade`, a.admin)).status, 404)
+    assert.equal((await ok('GET', `/api/v1/agents/persistent-agent?owner_id=${a.userId}`, a.user)).canUpgrade, true)
     const created = await request('POST', '/api/v1/agents/persistent-agent/sessions', a.admin,
       { owner_id: a.userId, management_actor_id: b.userId, source: 'forged' })
     assert.equal(created.status, 201, JSON.stringify(created.data))

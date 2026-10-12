@@ -1,6 +1,6 @@
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
-import { AgentManager, managedSessionAgentName } from './agentManager.js'
+import { AgentManager, canUpgradeAgentRuntime, managedSessionAgentName } from './agentManager.js'
 import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
 import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
 import { dispatchOrganizationRecharge, parseOrganizationPaymentCallback } from './billing/organizationRechargeRoutes.js'
@@ -7090,8 +7090,8 @@ export function startServer(
 
       const runtimeUpgradeMatch = pathname.match(/^\/api\/v1\/agent-runtimes\/([^/]+)\/upgrade$/)
       if (req.method === 'POST' && runtimeUpgradeMatch) {
-        authService.requireScope(auth, 'admin:settings')
         const ownerId = runtimeUpgradeMatch[1]!
+        if (!canUpgradeAgentRuntime(auth, ownerId)) throw new HttpError(403, 'Runtime upgrade is not permitted')
         await agentManager.list(auth, ownerId)
         const state = await runtime.upgradeUserRuntime(ownerId, auth.orgId)
         logger.info(`agent_runtime_upgraded ${JSON.stringify({ ownerId, orgId: auth.orgId, actorUserId: auth.userId })}`)
@@ -7124,7 +7124,7 @@ export function startServer(
                 (session.source === 'agent-manager' && session.clientMetadata?.agent_manager_actor_id === auth.userId)
                 ? agentWorkspaceUrl(session.sessionId) : null }))
           writeJson(res, 200, { agent, sessions, runtime: await runtime.inspectUserRuntime(ownerId),
-            canUpgrade: hasScope(auth.scopes, 'admin:settings'), isWorkspaceAvailable: Boolean(agentWorkspaceUrl('probe')) })
+            canUpgrade: canUpgradeAgentRuntime(auth, ownerId), isWorkspaceAvailable: Boolean(agentWorkspaceUrl('probe')) })
           return
         }
         if (req.method === 'POST' && managedAgentMatch[2]) {
@@ -7138,7 +7138,7 @@ export function startServer(
             userId: ownerId, orgId: auth.orgId, role: owner.role, scopes: owner.scopes,
             dangerouslySkipPermissions: false,
             assistantName: agent.reference, assistantDisplayName: agent.displayName,
-            runtime: { type: 'cohost' }, source: 'agent-manager', managementActorId: auth.userId,
+            runtime: { type: 'cohost', engine: 'scode' }, source: 'agent-manager', managementActorId: auth.userId,
             managementAgent: { name: agent.name, displayName: agent.displayName, ownerName: agent.ownerName },
           })
           logger.info(`agent_manager_session_created ${JSON.stringify({ actorUserId: auth.userId,

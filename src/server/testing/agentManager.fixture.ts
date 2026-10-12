@@ -19,7 +19,10 @@ const runtime = new RuntimeService({ config, store, authService, serverInstanceI
 runtime.readAgentNamespace = async ownerId => ({ isOwnerConfined: true,
   names: ['persistent-agent', 'worker-agent'], managedNames: ['persistent-agent'],
   executions: [{ name: 'worker-agent', ownerId, state: 'ready', kind: 'worker' }] })
+runtime.upgradeUserRuntime = async ownerId => ({ ownerId, isPresent: true, isDrifted: false,
+  phase: 'Running', expectedImage: 'fixture:verified', observedImageDigest: null, releaseId: null })
 runtime.createSession = async input => {
+  if (input.source === 'agent-manager' && input.runtime?.engine !== 'scode') throw new Error('Managed Agents require the shared engine')
   const sessionId = randomUUID()
   return store.createSession({ ...input, sessionId, transcriptSessionId: sessionId,
     transcriptPath: '', cwd: '/', runtime: { type: 'cohost', engine: 'scode' }, status: 'detached', desiredState: 'active' })

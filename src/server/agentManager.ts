@@ -39,6 +39,12 @@ export interface AgentManagerDependencies {
 const agentNameSchema = z.string().min(1).max(512)
   .refine(name => !/[\\/\0]/.test(name) && name !== '.' && name !== '..', 'Invalid Agent name')
 
+/** Owners may apply their own credentials; managing another box requires deployment authority. */
+export function canUpgradeAgentRuntime(auth: AuthContext, ownerId: string): boolean {
+  return hasScope(auth.scopes, 'admin:settings') || (auth.userId === ownerId &&
+    hasScope(auth.scopes, 'sessions:create') && hasScope(auth.scopes, 'sessions:attach'))
+}
+
 /** Merge durable Nexus presence with Moss identities without treating templates as principals. */
 export class AgentManager {
   constructor(private readonly dependencies: AgentManagerDependencies) {}
