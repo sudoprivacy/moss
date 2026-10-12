@@ -1,8 +1,12 @@
-import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
+import { NexusVfsClient, userRuntimeServerName, type NexusVfsTlsConfig } from '@nexus-ai-fs/vfs-client'
 import type { ResolvedNexusConfig } from './nexusEnvConfig.js'
 import { mintSessionIdentity, renewSessionCredential, SESSION_CREDENTIAL_VALIDITY_SECS, type SessionIdentity } from './sessionIdentity.js'
 
-type SessionConnectionConfig = Pick<Extract<ResolvedNexusConfig, { mode: 'external' }>, 'endpoint' | 'tls' | 'authToken'>
+type SessionConnectionConfig = Pick<Extract<ResolvedNexusConfig, { mode: 'external' }>, 'endpoint' | 'authToken'> & {
+  tls: NexusVfsTlsConfig | null
+  /** Destination from the trusted placement resolver; endpoint remains the credential issuer. */
+  runtimeEndpoint?: string
+}
 
 export interface SessionRuntimeConnection {
   client: NexusVfsClient
@@ -15,9 +19,17 @@ export async function connectSessionRuntime(
   config: SessionConnectionConfig,
   ownerId: string | undefined,
 ): Promise<SessionRuntimeConnection> {
+  let serverName: string | undefined
+  if (config.runtimeEndpoint !== undefined) {
+    if (!ownerId || !config.tls) {
+      throw new Error('A user runtime requires an authenticated owner and an mTLS credential issuer')
+    }
+    serverName = userRuntimeServerName(ownerId)
+  }
   const identity = await mintSessionIdentity(config.endpoint, config.tls, ownerId)
-  const tls = identity?.tls ?? config.tls
-  const client = tls ? NexusVfsClient.withMtls(config.endpoint, tls) : new NexusVfsClient(config.endpoint)
+  const tls = identity ? { ...identity.tls, ...(serverName ? { serverName } : {}) } : config.tls
+  const endpoint = config.runtimeEndpoint ?? config.endpoint
+  const client = tls ? NexusVfsClient.withMtls(endpoint, tls) : new NexusVfsClient(endpoint)
   if (identity && config.tls) {
     const minterTls = config.tls
     try {

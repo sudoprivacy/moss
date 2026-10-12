@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { NexusVfsClient, NexusZoneApiClient } from '@nexus-ai-fs/vfs-client'
+import { NexusVfsClient, NexusZoneApiClient, userRuntimeServerName, type SessionCredential } from '@nexus-ai-fs/vfs-client'
 
 import { mintSessionIdentity, renewSessionCredential, ownerField, type SessionIdentity } from './sessionIdentity.js'
 import { connectSessionRuntime } from './sessionConnection.js'
@@ -113,6 +113,68 @@ void test('closing a controller cancels its in-flight credential renewal and clo
   abort.abort()
   await rejected
   assert.equal(closeCount, 2, 'abort closes the live RPC and finally releases the issuer')
+})
+
+void test('user runtime execution and renewal use separate endpoints and credentials', async t => {
+  const issuerEndpoint = 'https://issuer:8443'
+  const runtimeEndpoint = 'https://alice-runtime:8444'
+  const operatorTls = { ca: '/ca.pem', cert: '/operator.pem', key: '/operator-key.pem', serverName: 'issuer' }
+  const credential = { subjectId: identity.subjectId, caPem: Buffer.from('session-ca'),
+    certPem: Buffer.from('session-cert'), keyPem: Buffer.from('session-key') }
+  let issuerConnections = 0
+  let issuerCloses = 0
+  let runtimeConnections = 0
+  let renew: ((current: SessionCredential, signal: AbortSignal) => Promise<SessionCredential>) | undefined
+  t.mock.method(NexusZoneApiClient, 'withMtls', (endpoint: string, tls: unknown) => {
+    assert.equal(endpoint, issuerEndpoint)
+    assert.equal(tls, operatorTls)
+    issuerConnections++
+    return {
+      mintSessionAgent: async (owner: string) => {
+        assert.equal(owner, 'alice')
+        return credential
+      },
+      renewSessionAgent: async (current: unknown) => {
+        assert.equal(current, credential)
+        return { ...credential, certPem: Buffer.from('renewed-session-cert') }
+      },
+      close: () => { issuerCloses++ },
+    }
+  })
+  t.mock.method(NexusVfsClient, 'withMtls', (endpoint: string, tls: unknown) => {
+    assert.equal(endpoint, runtimeEndpoint)
+    assert.deepEqual(tls, { ca: credential.caPem, cert: credential.certPem, key: credential.keyPem,
+      serverName: userRuntimeServerName('alice') })
+    runtimeConnections++
+    return {
+      maintainSessionCredential: (current: unknown, options: { renew: typeof renew }) => {
+        assert.equal(current, credential)
+        renew = options.renew
+      },
+      close: () => {},
+    }
+  })
+  const connection = await connectSessionRuntime({ endpoint: issuerEndpoint, runtimeEndpoint, tls: operatorTls,
+    authToken: 'deployment-token' }, 'alice')
+  try {
+    assert.equal(connection.authToken, '')
+    assert.deepEqual(ownerField(connection.identity, 'alice'), {})
+    assert.equal((await renew!(credential, new AbortController().signal)).certPem.toString(), 'renewed-session-cert')
+    assert.equal(issuerConnections, 2)
+    assert.equal(issuerCloses, 2)
+    assert.equal(runtimeConnections, 1)
+  } finally { connection.client.close() }
+})
+
+void test('user runtime placement cannot open an operator or plaintext fallback', async t => {
+  t.mock.method(NexusZoneApiClient, 'withMtls', () => { throw new Error('unexpected issuer dial') })
+  t.mock.method(NexusVfsClient, 'withMtls', () => { throw new Error('unexpected runtime dial') })
+  const config = { endpoint: 'https://issuer:8443', runtimeEndpoint: 'https://runtime:8444', authToken: 'operator-token' }
+  const tls = { ca: '/ca.pem', cert: '/operator.pem', key: '/operator-key.pem' }
+  await assert.rejects(connectSessionRuntime({ ...config, tls: null }, 'alice'), /authenticated owner/)
+  await assert.rejects(connectSessionRuntime({ ...config, tls }, undefined), /authenticated owner/)
+  await assert.rejects(connectSessionRuntime({ ...config, tls }, ''), /authenticated owner/)
+  await assert.rejects(connectSessionRuntime({ ...config, tls }, 'alice\n'), /owner/i)
 })
 
 void test('an already closed controller does not open a credential issuer', async t => {
