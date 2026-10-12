@@ -77,6 +77,21 @@ function maliciousMetadata(namespace: string, key: string, status: string, versi
 }
 
 describe('secret metadata list APIs', () => {
+  it('returns only the calling user metadata and preserves disabled entries', async () => {
+    const { client } = makeNexus([
+      { namespace: 'user:alice:mail', key: 'token', currentVersion: 2, deleted: false },
+      { namespace: 'user:alice:mail', key: 'password', currentVersion: 3, deleted: true },
+      { namespace: 'user:bob:mail', key: 'token', currentVersion: 5, deleted: false },
+      { namespace: 'user:alice-other:mail', key: 'token', currentVersion: 7, deleted: false },
+    ])
+    const result = await createListApi(client).listUserSecrets('org-a', 'alice')
+    expect(result).toEqual({ success: true, data: [
+      { namespace: 'user:alice:mail', key: 'token', status: 'enabled', version: 2, enabled: true },
+      { namespace: 'user:alice:mail', key: 'password', status: 'disabled', version: 3, enabled: false },
+    ] })
+    assertNoValueInSerializedResponse(result)
+  })
+
   it('lists only the current organization metadata without retrieving values', async () => {
     const { client, metadataCalls } = makeNexus([
       { namespace: 'org:org-a:system:github', key: 'token', currentVersion: 3, deleted: false },
