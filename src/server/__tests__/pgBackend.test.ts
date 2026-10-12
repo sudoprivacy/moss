@@ -120,11 +120,7 @@ async function createFreshDatabase(admin: Pool): Promise<string> {
 }
 
 async function dropDatabase(admin: Pool, dbName: string): Promise<void> {
-  // Terminate lingering connections first, or DROP hangs on pool checkout.
-  await admin.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-    [dbName],
-  );
+  assert.match(dbName, /^moss_pg_test_[a-z0-9]{8}$/);
   await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
 }
 

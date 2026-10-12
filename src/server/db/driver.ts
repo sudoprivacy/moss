@@ -266,7 +266,11 @@ export class PgDriver implements DbDriver {
     private readonly pool: PgPoolLike,
     private readonly onError?: (err: Error) => void,
   ) {
-    if (onError) pool.on('error', onError)
+    // node-postgres evicts the failed idle client. An unhandled pool error
+    // otherwise terminates the controller, even though its queries can recover.
+    pool.on('error', onError ?? (() => {
+      process.stderr.write('[PgDriver] PostgreSQL idle connection failed; the pool will replace it\n')
+    }))
   }
 
   /**

@@ -5,6 +5,8 @@ import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
+  'src/server/runnerReadiness.node-test.ts',
+  'src/server/runtime/userPodService.node-test.ts',
   'src/server/backends/cohostWorkspace.node-test.ts',
   'src/server/backends/cohostRecovery.node-test.ts',
   'src/server/backends/liveManagedExecution.node-test.ts',
@@ -144,6 +146,7 @@ const nodeTestFiles = [
   'src/server/migration/sudoworkP5QmsSourceReader.node-test.ts',
   'src/server/migration/sudoworkSourceSnapshot.node-test.ts',
   'src/server/migration/targetIdentitySnapshot.node-test.ts',
+  'src/server/nexus/cohostConnection.node-test.ts',
   'src/server/nexus/sessionIdentity.node-test.ts',
   'src/server/nexus/sessionConnection.node-test.ts',
   'src/server/qms/alertService.node-test.ts',

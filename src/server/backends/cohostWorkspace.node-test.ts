@@ -57,6 +57,10 @@ void test('workspace requests routed to another Moss host do not require that ho
     close() { closes++ },
   } as unknown as NexusVfsClient
   const access = createCohostWorkspaceAccess(session, {
+    async connectCohostRuntime(owner) {
+      assert.equal(owner, session.userId)
+      return { client, authToken: 'owner-token', identity: null }
+    },
     async connectInternalChannel() {
       const channel = new EventEmitter() as InternalSessionChannel
       channel.destroy = () => {}
@@ -65,7 +69,7 @@ void test('workspace requests routed to another Moss host do not require that ho
         cohostSessionBinding: binding })+'\n'))
       return channel
     },
-  }, async () => ({ client, authToken: 'owner-token' }))
+  })
   assert.equal((await access.readFile('retained.txt')).toString(), 'retained bytes')
   assert.equal(closes, 1)
 })
@@ -96,6 +100,10 @@ void test('workspace I/O uses the verified execution descriptor and closes every
   } as unknown as NexusVfsClient
   try {
     const access = createCohostWorkspaceAccess(session, {
+      async connectCohostRuntime(owner) {
+        assert.equal(owner, session.userId)
+        return { client, authToken: 'user-token', identity: null }
+      },
       async connectInternalChannel(id) {
         connections++
         assert.equal(id, session.sessionId)
@@ -105,8 +113,7 @@ void test('workspace I/O uses the verified execution descriptor and closes every
           cohostSessionBinding: binding })+'\n'))
         return channel
       },
-    },
-      async () => ({ client, authToken: 'user-token' }))
+    })
     assert.equal((await access.listTree(2))[0]?.relativePath, 'result.txt')
     assert.equal((await access.readFile('result.txt')).toString(), 'hello')
     await access.writeFile('reports/new.txt', Buffer.from('bytes'))
