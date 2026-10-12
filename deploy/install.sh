@@ -177,26 +177,36 @@ if [ "$DOWNLOAD_ONLY" = 1 ]; then
   DOWNLOAD_DIR="$(cd "$DOWNLOAD_DIR" && pwd)"
   DOWNLOAD_BASE="${MOSS_DOWNLOAD_BASE:-$DEFAULT_DOWNLOAD_BASE}"
   DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
+  OFFLINE_ASSETS=("$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE")
 
   download_offline_file() {
     local step="$1" filename="$2"
-    log "Downloading [$step/4] $filename"
+    log "Downloading [$step/$((${#OFFLINE_ASSETS[@]} + 2))] $filename"
     curl --fail --location --progress-bar --retry 3 --connect-timeout 20 \
       -o "$DOWNLOAD_DIR/$filename" "$DOWNLOAD_BASE/$filename"
   }
 
   download_offline_file 1 install.sh
   download_offline_file 2 SHA256SUMS
-  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+  if awk '$2 == "runtime-release.json" || $2 == "*runtime-release.json" { found=1 } END { exit found ? 0 : 1 }' \
+    "$DOWNLOAD_DIR/SHA256SUMS"; then
+    OFFLINE_ASSETS+=(runtime-release.json)
+  elif [ "${MOSS_RUNTIME:-}" = cohost ]; then
+    die "checksum manifest does not contain runtime-release.json"
+  fi
+  for archive in "${OFFLINE_ASSETS[@]}"; do
     if ! awk -v filename="$archive" '$2 == filename || $2 == "*" filename { found=1 } END { exit found ? 0 : 1 }' \
       "$DOWNLOAD_DIR/SHA256SUMS"; then
       die "checksum manifest does not contain $archive"
     fi
   done
-  download_offline_file 3 "$SERVER_ARCHIVE"
-  download_offline_file 4 "$RUNTIME_ARCHIVE"
+  step=3
+  for archive in "${OFFLINE_ASSETS[@]}"; do
+    download_offline_file "$step" "$archive"
+    step=$((step + 1))
+  done
 
-  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+  for archive in "${OFFLINE_ASSETS[@]}"; do
     CHECKSUM_FILE="$(mktemp)"
     awk -v filename="$archive" '$2 == filename || $2 == "*" filename { print }' \
       "$DOWNLOAD_DIR/SHA256SUMS" > "$CHECKSUM_FILE"
