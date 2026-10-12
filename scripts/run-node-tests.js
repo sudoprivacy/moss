@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
   'src/server/runnerReadiness.node-test.ts',
+  'src/server/sessionSocketAuthorization.node-test.ts',
   'src/server/runtime/runtimeRelease.node-test.ts',
   'src/server/agentManager.node-test.ts',
   'src/server/agentManagerRoutes.node-test.ts',

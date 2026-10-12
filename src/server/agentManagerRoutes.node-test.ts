@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
 import { test } from 'node:test'
+import { once } from 'node:events'
+import WebSocket from 'ws'
 import { waitForFixtureReady } from './testing/fixtureReady.js'
 
 void test('real HTTP: Agent ownership, organization boundaries and trusted manager grants', { timeout: 90_000 }, async t => {
@@ -77,8 +79,19 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
     assert.equal((await request('PATCH', `/api/v1/sessions/${created.data.sessionId}`, a.user,
       { client_metadata: { agent_manager_actor_id: b.userId } })).status, 400)
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, b.admin)).status, 403)
+    const managementSocket = new WebSocket(`ws://127.0.0.1:${port}/ws/sessions/${created.data.sessionId}`,
+      { headers: { Authorization: `Bearer ${a.admin}` } })
+    t.after(() => managementSocket.terminate())
+    await once(managementSocket, 'open')
+    const firstReply = once(managementSocket, 'message')
+    managementSocket.send('qa-before-role-change')
+    assert.equal(JSON.parse((await firstReply)[0].toString()).data, 'qa-before-role-change\n')
+    const managementClosed = once(managementSocket, 'close')
     const bootInA = (await ok('POST', '/api/v1/auth/switch-org', boot, { org_id: a.orgId })).access_token
     await ok('PATCH', `/api/v1/users/${adminId}`, bootInA, { role: 'user' })
+    managementSocket.send('qa-after-role-change')
+    assert.equal((await managementClosed)[0], 1008,
+      'the direct Moss WebSocket must reject controls after a management role changes')
     assert.equal((await request('GET', '/api/v1/agents', a.admin)).status, 401,
       'a role change immediately invalidates the previous management token')
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, a.admin)).status, 401)

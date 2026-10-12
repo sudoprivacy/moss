@@ -25,6 +25,7 @@ import os from 'os'
 import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import { WebSocketServer } from 'ws'
+import { attachSessionSocketAuthorization } from './sessionSocketAuthorization.js'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
@@ -10817,15 +10818,24 @@ export function startServer(
             const runnerSocket = await runtime.connectToAttempt(ready.attempt)
             wss.handleUpgrade(req, socket, head, ws => {
               let buffer = ''
-              ws.on('message', data => {
-                if (runtime.isUserRuntimeUpgrading(session.userId)) {
-                  ws.close(1013, 'User runtime is draining for an upgrade')
-                  return
-                }
-                const text = wsDataToText(data)
-                if (!runnerSocket.destroyed) {
-                  runnerSocket.write(text.endsWith('\n') ? text : `${text}\n`)
-                }
+              attachSessionSocketAuthorization(ws, {
+                isManagement: auth.userId !== session.userId,
+                verify: async () => {
+                  const current = token ? await authService.verifyAccessToken(token) : null
+                  const visible = await runtime.getSession(sessionId)
+                  return Boolean(current && visible && hasExactScope(current.scopes, 'internal:channel') &&
+                    canAccessSession(current, visible, 'sessions:attach:any'))
+                },
+                onMessage: data => {
+                  if (runtime.isUserRuntimeUpgrading(session.userId)) {
+                    ws.close(1013, 'User runtime is draining for an upgrade')
+                    return
+                  }
+                  const text = wsDataToText(data)
+                  if (!runnerSocket.destroyed) {
+                    runnerSocket.write(text.endsWith('\n') ? text : `${text}\n`)
+                  }
+                },
               })
               ws.on('close', () => runnerSocket.destroy())
               ws.on('error', () => runnerSocket.destroy())
@@ -10964,13 +10974,21 @@ export function startServer(
             }
           }
 
-          ws.on('message', data => {
-            const text = wsDataToText(data)
-            process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
-            sendToRunner({
-              type: 'stdin',
-              data: text.endsWith('\n') ? text : `${text}\n`,
-            })
+          attachSessionSocketAuthorization(ws, {
+            isManagement: auth.userId !== session.userId,
+            verify: async () => {
+              const current = token ? await authService.verifyAccessToken(token) : null
+              const visible = await runtime.getSession(sessionId)
+              return Boolean(current && visible && canAccessSession(current, visible, 'sessions:attach:any'))
+            },
+            onMessage: data => {
+              const text = wsDataToText(data)
+              process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+              sendToRunner({
+                type: 'stdin',
+                data: text.endsWith('\n') ? text : `${text}\n`,
+              })
+            },
           })
           ws.on('close', () => {
             runnerSocket.destroy()

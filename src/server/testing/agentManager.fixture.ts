@@ -1,5 +1,7 @@
 /** Real HTTP/auth/storage with only runtime placement and execution replaced. */
 import { randomUUID } from 'node:crypto'
+import { once } from 'node:events'
+import { createServer, createConnection } from 'node:net'
 import { readServerConfig, ensureServerDirectories } from '../config.js'
 import { DirectConnectStore } from '../db.js'
 import { ensureSqliteCompatibilityDomainSchemas, ensureCompatibilityCoreSchema } from '../db/compatibilitySchema.js'
@@ -26,6 +28,23 @@ runtime.createSession = async input => {
   const sessionId = randomUUID()
   return store.createSession({ ...input, sessionId, transcriptSessionId: sessionId,
     transcriptPath: '', cwd: '/', runtime: { type: 'cohost', engine: 'scode' }, status: 'detached', desiredState: 'active' })
+}
+const runner = createServer(socket => {
+  socket.on('data', bytes => {
+    socket.write(`${JSON.stringify({ type: 'stdout', line: bytes.toString().trim() })}\n`)
+  })
+})
+runner.listen(0, '127.0.0.1')
+await once(runner, 'listening')
+const runnerAddress = runner.address()
+if (!runnerAddress || typeof runnerAddress === 'string') throw new Error('Fixture runner address is missing')
+runtime.ensureSessionReady = async sessionId => ({ session: (await store.getSession(sessionId))!,
+  attempt: { attemptId: 'fixture-attempt', attachPath: 'fixture' },
+} as Awaited<ReturnType<RuntimeService['ensureSessionReady']>>)
+runtime.connectToAttempt = async () => {
+  const socket = createConnection(runnerAddress.port, '127.0.0.1')
+  await once(socket, 'connect')
+  return socket
 }
 const server = startServer(config, runtime, authService, {
   info: () => {}, warn: () => {}, debug: () => {}, error: message => process.stderr.write(`AGENT_TEST_ERROR:${message}\n`),
