@@ -84,6 +84,8 @@ jobs:
             scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts \
             scripts/e2e/cohost-session-recovery.ts \
             scripts/e2e/cohost-real-model-workflow.ts scripts/e2e/cohost-model-bootstrap.ts \
+            scripts/e2e/cohost-owner-keys.ts scripts/e2e/user-pod-runtime.ts \
+            scripts/e2e/user-pod-recovery.ts scripts/e2e/user-pod-release-upgrade.ts \
             scripts/e2e/server-session-live.ts \
             scripts/e2e/embedded-nexus-live.ts scripts/e2e/broker-upgrade-live.ts scripts/e2e/external-broker-live.ts
 

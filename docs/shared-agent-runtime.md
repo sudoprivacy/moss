@@ -78,7 +78,7 @@ Existing Pods require an explicit upgrade; discovery never silently replaces
 them.
 
 An upgrade obtains an owner lock, refuses active work and untracked native
-controllers, flushes tracked native sessions and replaces the exact observed
+controllers, stops tracked native sessions and replaces the exact observed
 Pod UID. The PVC and private Service remain. Moss resumes durable session IDs
 with new process IDs. If the replacement fails, it restores the prior Pod spec
 and model configuration; drift remains visible. Peer Moss controllers must be
@@ -117,6 +117,20 @@ HTTP tests cover organization boundaries, owner runtime roles and reserved
 metadata. SudoWork integration tests cover management workbench access, revoked
 grants and a shared writer lock between manager and owner. Production migration
 requires a published, paired engine release and live gVisor acceptance.
+
+On 2026-10-13, fresh temporary owners passed the paired 0.2.28 release checks on
+the actual gVisor compute VM. The CLI and running cohost reported `b2e2c57`; the
+cohost executable matched the formally published archive. Two native sessions
+returned real `gpt-6-luna` replies through `api.sudorouter.ai`. A deliberately
+incorrect executable digest failed replacement and restored the previous Pod
+configuration and exact memory/transcript bytes. A subsequent valid replacement
+cleared drift and resumed both original durable session IDs with another model
+reply. The live workflow is `scripts/e2e/user-pod-release-upgrade.ts`.
+
+This acceptance covers an idle owner controlled by the test. Native quiescing
+that atomically rejects a new external controller during the drain check remains
+unimplemented. Production cutover must keep native controllers within the Moss
+rollout boundary; metered per-account quota acceptance is still separate.
 
 The paired SudoWork change removes the legacy WebUI-host shell. Without an
 explicit remote runtime terminal provider, terminal creation returns
