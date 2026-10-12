@@ -1,6 +1,8 @@
 # Co-host production acceptance
 
-The release pins Nexus VFS 0.8.4, Vault 0.5.68 and nexusd-cohost 0.2.26.
+The shared-runtime candidate pins Nexus VFS 0.8.10, Vault 0.5.68 and paired
+scode/nexusd-cohost 0.2.28. The recorded production runs below used earlier
+versions and do not establish acceptance of this candidate.
 Ordinary scode keeps its direct model connection. Controlled co-host sessions
 use the native Nexus model mount for parent, child and compaction requests.
 
@@ -12,9 +14,11 @@ denies every co-host account; an unset value keeps the private deployment's
 existing behavior. The guard applies to creation and subsequent spawn attempts.
 Creation rejects an unlisted account before writing a session record.
 
-The co-host native backend currently reads a deployment credential from the
-daemon environment. It does not consume the user's runner credential. Keep this
-rollout limited until per-user model billing is implemented and verified.
+The owner-Pod candidate supplies each session owner's SudoRouter credential to
+that Pod's private model backend. Metered accounts without an owner credential
+fail startup. The earlier external co-host deployment used a deployment-level
+credential; do not migrate its users until owner billing and runtime recovery
+have passed live acceptance. See [shared Agent runtime](shared-agent-runtime.md).
 
 Configure `MOSS_COHOST_NEXUS_MODE=external`, endpoint and TLS CA/cert/key for the
 execution daemon. The primary `MOSS_NEXUS_*` connection continues to serve the

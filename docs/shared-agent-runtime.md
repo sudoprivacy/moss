@@ -40,8 +40,8 @@ Both standalone and native engines use the same proxy configuration builder.
 The native engine addresses `nexus:///model`; the upstream URL and owner API Key
 are supplied to the private model mount at startup. They are not copied into
 replicated mount metadata or browser URLs. Changing the mounted provider or Key
-requires a controlled runtime restart. The Agent detail page exposes this action
-to users with settings administration permission.
+requires a controlled runtime restart. The Agent detail page permits owners to
+reload their own runtime and settings administrators to reload visible owners.
 
 A management actor does not become the session owner. The server records its
 actor ID and Agent context in reserved session metadata. The WebUI accepts the
@@ -92,8 +92,9 @@ detail page uses the same authorization rule as the upgrade endpoint.
 
 Role changes invalidate existing access tokens. SudoWork checks access before
 each conversation control frame and terminal input, including established
-connections. Management metadata identifies the intended actor and does not
-replace current permission.
+connections. Idle management subscribers are checked every five seconds.
+Management metadata identifies the intended actor and does not replace current
+permission.
 
 ## Deployment settings
 
@@ -117,8 +118,10 @@ metadata. SudoWork integration tests cover management workbench access, revoked
 grants and a shared writer lock between manager and owner. Production migration
 requires a published, paired engine release and live gVisor acceptance.
 
-The existing WebUI terminal launches a shell on the WebUI server. Its input
-authorization is covered, but its placement must move to the owner runtime
-before the cloud migration is complete. The old Moss Electron client has a
+The paired SudoWork change removes the legacy WebUI-host shell. Without an
+explicit remote runtime terminal provider, terminal creation returns
+`REMOTE_TERMINAL_UNAVAILABLE`. Remote PTY execution, window resizing and Nexus
+workspace access still need an owner-runtime implementation and live acceptance.
+The old Moss Electron client has a
 chat entry in `ui/`; its installed version needs separate acceptance. Its
 management entry should reuse the Agent manager and SudoWork workbench.
