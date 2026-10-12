@@ -21,6 +21,7 @@ node_modules
 /tests/*
 !/tests/system-settings.test.ts
 !/tests/list-page.test.tsx
+!/tests/model-account-management.test.tsx
 !/tests/clipboard.test.ts
 !/tests/credential-list.test.ts
 !/tests/secrets-api.test.ts

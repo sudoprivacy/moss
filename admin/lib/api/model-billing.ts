@@ -12,6 +12,9 @@ export interface ModelToken {
   used_amount_usd?: string
   admin_status?: 'enabled' | 'disabled'
   effective_status?: string
+  review_outcome?: 'matched' | 'missing' | 'ambiguous' | 'mismatch' | 'key_unavailable' | 'capability_unavailable' | null
+  checked_at?: number | null
+  next_action?: 'none' | 'reconcile' | 'contact_super_admin'
 }
 export interface ModelAccount {
   org_id: string
@@ -21,6 +24,17 @@ export interface ModelAccount {
   used_amount_usd?: string
   default_member_limit_usd?: string | null
   can_manage: boolean
+}
+export interface ModelTokenProvisioning {
+  user_id: string | null
+  purpose: 'member' | 'service'
+  provisioning_status: string
+  operation_status: string | null
+  expected_remote_name: string
+  review_outcome: ModelToken['review_outcome']
+  checked_at: number | null
+  next_action: 'none' | 'reconcile' | 'contact_super_admin'
+  token_id?: number
 }
 export interface OrganizationRechargeOrder {
   source: 'online' | 'manual'
@@ -71,6 +85,9 @@ export const modelBillingApi = {
   defaults: (limit: string | null) => authClient.patch('/api/v1/model-account/defaults', { member_limit_usd: limit }),
   retry: () => authClient.post('/api/v1/model-account/retry'),
   provision: (userId: string) => authClient.post(`/api/v1/model-account/members/${encodeURIComponent(userId)}/provision`),
+  provisioning: (userId: string) => authClient.get<{ data: ModelTokenProvisioning }>(`/api/v1/model-account/members/${encodeURIComponent(userId)}/provisioning`).then(r => r.data),
+  reconcileMember: (userId: string, reference: string) => authClient.post(`/api/v1/model-account/members/${encodeURIComponent(userId)}/reconcile`, {}, { headers: { 'Idempotency-Key': reference } }),
+  reconcileService: (reference: string) => authClient.post('/api/v1/model-account/service/reconcile', {}, { headers: { 'Idempotency-Key': reference } }),
   status: (userId: string, status: 'enabled' | 'disabled', reference: string) => authClient.patch(`/api/v1/model-account/members/${encodeURIComponent(userId)}/status`, { status }, { headers: { 'Idempotency-Key': reference } }),
   limit: (userId: string, amount: string, direction: 'increase' | 'decrease', reference: string) => authClient.post(`/api/v1/model-account/members/${encodeURIComponent(userId)}/limit`, { amount_usd: amount, direction }, { headers: { 'Idempotency-Key': reference } }),
 }

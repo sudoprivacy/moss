@@ -44,6 +44,34 @@ export async function ensureOrganizationBillingSchema(db: DbDriver): Promise<voi
       updated_at BIGINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS organization_model_operations_org_idx ON organization_model_operations(org_id, created_at, reference);
+    CREATE TABLE IF NOT EXISTS organization_model_token_attempts (
+      id TEXT PRIMARY KEY,
+      token_binding_id TEXT NOT NULL REFERENCES organization_model_tokens(id),
+      attempt_no INTEGER NOT NULL CHECK (attempt_no > 0),
+      operation_reference TEXT NOT NULL UNIQUE REFERENCES organization_model_operations(reference),
+      expected_remote_name TEXT NOT NULL,
+      remote_token_id BIGINT,
+      resolution TEXT CHECK (resolution IN ('matched', 'missing', 'ambiguous', 'mismatch', 'key_unavailable', 'capability_unavailable')),
+      created_at BIGINT NOT NULL,
+      checked_at BIGINT,
+      resolved_at BIGINT,
+      UNIQUE (token_binding_id, attempt_no)
+    );
+    CREATE INDEX IF NOT EXISTS organization_model_token_attempts_binding_idx
+      ON organization_model_token_attempts(token_binding_id, attempt_no);
+    CREATE TABLE IF NOT EXISTS organization_model_token_review_audit (
+      reference TEXT PRIMARY KEY,
+      org_id TEXT NOT NULL REFERENCES organization_model_accounts(org_id),
+      token_binding_id TEXT NOT NULL REFERENCES organization_model_tokens(id),
+      actor_user_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      evidence TEXT NOT NULL,
+      details_json TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS organization_model_token_review_audit_binding_idx
+      ON organization_model_token_review_audit(token_binding_id, created_at);
     CREATE TABLE IF NOT EXISTS organization_model_orders (
       id TEXT PRIMARY KEY,
       order_no TEXT NOT NULL UNIQUE,

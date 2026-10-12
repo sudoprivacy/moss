@@ -14,6 +14,9 @@ export async function dispatchOrganizationBilling(
     else if (method === 'GET' && path === `${base}/access`) data = await service.access(actor)
     else if (method === 'GET' && path === `${base}/logs`) data = await service.logs(actor, Number(url.searchParams.get('page') ?? 1), Number(url.searchParams.get('page_size') ?? 20))
     else if (method === 'GET' && path === `${base}/members`) data = { items: await service.listMembers(actor) }
+    else if (method === 'POST' && path === `${base}/service/reconcile`) {
+      data = await service.reconcileServiceToken(actor, reference ?? '')
+    }
     else if (method === 'PATCH' && path === `${base}/status`) {
       if (body.status !== 'enabled' && body.status !== 'disabled') throw new OrganizationBillingError('INVALID_STATUS', '状态无效')
       await service.setAccountStatus(actor, body.status, reference ?? ''); data = { updated: true }
@@ -36,12 +39,16 @@ export async function dispatchOrganizationBilling(
       const account = await service.retryOrganization(actor.orgId, String(org?.name ?? actor.orgId))
       data = { account_status: account.status }
     } else {
-      const match = path.match(/^\/api\/v1\/model-account\/members\/([^/]+)\/(limit|limit-mode|usage|status|provision)$/)
+      const match = path.match(/^\/api\/v1\/model-account\/members\/([^/]+)\/(limit|limit-mode|usage|status|provision|provisioning|reconcile)$/)
       if (!match) throw new OrganizationBillingError('NOT_FOUND', '接口不存在', 404)
       const member = decodeURIComponent(match[1]!)
       const operationReference = reference ?? (typeof body.reference === 'string' ? body.reference : '')
       if (match[2] === 'usage' && method === 'GET') {
         data = await service.memberUsage(actor, member, Number(url.searchParams.get('page') ?? 1), Number(url.searchParams.get('page_size') ?? 20))
+      } else if (match[2] === 'provisioning' && method === 'GET') {
+        data = await service.tokenProvisioning(actor, member)
+      } else if (match[2] === 'reconcile' && method === 'POST') {
+        data = await service.reconcileMemberToken(actor, member, operationReference)
       } else if (match[2] === 'limit-mode' && method === 'PATCH') {
         if (typeof body.unlimited !== 'boolean' || !body.unlimited && typeof body.remaining_limit_usd !== 'string') throw new OrganizationBillingError('INVALID_LIMIT', '请选择限额模式并填写剩余限额')
         const token = await service.setMemberLimitMode(actor, member, body.unlimited ? null : body.remaining_limit_usd as string, operationReference)
@@ -63,7 +70,9 @@ export async function dispatchOrganizationBilling(
     }
     return { status: 200, body: { success: true, data } }
   } catch (error) {
-    if (error instanceof OrganizationBillingError) return { status: error.statusCode, body: { success: false, error: { code: error.code, message: error.message } } }
+    if (error instanceof OrganizationBillingError) return { status: error.statusCode, body: { success: false, error: {
+      code: error.code, message: error.message, ...(error.nextAction ? { next_action: error.nextAction } : {}),
+    } } }
     if (error instanceof RouterRequestError) return { status: error.outcome === 'unknown' ? 503 : 422, body: { success: false, error: { code: error.code, message: error.outcome === 'unknown' ? '模型服务结果待核对，请勿重复调整限额' : '模型服务拒绝了请求，请核对 Key 状态和剩余限额' } } }
     return { status: 400, body: { success: false, error: { code: 'INVALID_REQUEST', message: '请求参数无效或服务暂不可用' } } }
   }

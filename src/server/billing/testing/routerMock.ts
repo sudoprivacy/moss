@@ -96,7 +96,8 @@ export class RouterMock {
     if (path === '/api/token' && request.method === 'POST') {
       if (!this.state.accounts.some(a => a.id === body.user_id) || !Number.isSafeInteger(body.remain_quota) || body.remain_quota < 0) return failure('INVALID', 'Invalid token', 400)
       const token: RouterTokenCreated = { id: this.state.nextTokenId++, user_id: body.user_id, name: body.name, key: `sk-mock-${randomBytes(20).toString('hex')}`,
-        admin_status: 'enabled', effective_status: 'active', unlimited_quota: body.unlimited_quota, remain_quota: body.remain_quota, used_quota: 0, expired_time: body.expired_time }
+        admin_status: 'enabled', effective_status: 'active', unlimited_quota: body.unlimited_quota, remain_quota: body.remain_quota, used_quota: 0,
+        expired_time: body.expired_time, created_at: Date.now() }
       this.state.tokens.push(token); this.save(); return ok(token)
     }
     if (path === '/api/log') {
@@ -157,7 +158,7 @@ export class RouterMock {
     const effective = token.admin_status === 'disabled' ? 'disabled' : account.status !== 1 ? 'parent_disabled'
       : token.expired_time !== -1 && token.expired_time <= Date.now() / 1000 ? 'expired'
         : !token.unlimited_quota && token.remain_quota <= 0 ? 'exhausted' : 'active'
-    return { ...data, status: effective === 'active' ? 'enabled' : effective, effective_status: effective, key_masked: `${key.slice(0, 6)}…${key.slice(-4)}` }
+    return { ...data, key, status: effective === 'active' ? 'enabled' : effective, effective_status: effective, key_masked: `${key.slice(0, 6)}…${key.slice(-4)}` }
   }
   private consume(token: RouterTokenCreated, account: RouterAccount, quota: number, model: string): Response | null {
     if (this.project(token, account).effective_status !== 'active') return failure('KEY_UNAVAILABLE', 'Key unavailable', 403)

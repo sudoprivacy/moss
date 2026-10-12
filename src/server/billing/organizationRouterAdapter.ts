@@ -23,7 +23,17 @@ export interface RouterToken {
   used_quota: number
   expired_time: number
 }
-export interface RouterTokenCreated extends RouterToken { key: string }
+export interface RouterTokenCreated extends RouterToken { key: string; created_at?: number }
+export type RouterTokenInspectionOutcome = 'matched' | 'missing' | 'ambiguous' | 'mismatch' | 'key_unavailable' | 'capability_unavailable'
+export interface RouterTokenProvisioningExpectation {
+  name: string
+  limit: number | null
+  createdAfter: number
+  createdBefore: number
+}
+export type RouterTokenProvisioningInspection =
+  | { outcome: 'matched'; token: RouterTokenCreated }
+  | { outcome: Exclude<RouterTokenInspectionOutcome, 'matched'>; candidateIds: number[] }
 export interface RouterLog {
   id: string
   user_id: number
@@ -46,6 +56,8 @@ export interface OrganizationRouterPort {
   setAccountStatus(id: number, status: RouterAdminStatus): Promise<void>
   createToken(userId: number, name: string, limit: number | null): Promise<RouterTokenCreated>
   listTokens(userId: number, tokenId?: number): Promise<RouterToken[]>
+  /** Internal recovery path. The raw Key returned on a match must only flow to the secret store. */
+  inspectTokenProvisioning(userId: number, expectation: RouterTokenProvisioningExpectation): Promise<RouterTokenProvisioningInspection>
   setTokenStatus(userId: number, tokenId: number, status: RouterAdminStatus, reference: string): Promise<RouterToken>
   adjustTokenQuota(userId: number, tokenId: number, delta: number, reference: string): Promise<RouterToken>
   setTokenLimitMode(userId: number, tokenId: number, limit: number | null, reference: string): Promise<RouterToken>
@@ -146,6 +158,40 @@ export class OrganizationRouterAdapter implements OrganizationRouterPort {
     if (items.length !== integer(payload.data.count, 'total', 0)) throw new RouterRequestError('Router Key list is incomplete', 'unknown')
     const account = await this.getAccount(userId)
     return items.map(token => account.status !== 1 && token.admin_status !== 'disabled' ? { ...token, effective_status: 'parent_disabled' } : token)
+  }
+  async inspectTokenProvisioning(userId: number, expectation: RouterTokenProvisioningExpectation): Promise<RouterTokenProvisioningInspection> {
+    let payload: Record<string, any>
+    try {
+      payload = await this.request(`/api/user/tokens?${new URLSearchParams({ user_id: String(integer(userId, 'account id', 1)) })}`)
+    } catch {
+      return { outcome: 'capability_unavailable', candidateIds: [] }
+    }
+    if (!Array.isArray(payload.data?.data)) return { outcome: 'capability_unavailable', candidateIds: [] }
+    const rows = payload.data.data as Array<Record<string, any>>
+    let parsed: RouterToken[]
+    try {
+      parsed = rows.map(parseToken)
+      if (parsed.some(token => token.user_id !== userId) || new Set(parsed.map(token => token.id)).size !== parsed.length
+        || parsed.length !== integer(payload.data.count, 'total', 0)) return { outcome: 'capability_unavailable', candidateIds: [] }
+    } catch {
+      return { outcome: 'capability_unavailable', candidateIds: [] }
+    }
+    const named = rows.map((row, index) => ({ row, token: parsed[index]! })).filter(item => item.token.name === expectation.name)
+    const candidateIds = named.map(item => item.token.id)
+    if (!named.length) return { outcome: 'missing', candidateIds }
+    if (named.length > 1) return { outcome: 'ambiguous', candidateIds }
+    const candidate = named[0]!
+    const createdAt = parseRemoteCreatedAt(candidate.row)
+    if (createdAt === null) return { outcome: 'capability_unavailable', candidateIds }
+    const matchesLimit = candidate.token.unlimited_quota === (expectation.limit === null)
+      && (expectation.limit === null || candidate.token.remain_quota === expectation.limit)
+    if (!matchesLimit || candidate.token.used_quota !== 0 || createdAt < expectation.createdAfter || createdAt > expectation.createdBefore) {
+      return { outcome: 'mismatch', candidateIds }
+    }
+    const raw = typeof candidate.row.key === 'string' ? candidate.row.key.trim() : ''
+    const key = raw.startsWith('sk-') ? raw : raw ? `sk-${raw}` : ''
+    if (!/^sk-\S{8,}$/.test(key)) return { outcome: 'key_unavailable', candidateIds }
+    return { outcome: 'matched', token: { ...candidate.token, key } }
   }
   async setTokenStatus(userId: number, tokenId: number, status: RouterAdminStatus, reference: string): Promise<RouterToken> {
     await this.getToken(userId, tokenId)
@@ -262,4 +308,18 @@ function parseToken(row: Record<string, any>): RouterToken {
     key_masked: typeof (row.key_masked ?? row.key) === 'string' ? `${String(row.key_masked ?? row.key).slice(0, 4)}****${String(row.key_masked ?? row.key).slice(-4)}` : undefined,
     admin_status: admin, effective_status: effective, unlimited_quota: row.unlimited_quota,
     remain_quota: remaining, used_quota: integer(row.used_quota ?? 0, 'used quota', 0), expired_time: expired }
+}
+
+function parseRemoteCreatedAt(row: Record<string, any>): number | null {
+  const value = row.created_at ?? row.created_time ?? row.createdAt
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value < 10_000_000_000 ? value * 1000 : value
+  if (typeof value === 'string' && value.trim()) {
+    if (/^\d+$/.test(value)) {
+      const numeric = Number(value)
+      if (Number.isSafeInteger(numeric)) return numeric < 10_000_000_000 ? numeric * 1000 : numeric
+    }
+    const timestamp = Date.parse(value)
+    if (Number.isFinite(timestamp)) return timestamp
+  }
+  return null
 }

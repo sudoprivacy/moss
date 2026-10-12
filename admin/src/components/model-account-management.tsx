@@ -8,6 +8,13 @@ import { Label } from '@/components/ui/label'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
 const statusLabels: Record<string, string> = { ready: '就绪', pending: '待开通', needs_review: '待核对', disabled: '已停用', active: '可用', exhausted: '额度不足', expired: '已过期', parent_disabled: '组织已停用', revoked: '已撤销' }
+const reviewOutcomeLabels: Record<string, string> = {
+  missing: '远端暂未发现匹配 Key。为避免重复创建，请联系超级管理员继续核查。',
+  ambiguous: '远端存在多个同名候选，无法安全自动认领，请联系超级管理员处理。',
+  mismatch: '远端候选的额度、时间或归属不匹配，请联系超级管理员核查。',
+  key_unavailable: '远端候选不包含可安全保存的完整 Key，请联系超级管理员处理。',
+  capability_unavailable: '当前 Router 暂不支持完整核对，请联系超级管理员处理。',
+}
 export function ModelAccountManagement({ orgId }: { orgId?: string | null }) {
   const [account, setAccount] = useState<ModelAccount>()
   const [service, setService] = useState<ModelToken>()
@@ -40,9 +47,10 @@ export function ModelAccountManagement({ orgId }: { orgId?: string | null }) {
       <div className="flex items-end gap-3"><div className="space-y-1"><Label htmlFor="default-member-limit">新成员默认限额（USD，留空表示不限额）</Label><Input id="default-member-limit" value={limit} onChange={e => setLimit(e.target.value)} /></div><Button disabled={isBusy} onClick={() => void onAction(() => modelBillingApi.defaults(limit.trim() || null))}>保存默认限额</Button></div>
       <p className="text-xs text-muted-foreground">只影响后续创建和邀请码注册的成员，已有成员限额保持不变。</p>
       {service && <p className="text-sm">默认服务 Key：{service.key_masked ?? '未就绪'} · 剩余限额 ${service.remaining_limit_usd ?? '—'} · 已用 ${service.used_amount_usd ?? '—'} · {statusLabels[service.effective_status ?? service.provisioning_status]}</p>}
+      {service?.provisioning_status === 'needs_review' && <div className="rounded-md border border-amber-300 bg-amber-50 p-3 space-y-2 text-sm text-amber-950"><p>{reviewOutcomeLabels[service.review_outcome ?? ''] ?? '创建结果不确定，需要只读核对远端 Key；核对不会创建新 Key。'}</p><Button disabled={isBusy} variant="outline" onClick={() => void onServiceAction('service-reconcile', key => modelBillingApi.reconcileService(key))}>核对默认服务 Key</Button></div>}
       {service?.token_id && <div className="flex items-end flex-wrap gap-2"><div><Label htmlFor="service-limit-delta">默认服务 Key 限额调整（USD）</Label><Input id="service-limit-delta" value={serviceAmount} onChange={e => setServiceAmount(e.target.value)} /></div><Button disabled={isBusy} variant="outline" onClick={() => void onServiceAction(`service-increase:${serviceAmount}`, key => modelBillingApi.serviceLimit(serviceAmount, 'increase', key))}>增加限额</Button><Button disabled={isBusy} variant="outline" onClick={() => void onServiceAction(`service-decrease:${serviceAmount}`, key => modelBillingApi.serviceLimit(serviceAmount, 'decrease', key))}>减少限额</Button><Button disabled={isBusy} variant="outline" onClick={() => { const status = service.admin_status === 'disabled' ? 'enabled' : 'disabled'; void onServiceAction(`service:${status}`, key => modelBillingApi.serviceStatus(status, key)) }}>{service.admin_status === 'disabled' ? '启用服务 Key' : '停用服务 Key'}</Button></div>}
       {['ready', 'disabled'].includes(account.account_status) && <Button disabled={isBusy} variant="outline" onClick={() => { const status = account.account_status === 'disabled' ? 'enabled' : 'disabled'; void onServiceAction(`account:${status}`, key => modelBillingApi.accountStatus(status, key)) }}>{account.account_status === 'disabled' ? '启用组织模型服务' : '停用组织模型服务'}</Button>}
-      {account.account_status !== 'ready' && <><p className="text-sm">开户或入账结果不确定时需核对远端记录，重试不会重复加额。</p><Button disabled={isBusy} onClick={() => void onAction(modelBillingApi.retry)}>继续开户</Button></>}
+      {account.account_status !== 'ready' && service?.provisioning_status !== 'needs_review' && <><p className="text-sm">开户或入账结果不确定时需核对远端记录，重试不会重复加额。</p><Button disabled={isBusy} onClick={() => void onAction(modelBillingApi.retry)}>继续开户</Button></>}
     </>}
   </section>
 }
@@ -79,8 +87,21 @@ export function ModelMemberDialog({ target, onClose, onChanged }: { target: Auth
       </>}
       {!token.unlimited && <><Label htmlFor="member-limit-delta">调整金额（USD）</Label><Input id="member-limit-delta" value={amount} onChange={e => setAmount(e.target.value)} placeholder="例如 5.00" /><div className="flex gap-2"><Button disabled={isBusy} onClick={() => void onAction(`increase:${amount}`, ref => modelBillingApi.limit(target.id, amount, 'increase', ref))}>增加限额</Button><Button variant="outline" disabled={isBusy} onClick={() => void onAction(`decrease:${amount}`, ref => modelBillingApi.limit(target.id, amount, 'decrease', ref))}>减少限额</Button></div></>}
       <Button variant="outline" disabled={isBusy || target.status !== 'active' && token.admin_status === 'disabled'} onClick={() => { const status = token.admin_status === 'disabled' ? 'enabled' : 'disabled'; void onAction(status, ref => modelBillingApi.status(target.id, status, ref)) }}>{token.admin_status === 'disabled' ? '启用 Key' : '停用 Key'}</Button>
-    </> : <Button disabled={isBusy} onClick={() => void onAction('provision', () => modelBillingApi.provision(target.id))}>开通成员 Key</Button>}
+    </> : <ModelProvisioningAction token={token} busy={isBusy}
+      onProvision={() => void onAction('provision', () => modelBillingApi.provision(target.id))}
+      onReconcile={() => void onAction('reconcile', ref => modelBillingApi.reconcileMember(target.id, ref))} />}
   </DialogContent></Dialog>
+}
+
+export function ModelProvisioningAction({ token, busy, onProvision, onReconcile }: {
+  token?: ModelToken; busy: boolean; onProvision(): void; onReconcile(): void
+}) {
+  if (token?.provisioning_status === 'needs_review') return <div className="rounded-md border border-amber-300 bg-amber-50 p-3 space-y-2 text-sm text-amber-950">
+    <p>{reviewOutcomeLabels[token.review_outcome ?? ''] ?? '上次创建结果不确定。请核对远端 Key；此操作不会创建新 Key。'}</p>
+    {token.checked_at && <p className="text-xs">上次核对：{new Date(token.checked_at).toLocaleString()}</p>}
+    <Button disabled={busy} onClick={onReconcile}>核对远端 Key</Button>
+  </div>
+  return <Button disabled={busy} onClick={onProvision}>开通成员 Key</Button>
 }
 
 export function ModelUsageDialog({ target, onClose }: { target: AuthUser; onClose(): void }) {

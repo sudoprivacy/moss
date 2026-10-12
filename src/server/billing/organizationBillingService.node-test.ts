@@ -17,13 +17,17 @@ async function setup(registrationQuota = 0, transform?: (fetcher: RouterFetch) =
   const mock = new RouterMock({ adminToken: 'local-router-test', registrationQuota })
   const router = new OrganizationRouterAdapter({ baseUrl: 'http://mock', apiToken: 'local-router-test', adminUserId: '1', fetch: transform ? transform(mock.fetch) : mock.fetch })
   const values = new Map<string, string>()
+  const secretControl = { failPut: false }
   const secrets = {
-    putSecret: async (namespace: string, key: string, value: string) => { values.set(`${namespace}/${key}`, value) },
+    putSecret: async (namespace: string, key: string, value: string) => {
+      if (secretControl.failPut) throw new Error('simulated secret store failure')
+      values.set(`${namespace}/${key}`, value)
+    },
     getSecret: async (namespace: string, key: string) => { const value = values.get(`${namespace}/${key}`); return value ? { value, status: 'enabled', version: 1 } : null },
   }
   const service = new OrganizationBillingService(db, router, secrets, { isRechargeEnabled })
   await service.initialize()
-  return { sqlite, db, service, router, mock, values }
+  return { sqlite, db, service, router, mock, values, secretControl }
 }
 const actor = { userId: 'admin-a', orgId: 'org-a' }
 
@@ -103,7 +107,7 @@ void test('lost old quota response never triggers blind replenishment, even if s
   } finally { await c.db.close() }
 })
 
-void test('lost old Key response does not create duplicate Keys; credentials never fall back to service Key', async () => {
+void test('lost service Key response is reconciled without a duplicate or exposing the raw Key', async () => {
   let keyWrites = 0
   const c = await setup(0, fetcher => async (input, init) => {
     const response = await fetcher(input, init)
@@ -115,7 +119,112 @@ void test('lost old Key response does not create duplicate Keys; credentials nev
     await assert.rejects(c.service.retryOrganization('org-a', 'Example'), /待核对/)
     assert.equal(keyWrites, 1)
     assert.equal(c.mock.snapshot().tokens.length, 1)
+    const result = await c.service.reconcileServiceToken(actor, 'review-service-1')
+    assert.equal(result.provisioning_status, 'ready')
+    assert.equal(result.review_outcome, 'matched')
+    assert.equal(JSON.stringify(result).includes(c.mock.snapshot().tokens[0]!.key), false)
+    assert.equal((await c.service.account('org-a'))!.status, 'ready')
+    await c.service.retryOrganization('org-a', 'Example')
+    assert.equal(keyWrites, 1)
+    assert.equal(c.mock.snapshot().tokens.length, 1)
     assert.equal(await c.service.credential('org-a', 'member-a'), null)
+  } finally { await c.db.close() }
+})
+
+void test('lost member Key response can be safely adopted once and concurrent review never creates again', async () => {
+  let loseMemberResponse = false
+  let keyWrites = 0
+  const c = await setup(0, fetcher => async (input, init) => {
+    const response = await fetcher(input, init)
+    if (String(input).endsWith('/api/token/')) {
+      keyWrites++
+      if (loseMemberResponse) throw new Error('lost member Key response')
+    }
+    return response
+  })
+  try {
+    await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '100', defaultMemberLimitUsd: '10' })
+    loseMemberResponse = true
+    await assert.rejects(c.service.ensureMember('org-a', 'member-a'))
+    const before = c.mock.snapshot().tokens.find(token => token.name.startsWith('member-'))!
+    const [first, second] = await Promise.all([
+      c.service.reconcileMemberToken(actor, 'member-a', 'review-member-1'),
+      c.service.reconcileMemberToken(actor, 'member-a', 'review-member-2'),
+    ])
+    assert.equal(first.provisioning_status, 'ready')
+    assert.equal(second.provisioning_status, 'ready')
+    assert.equal(first.token_id, before.id)
+    assert.equal((await c.service.credential('org-a', 'member-a'))!.sudorouterKey, before.key)
+    assert.equal(c.mock.snapshot().tokens.filter(token => token.name.startsWith('member-')).length, 1)
+    assert.equal(keyWrites, 2, 'one service POST and one member POST only')
+    const binding = (await c.service.token('org-a', 'member-a'))!
+    const operation = await c.db.get('SELECT status, result_json FROM organization_model_operations WHERE reference = ?', [`create-token:${binding.id}`])
+    assert.equal(operation?.status, 'succeeded')
+    assert.equal(JSON.stringify({ first, second, operation }).includes(before.key), false)
+  } finally { await c.db.close() }
+})
+
+void test('unsafe or unauthorized member Key review remains fenced and never issues another create', async () => {
+  let loseMemberResponse = false
+  let keyWrites = 0
+  const c = await setup(0, fetcher => async (input, init) => {
+    const response = await fetcher(input, init)
+    if (String(input).endsWith('/api/token/')) {
+      keyWrites++
+      if (loseMemberResponse) throw new Error('lost member Key response')
+    }
+    return response
+  })
+  try {
+    await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '10', defaultMemberLimitUsd: '2' })
+    loseMemberResponse = true
+    await assert.rejects(c.service.ensureMember('org-a', 'member-a'))
+    const originalInspect = c.router.inspectTokenProvisioning.bind(c.router)
+    c.router.inspectTokenProvisioning = async () => ({ outcome: 'missing', candidateIds: [] })
+    const response = await dispatchOrganizationBilling(c.service, actor, 'POST',
+      new URL('http://test/api/v1/model-account/members/member-a/reconcile'), {}, 'review-missing')
+    assert.equal(response.status, 200)
+    const missing = (response.body as { data: Awaited<ReturnType<typeof c.service.reconcileMemberToken>> }).data
+    assert.equal(missing.review_outcome, 'missing')
+    assert.equal(missing.next_action, 'contact_super_admin')
+    assert.equal(JSON.stringify(response).includes(c.mock.snapshot().tokens.find(token => token.name.startsWith('member-'))!.key), false)
+    assert.equal((await c.service.token('org-a', 'member-a'))!.status, 'needs_review')
+    await assert.rejects(c.service.ensureMember('org-a', 'member-a'), { code: 'NEEDS_REVIEW', nextAction: 'reconcile' })
+    const forbidden = await dispatchOrganizationBilling(c.service, { userId: 'member-a', orgId: 'org-a' }, 'POST',
+      new URL('http://test/api/v1/model-account/members/member-a/reconcile'), {}, 'review-forbidden')
+    assert.equal(forbidden.status, 403)
+    await assert.rejects(c.service.reconcileMemberToken({ userId: 'other', orgId: 'org-b' }, 'member-a', 'review-cross-org'))
+    c.router.inspectTokenProvisioning = originalInspect
+    assert.equal(keyWrites, 2)
+  } finally { await c.db.close() }
+})
+
+void test('reconciliation resumes after secret-store or local-transaction failure without another remote create', async () => {
+  let loseMemberResponse = false
+  let memberCreates = 0
+  const c = await setup(0, fetcher => async (input, init) => {
+    const response = await fetcher(input, init)
+    if (String(input).endsWith('/api/token/') && loseMemberResponse) { memberCreates++; throw new Error('lost member Key response') }
+    return response
+  })
+  try {
+    await c.service.configureOrganization('org-a', 'Example', { initialAmountUsd: '10', defaultMemberLimitUsd: '2' })
+    loseMemberResponse = true
+    await assert.rejects(c.service.ensureMember('org-a', 'member-a'))
+    c.secretControl.failPut = true
+    await assert.rejects(c.service.reconcileMemberToken(actor, 'member-a', 'review-vault-failure'), { code: 'KEY_UNAVAILABLE', nextAction: 'reconcile' })
+    c.secretControl.failPut = false
+    const transaction = c.db.transaction.bind(c.db)
+    let failTransaction = true
+    c.db.transaction = async run => {
+      if (failTransaction) { failTransaction = false; throw new Error('simulated local commit failure') }
+      return transaction(run)
+    }
+    await assert.rejects(c.service.reconcileMemberToken(actor, 'member-a', 'review-db-failure'), /local commit/)
+    const recovered = await c.service.reconcileMemberToken(actor, 'member-a', 'review-resume')
+    assert.equal(recovered.provisioning_status, 'ready')
+    assert.equal(memberCreates, 1)
+    assert.equal(c.mock.snapshot().tokens.filter(token => token.name.startsWith('member-')).length, 1)
   } finally { await c.db.close() }
 })
 
@@ -310,6 +419,36 @@ void test('documented Token API uses user_id/id, enable, PUT deltas and validate
   await assert.rejects(router.setTokenStatus(9999, 278, 'disabled', 'wrong-org'), /scope/)
   await assert.rejects(router.adjustTokenQuota(9880, 279, 1, 'wrong-token'), /scope/)
   assert.equal(calls.filter(call => call.method === 'PUT').length, 2)
+})
+
+void test('internal provisioning inspection classifies candidates without weakening public Key masking', async () => {
+  const now = Date.now()
+  const base = { id: 278, user_id: 9880, status: 1, name: 'member-binding', remain_quota: 2_500_000,
+    unlimited_quota: false, expired_time: -1, used_quota: 0, key: 'sk-internal-recovery-only', created_at: now }
+  let rows: Array<Record<string, unknown>> = [base]
+  const router = new OrganizationRouterAdapter({ baseUrl: 'http://router', apiToken: 'admin', adminUserId: '76',
+    fetch: async input => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/user/tokens') return Response.json({ success: true, data: { count: rows.length, data: rows } })
+      return Response.json({ success: true, data: { id: 9880, username: 'org', quota: 5_000_000, used_quota: 0, status: 1 } })
+    },
+  })
+  const expectation = { name: base.name, limit: base.remain_quota, createdAfter: now - 1000, createdBefore: now + 1000 }
+  const matched = await router.inspectTokenProvisioning(9880, expectation)
+  assert.equal(matched.outcome, 'matched')
+  assert.equal(matched.outcome === 'matched' && matched.token.id, base.id)
+  const publicList = await router.listTokens(9880)
+  assert.equal(JSON.stringify(publicList).includes(base.key), false)
+  rows = []
+  assert.equal((await router.inspectTokenProvisioning(9880, expectation)).outcome, 'missing')
+  rows = [base, { ...base, id: 279 }]
+  assert.equal((await router.inspectTokenProvisioning(9880, expectation)).outcome, 'ambiguous')
+  rows = [{ ...base, remain_quota: 1 }]
+  assert.equal((await router.inspectTokenProvisioning(9880, expectation)).outcome, 'mismatch')
+  rows = [{ ...base, key: undefined }]
+  assert.equal((await router.inspectTokenProvisioning(9880, expectation)).outcome, 'key_unavailable')
+  rows = [{ ...base, created_at: undefined }]
+  assert.equal((await router.inspectTokenProvisioning(9880, expectation)).outcome, 'capability_unavailable')
 })
 
 void test('lost Token quota responses never replay non-idempotent member or service deltas', async () => {
