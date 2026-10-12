@@ -83,3 +83,46 @@ export interface RegisterExternalAgent {
   review_expires_at: number
   review_note: string
 }
+
+export interface ExternalPilotPolicy {
+  enabled: boolean
+  endpoints: string[]
+  revision: number
+}
+export interface ExternalProviderAccess {
+  can_manage: boolean
+  can_manage_policy: boolean
+  credential_storage_available: boolean
+}
+export interface ExternalAgentAdmin extends ExternalAgent {
+  endpoint: string
+  app_id: string
+  workspace_id: string
+  allowed_user_ids: string[]
+  review_note: string
+  revision: number
+  archived: boolean
+  credential_configured: boolean
+}
+export interface InspectExternalConnection { endpoint: string; api_key: string }
+export interface ExternalConnectionInspection { name: string; parameters_digest: string; checked_at: number }
+export interface OnboardExternalAgent extends InspectExternalConnection {
+  request_id: string
+  name: string
+  app_id: string
+  workspace_id: string
+  source_definition: string
+  decoder: OutputDecoder
+  allowed_user_ids: string[]
+  review_days: number
+  review_note: string
+}
+export interface UpdateExternalAgent {
+  revision: number
+  name: string
+  decoder: OutputDecoder
+  allowed_user_ids: string[]
+  review_days: number
+  review_note: string
+}
+export interface ExternalProviderMember { id: string; name: string }
