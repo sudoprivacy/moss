@@ -107,6 +107,7 @@ export function resolveNexusConfigFromEnv(env: NodeJS.ProcessEnv = process.env):
 /** Resolve the execution daemon separately from the deployment's secrets daemon. */
 export function resolveCohostNexusConfig(env: NodeJS.ProcessEnv = process.env): Extract<ResolvedNexusConfig, { mode: 'external' }> {
   const executionEnv = { ...env }
+  if (env.MOSS_COHOST_NEXUS_MODE || env.MOSS_COHOST_NEXUS_ENDPOINT) delete executionEnv.MOSS_NEXUS_ZONE_ID
   for (const suffix of ['MODE', 'ENDPOINT', 'AUTH_TOKEN', 'TLS_CA', 'TLS_CERT', 'TLS_KEY', 'TLS_SERVER_NAME']) {
     executionEnv[`MOSS_NEXUS_${suffix}`] = env[`MOSS_COHOST_NEXUS_${suffix}`] ?? env[`MOSS_NEXUS_${suffix}`]
   }

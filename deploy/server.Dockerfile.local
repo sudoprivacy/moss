@@ -83,7 +83,7 @@ RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)
       arm64) NEXUS_ARCH="aarch64" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
     esac \
-    && NEXUS_SHA256="$(jq -er --arg artifact "nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" '."nexusd-cluster-sha256"[$artifact]' /runtime-versions.json)" \
+    && NEXUS_SHA256="$(jq -er --arg artifact "nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" '."artifact-sha256"[$artifact]' /runtime-versions.json)" \
     && curl -fsSL "https://github.com/nexi-lab/nexus-vfs/releases/download/v${NEXUSD_CLUSTER_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
     && echo "${NEXUS_SHA256}  nexus.tar.gz" | sha256sum -c - \
     && tar -xzf nexus.tar.gz \
@@ -100,7 +100,7 @@ RUN NEXUS_VAULT_VERSION="$(jq -er '."nexus-vault"' /runtime-versions.json)" \
     && if [ "$TARGETARCH" != "amd64" ]; then \
       echo "ERROR: this server package currently supports amd64 only" && exit 1; \
     fi \
-    && VAULT_SHA256="60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914" \
+    && VAULT_SHA256="$(jq -er '."artifact-sha256"["nexus-vault-linux-x86_64.tar.gz"]' /runtime-versions.json)" \
     && curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/vault-v${NEXUS_VAULT_VERSION}/nexus-vault-linux-x86_64.tar.gz" -o vault.tar.gz \
     && echo "${VAULT_SHA256}  vault.tar.gz" | sha256sum -c - \
     && tar -xzf vault.tar.gz \

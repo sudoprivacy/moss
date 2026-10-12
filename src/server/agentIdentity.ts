@@ -24,6 +24,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { ResourceAccessError } from './catalog/resourceError.js'
 
 /**
  * Marks an agent that exists because a user does.
@@ -49,6 +50,23 @@ const DEFAULT_AGENT_PREFIX = 'moss-agent:user:'
  * be changed, and the agent's home, memory and conversations all hang off this.
  */
 const USER_CREATED_AGENT_PREFIX = 'moss-agent:own:'
+const NEXUS_AGENT_PREFIX = 'moss-agent:nexus:'
+
+/** Reference an existing Nexus principal without assigning it a new Moss identity. */
+export function nexusAgentReference(agentName: string): string {
+  if (!agentName || agentName.length > 512 || /[\\/\0]/.test(agentName) || agentName === '.' || agentName === '..') {
+    throw new ResourceAccessError(400, 'Invalid Nexus Agent name')
+  }
+  return `${NEXUS_AGENT_PREFIX}${Buffer.from(agentName, 'utf8').toString('base64url')}`
+}
+
+/** Decode only canonical references; authorization is checked against the owner's namespace. */
+export function nexusAgentName(reference: string | null | undefined): string | undefined {
+  if (!reference?.startsWith(NEXUS_AGENT_PREFIX)) return undefined
+  const name = Buffer.from(reference.slice(NEXUS_AGENT_PREFIX.length), 'base64url').toString('utf8')
+  if (nexusAgentReference(name) !== reference) throw new ResourceAccessError(400, 'Invalid Nexus Agent reference')
+  return name
+}
 
 /** The reference stored for an agent the user made. `id` is generated at creation. */
 export function userCreatedAgentName(id: string): string {
@@ -69,7 +87,7 @@ export function isUserCreatedAgentName(name: string | null | undefined): boolean
  * is perfectly valid.
  */
 export function isUserOwnedAgentName(name: string | null | undefined): boolean {
-  return isDefaultAgentName(name) || isUserCreatedAgentName(name)
+  return isDefaultAgentName(name) || isUserCreatedAgentName(name) || nexusAgentName(name) !== undefined
 }
 
 /** The agent a session belongs to when the user did not choose an assistant. */
@@ -109,6 +127,8 @@ export function isDefaultAgentName(name: string | null | undefined): boolean {
  * original is appended so two templates that slugify alike stay apart.
  */
 export function sessionAgentName(userId: string, assistantRef?: string | null): string {
+  const existing = nexusAgentName(assistantRef)
+  if (existing) return existing
   // The stored reference carries a marker so a catalog assistant cannot be
   // mistaken for one of these; the marker is not part of the agent's name,
   // which has to survive being a path segment.

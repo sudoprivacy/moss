@@ -84,6 +84,8 @@ jobs:
             scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts \
             scripts/e2e/cohost-session-recovery.ts \
             scripts/e2e/cohost-real-model-workflow.ts scripts/e2e/cohost-model-bootstrap.ts \
+            scripts/e2e/cohost-owner-keys.ts scripts/e2e/user-pod-runtime.ts \
+            scripts/e2e/user-pod-recovery.ts scripts/e2e/user-pod-release-upgrade.ts \
             scripts/e2e/server-session-live.ts \
             scripts/e2e/embedded-nexus-live.ts scripts/e2e/broker-upgrade-live.ts scripts/e2e/external-broker-live.ts
 
@@ -242,6 +244,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Setup Bun for release manifest generation
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install release manifest dependencies
+        run: bun install --frozen-lockfile
+
       - name: Validate deployment scripts
         run: |
           bash -n deploy/install.sh
@@ -305,9 +315,16 @@ jobs:
             "${secret_args[@]}" \
             -t "my-moss-runtime:$IMAGE_TAG" \
             -f deploy/runtime/Dockerfile .
-          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version 2>&1 | tee dist/scode-version.txt
+          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode version 2>&1 | tee dist/scode-version.txt
           grep -Fq "${SCODE_VERSION#v}" dist/scode-version.txt
+          docker run --rm "my-moss-runtime:$IMAGE_TAG" nexusd-cohost --version | tee dist/cohost-version.txt
+          COHOST_DIGEST="sha256:$(docker run --rm "my-moss-runtime:$IMAGE_TAG" sha256sum /usr/local/bin/nexusd-cohost | awk '{print $1}')"
+          IMAGE_DIGEST="$(docker image inspect "my-moss-runtime:$IMAGE_TAG" --format '{{.Id}}')"
           docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz"
+          bun scripts/create-runtime-manifest.ts "${{ steps.release.outputs.release_tag }}" \
+            "docker.io/library/my-moss-runtime:$IMAGE_TAG" "$IMAGE_DIGEST" \
+            "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz" \
+            dist/scode-version.txt dist/cohost-version.txt "$COHOST_DIGEST" dist/runtime-release.json
 
       - name: Assemble installer and checksums
         env:
@@ -326,7 +343,7 @@ jobs:
           RUNTIME_ARCHIVE="moss-runtime-$VERSION-linux-$ARCH.tar.gz"
           (
             cd dist
-            sha256sum "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE" > "SHA256SUMS-$ARCH"
+            sha256sum "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE" runtime-release.json > "SHA256SUMS-$ARCH"
           )
 
       - name: Validate release contents
@@ -453,6 +470,7 @@ jobs:
           path: |
             dist/moss-server-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
             dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
+            dist/runtime-release.json
             dist/SHA256SUMS-amd64
             dist/install.sh
             dist/uninstall-k3s.sh
@@ -485,6 +503,7 @@ jobs:
           cp "$(find artifacts -type f -name install.sh -print -quit)" release-assets/install.sh
           cp "$(find artifacts -type f -name uninstall-k3s.sh -print -quit)" release-assets/uninstall-k3s.sh
           cp "$(find artifacts -type f -name fetch-offline-deps.sh -print -quit)" release-assets/fetch-offline-deps.sh
+          cp "$(find artifacts -type f -name runtime-release.json -print -quit)" release-assets/runtime-release.json
           chmod +x release-assets/install.sh \
             release-assets/uninstall-k3s.sh release-assets/fetch-offline-deps.sh
           # SHA256SUMS covers only the tarballs (scripts stay out, like install.sh).
@@ -519,6 +538,7 @@ jobs:
             release-assets/uninstall-k3s.sh
             release-assets/fetch-offline-deps.sh
             release-assets/SHA256SUMS
+            release-assets/runtime-release.json
             release-assets/moss-server-e2e-report-*.zip
 
       - name: Publish Tencent COS Latest entrypoint
