@@ -1,9 +1,9 @@
 {
   "nexusd-cluster": "0.8.12",
-  "nexusd-cohost": "0.2.28",
+  "nexusd-cohost": "0.2.29",
   "nexus-vault": "0.5.68",
-  "scode": "v0.2.28",
-  "scode-linux-x64-bundle-sha256": "f4774523b47d6339bc1541890b53a3847077c009cd186bf0ef79e93258eab8f5",
+  "scode": "v0.2.29",
+  "scode-linux-x64-bundle-sha256": "5217cc934560325f8d61a96778def3651964da7e38282fb246ea02cdcf52b84c",
   "artifact-sha256": {
     "nexus-vault-linux-x86_64.tar.gz": "60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914",
     "nexus-vault-linux-aarch64.tar.gz": "2954afa5a5732451188b6e84a6d143805e3afebc77f67f4a1e8feebc67648f04",
