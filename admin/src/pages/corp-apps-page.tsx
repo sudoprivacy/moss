@@ -564,7 +564,15 @@ function CorpAppDialog({
         toast.error(`请填写:${f.label}`)
         return
       }
-      if (!v) continue
+      if (!v) {
+        // Optional config fields must be sent as '' on edit: the server
+        // MERGES config (so it keeps server-managed keys like publicKeys),
+        // which also means an omitted key silently keeps its old value and
+        // the admin can never clear e.g. roomFilter back to "all groups".
+        // Credentials stay skipped — blank there means "keep current".
+        if (existing && f.optional && f.bucket === 'config') config[f.key] = ''
+        continue
+      }
       if (f.validate) {
         const err = f.validate(v)
         if (err) {
