@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import {
   existsSync,
   mkdirSync,
@@ -164,6 +166,67 @@ function expectRollbackResult(result: RollbackResult, scenario: RollbackScenario
 }
 
 describe("packaged Server E2E smoke", () => {
+  for (const scenario of ["shared release", "legacy release", "missing cohost manifest", "corrupt manifest"] as const) {
+    it("downloads offline assets safely for " + scenario, async () => {
+      const tempRoot = mkdtempSync(resolve(tmpdir(), "moss-offline-download-"));
+      const downloadDir = resolve(tempRoot, "download");
+      const isManifestIncluded = scenario === "shared release" || scenario === "corrupt manifest";
+      const assets = new Map<string, Buffer>([
+        ["install.sh", Buffer.from('#!/usr/bin/env bash\nRELEASE_TAG="${MOSS_RELEASE_TAG:-server-vtest}"\n')],
+        ["moss-server-test-linux-amd64.tar.gz", Buffer.from("host archive fixture\n")],
+        ["moss-runtime-test-linux-amd64.tar.gz", Buffer.from("runtime archive fixture\n")],
+      ]);
+      if (isManifestIncluded) assets.set("runtime-release.json", Buffer.from('{"schemaVersion":1}\n'));
+      const checksums = [...assets].filter(([name]) => name !== "install.sh")
+        .map(([name, data]) => createHash("sha256").update(data).digest("hex") + "  " + name + "\n").join("");
+      assets.set("SHA256SUMS", Buffer.from(checksums));
+      if (scenario === "corrupt manifest") assets.set("runtime-release.json", Buffer.from("tampered manifest\n"));
+      const server = createServer((request, response) => {
+        const data = assets.get(request.url?.slice(1) ?? "");
+        response.writeHead(data ? 200 : 404);
+        response.end(data ?? "Not found");
+      });
+      await new Promise<void>(resolveReady => server.listen(0, "127.0.0.1", resolveReady));
+      try {
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("Missing download fixture address");
+        const child = spawn("bash", [toShellPath(resolve(root, "deploy/install.sh")), "--download", toShellPath(downloadDir)], {
+          env: {
+            ...process.env,
+            MOSS_RELEASE_TAG: "server-vtest",
+            MOSS_DOWNLOAD_BASE: "http://127.0.0.1:" + address.port,
+            MOSS_RUNTIME: scenario === "missing cohost manifest" ? "cohost" : "",
+          },
+          signal: AbortSignal.timeout(20_000),
+        });
+        let output = "";
+        child.stdout.on("data", chunk => { output += chunk.toString(); });
+        child.stderr.on("data", chunk => { output += chunk.toString(); });
+        const status = await new Promise<number | null>((resolveExit, reject) => {
+          child.once("error", reject);
+          child.once("close", resolveExit);
+        });
+        if (scenario === "corrupt manifest" || scenario === "missing cohost manifest") {
+          expect(status).not.toBe(0);
+          expect(output).not.toContain("Offline files are ready");
+          expect(output).toContain("runtime-release.json");
+        } else {
+          expect(status).toBe(0);
+          expect(output).toContain("Offline files are ready");
+          expect(Buffer.compare(readFileSync(resolve(downloadDir, "moss-server-test-linux-amd64.tar.gz")), assets.get("moss-server-test-linux-amd64.tar.gz")!)).toBe(0);
+          expect(existsSync(resolve(downloadDir, "runtime-release.json"))).toBe(isManifestIncluded);
+          if (isManifestIncluded) {
+            expect(Buffer.compare(readFileSync(resolve(downloadDir, "runtime-release.json")), assets.get("runtime-release.json")!)).toBe(0);
+            expect(output).toContain("runtime-release.json: OK");
+          }
+        }
+      } finally {
+        await new Promise<void>((resolveClosed, reject) => server.close(error => error ? reject(error) : resolveClosed()));
+        rmSync(tempRoot, { recursive: true, force: true });
+      }
+    }, 30_000);
+  }
+
   it("restores failed upgrades without touching Nexus state", () => {
     const installer = readFileSync(resolve(root, "deploy/install.sh"), "utf8");
     const restoreInstallConfig = extractShellFunction(installer, "restore_install_config");

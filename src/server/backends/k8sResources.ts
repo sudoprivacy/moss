@@ -11,6 +11,7 @@ const ResourceSchema = z.object({
   }).passthrough(),
   status: z.object({ phase: z.string().optional(), podIP: z.string().optional(),
     conditions: z.array(z.object({ type: z.string(), status: z.string() }).passthrough()).optional(),
+    containerStatuses: z.array(z.object({ name: z.string(), imageID: z.string() }).passthrough()).optional(),
   }).passthrough().optional(),
   spec: z.record(z.string(), z.unknown()).optional(),
   data: z.record(z.string(), z.string()).optional(),
@@ -35,8 +36,19 @@ export async function readK8sResource(base: string[], kind: string, name: string
 
 /** Keep credentials in stdin and report only the Kubernetes error category. */
 export async function kubectlApply(base: string[], manifest: Record<string, unknown>, verb: 'apply' | 'create' = 'apply'): Promise<void> {
+  return kubectlJsonRequest(base, [verb, '-f', '-'], manifest, verb)
+}
+
+/** Delete exactly the observed object, preserving a concurrently replaced resource with the same name. */
+export async function deleteK8sResource(base: string[], namespace: string, kind: 'pods' | 'secrets', name: string, uid: string): Promise<void> {
+  if (!uid || !/^[a-z0-9-]+$/.test(namespace) || !/^[a-z0-9-]+$/.test(name)) throw new Error('Invalid owned Kubernetes resource')
+  return kubectlJsonRequest(base, ['delete', '--raw', `/api/v1/namespaces/${namespace}/${kind}/${name}`, '-f', '-'],
+    { apiVersion: 'v1', kind: 'DeleteOptions', preconditions: { uid }, gracePeriodSeconds: 30 }, 'delete')
+}
+
+async function kubectlJsonRequest(base: string[], args: string[], manifest: Record<string, unknown>, verb: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('kubectl', [...base, verb, '-f', '-'], { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true })
+    const child = spawn('kubectl', [...base, ...args], { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true })
     let stderr = ''
     const timer = setTimeout(() => {
       child.kill()
@@ -52,6 +64,16 @@ export async function kubectlApply(base: string[], manifest: Record<string, unkn
     })
     child.stdin.end(JSON.stringify(manifest))
   })
+}
+
+/** Inspect the executable actually running as PID 1, rather than only the Pod's requested tag. */
+export async function observeK8sRuntime(base: string[], name: string): Promise<{ version: string; binaryDigest: string }> {
+  const { stdout } = await execFileAsync('kubectl', [...base, 'exec', name, '-c', 'runtime', '--',
+    'sh', '-ec', 'nexusd-cohost --version; sha256sum /proc/1/exe'],
+  { windowsHide: true, timeout: 30_000, maxBuffer: 32_768 })
+  const hash = /^([a-f0-9]{64})\s+\/proc\/1\/exe$/m.exec(stdout)?.[1]
+  if (!hash) throw new Error('Runtime executable digest is missing')
+  return { version: stdout.split('\n')[0]!.trim(), binaryDigest: `sha256:${hash}` }
 }
 
 export function isImmutablePodSpecError(error: unknown): boolean {

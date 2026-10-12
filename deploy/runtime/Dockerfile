@@ -113,8 +113,26 @@ RUN SCODE_VERSION="$(node -p 'require("/tmp/moss-runtime-versions.json").scode')
     install -m 0755 /tmp/scode-linux-x64-bundle/scode /usr/local/bin/scode && \
     scode --version && \
     rm -rf /tmp/scode-linux-x64-bundle "/tmp/$SCODE_ASSET" && \
-    rm -f /tmp/moss-runtime-versions.json && \
     ln -s /usr/local/bin/scode /usr/bin/scode
+
+# The embedded engine and CLI share the release pins. Signed Vault services use
+# the same artifact as the controller; credentials are projected per owner.
+RUN COHOST_VERSION="$(node -p 'require("/tmp/moss-runtime-versions.json")["nexusd-cohost"]')" && \
+    VAULT_VERSION="$(node -p 'require("/tmp/moss-runtime-versions.json")["nexus-vault"]')" && \
+    mkdir -p /tmp/cohost /opt/scode-plugins && \
+    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/nexusd-cohost-v${COHOST_VERSION}/nexusd-cohost-linux-x64.tar.gz" -o /tmp/cohost/nexusd-cohost-linux-x64.tar.gz && \
+    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/nexusd-cohost-v${COHOST_VERSION}/SHA256SUMS.txt" -o /tmp/cohost/SHA256SUMS.txt && \
+    (cd /tmp/cohost && sha256sum --check --ignore-missing SHA256SUMS.txt) && \
+    tar -xzf /tmp/cohost/nexusd-cohost-linux-x64.tar.gz -C /tmp/cohost && \
+    install -m 0755 /tmp/cohost/nexusd-cohost-linux-x64/nexusd-cohost /usr/local/bin/nexusd-cohost && \
+    curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/vault-v${VAULT_VERSION}/nexus-vault-linux-x86_64.tar.gz" -o /tmp/vault.tar.gz && \
+    VAULT_SHA256="$(node -p 'require("/tmp/moss-runtime-versions.json")["artifact-sha256"]["nexus-vault-linux-x86_64.tar.gz"]')" && \
+    echo "$VAULT_SHA256  /tmp/vault.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/vault.tar.gz -C /opt/scode-plugins && \
+    test -f /opt/scode-plugins/libnexus_vault.so.sig && \
+    nexusd-cohost --version && \
+    nexusd-cohost serve-user --help >/dev/null && \
+    rm -rf /tmp/cohost /tmp/vault.tar.gz /tmp/moss-runtime-versions.json
 
 # 5. Agent-facing CLIs (built in the wiki / corpapp / corpauth / fetchurl stages):
 #    wiki (Document Center), corpapp (企业应用), corpauth (企业鉴权),

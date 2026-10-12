@@ -117,6 +117,12 @@ const menuItems: NavItem[] = [
     requiredScope: 'admin:users',
   },
   {
+    title: 'Agent',
+    url: '/agents',
+    icon: Bot,
+    requiredAnyScopes: ['sessions:list', 'sessions:list:any'],
+  },
+  {
     title: '会话管理',
     url: '/sessions',
     icon: MessageSquare,

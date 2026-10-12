@@ -71,7 +71,7 @@ Options:
 
 Configuration environment variables:
   MOSS_ROLE, MOSS_INSTALL_USER, MOSS_INSTALL_DIR, MOSS_PORT, MOSS_ADVERTISED_HOST,
-  MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_RUNTIME (docker|k8s),
+  MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD, MOSS_RUNTIME (docker|k8s|cohost),
   MOSS_NEXUS_ZONE_ID (optional, embedded Nexus only; immutable after first use),
   MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY,
   MOSS_INSTANCE_ID (optional stable per-instance id; required for multi-instance
@@ -177,26 +177,36 @@ if [ "$DOWNLOAD_ONLY" = 1 ]; then
   DOWNLOAD_DIR="$(cd "$DOWNLOAD_DIR" && pwd)"
   DOWNLOAD_BASE="${MOSS_DOWNLOAD_BASE:-$DEFAULT_DOWNLOAD_BASE}"
   DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
+  OFFLINE_ASSETS=("$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE")
 
   download_offline_file() {
     local step="$1" filename="$2"
-    log "Downloading [$step/4] $filename"
+    log "Downloading [$step/$((${#OFFLINE_ASSETS[@]} + 2))] $filename"
     curl --fail --location --progress-bar --retry 3 --connect-timeout 20 \
       -o "$DOWNLOAD_DIR/$filename" "$DOWNLOAD_BASE/$filename"
   }
 
   download_offline_file 1 install.sh
   download_offline_file 2 SHA256SUMS
-  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+  if awk '$2 == "runtime-release.json" || $2 == "*runtime-release.json" { found=1 } END { exit found ? 0 : 1 }' \
+    "$DOWNLOAD_DIR/SHA256SUMS"; then
+    OFFLINE_ASSETS+=(runtime-release.json)
+  elif [ "${MOSS_RUNTIME:-}" = cohost ]; then
+    die "checksum manifest does not contain runtime-release.json"
+  fi
+  for archive in "${OFFLINE_ASSETS[@]}"; do
     if ! awk -v filename="$archive" '$2 == filename || $2 == "*" filename { found=1 } END { exit found ? 0 : 1 }' \
       "$DOWNLOAD_DIR/SHA256SUMS"; then
       die "checksum manifest does not contain $archive"
     fi
   done
-  download_offline_file 3 "$SERVER_ARCHIVE"
-  download_offline_file 4 "$RUNTIME_ARCHIVE"
+  step=3
+  for archive in "${OFFLINE_ASSETS[@]}"; do
+    download_offline_file "$step" "$archive"
+    step=$((step + 1))
+  done
 
-  for archive in "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE"; do
+  for archive in "${OFFLINE_ASSETS[@]}"; do
     CHECKSUM_FILE="$(mktemp)"
     awk -v filename="$archive" '$2 == filename || $2 == "*" filename { print }' \
       "$DOWNLOAD_DIR/SHA256SUMS" > "$CHECKSUM_FILE"
@@ -970,17 +980,17 @@ if [ -z "$MOSS_RUNTIME_VALUE" ]; then
   elif [ -f "$INSTALL_DIR/server.json" ]; then
     MOSS_RUNTIME_VALUE="$(existing_runtime_type)"
     case "$MOSS_RUNTIME_VALUE" in
-      docker|k8s) ;;
+      docker|k8s|cohost) ;;
       # Unreadable config: keep whatever this machine can actually run.
       *) if command -v docker >/dev/null 2>&1; then MOSS_RUNTIME_VALUE=docker; else MOSS_RUNTIME_VALUE=k8s; fi ;;
     esac
   else
-    prompt_value MOSS_RUNTIME_VALUE 'Session runtime (k8s/docker)' 'k8s'
+    prompt_value MOSS_RUNTIME_VALUE 'Session runtime (cohost/k8s/docker)' 'k8s'
   fi
 fi
 case "$MOSS_RUNTIME_VALUE" in
-  docker|k8s) ;;
-  *) die "runtime must be 'docker' or 'k8s' (got '$MOSS_RUNTIME_VALUE')" ;;
+  docker|k8s|cohost) ;;
+  *) die "runtime must be 'docker', 'k8s' or 'cohost' (got '$MOSS_RUNTIME_VALUE')" ;;
 esac
 # Only the docker runtime loads the session image on this machine. Under k8s it
 # lives in the compute node's containerd, so the control plane neither needs the
@@ -989,6 +999,7 @@ NEED_RUNTIME_ARCHIVE=0
 [ "$MOSS_RUNTIME_VALUE" = docker ] && NEED_RUNTIME_ARCHIVE=1
 INSTALL_ARCHIVES=("$SERVER_ARCHIVE")
 [ "$NEED_RUNTIME_ARCHIVE" = 1 ] && INSTALL_ARCHIVES+=("$RUNTIME_ARCHIVE")
+[ "$MOSS_RUNTIME_VALUE" = cohost ] && INSTALL_ARCHIVES+=(runtime-release.json)
 
 INSTALLED_RELEASE_DIR="$(readlink -f "$INSTALL_DIR/current" 2>/dev/null || true)"
 INSTALLED_RELEASE_TAG="${INSTALLED_RELEASE_DIR##*/}"
@@ -1376,6 +1387,9 @@ if systemctl cat "$SERVICE_NAME.service" >/dev/null 2>&1; then
 fi
 rm -rf "$NEW_RELEASE_DIR"
 cp -a "$PACKAGE_DIR" "$NEW_RELEASE_DIR"
+if [ "$MOSS_RUNTIME_VALUE" = cohost ]; then
+  install -m 644 "$SOURCE_DIR/runtime-release.json" "$NEW_RELEASE_DIR/runtime-release.json"
+fi
 chown -R "$INSTALL_USER:$INSTALL_USER_GROUP" "$NEW_RELEASE_DIR"
 rm -rf "$RELEASE_DIR"
 mv "$NEW_RELEASE_DIR" "$RELEASE_DIR"
@@ -1389,6 +1403,8 @@ MOSS_ADMIN_USERNAME_VALUE="$MOSS_ADMIN_USERNAME_VALUE" \
 MOSS_ADMIN_PASSWORD_VALUE="$MOSS_ADMIN_PASSWORD_VALUE" \
 MOSS_RUNTIME_IMAGE="$RUNTIME_IMAGE" MOSS_NETWORK_NAME="$NETWORK_NAME" \
 MOSS_RUNTIME_VALUE="$MOSS_RUNTIME_VALUE" \
+MOSS_RUNTIME_MANIFEST_FILE="$RELEASE_DIR/runtime-release.json" \
+COMPUTE_HOST_VALUE="${MOSS_USER_RUNTIME_HOST:-$COMPUTE_NODE_IP}" \
 COMPUTE_KUBECONFIG="$COMPUTE_KUBECONFIG" COMPUTE_NAMESPACE="$COMPUTE_NAMESPACE" \
 COMPUTE_RUNTIME_CLASS="$COMPUTE_RUNTIME_CLASS" COMPUTE_SCODE_IMAGE="$COMPUTE_SCODE_IMAGE" \
 "$RELEASE_DIR/node/bin/node" <<'NODE'
@@ -1401,6 +1417,18 @@ const root = process.env.MOSS_INSTALL_ROOT
 const port = Number(process.env.MOSS_PORT_VALUE)
 const hostScodePath = path.join(root, 'current', 'app', 'bin', 'scode')
 const dockerScodePath = '/usr/local/bin/scode'
+if (process.env.MOSS_RUNTIME_VALUE === 'cohost') {
+  const release = JSON.parse(fs.readFileSync(process.env.MOSS_RUNTIME_MANIFEST_FILE, 'utf8'))
+  if (release.schemaVersion !== 1 || !release.image?.reference || !release.engine?.commit) throw new Error('Invalid shared runtime manifest')
+  config.runtimeDefaults = { ...config.runtimeDefaults, type: 'cohost' }
+  const kubeconfig = config.k8s?.kubeconfig || process.env.COMPUTE_KUBECONFIG || path.join(root, 'moss-k3s-kubeconfig.yaml')
+  const apiServer = fs.existsSync(kubeconfig) ? fs.readFileSync(kubeconfig, 'utf8').match(/server:\s*(https?:\/\/\S+)/)?.[1] : undefined
+  const computeHost = process.env.COMPUTE_HOST_VALUE || config.k8s?.userRuntimeHost || (apiServer ? new URL(apiServer).hostname : undefined)
+  if (!computeHost) throw new Error('Set MOSS_USER_RUNTIME_HOST to the private compute node address')
+  config.k8s = { ...config.k8s, userRuntimeImage: release.image.reference,
+    userRuntimeHost: computeHost, kubeconfig,
+    workspaceStorageClass: config.k8s?.workspaceStorageClass || 'local-path' }
+}
 if (process.env.EXISTING_INSTALL === '1') {
   const legacyScodePath = config.runtimeDefaults?.scodePath
   config.runtimeDefaults = {
@@ -1429,7 +1457,7 @@ if (!fs.existsSync(configPath)) {
     password: process.env.MOSS_ADMIN_PASSWORD_VALUE,
   }
 }
-const runtime = process.env.MOSS_RUNTIME_VALUE === 'k8s' ? 'k8s' : 'docker'
+const runtime = process.env.MOSS_RUNTIME_VALUE === 'cohost' ? 'cohost' : process.env.MOSS_RUNTIME_VALUE === 'k8s' ? 'k8s' : 'docker'
 config.runtimeDefaults = {
   ...config.runtimeDefaults,
   type: runtime,
@@ -1438,7 +1466,7 @@ config.runtimeDefaults = {
   hostScodePath,
   dockerScodePath,
 }
-if (runtime === 'k8s') {
+if (runtime === 'k8s' || runtime === 'cohost') {
   // Seed the k8s block from the template defaults and pin the kubeconfig to the
   // file the compute role writes beside this server.json. When that role ran on
   // this machine it also reports the namespace, RuntimeClass and image ref it
@@ -1521,6 +1549,39 @@ elif [ -f "$ENV_PATH" ]; then
   ' "$ENV_PATH")"
 fi
 
+MOSS_RUNTIME_MANIFEST_LINE=""
+if [ "$MOSS_RUNTIME_VALUE" = cohost ]; then
+  MOSS_RUNTIME_MANIFEST_LINE="MOSS_RUNTIME_MANIFEST_PATH=$INSTALL_DIR/current/runtime-release.json"
+fi
+MOSS_CONNECTION_LINES=""
+if [ -f "$ENV_PATH" ]; then
+  MOSS_CONNECTION_LINES="$(grep -E '^MOSS_(COHOST_)?NEXUS_(MODE|ENDPOINT|AUTH_TOKEN|TLS_CA|TLS_CERT|TLS_KEY|TLS_SERVER_NAME)=' "$ENV_PATH" || true)"
+fi
+for connection_key in MOSS_NEXUS_MODE MOSS_NEXUS_ENDPOINT MOSS_NEXUS_AUTH_TOKEN \
+  MOSS_NEXUS_TLS_CA MOSS_NEXUS_TLS_CERT MOSS_NEXUS_TLS_KEY MOSS_NEXUS_TLS_SERVER_NAME \
+  MOSS_COHOST_NEXUS_MODE MOSS_COHOST_NEXUS_ENDPOINT MOSS_COHOST_NEXUS_AUTH_TOKEN \
+  MOSS_COHOST_NEXUS_TLS_CA MOSS_COHOST_NEXUS_TLS_CERT MOSS_COHOST_NEXUS_TLS_KEY MOSS_COHOST_NEXUS_TLS_SERVER_NAME; do
+  if [ -n "${!connection_key:-}" ]; then
+    connection_value="${!connection_key}"
+    connection_value="${connection_value//\\/\\\\}"
+    connection_value="${connection_value//\"/\\\"}"
+    MOSS_CONNECTION_LINES+=$'\n'"$connection_key=\"$connection_value\""
+  fi
+done
+MOSS_WORKSPACE_LINE=""
+if [ -n "${MOSS_WORKSPACE_URL:-}" ]; then
+  MOSS_WORKSPACE_LINE="MOSS_WORKSPACE_URL=$MOSS_WORKSPACE_URL"
+elif [ -f "$ENV_PATH" ]; then
+  MOSS_WORKSPACE_LINE="$(grep '^MOSS_WORKSPACE_URL=' "$ENV_PATH" || true)"
+fi
+
+MOSS_COHOST_ACCESS_LINE=""
+if [ "${MOSS_COHOST_ALLOWED_USERS+x}" = x ]; then
+  MOSS_COHOST_ACCESS_LINE="MOSS_COHOST_ALLOWED_USERS=$MOSS_COHOST_ALLOWED_USERS"
+elif [ -f "$ENV_PATH" ]; then
+  MOSS_COHOST_ACCESS_LINE="$(grep '^MOSS_COHOST_ALLOWED_USERS=' "$ENV_PATH" || true)"
+fi
+
 cat > "$ENV_PATH" <<EOF
 HOME=$INSTALL_DIR
 MOSS_SERVER_CONFIG=$INSTALL_DIR/server.json
@@ -1532,6 +1593,10 @@ MOSS_AUTH_PROXY_URL=http://$SESSION_REACHABLE_HOST:12013
 MOSS_SERVER_URL=http://$SESSION_REACHABLE_HOST:$MOSS_PORT_VALUE
 $MOSS_INSTANCE_ID_LINE
 $MOSS_NEXUS_ZONE_ID_LINE
+$MOSS_CONNECTION_LINES
+$MOSS_RUNTIME_MANIFEST_LINE
+$MOSS_WORKSPACE_LINE
+$MOSS_COHOST_ACCESS_LINE
 PATH=$INSTALL_DIR/current/node/bin:$INSTALL_DIR/current/app/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EOF
 chmod 600 "$ENV_PATH"

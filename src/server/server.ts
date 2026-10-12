@@ -1,5 +1,7 @@
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
+import { AgentManager, canUpgradeAgentRuntime, managedSessionAgentName } from './agentManager.js'
+import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
 import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
 import { dispatchOrganizationRecharge, parseOrganizationPaymentCallback } from './billing/organizationRechargeRoutes.js'
 import { artifactManifestPath, readArtifacts, projectArtifactDrafts } from './artifacts.js'
@@ -23,6 +25,7 @@ import os from 'os'
 import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import { WebSocketServer } from 'ws'
+import { attachSessionSocketAuthorization } from './sessionSocketAuthorization.js'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
@@ -2013,6 +2016,16 @@ export function startServer(
   getConnections: () => Promise<number>
 } {
   const adminDistDir = resolveAdminDistDir()
+  const agentManager = new AgentManager({
+    visibleOwners: auth => authService.listAgentOwners(auth),
+    personalAgents: (owner, auth) => listMyAgents({
+      orgId: auth.orgId, userId: owner.id, defaultDisplayName: owner.displayName,
+      listSessionAssistants: ({ orgId, userId }) => runtime.store.listUserSessions(orgId, userId),
+      resolveTemplateName: resolveAssistantDisplayName,
+    }),
+    namespace: ownerId => runtime.readAgentNamespace(ownerId),
+    runtimeState: ownerId => runtime.inspectUserRuntime(ownerId),
+  })
   const privateAgentArchives = new PrivateAgentArchives(join(config.rootDir, 'private-agent-archives'))
   const wss = new WebSocketServer({ noServer: true })
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
@@ -3625,6 +3638,7 @@ export function startServer(
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
+
         // Scope the forwarded revoke to attempts this instance actually owns —
         // aligns with the /ws/internal ownership gate; a peer's session 403s.
         if (!session.currentAttemptId || !(await runtime.ownsAttempt(session.currentAttemptId))) {
@@ -7073,6 +7087,67 @@ export function startServer(
         })
         writeJson(res, 200, { success: true, data: agents })
         return
+      }
+
+      const runtimeUpgradeMatch = pathname.match(/^\/api\/v1\/agent-runtimes\/([^/]+)\/upgrade$/)
+      if (req.method === 'POST' && runtimeUpgradeMatch) {
+        const ownerId = runtimeUpgradeMatch[1]!
+        if (!canUpgradeAgentRuntime(auth, ownerId)) throw new HttpError(403, 'Runtime upgrade is not permitted')
+        await agentManager.list(auth, ownerId)
+        const state = await runtime.upgradeUserRuntime(ownerId, auth.orgId)
+        logger.info(`agent_runtime_upgraded ${JSON.stringify({ ownerId, orgId: auth.orgId, actorUserId: auth.userId })}`)
+        writeJson(res, 200, { runtime: state })
+        return
+      }
+
+      if (req.method === 'GET' && (pathname === '/api/v1/agent-manager/agents' || pathname === '/api/v1/agents')) {
+        const rawLimit = url.searchParams.get('limit') || '25'
+        if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 100) throw new HttpError(400, 'Invalid Agent page size')
+        const result = await agentManager.list(auth, url.searchParams.get('owner_id') || undefined,
+          { after: url.searchParams.get('after') || undefined, limit: Number(rawLimit) })
+        writeJson(res, 200, { ...result, isWorkspaceAvailable: Boolean(agentWorkspaceUrl('probe')) })
+        return
+      }
+
+      // The canonical management path also permits names reserved by legacy template aliases.
+      const managedAgentMatch = pathname.match(/^\/api\/v1\/(?:agent-manager\/agents|agents)\/([^/]+)(\/sessions)?$/)
+      if (managedAgentMatch && (req.method === 'GET' || req.method === 'POST')) {
+        let name: string
+        try { name = decodeURIComponent(managedAgentMatch[1]!) }
+        catch { throw new HttpError(400, 'Invalid Agent name') }
+        if (req.method === 'GET' && !managedAgentMatch[2]) {
+          const ownerId = url.searchParams.get('owner_id') || auth.userId
+          const agent = await agentManager.get(auth, ownerId, name)
+          const sessions = (await runtime.store.listUserSessions(auth.orgId, ownerId))
+            .filter(session => managedSessionAgentName(ownerId, session.assistantName) === name)
+            .map(session => ({ sessionId: session.sessionId, status: session.status,
+              createdAt: session.createdAt, title: session.title,
+              workspaceUrl: session.userId === auth.userId ||
+                (session.source === 'agent-manager' && session.clientMetadata?.agent_manager_actor_id === auth.userId)
+                ? agentWorkspaceUrl(session.sessionId) : null }))
+          writeJson(res, 200, { agent, sessions, runtime: await runtime.inspectUserRuntime(ownerId),
+            canUpgrade: agent.isOwnerActive && canUpgradeAgentRuntime(auth, ownerId), isWorkspaceAvailable: Boolean(agentWorkspaceUrl('probe')) })
+          return
+        }
+        if (req.method === 'POST' && managedAgentMatch[2]) {
+          if (!agentWorkspaceUrl('probe')) throw new HttpError(503, 'Agent workspace is not configured')
+          const body = await readJsonBody(req)
+          const ownerId = typeof body.owner_id === 'string' ? body.owner_id : auth.userId
+          const agent = await agentManager.requireStart(auth, ownerId, name)
+          const owner = await authService.getAgentOwner(ownerId, auth.orgId)
+          if (!owner || owner.status !== 'active') throw new HttpError(409, 'Agent owner is unavailable')
+          const session = await runtime.createSession({
+            userId: ownerId, orgId: auth.orgId, role: owner.role, scopes: owner.scopes,
+            dangerouslySkipPermissions: false,
+            assistantName: agent.reference, assistantDisplayName: agent.displayName,
+            runtime: { type: 'cohost', engine: 'scode' }, source: 'agent-manager', managementActorId: auth.userId,
+            managementAgent: { name: agent.name, displayName: agent.displayName, ownerName: agent.ownerName },
+          })
+          logger.info(`agent_manager_session_created ${JSON.stringify({ actorUserId: auth.userId,
+            ownerId, orgId: auth.orgId, agentName: name, sessionId: session.sessionId })}`)
+          writeJson(res, 201, { sessionId: session.sessionId, workspaceUrl: agentWorkspaceUrl(session.sessionId) })
+          return
+        }
       }
 
       if (pathname === '/api/v1/user-agents') {
@@ -10548,7 +10623,7 @@ export function startServer(
         if (body.client_metadata && typeof body.client_metadata === 'object' && !Array.isArray(body.client_metadata)) {
           const patch: Record<string, unknown> = {}
           for (const [key, value] of Object.entries(body.client_metadata as Record<string, unknown>)) {
-            if (key === 'implicit_task_id' || key === 'task_contract' || key === 'requested_execution') {
+            if (key === 'implicit_task_id' || key === 'task_contract' || key === 'requested_execution' || key.startsWith('agent_manager_')) {
               throw new HttpError(400, `Reserved client_metadata key: ${key}`)
             }
             patch[key] = value === null ? undefined : value
@@ -10714,6 +10789,11 @@ export function startServer(
             socket.destroy()
             return
           }
+          if (runtime.isUserRuntimeUpgrading(session.userId)) {
+            socket.write('HTTP/1.1 409 Conflict\r\n\r\n')
+            socket.destroy()
+            return
+          }
           const locallyOwned = session.currentAttemptId
             ? await runtime.getLocallyOwnedRunningAttempt(session.currentAttemptId)
             : null
@@ -10739,11 +10819,24 @@ export function startServer(
             const runnerSocket = await runtime.connectToAttempt(ready.attempt)
             wss.handleUpgrade(req, socket, head, ws => {
               let buffer = ''
-              ws.on('message', data => {
-                const text = wsDataToText(data)
-                if (!runnerSocket.destroyed) {
-                  runnerSocket.write(text.endsWith('\n') ? text : `${text}\n`)
-                }
+              attachSessionSocketAuthorization(ws, {
+                isManagement: auth.userId !== session.userId,
+                verify: async () => {
+                  const current = token ? await authService.verifyAccessToken(token) : null
+                  const visible = await runtime.getSession(sessionId)
+                  return Boolean(current && visible && hasExactScope(current.scopes, 'internal:channel') &&
+                    canAccessSession(current, visible, 'sessions:attach:any'))
+                },
+                onMessage: data => {
+                  if (runtime.isUserRuntimeUpgrading(session.userId)) {
+                    ws.close(1013, 'User runtime is draining for an upgrade')
+                    return
+                  }
+                  const text = wsDataToText(data)
+                  if (!runnerSocket.destroyed) {
+                    runnerSocket.write(text.endsWith('\n') ? text : `${text}\n`)
+                  }
+                },
               })
               ws.on('close', () => runnerSocket.destroy())
               ws.on('error', () => runnerSocket.destroy())
@@ -10794,6 +10887,12 @@ export function startServer(
         }
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+          socket.destroy()
+          return
+        }
+
+        if (runtime.isUserRuntimeUpgrading(session.userId)) {
+          socket.write('HTTP/1.1 409 Conflict\r\n\r\n')
           socket.destroy()
           return
         }
@@ -10864,6 +10963,10 @@ export function startServer(
         wss.handleUpgrade(req, socket, head, ws => {
           let buffer = ''
           const sendToRunner = (payload: Record<string, unknown>) => {
+            if (runtime.isUserRuntimeUpgrading(session.userId)) {
+              ws.close(1013, 'User runtime is draining for an upgrade')
+              return
+            }
             if (!runnerSocket.destroyed) {
               process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
               runnerSocket.write(`${jsonStringify(payload)}\n`)
@@ -10872,13 +10975,21 @@ export function startServer(
             }
           }
 
-          ws.on('message', data => {
-            const text = wsDataToText(data)
-            process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
-            sendToRunner({
-              type: 'stdin',
-              data: text.endsWith('\n') ? text : `${text}\n`,
-            })
+          attachSessionSocketAuthorization(ws, {
+            isManagement: auth.userId !== session.userId,
+            verify: async () => {
+              const current = token ? await authService.verifyAccessToken(token) : null
+              const visible = await runtime.getSession(sessionId)
+              return Boolean(current && visible && canAccessSession(current, visible, 'sessions:attach:any'))
+            },
+            onMessage: data => {
+              const text = wsDataToText(data)
+              process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+              sendToRunner({
+                type: 'stdin',
+                data: text.endsWith('\n') ? text : `${text}\n`,
+              })
+            },
           })
           ws.on('close', () => {
             runnerSocket.destroy()

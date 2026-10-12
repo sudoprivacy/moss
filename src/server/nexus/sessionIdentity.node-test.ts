@@ -215,3 +215,44 @@ void test('the plaintext bearer contract retains its token and asserted owner', 
     assert.equal(sent?.params.owner_id, 'legacy-owner')
   } finally { connection.client.close() }
 })
+
+void test('a placed user runtime delegates issuance and renewal to the control plane', async t => {
+  const issuerTls = { ca: '/issuer/ca', cert: '/issuer/moss', key: '/issuer/moss-key' }
+  const credential = { subjectId: identity.subjectId, caPem: 'root-ca', certPem: 'alice-cert', keyPem: 'alice-key' }
+  const issuerEndpoints: string[] = []
+  let renewal: ((current: typeof credential, signal: AbortSignal) => Promise<unknown>) | undefined
+  t.mock.method(NexusZoneApiClient, 'withMtls', (endpoint: string, tls: unknown) => {
+    issuerEndpoints.push(endpoint)
+    assert.equal(tls, issuerTls)
+    return {
+      mintSessionAgent: async (owner: string) => { assert.equal(owner, 'alice'); return credential },
+      renewSessionAgent: async (current: unknown) => { assert.equal(current, credential); return credential },
+      close() {},
+    }
+  })
+  t.mock.method(NexusVfsClient, 'withMtls', (endpoint: string, tls: unknown) => {
+    assert.equal(endpoint, 'https://alice-pod:8443')
+    assert.deepEqual(tls, { ca: 'root-ca', cert: 'alice-cert', key: 'alice-key', serverName: userRuntimeServerName('alice') })
+    return {
+      maintainSessionCredential: (_credential: unknown, options: { renew: typeof renewal }) => { renewal = options.renew },
+      close() {},
+    }
+  })
+  const connection = await connectSessionRuntime({ endpoint: 'https://control-plane:8443', tls: issuerTls,
+    runtimeEndpoint: 'https://alice-pod:8443', authToken: 'unused-operator-token' }, 'alice')
+  try {
+    assert.equal(connection.authToken, '')
+    assert.ok(renewal)
+    await renewal(credential, new AbortController().signal)
+    assert.deepEqual(issuerEndpoints, ['https://control-plane:8443', 'https://control-plane:8443'])
+  } finally { connection.client.close() }
+})
+
+void test('a placed user runtime refuses an unowned connection before opening a transport', async t => {
+  let calls = 0
+  t.mock.method(NexusVfsClient, 'withMtls', () => { calls++; throw new Error('unexpected fallback') })
+  await assert.rejects(connectSessionRuntime({ endpoint: 'https://control-plane:8443', authToken: '',
+    runtimeEndpoint: 'https://user-pod:8443', tls: { ca: '/ca', cert: '/cert', key: '/key' } },
+  undefined), /authenticated owner/)
+  assert.equal(calls, 0)
+})
