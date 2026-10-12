@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { createServer as reservePort } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, posix, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import grpc from '@grpc/grpc-js'
@@ -283,7 +283,8 @@ try {
     const sid = first.durableSessionId
     assert.equal(await bindingStore.bind(mossSessionId, attemptId,
       { ownerId: owner, agentId, durableSessionId: sid, repositoryPath }, 'moss-owner'), true)
-    const root = `/agents/${agentId}/recovery-${randomUUID()}`
+    const recoveryDirectory = `recovery-${randomUUID()}`
+    const root = `${repositoryPath}/${recoveryDirectory}`
     const output = `${root}/subtotal.json`
     const final = `${root}/total.json`
     const order = { code: `ORDER_${randomUUID()}`, subtotal: 200 + Math.floor(Math.random() * 100), output }
@@ -305,6 +306,9 @@ try {
       assert.equal((await controller.rpc('session/prompt', { sessionId: sid,
         prompt: [{ type: 'text', text: `MOSS_RECOVERY_ORDER ${JSON.stringify(order)}\nWrite the subtotal to the named file.` }] })).stopReason, 'end_turn')
       assert.deepEqual(JSON.parse((await operator.read(output, '')).toString()), { code: order.code, subtotal: order.subtotal })
+      assert.equal(first.workspacePath?.replace(/\/+$/, ''), `/proc/${first.sessionId}/workspace`)
+      assert.deepEqual(JSON.parse((await operator.read(posix.join(first.workspacePath!, 'workspace', recoveryDirectory, 'subtotal.json'), '')).toString()),
+        { code: order.code, subtotal: order.subtotal }, 'procfs workspace alias reads the durable Moss repository bytes')
       assert(requests.slice(initialRequestStart).every(request => JSON.stringify(request.system).includes(memoryMarker)),
         'the real model system prompt must load this agent memory')
       for (const [otherOwner, marker] of memoryMarkers) {
@@ -402,6 +406,8 @@ try {
       assert.equal((await controller.rpc('session/prompt', { sessionId: sid, prompt: [{ type: 'text',
         text: `MOSS_RECOVERY_FEE ${JSON.stringify({ output: final })}\nAdd 13 to the subtotal from the previous turn and write the total.` }] })).stopReason, 'end_turn')
       assert.deepEqual(JSON.parse((await operator.read(final, '')).toString()), { code: order.code, total: order.subtotal + 13 })
+      assert.deepEqual(JSON.parse((await operator.read(posix.join(active.workspacePath!, 'workspace', recoveryDirectory, 'total.json'), '')).toString()),
+        { code: order.code, total: order.subtotal + 13 }, 'restored workspace alias keeps the same persistent repository')
       controller.assertHealthy()
       assert(controller.approvals > 0)
       assert(requests.slice(requestStart).every(request => JSON.stringify(request.messages).includes(order.code)), 'restored model requests must include the original order')
@@ -441,7 +447,8 @@ try {
     'real controller approval', 'native transcript stream', 'second writer refusal',
     'wrong owner refusal', 'daemon restart with model startup hook', 'active daemon crash', 'persisted files and agent memory',
     'same durable ID and fresh channel with native OS-scoped PID', 'exact prior history', 'dependent file write',
-    'native OS PID.local_id decodes to execution daemon', 'cancel removes dynamic procfs children without deleting durable targets',
+    'native OS PID.local_id decodes to execution daemon', 'procfs workspace aliases read the canonical persistent Moss repository',
+    'cancel removes dynamic procfs children without deleting durable targets',
     'lost creation reply without duplicate execution', 'replacement controller discovers and resumes owned orphan',
     'obsolete execution detected on reconnect',
     'native agent memory injected before and after restart', 'other owner agent memory absent from system prompt',
