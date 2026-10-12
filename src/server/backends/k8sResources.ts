@@ -9,7 +9,9 @@ const ResourceSchema = z.object({
     annotations: z.record(z.string(), z.string()).optional(),
     labels: z.record(z.string(), z.string()).optional(),
   }).passthrough(),
-  status: z.object({ phase: z.string().optional(), podIP: z.string().optional() }).passthrough().optional(),
+  status: z.object({ phase: z.string().optional(), podIP: z.string().optional(),
+    conditions: z.array(z.object({ type: z.string(), status: z.string() }).passthrough()).optional(),
+  }).passthrough().optional(),
   spec: z.record(z.string(), z.unknown()).optional(),
   data: z.record(z.string(), z.string()).optional(),
 }).passthrough()

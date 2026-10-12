@@ -12,6 +12,8 @@ plugs into the same `SessionBackend` seam and is selected by
 native `cohost` sessions. The image contains a paired `nexusd-cohost`, signed
 Vault plugins and the agent's userland tools. `k8s.image` supplies the existing
 standalone session image.
+`MOSS_USER_RUNTIME_HOST` (`k8s.userRuntimeHost`) supplies the private compute
+node host used to reach each runtime's Kubernetes NodePort Service.
 
 [`UserPodService`](../src/server/runtime/userPodService.ts) belongs to the main
 `RuntimeService`. It coordinates one owner-bound Pod and retained PVC for each
@@ -26,7 +28,7 @@ flowchart LR
     Placement --> Issuer[Root Nexus credential issuer]
     Placement --> K8s[Kubernetes API]
     K8s --> Config[Projected configuration and bounded credentials]
-    Placement --> Transport[Shared owner port forward]
+    Placement --> Transport[Owned Kubernetes Service]
     Moss --> Runner[Session runner]
     Runner --> Transport
     Transport --> Pod[gVisor user Pod]
@@ -41,11 +43,11 @@ The writable global configuration directory is `/data/scode`; its
 `sudocode.json` links to the projected configuration. Credential renewal keeps
 the current configuration, including after controller restart. Model backend
 changes require an explicit runtime restart because backend mounts are boot
-configuration. Runtime endpoints, port forwards and renewal timers stay in the
-controller's process. Closing that controller retains Pods and PVCs.
+configuration. Runtime endpoints and renewal timers stay in the
+controller's process. Closing that controller retains Pods, Services and PVCs.
 
-The namespace Role grants `get/create/patch` for Secrets and PVCs and `create`
-for `pods/portforward`, alongside the Pod permissions below. Each resource
+The namespace Role grants `get/create/patch` for Secrets and PVCs and `get/create`
+for Services, alongside the Pod permissions below. Each resource
 carries its owner annotation; the coordinator verifies that owner before
 changing credentials or using a volume.
 

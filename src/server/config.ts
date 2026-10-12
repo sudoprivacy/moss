@@ -337,6 +337,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       // MOSS_SCODE_IMAGE is the primary env knob for the scode pod image.
       image: process.env.MOSS_SCODE_IMAGE || raw.k8s.image,
       userRuntimeImage: process.env.MOSS_USER_RUNTIME_IMAGE || raw.k8s.userRuntimeImage,
+      userRuntimeHost: process.env.MOSS_USER_RUNTIME_HOST || raw.k8s.userRuntimeHost,
       namespace: process.env.MOSS_K8S_NAMESPACE || raw.k8s.namespace,
       // `??` (not `||`): an explicit empty override means "omit runtimeClassName"
       // (customer cluster without a gvisor RuntimeClass), so don't fall back.

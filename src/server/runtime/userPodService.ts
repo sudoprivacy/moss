@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
+import { z } from 'zod'
 import { NexusZoneApiClient, userRuntimeServerName, type SessionCredential } from '@nexus-ai-fs/vfs-client'
 import { buildKubectlBaseArgs, kubectlApply, readK8sResource, type K8sResource } from '../backends/k8sResources.js'
-import { forwardK8sPod, type PodForward } from '../backends/k8sForward.js'
 import type { NexusTlsConfig } from '../nexus/nexusEnvConfig.js'
 import type { SessionConnectionConfig } from '../nexus/sessionConnection.js'
 
@@ -15,6 +15,7 @@ const CREDENTIAL_VALIDITY_SECS = 300
 
 export interface UserPodOptions {
   image: string
+  nodeHost: string
   namespace: string
   kubeconfig?: string
   storageClass: string
@@ -29,7 +30,6 @@ export interface UserPodOptions {
 }
 
 interface UserPodConnection {
-  forward: PodForward
   config: SessionConnectionConfig
   close: () => void
   configure: (configuration: Record<string, string>) => Promise<void>
@@ -38,7 +38,6 @@ interface UserPodConnection {
 export interface UserPodResources {
   read: (kind: string, name: string) => Promise<K8sResource | undefined>
   write: (manifest: Record<string, unknown>, verb?: 'create' | 'apply') => Promise<void>
-  forward: (name: string) => Promise<PodForward>
 }
 
 function kubernetesResources(options: UserPodOptions): UserPodResources {
@@ -46,7 +45,6 @@ function kubernetesResources(options: UserPodOptions): UserPodResources {
   return {
     read: (kind, name) => readK8sResource(base, kind, name),
     write: (manifest, verb) => kubectlApply(base, manifest, verb),
-    forward: name => forwardK8sPod(base, name, RUNTIME_PORT),
   }
 }
 
@@ -69,12 +67,12 @@ export function userRuntimeCredentialData(ownerId: string, credential: SessionCr
 /** Compose one native cohost and durable Nexus volume for the authenticated owner. */
 export function userPodManifests(ownerId: string, options: UserPodOptions) {
   const name = userPodName(ownerId)
-  const metadata = { name, namespace: options.namespace, labels: { app: APP_LABEL },
+  const metadata = { name, namespace: options.namespace, labels: { app: APP_LABEL, runtime: name },
     annotations: { [OWNER_ANNOTATION]: ownerId } }
   const container = {
     name: 'runtime', image: options.image, imagePullPolicy: options.imagePullPolicy ?? 'IfNotPresent',
     command: ['nexusd-cohost'],
-    args: ['--data-dir', DATA_ROOT, '--root-fs', `${DATA_ROOT}/files`,
+    args: ['--data-dir', `${DATA_ROOT}/nexus`, '--root-path', `${DATA_ROOT}/files`,
       '--plugin-dir', '/opt/scode-plugins', '--bind-addr', `0.0.0.0:${RUNTIME_PORT}`,
       'serve-user', '--owner', ownerId, '--credential', '/runtime-identity',
       '--backend-config', '/runtime-config/backend-config.json'],
@@ -96,7 +94,7 @@ export function userPodManifests(ownerId: string, options: UserPodOptions) {
     initContainers: [{ name: 'configuration', image: options.image,
       imagePullPolicy: options.imagePullPolicy ?? 'IfNotPresent',
       command: ['sh', '-ec',
-        'mkdir -p /data/scode; if [ -e /data/scode/sudocode.json ] || [ -L /data/scode/sudocode.json ]; then test "$(readlink /data/scode/sudocode.json)" = /runtime-config/sudocode.json; else ln -s /runtime-config/sudocode.json /data/scode/sudocode.json; fi'],
+        'mkdir -p /data/scode /data/files; if [ -e /data/scode/sudocode.json ] || [ -L /data/scode/sudocode.json ]; then test "$(readlink /data/scode/sudocode.json)" = /runtime-config/sudocode.json; else ln -s /runtime-config/sudocode.json /data/scode/sudocode.json; fi'],
       securityContext: container.securityContext,
       volumeMounts: [{ name: 'data', mountPath: DATA_ROOT },
         { name: 'configuration', mountPath: '/runtime-config', readOnly: true }],
@@ -117,6 +115,9 @@ export function userPodManifests(ownerId: string, options: UserPodOptions) {
       spec: { accessModes: ['ReadWriteOnce'], storageClassName: options.storageClass,
         resources: { requests: { storage: options.storageSize ?? '10Gi' } } } },
     secret: { apiVersion: 'v1', kind: 'Secret', type: 'Opaque', metadata },
+    service: { apiVersion: 'v1', kind: 'Service', metadata,
+      spec: { type: 'NodePort', selector: metadata.labels,
+        ports: [{ name: 'nexus', port: RUNTIME_PORT, targetPort: RUNTIME_PORT, protocol: 'TCP' }] } },
   }
 }
 
@@ -124,9 +125,16 @@ export function userPodManifests(ownerId: string, options: UserPodOptions) {
 export class UserPodService {
   private readonly connections = new Map<string, Promise<UserPodConnection>>()
   private isClosed = false
+  private readonly runtimeHost: string
 
   constructor(private readonly options: UserPodOptions, private readonly resources = kubernetesResources(options)) {
     if (!options.image || !options.storageClass) throw new Error('User Pods require an image and retained storage')
+    if (!options.nodeHost) throw new Error('User Pods require a private compute node host')
+    const host = new URL(`https://${options.nodeHost}`)
+    if (host.username || host.password || host.port || host.pathname !== '/' || host.search || host.hash) {
+      throw new Error('User Pod compute host must be a hostname or IP address')
+    }
+    this.runtimeHost = host.hostname
   }
 
   async resolve(ownerId: string, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
@@ -135,15 +143,8 @@ export class UserPodService {
     let connection = this.connections.get(ownerId)
     if (connection) {
       const existing = await connection
-      if (existing.forward.isOpen()) {
-        if (configuration) await existing.configure(configuration)
-        return existing.config
-      }
-      if (this.connections.get(ownerId) === connection) {
-        existing.close()
-        this.connections.delete(ownerId)
-      }
-      return this.resolve(ownerId, configuration)
+      if (configuration) await existing.configure(configuration)
+      return existing.config
     }
     connection = this.open(ownerId, configuration)
     this.connections.set(ownerId, connection)
@@ -174,9 +175,10 @@ export class UserPodService {
     if (existingPod && existingPod.metadata.annotations?.[SPEC_ANNOTATION] !== manifests.pod.metadata.annotations[SPEC_ANNOTATION]) {
       throw new Error('User Pod image or configuration requires an explicit runtime upgrade')
     }
-    await ensureCreated('pvc', manifests.claim)
     const defaults = { 'sudocode.json': '{}', 'backend-config.json': '{"mounts":[]}' }
     const savedSecret = await assertOwner('secret')
+    await assertOwner('service')
+    await assertOwner('pvc')
     const saved: Record<string, string> = {}
     for (const key of Object.keys(defaults)) {
       const encoded = savedSecret?.data?.[key]
@@ -188,6 +190,7 @@ export class UserPodService {
     if (existingPod && saved['backend-config.json'] !== configuration['backend-config.json']) {
       throw new Error('User Pod model backend changes require an explicit runtime restart')
     }
+    await ensureCreated('pvc', manifests.claim)
     let updates = Promise.resolve()
     const refresh = (replacement?: Record<string, string>) => {
       const update = updates.catch(() => {}).then(async () => {
@@ -214,18 +217,27 @@ export class UserPodService {
     while (true) {
       if (this.isClosed) throw new Error('User Pod service is closed')
       const current = await assertOwner('pod')
-      if (current?.status?.phase === 'Running') break
+      if (current?.status?.conditions?.some(condition => condition.type === 'Ready' && condition.status === 'True')) break
       if (current?.status?.phase === 'Failed' || current?.status?.phase === 'Succeeded') {
         throw new Error('User Pod exited before its service became ready')
       }
-      if (Date.now() >= deadline) throw new Error('User Pod did not reach Running within 90 seconds')
+      if (Date.now() >= deadline) throw new Error('User Pod service did not become Ready within 90 seconds')
       await delay(1000)
     }
-    const forward = await this.resources.forward(name)
+    await ensureCreated('service', manifests.service)
+    const service = await assertOwner('service')
+    const serviceSpec = z.object({ type: z.literal('NodePort'), selector: z.record(z.string(), z.string()),
+      ports: z.array(z.object({ name: z.literal('nexus'), port: z.literal(RUNTIME_PORT),
+        targetPort: z.literal(RUNTIME_PORT), nodePort: z.number().int().min(1).max(65535) })).length(1),
+    }).parse(service?.spec)
+    if (serviceSpec.selector.app !== APP_LABEL || serviceSpec.selector.runtime !== name) {
+      throw new Error('User Pod Service does not select its owned runtime')
+    }
+    const endpoint = `https://${this.runtimeHost}:${serviceSpec.ports[0]!.nodePort}`
     let timer: ReturnType<typeof setTimeout> | undefined
     let isActive = true
     const renew = async () => {
-      if (!isActive || this.isClosed || !forward.isOpen()) return
+      if (!isActive || this.isClosed) return
       let retryMs = 90_000
       try { await refresh() } catch {
         retryMs = 5_000
@@ -236,7 +248,6 @@ export class UserPodService {
     timer = setTimeout(() => { void renew() }, 90_000)
     timer.unref()
     return {
-      forward,
       configure: async (next) => {
         const replacement = { ...defaults, ...next }
         if (configuration['backend-config.json'] !== replacement['backend-config.json']) {
@@ -245,8 +256,8 @@ export class UserPodService {
         if (JSON.stringify(configuration) === JSON.stringify(replacement)) return
         await refresh(replacement)
       },
-      config: { ...this.options.issuer, authToken: '', runtimeEndpoint: forward.endpoint },
-      close: () => { isActive = false; clearTimeout(timer); forward.close() },
+      config: { ...this.options.issuer, authToken: '', runtimeEndpoint: endpoint },
+      close: () => { isActive = false; clearTimeout(timer) },
     }
   }
 

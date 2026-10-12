@@ -470,11 +470,11 @@ export class RuntimeService {
     const k8s = options.config.k8s
     if (!this.userPods && k8s?.userRuntimeImage) {
       const issuer = resolveNexusConfigFromEnv()
-      if (issuer.mode !== 'external' || !issuer.tls || !k8s.workspaceStorageClass) {
-        throw new Error('User runtimes require an external mTLS issuer and retained Kubernetes storage')
+      if (issuer.mode !== 'external' || !issuer.tls || !k8s.workspaceStorageClass || !k8s.userRuntimeHost) {
+        throw new Error('User runtimes require an external mTLS issuer, retained storage and private compute host')
       }
       this.userPods = new UserPodService({
-        image: k8s.userRuntimeImage, namespace: k8s.namespace, kubeconfig: k8s.kubeconfig,
+        image: k8s.userRuntimeImage, nodeHost: k8s.userRuntimeHost, namespace: k8s.namespace, kubeconfig: k8s.kubeconfig,
         storageClass: k8s.workspaceStorageClass, storageSize: k8s.workspaceStorageSize,
         runtimeClassName: k8s.runtimeClassName, cpuLimit: k8s.cpuLimit, memoryLimit: k8s.memoryLimit,
         imagePullPolicy: k8s.imagePullPolicy, imagePullSecrets: k8s.imagePullSecrets,
@@ -2355,7 +2355,7 @@ export class RuntimeService {
     if (session.runtime.type === 'cohost') {
       runnerEnv.MOSS_COHOST_CONNECTION = encodeCohostConnection(await this.resolveCohostConnection(
         session.userId,
-        buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || ''),
+        buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || '', defaultModel),
       ))
     }
 
