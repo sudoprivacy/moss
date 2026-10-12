@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { DbDriver, SqlRow } from '../db/driver.js'
 import type { SudorouterSecretPort } from './sudorouterAccountService.js'
 import { QUOTA_PER_USD, parseUsd, quotaToUsd, usdMicrosToQuota } from './modelMoney.js'
-import { RouterRequestError, type OrganizationRouterPort, type RouterAdminStatus, type RouterToken } from './organizationRouterAdapter.js'
+import { RouterRequestError, type OrganizationRouterPort, type RouterAdminStatus, type RouterToken, type RouterTokenInspectionOutcome } from './organizationRouterAdapter.js'
 import { ensureOrganizationBillingSchema } from './organizationBillingSchema.js'
 
 const SECRET_NAMESPACE = 'moss:organization-model-keys'
@@ -17,10 +17,25 @@ export type ModelTokenRow = SqlRow & {
   router_token_id: number | null; secret_ref: string | null; initial_quota: number | null
   status: 'pending' | 'ready' | 'disabled' | 'revoked' | 'needs_review'
 }
-type OperationRow = SqlRow & { reference: string; fingerprint: string; status: string; result_json: string | null; request_json: string }
+type OperationRow = SqlRow & { reference: string; fingerprint: string; status: string; result_json: string | null; request_json: string; created_at: number; updated_at: number }
+type TokenAttemptRow = SqlRow & {
+  id: string; token_binding_id: string; attempt_no: number; operation_reference: string; expected_remote_name: string
+  remote_token_id: number | null; resolution: RouterTokenInspectionOutcome | null; created_at: number; checked_at: number | null; resolved_at: number | null
+}
 
 export class OrganizationBillingError extends Error {
-  constructor(readonly code: string, message: string, readonly statusCode = 400) { super(message) }
+  constructor(readonly code: string, message: string, readonly statusCode = 400, readonly nextAction?: string) { super(message) }
+}
+export interface TokenProvisioningResult {
+  user_id: string | null
+  purpose: 'member' | 'service'
+  provisioning_status: ModelTokenRow['status']
+  operation_status: string | null
+  expected_remote_name: string
+  review_outcome: RouterTokenInspectionOutcome | null
+  checked_at: number | null
+  next_action: 'none' | 'reconcile' | 'contact_super_admin'
+  token_id?: number
 }
 export interface CreateOrganizationModelInput {
   initialAmountUsd: string
@@ -142,6 +157,9 @@ export class OrganizationBillingService {
     [id, account.org_id, memberId, purpose, account.router_user_id!, limit, Date.now(), Date.now()])
     let token = (await this.token(account.org_id, memberId, purpose))!
     if (['ready', 'disabled'].includes(token.status)) return token
+    if (token.status === 'needs_review') {
+      throw new OrganizationBillingError('NEEDS_REVIEW', '上次 Key 创建结果待核对，请先核对远端 Key', 409, 'reconcile')
+    }
     const current = token
     try {
       await this.operation(account.org_id, 'create-token', `create-token:${token.id}`, { tokenBindingId: token.id, limit: token.initial_quota }, false, async () => {
@@ -243,8 +261,149 @@ export class OrganizationBillingService {
     const bindings = await this.db.all<ModelTokenRow>('SELECT * FROM organization_model_tokens WHERE org_id = ?', [actor.orgId])
     const tokens = account.router_user_id ? await this.router.listTokens(account.router_user_id) : []
     const byId = new Map(tokens.map(token => [token.id, token]))
-    return bindings.map(binding => ({ user_id: binding.member_id || null, purpose: binding.purpose, provisioning_status: binding.status,
-      ...(binding.router_token_id && byId.has(binding.router_token_id) ? this.projectToken(byId.get(binding.router_token_id)!, account) : {}) }))
+    return Promise.all(bindings.map(async binding => {
+      const attempt = await this.latestTokenAttempt(binding)
+      return { user_id: binding.member_id || null, purpose: binding.purpose, provisioning_status: binding.status,
+        review_outcome: attempt?.resolution ?? null, checked_at: attempt?.checked_at ?? null,
+        next_action: binding.status !== 'needs_review' ? 'none' : attempt?.resolution ? 'contact_super_admin' : 'reconcile',
+        ...(binding.router_token_id && byId.has(binding.router_token_id) ? this.projectToken(byId.get(binding.router_token_id)!, account) : {}) }
+    }))
+  }
+
+  async tokenProvisioning(actor: OrganizationBillingActor, memberId: string, purpose: 'member' | 'service' = 'member'): Promise<TokenProvisioningResult> {
+    await this.assertAdmin(actor, actor.orgId)
+    const binding = await this.token(actor.orgId, memberId, purpose)
+    if (!binding) throw new OrganizationBillingError('KEY_UNAVAILABLE', '未找到 Key 开通记录', 404)
+    const attempt = await this.latestTokenAttempt(binding)
+    const operation = await this.getOperation(`create-token:${binding.id}`)
+    return this.projectProvisioning(binding, attempt, operation)
+  }
+
+  async reconcileMemberToken(actor: OrganizationBillingActor, memberId: string, reference: string): Promise<TokenProvisioningResult> {
+    await this.assertAdmin(actor, actor.orgId)
+    const member = await this.db.get('SELECT id FROM users WHERE id = ? AND org_id = ?', [memberId, actor.orgId])
+    if (!member) throw new OrganizationBillingError('MEMBER_UNAVAILABLE', '成员不属于当前组织', 404)
+    return this.exclusive(`member:${actor.orgId}:${memberId}`, async () => {
+      const binding = await this.token(actor.orgId, memberId)
+      if (!binding) throw new OrganizationBillingError('KEY_UNAVAILABLE', '未找到 Key 开通记录', 404)
+      return this.reconcileTokenProvisioning(actor, binding, reference)
+    })
+  }
+
+  async reconcileServiceToken(actor: OrganizationBillingActor, reference: string): Promise<TokenProvisioningResult> {
+    await this.assertAdmin(actor, actor.orgId)
+    return this.exclusive(`service:${actor.orgId}`, async () => {
+      const binding = await this.token(actor.orgId, '', 'service')
+      if (!binding) throw new OrganizationBillingError('KEY_UNAVAILABLE', '未找到默认服务 Key 开通记录', 404)
+      const result = await this.reconcileTokenProvisioning(actor, binding, reference)
+      if (result.provisioning_status === 'ready') {
+        const account = await this.requireAccount(actor.orgId)
+        const key = await this.readKey((await this.token(actor.orgId, '', 'service'))!)
+        await this.options.onServiceReady?.(actor.orgId, key, this.router.modelBaseUrl)
+        const initial = await this.getOperation(`initial:${actor.orgId}`)
+        if (account.router_user_id && initial?.status === 'succeeded') {
+          await this.db.run("UPDATE organization_model_accounts SET status = 'ready', updated_at = ? WHERE org_id = ?", [Date.now(), actor.orgId])
+        }
+      }
+      return result
+    })
+  }
+
+  private async reconcileTokenProvisioning(actor: OrganizationBillingActor, binding: ModelTokenRow, reference: string): Promise<TokenProvisioningResult> {
+    if (!reference || reference.length > 200) throw new OrganizationBillingError('INVALID_REFERENCE', '缺少有效核对操作标识')
+    const operation = await this.getOperation(`create-token:${binding.id}`)
+    if (!operation) throw new OrganizationBillingError('KEY_UNAVAILABLE', '未找到原始 Key 创建操作', 409, 'contact_super_admin')
+    const attempt = await this.ensureTokenAttempt(binding, operation)
+    if (['ready', 'disabled'].includes(binding.status) && binding.router_token_id && binding.secret_ref) {
+      await this.readKey(binding)
+      if (operation.status !== 'succeeded') {
+        await this.db.run("UPDATE organization_model_operations SET status = 'succeeded', result_json = ?, updated_at = ? WHERE reference = ?",
+          [JSON.stringify({ tokenId: binding.router_token_id }), Date.now(), operation.reference])
+      }
+      return this.projectProvisioning(binding, attempt, { ...operation, status: 'succeeded' })
+    }
+    if (binding.status !== 'needs_review') throw new OrganizationBillingError('KEY_NOT_REVIEWABLE', '当前 Key 不需要核对', 409)
+    const inspection = await this.router.inspectTokenProvisioning(binding.router_user_id, {
+      name: attempt.expected_remote_name,
+      limit: binding.initial_quota,
+      createdAfter: operation.created_at - 30_000,
+      createdBefore: Date.now() + 30_000,
+    })
+    const now = Date.now()
+    if (inspection.outcome !== 'matched') {
+      await this.db.run('UPDATE organization_model_token_attempts SET resolution = ?, checked_at = ? WHERE id = ?', [inspection.outcome, now, attempt.id])
+      await this.writeTokenReviewAudit(reference, actor, binding, inspection.outcome, inspection.candidateIds)
+      return this.projectProvisioning(binding, { ...attempt, resolution: inspection.outcome, checked_at: now }, operation)
+    }
+    const conflict = await this.db.get('SELECT id FROM organization_model_tokens WHERE router_token_id = ? AND id <> ?', [inspection.token.id, binding.id])
+    if (conflict) {
+      await this.db.run("UPDATE organization_model_token_attempts SET resolution = 'mismatch', remote_token_id = ?, checked_at = ? WHERE id = ?", [inspection.token.id, now, attempt.id])
+      await this.writeTokenReviewAudit(reference, actor, binding, 'mismatch', [inspection.token.id])
+      return this.projectProvisioning(binding, { ...attempt, resolution: 'mismatch', remote_token_id: inspection.token.id, checked_at: now }, operation)
+    }
+    try {
+      await this.secrets.putSecret(SECRET_NAMESPACE, binding.id, inspection.token.key, `org:${binding.org_id}`)
+      const saved = await this.secrets.getSecret(SECRET_NAMESPACE, binding.id, `org:${binding.org_id}`)
+      if (!saved?.value || saved.value !== inspection.token.key) throw new Error('secret verification failed')
+    } catch {
+      await this.writeTokenReviewAudit(reference, actor, binding, 'key_unavailable', [inspection.token.id])
+      throw new OrganizationBillingError('KEY_UNAVAILABLE', 'Key 已找到但安全存储验证失败，请稍后重新核对', 503, 'reconcile')
+    }
+    const status: ModelTokenRow['status'] = inspection.token.admin_status === 'disabled' ? 'disabled' : 'ready'
+    await this.db.transaction(async () => {
+      const current = await this.db.get<ModelTokenRow>('SELECT * FROM organization_model_tokens WHERE id = ?', [binding.id])
+      const currentOperation = await this.getOperation(operation.reference)
+      const occupied = await this.db.get('SELECT id FROM organization_model_tokens WHERE router_token_id = ? AND id <> ?', [inspection.token.id, binding.id])
+      if (!current || occupied || current.router_token_id && current.router_token_id !== inspection.token.id
+        || !currentOperation || !['sending', 'unknown', 'succeeded'].includes(currentOperation.status)) {
+        throw new OrganizationBillingError('RECONCILE_CONFLICT', '本地开通状态已变化，请刷新后重新核对', 409, 'reconcile')
+      }
+      await this.db.run('UPDATE organization_model_tokens SET router_token_id = ?, secret_ref = ?, status = ?, updated_at = ? WHERE id = ?',
+        [inspection.token.id, binding.id, status, now, binding.id])
+      await this.db.run("UPDATE organization_model_operations SET status = 'succeeded', result_json = ?, updated_at = ? WHERE reference = ?",
+        [JSON.stringify({ tokenId: inspection.token.id }), now, operation.reference])
+      await this.db.run("UPDATE organization_model_token_attempts SET resolution = 'matched', remote_token_id = ?, checked_at = ?, resolved_at = ? WHERE id = ?",
+        [inspection.token.id, now, now, attempt.id])
+      await this.insertTokenReviewAudit(reference, actor, binding, 'matched', [inspection.token.id], now)
+    })
+    const updated = (await this.token(binding.org_id, binding.member_id, binding.purpose))!
+    return this.projectProvisioning(updated, { ...attempt, resolution: 'matched', remote_token_id: inspection.token.id, checked_at: now, resolved_at: now }, { ...operation, status: 'succeeded' })
+  }
+
+  private async ensureTokenAttempt(binding: ModelTokenRow, operation: OperationRow): Promise<TokenAttemptRow> {
+    const id = `${binding.id}:1`
+    await this.db.run(`INSERT INTO organization_model_token_attempts
+      (id, token_binding_id, attempt_no, operation_reference, expected_remote_name, created_at)
+      VALUES (?, ?, 1, ?, ?, ?) ON CONFLICT(operation_reference) DO NOTHING`,
+    [id, binding.id, operation.reference, `${binding.purpose}-${binding.id.slice(0, 18)}`, operation.created_at])
+    return (await this.db.get<TokenAttemptRow>('SELECT * FROM organization_model_token_attempts WHERE operation_reference = ?', [operation.reference]))!
+  }
+
+  private async latestTokenAttempt(binding: ModelTokenRow): Promise<TokenAttemptRow | undefined> {
+    const operation = await this.getOperation(`create-token:${binding.id}`)
+    if (!operation) return undefined
+    return this.ensureTokenAttempt(binding, operation)
+  }
+
+  private projectProvisioning(binding: ModelTokenRow, attempt: TokenAttemptRow | undefined, operation: OperationRow | undefined): TokenProvisioningResult {
+    return { user_id: binding.member_id || null, purpose: binding.purpose, provisioning_status: binding.status,
+      operation_status: operation?.status ?? null, expected_remote_name: attempt?.expected_remote_name ?? `${binding.purpose}-${binding.id.slice(0, 18)}`,
+      review_outcome: attempt?.resolution ?? null, checked_at: attempt?.checked_at ?? null,
+      next_action: ['ready', 'disabled'].includes(binding.status) ? 'none' : attempt?.resolution && attempt.resolution !== 'matched' ? 'contact_super_admin' : 'reconcile',
+      ...(binding.router_token_id ? { token_id: binding.router_token_id } : {}) }
+  }
+
+  private async writeTokenReviewAudit(reference: string, actor: OrganizationBillingActor, binding: ModelTokenRow, outcome: RouterTokenInspectionOutcome, candidateIds: number[]): Promise<void> {
+    await this.insertTokenReviewAudit(reference, actor, binding, outcome, candidateIds, Date.now())
+  }
+
+  private async insertTokenReviewAudit(reference: string, actor: OrganizationBillingActor, binding: ModelTokenRow, outcome: RouterTokenInspectionOutcome, candidateIds: number[], now: number): Promise<void> {
+    const auditReference = `token-review:${createHash('sha256').update(JSON.stringify([binding.id, reference, outcome])).digest('hex')}`
+    await this.db.run(`INSERT INTO organization_model_token_review_audit
+      (reference, org_id, token_binding_id, actor_user_id, action, outcome, evidence, details_json, created_at)
+      VALUES (?, ?, ?, ?, 'inspect-and-adopt', ?, 'validated remote provisioning metadata', ?, ?)
+      ON CONFLICT(reference) DO NOTHING`,
+    [auditReference, binding.org_id, binding.id, actor.userId, outcome, JSON.stringify({ request_reference: reference, candidate_ids: candidateIds }), now])
   }
 
   /** Revoke upstream access before an identity mutation, including copied client Keys. */
