@@ -6,6 +6,54 @@ subprocess (`ScodeBackend`) or a local docker container (`DockerBackend`). It
 plugs into the same `SessionBackend` seam and is selected by
 `runtime.type === 'k8s'`.
 
+## Native user runtime boxes
+
+`MOSS_USER_RUNTIME_IMAGE` (`k8s.userRuntimeImage`) selects the image used for
+native `cohost` sessions. The image contains a paired `nexusd-cohost`, signed
+Vault plugins and the agent's userland tools. `k8s.image` supplies the existing
+standalone session image.
+
+[`UserPodService`](../src/server/runtime/userPodService.ts) belongs to the main
+`RuntimeService`. It coordinates one owner-bound Pod and retained PVC for each
+user. Session runners receive its resolved connection and reuse the same box.
+The control plane issues short-lived owner credentials; each connection
+validates the runtime server name derived from that owner.
+
+```mermaid
+flowchart LR
+    UI[Browser or desktop] --> Moss[Moss authenticated session API]
+    Moss --> Placement[RuntimeService and UserPodService]
+    Placement --> Issuer[Root Nexus credential issuer]
+    Placement --> K8s[Kubernetes API]
+    K8s --> Config[Projected configuration and bounded credentials]
+    Placement --> Transport[Shared owner port forward]
+    Moss --> Runner[Session runner]
+    Runner --> Transport
+    Transport --> Pod[gVisor user Pod]
+    Config --> Pod
+    Pod --> Native[Native cohost and ManagedAgentService]
+    Native --> Engines[Multiple Sudo Code engines]
+    Native --> Data[Retained PVC: Agent homes and flat session storage]
+```
+
+Configuration and server credentials reach the compute node through a Secret.
+The writable global configuration directory is `/data/scode`; its
+`sudocode.json` links to the projected configuration. Credential renewal keeps
+the current configuration, including after controller restart. Model backend
+changes require an explicit runtime restart because backend mounts are boot
+configuration. Runtime endpoints, port forwards and renewal timers stay in the
+controller's process. Closing that controller retains Pods and PVCs.
+
+The namespace Role grants `get/create/patch` for Secrets and PVCs and `create`
+for `pods/portforward`, alongside the Pod permissions below. Each resource
+carries its owner annotation; the coordinator verifies that owner before
+changing credentials or using a volume.
+
+The [Agent storage matrix](https://s.shareone.vip/s/agent-context-storage-matrix)
+owns logical paths, links and durable session format. The
+[Nexus authentication architecture](https://s.shareone.vip/s/nexus-auth-architecture)
+owns credential issuance and runtime confinement.
+
 ## Retaining workspace files across runtime restarts
 
 Set `MOSS_K8S_WORKSPACE_STORAGE_CLASS=local-path` for the bundled k3s storage

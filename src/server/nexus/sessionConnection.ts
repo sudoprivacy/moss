@@ -2,7 +2,7 @@ import { NexusVfsClient, userRuntimeServerName, type NexusVfsTlsConfig } from '@
 import type { ResolvedNexusConfig } from './nexusEnvConfig.js'
 import { mintSessionIdentity, renewSessionCredential, SESSION_CREDENTIAL_VALIDITY_SECS, type SessionIdentity } from './sessionIdentity.js'
 
-type SessionConnectionConfig = Pick<Extract<ResolvedNexusConfig, { mode: 'external' }>, 'endpoint' | 'authToken'> & {
+export type SessionConnectionConfig = Pick<Extract<ResolvedNexusConfig, { mode: 'external' }>, 'endpoint' | 'authToken'> & {
   tls: NexusVfsTlsConfig | null
   /** Destination from the trusted placement resolver; endpoint remains the credential issuer. */
   runtimeEndpoint?: string

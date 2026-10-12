@@ -67,6 +67,11 @@ import {
 } from './sharedAgentMemory.js'
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import type { NexusClient } from './nexus/nexusClient.js'
+import { UserPodService } from './runtime/userPodService.js'
+import { resolveNexusConfigFromEnv } from './nexus/nexusEnvConfig.js'
+import { resolveCohostConnection as externalCohostConnection, encodeCohostConnection } from './nexus/cohostConnection.js'
+import { connectSessionRuntime, type SessionConnectionConfig } from './nexus/sessionConnection.js'
+import { buildCohostProxyConfig } from './backends/scodeProxyConfig.js'
 import {
   openInternalSessionChannel,
   revokeInternalSessionToken,
@@ -366,6 +371,7 @@ type RuntimeServiceOptions = {
    * 缺省则跳过 MCP 注入（如测试或无 nexus 环境），不影响会话其余功能。
    */
   nexusClient?: NexusClient
+  userPodService?: UserPodService
 }
 
 /**
@@ -427,6 +433,7 @@ export class TokenQuotaExceededError extends Error {
 const USAGE_CACHE_TTL_MS = 15_000
 
 export class RuntimeService {
+  private readonly userPods?: UserPodService
   readonly store: DirectConnectStore
   readonly authService: AuthService
   private readonly mcpStore: McpStore | null
@@ -459,6 +466,21 @@ export class RuntimeService {
     }
     this.store = options.store ?? openDirectConnectStore(options.config)
     this.authService = options.authService
+    this.userPods = options.userPodService
+    const k8s = options.config.k8s
+    if (!this.userPods && k8s?.userRuntimeImage) {
+      const issuer = resolveNexusConfigFromEnv()
+      if (issuer.mode !== 'external' || !issuer.tls || !k8s.workspaceStorageClass) {
+        throw new Error('User runtimes require an external mTLS issuer and retained Kubernetes storage')
+      }
+      this.userPods = new UserPodService({
+        image: k8s.userRuntimeImage, namespace: k8s.namespace, kubeconfig: k8s.kubeconfig,
+        storageClass: k8s.workspaceStorageClass, storageSize: k8s.workspaceStorageSize,
+        runtimeClassName: k8s.runtimeClassName, cpuLimit: k8s.cpuLimit, memoryLimit: k8s.memoryLimit,
+        imagePullPolicy: k8s.imagePullPolicy, imagePullSecrets: k8s.imagePullSecrets,
+        issuer: { endpoint: issuer.endpoint, tls: issuer.tls },
+      })
+    }
     if (options.nexusClient) {
       this.mcpStore = new McpStore(this.store.driver)
       this.mcpUserConfig = createMcpUserConfigApi({
@@ -667,6 +689,21 @@ export class RuntimeService {
     if (!userId || !allowed.has(userId)) {
       throw new ResourceAccessError(403, '此运行环境暂未向当前账号开放')
     }
+  }
+
+  /** Main-process placement shared by session runners and authenticated workspace I/O. */
+  async resolveCohostConnection(ownerId: string, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
+    return this.userPods ? this.userPods.resolve(ownerId, configuration) : externalCohostConnection()
+  }
+
+  /** Connect with a fresh owner-delegated identity at the execution endpoint. */
+  async connectCohostRuntime(ownerId: string) {
+    return connectSessionRuntime(await this.resolveCohostConnection(ownerId), ownerId)
+  }
+
+  /** Close process-local channels while retaining user boxes and durable volumes. */
+  async closeRuntimeServices(): Promise<void> {
+    await this.userPods?.close()
   }
 
   private async createSessionInResourceScope(input: SessionCreateInput): Promise<SessionRecord> {
@@ -2313,6 +2350,13 @@ export class RuntimeService {
       runnerEnv.SUDOWORK_AUTH_PROXY_TOKEN = authToken
       // Token will be registered after spawn (needs pid)
       this.sessionTokens.set(session.sessionId, { token: authToken, pid: -1 })
+    }
+
+    if (session.runtime.type === 'cohost') {
+      runnerEnv.MOSS_COHOST_CONNECTION = encodeCohostConnection(await this.resolveCohostConnection(
+        session.userId,
+        buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || ''),
+      ))
     }
 
     const runnerPath = resolveRunnerPath()

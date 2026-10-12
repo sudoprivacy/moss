@@ -1,0 +1,70 @@
+import { execFile, spawn } from 'node:child_process'
+import { promisify } from 'node:util'
+import { z } from 'zod'
+
+const execFileAsync = promisify(execFile)
+const ResourceSchema = z.object({
+  metadata: z.object({
+    name: z.string(), uid: z.string().optional(), resourceVersion: z.string().optional(),
+    annotations: z.record(z.string(), z.string()).optional(),
+    labels: z.record(z.string(), z.string()).optional(),
+  }).passthrough(),
+  status: z.object({ phase: z.string().optional(), podIP: z.string().optional() }).passthrough().optional(),
+  spec: z.record(z.string(), z.unknown()).optional(),
+  data: z.record(z.string(), z.string()).optional(),
+}).passthrough()
+export type K8sResource = z.infer<typeof ResourceSchema>
+
+export function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] {
+  return [...(kubeconfig ? ['--kubeconfig', kubeconfig] : []), '--namespace', namespace]
+}
+
+/** Read resource metadata through the controller's Kubernetes identity. */
+export async function readK8sResource(base: string[], kind: string, name: string): Promise<K8sResource | undefined> {
+  let stdout: string
+  try {
+    ({ stdout } = await execFileAsync('kubectl', [...base, 'get', kind, name, '--ignore-not-found', '-o', 'json'],
+      { windowsHide: true, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 }))
+  } catch (error) {
+    throw formatKubectlApplyError(null, String((error as { stderr?: unknown }).stderr ?? ''), 'get')
+  }
+  return stdout.trim() ? ResourceSchema.parse(JSON.parse(stdout)) : undefined
+}
+
+/** Keep credentials in stdin and report only the Kubernetes error category. */
+export async function kubectlApply(base: string[], manifest: Record<string, unknown>, verb: 'apply' | 'create' = 'apply'): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('kubectl', [...base, verb, '-f', '-'], { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true })
+    let stderr = ''
+    const timer = setTimeout(() => {
+      child.kill()
+      reject(new Error(`kubectl ${verb} timed out`))
+    }, 60_000)
+    child.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-32_768) })
+    child.stdin.on('error', () => {})
+    child.on('error', error => { clearTimeout(timer); reject(error) })
+    child.on('close', code => {
+      clearTimeout(timer)
+      if (code === 0) resolve()
+      else reject(formatKubectlApplyError(code, stderr, verb))
+    })
+    child.stdin.end(JSON.stringify(manifest))
+  })
+}
+
+export function isImmutablePodSpecError(error: unknown): boolean {
+  return /may not change fields other than|field is immutable/i.test(error instanceof Error ? error.message : String(error))
+}
+
+/** Preserve actionable API errors without exposing manifests echoed by kubectl. */
+export function formatKubectlApplyError(code: number | null, stderr: string, verb = 'apply'): Error {
+  const reason = /Error from server \((\w+)\)/.exec(stderr)?.[1]
+  const allowedReasons = new Set([
+    'Forbidden', 'Unauthorized', 'NotFound', 'AlreadyExists', 'Invalid', 'BadRequest',
+    'Timeout', 'ServerTimeout', 'InternalError', 'ServiceUnavailable', 'Gone',
+  ])
+  const detail = isImmutablePodSpecError(new Error(stderr))
+    ? 'pod spec field is immutable'
+    : reason && allowedReasons.has(reason) ? 'Kubernetes API ' + reason : 'manifest rejected'
+  return new Error('kubectl ' + verb + ' failed (code ' + code + '): ' + detail)
+}
