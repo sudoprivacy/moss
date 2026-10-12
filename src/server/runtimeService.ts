@@ -711,8 +711,9 @@ export class RuntimeService {
     })
   }
 
-  private assertCohostDeploymentAccess(runtimeType: string, userId: string | undefined): void {
-    assertRuntimePlacement(runtimeType, Boolean(this.userPods))
+  private assertCohostDeploymentAccess(runtimeType: string, userId: string | undefined, isNewSession = false): void {
+    assertRuntimePlacement(runtimeType, Boolean(this.userPods), false,
+      isNewSession && this.options.config.defaultRuntime === 'cohost')
     const configured = process.env.MOSS_COHOST_ALLOWED_USERS
     if (runtimeType !== 'cohost' || configured === undefined) return
     const allowed = new Set(configured.split(',').map(value => value.trim()).filter(Boolean))
@@ -828,7 +829,7 @@ export class RuntimeService {
     // status='failed' half-created record that spawnAttempt-level rejection
     // would leave behind).
     if (this.draining) throw new ServerDrainingError()
-    this.assertCohostDeploymentAccess(input.runtime?.type || this.options.config.defaultRuntime, input.userId)
+    this.assertCohostDeploymentAccess(input.runtime?.type || this.options.config.defaultRuntime, input.userId, true)
     const active = await this.store.listSessions({
       orgId: input.orgId,
       activeOnly: true,

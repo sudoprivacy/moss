@@ -102,6 +102,9 @@ When owner Pods are configured, session creation and spawn reject `host` and
 `docker` execution on the Moss server. Legacy gVisor sessions may continue during
 migration. Private deployments without owner Pods retain their existing runtime
 choices. SudoWork desktop local execution remains on the user's machine.
+With the native cloud default enabled, new sessions cannot select a legacy K8s
+placement or override its image and sandbox settings. Existing gVisor sessions
+retain their recovery route until their histories are migrated.
 
 ## Deployment settings
 

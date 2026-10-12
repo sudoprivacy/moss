@@ -15,6 +15,11 @@ void test('both native owner boxes and legacy gVisor sessions remain valid compu
   assert.doesNotThrow(() => assertRuntimePlacement('cohost', true, true))
   assert.doesNotThrow(() => assertRuntimePlacement('k8s', true, true))
 })
+void test('a native cloud default refuses new legacy placements while retaining existing gVisor sessions', () => {
+  assert.throws(() => assertRuntimePlacement('k8s', true, true, true), error => error instanceof ResourceAccessError && error.statusCode === 403)
+  assert.doesNotThrow(() => assertRuntimePlacement('cohost', true, true, true))
+  assert.doesNotThrow(() => assertRuntimePlacement('k8s', true, true, false))
+})
 void test('metered native sessions cannot spend a deployment credential through the legacy daemon', () => {
   assert.throws(() => assertRuntimePlacement('cohost', false, true), error => error instanceof ResourceAccessError && error.statusCode === 503)
   assert.doesNotThrow(() => assertRuntimePlacement('cohost', false, false))
