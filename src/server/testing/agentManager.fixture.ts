@@ -18,8 +18,9 @@ ensureCompatibilityCoreSchema(store.requireSqliteDb())
 const { service: authService } = await createAuthService({ db: store.requireSqliteDb(),
   dbPath: config.dbPath, tokenTtlSec: config.tokenTtlSec, bootstrapAdmin: config.bootstrapAdmin })
 const runtime = new RuntimeService({ config, store, authService, serverInstanceId: randomUUID() })
+const reservedAgentNames = ['mine', 'install', 'visible', 'create', 'tenant', 'private-archives']
 runtime.readAgentNamespace = async ownerId => ({ isOwnerConfined: true,
-  names: ['persistent-agent', 'worker-agent'], managedNames: ['persistent-agent'],
+  names: ['persistent-agent', 'worker-agent', ...reservedAgentNames], managedNames: ['persistent-agent', ...reservedAgentNames],
   executions: [{ name: 'worker-agent', ownerId, state: 'ready', kind: 'worker' }] })
 runtime.upgradeUserRuntime = async ownerId => ({ ownerId, isPresent: true, isDrifted: false,
   phase: 'Running', expectedImage: 'fixture:verified', observedImageDigest: null, releaseId: null })

@@ -14,8 +14,8 @@ const namespace: RuntimeAgentNamespace = { isOwnerConfined: true,
 function manager(value = namespace) {
   return new AgentManager({
     visibleOwners: async actor => actor.userId === 'admin'
-      ? [{ id: 'alice', displayName: 'Alice' }, { id: 'bob', displayName: 'Bob' }]
-      : [{ id: actor.userId, displayName: actor.userId }],
+      ? [{ id: 'alice', displayName: 'Alice', isActive: true }, { id: 'bob', displayName: 'Bob', isActive: true }]
+      : [{ id: actor.userId, displayName: actor.userId, isActive: true }],
     personalAgents: async owner => [{ ref: defaultAgentName(owner.id), agentName: `user-${owner.id}`,
       displayName: owner.displayName, kind: 'default' }],
     namespace: async ownerId => ({ ...value, executions: value.executions.map(record => ({ ...record, ownerId })) }),
@@ -53,7 +53,7 @@ void test('shared legacy directory names are not attributed to each member witho
 })
 
 void test('failed native discovery is explicit and cannot grant unknown Agents', async () => {
-  const service = new AgentManager({ visibleOwners: async () => [{ id: 'alice', displayName: 'Alice' }],
+  const service = new AgentManager({ visibleOwners: async () => [{ id: 'alice', displayName: 'Alice', isActive: true }],
     personalAgents: async () => [], namespace: async () => { throw new Error('runtime unavailable') } })
   assert.deepEqual(await service.list(auth), { agents: [], unavailableOwners: ['alice'] })
   await assert.rejects(service.requireStart(auth, 'alice', 'persistent'), { statusCode: 404 })
@@ -66,6 +66,18 @@ void test('organization pagination bounds runtime discovery and carries no forei
   const second = await manager().list(auth, undefined, { limit: 1, after: first.nextCursor! })
   assert.equal(second.nextCursor, null)
   assert.ok(second.agents.every(agent => agent.ownerId === 'bob'))
+})
+
+void test('disabled owners remain visible but cannot start a conversation', async () => {
+  const service = new AgentManager({
+    visibleOwners: async () => [{ id: 'alice', displayName: 'Alice', isActive: false }, { id: 'bob', displayName: 'Bob', isActive: true }],
+    personalAgents: async () => [], namespace: async () => namespace,
+  })
+  const { agents } = await service.list(auth)
+  assert(agents.some(agent => agent.ownerId === 'alice'))
+  assert(agents.filter(agent => agent.ownerId === 'alice').every(agent => !agent.isOwnerActive && !agent.canStart))
+  assert.equal((await service.get(auth, 'bob', 'persistent')).canStart, true)
+  await assert.rejects(service.requireStart(auth, 'alice', 'persistent'), { statusCode: 403 })
 })
 
 void test('Agent references round trip Unicode and refuse path traversal or malformed base64', async () => {

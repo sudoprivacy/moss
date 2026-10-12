@@ -52,7 +52,7 @@ share the owner's write lock and one upstream conversation.
 
 ## Agent discovery and access
 
-`GET /api/v1/agents` combines Moss personal Agents with persistent `/agents/`
+`GET /api/v1/agent-manager/agents` combines Moss personal Agents with persistent `/agents/`
 directories and the native execution registry. It lists owners permitted by the
 current organization and department scope. Owner pages bound discovery work;
 failures are returned explicitly. Listing does not provision a missing Pod.
@@ -62,10 +62,14 @@ shared directories require owner evidence before attribution. Worker and daemon
 entries can be listed, but only managed Agents and configured personal Agents
 can start conversations.
 
-`POST /api/v1/agents/:name/sessions` checks creation and attachment permissions,
+`POST /api/v1/agent-manager/agents/:name/sessions` checks creation and attachment permissions,
 then creates the conversation using the actual owner's role and scopes. The
 manager UI opens the configured SudoWork workbench instead of maintaining a
 second conversation renderer. Templates remain separate from live Agent entries.
+The management path permits Agent names such as `mine` and `install` while
+the historical template and personal Agent endpoints retain their behavior.
+Disabled owners remain visible for inspection. New conversations and runtime
+upgrades remain unavailable until the owner is active again.
 
 ## Shared release and upgrades
 

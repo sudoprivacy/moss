@@ -7,6 +7,7 @@ import { ResourceAccessError } from './catalog/resourceError.js'
 export interface AgentOwner {
   id: string
   displayName: string
+  isActive: boolean
 }
 
 export interface RuntimeAgentNamespace {
@@ -27,6 +28,7 @@ export interface ManagedAgentEntry {
   state: string
   isPresent: boolean
   canStart: boolean
+  isOwnerActive: boolean
 }
 
 export interface AgentManagerDependencies {
@@ -101,7 +103,8 @@ export class AgentManager {
             origin: configured ? 'moss' : 'nexus',
             state: executions.find(record => record.state === 'busy' || record.state === 'awaiting_input')?.state ?? executions[0]?.state ?? 'stopped',
             isPresent: Boolean(namespace?.names.includes(name)),
-            canStart: canUseOwner && hasScope(auth.scopes, 'sessions:create') && Boolean(configured || isManaged),
+            isOwnerActive: owner.isActive,
+            canStart: owner.isActive && canUseOwner && hasScope(auth.scopes, 'sessions:create') && Boolean(configured || isManaged),
           })
         }
       }))

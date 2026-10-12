@@ -7100,7 +7100,7 @@ export function startServer(
         return
       }
 
-      if (req.method === 'GET' && pathname === '/api/v1/agents') {
+      if (req.method === 'GET' && (pathname === '/api/v1/agent-manager/agents' || pathname === '/api/v1/agents')) {
         const rawLimit = url.searchParams.get('limit') || '25'
         if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 100) throw new HttpError(400, 'Invalid Agent page size')
         const result = await agentManager.list(auth, url.searchParams.get('owner_id') || undefined,
@@ -7109,7 +7109,8 @@ export function startServer(
         return
       }
 
-      const managedAgentMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)(\/sessions)?$/)
+      // The canonical management path also permits names reserved by legacy template aliases.
+      const managedAgentMatch = pathname.match(/^\/api\/v1\/(?:agent-manager\/agents|agents)\/([^/]+)(\/sessions)?$/)
       if (managedAgentMatch && (req.method === 'GET' || req.method === 'POST')) {
         let name: string
         try { name = decodeURIComponent(managedAgentMatch[1]!) }
@@ -7125,7 +7126,7 @@ export function startServer(
                 (session.source === 'agent-manager' && session.clientMetadata?.agent_manager_actor_id === auth.userId)
                 ? agentWorkspaceUrl(session.sessionId) : null }))
           writeJson(res, 200, { agent, sessions, runtime: await runtime.inspectUserRuntime(ownerId),
-            canUpgrade: canUpgradeAgentRuntime(auth, ownerId), isWorkspaceAvailable: Boolean(agentWorkspaceUrl('probe')) })
+            canUpgrade: agent.isOwnerActive && canUpgradeAgentRuntime(auth, ownerId), isWorkspaceAvailable: Boolean(agentWorkspaceUrl('probe')) })
           return
         }
         if (req.method === 'POST' && managedAgentMatch[2]) {

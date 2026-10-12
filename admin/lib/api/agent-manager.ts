@@ -10,6 +10,7 @@ export interface ManagedAgent {
   state: string
   isPresent: boolean
   canStart: boolean
+  isOwnerActive: boolean
 }
 
 export interface ManagedAgentList {
@@ -39,11 +40,11 @@ export interface ManagedAgentDetail {
 }
 
 function agentUrl(ownerId: string, name: string): string {
-  return `/api/v1/agents/${encodeURIComponent(name)}?owner_id=${encodeURIComponent(ownerId)}`
+  return `/api/v1/agent-manager/agents/${encodeURIComponent(name)}?owner_id=${encodeURIComponent(ownerId)}`
 }
 
 export function getManagedAgents(after?: string): Promise<ManagedAgentList> {
-  return dcClient.get<ManagedAgentList>(`/api/v1/agents${after ? `?after=${encodeURIComponent(after)}` : ''}`)
+  return dcClient.get<ManagedAgentList>(`/api/v1/agent-manager/agents${after ? `?after=${encodeURIComponent(after)}` : ''}`)
 }
 
 export function upgradeUserRuntime(ownerId: string): Promise<{ runtime: UserRuntimeState }> {
@@ -55,5 +56,5 @@ export function getManagedAgent(ownerId: string, name: string): Promise<ManagedA
 }
 
 export function startManagedAgent(ownerId: string, name: string): Promise<{ sessionId: string; workspaceUrl: string }> {
-  return dcClient.post(`/api/v1/agents/${encodeURIComponent(name)}/sessions`, { owner_id: ownerId })
+  return dcClient.post(`/api/v1/agent-manager/agents/${encodeURIComponent(name)}/sessions`, { owner_id: ownerId })
 }

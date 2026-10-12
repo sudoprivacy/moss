@@ -1745,12 +1745,12 @@ export class AuthService {
   }
 
   /** List Agent owners using the same organization and department boundary as sessions. */
-  async listAgentOwners(auth: AuthContext): Promise<Array<{ id: string; displayName: string }>> {
+  async listAgentOwners(auth: AuthContext): Promise<Array<{ id: string; displayName: string; isActive: boolean }>> {
     const allowed = hasScope(auth.scopes, 'sessions:list:any')
       ? null : await this.listSubtreeUserIds(auth.orgId, auth)
     return (await this.db.listUsersByOrg(auth.orgId))
       .filter(user => !allowed || allowed.has(user.id))
-      .map(user => ({ id: user.id, displayName: user.displayName?.trim() || user.name || user.id }))
+      .map(user => ({ id: user.id, displayName: user.displayName?.trim() || user.name || user.id, isActive: user.status === 'active' }))
   }
 
   /** Resolve the actual owner's runtime privileges without borrowing the administrator's scopes. */

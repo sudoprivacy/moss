@@ -58,6 +58,37 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
     const listed = await ok('GET', '/api/v1/agents', a.user)
     assert(listed.agents.every((agent: any) => agent.ownerId === a.userId))
     assert(listed.agents.some((agent: any) => agent.name === 'persistent-agent' && agent.canStart))
+    await t.test('reserved template names remain usable through the management API', async () => {
+      const managed = await ok('GET', '/api/v1/agent-manager/agents', a.user)
+      assert(managed.agents.every((agent: any) => agent.ownerId === a.userId))
+      for (const name of ['mine', 'install', 'visible', 'create', 'tenant', 'private-archives']) {
+        const path = `/api/v1/agent-manager/agents/${name}`
+        const detail = await ok('GET', `${path}?owner_id=${a.userId}`, a.admin)
+        assert.equal(detail.agent.name, name)
+        assert.equal(detail.agent.ownerId, a.userId)
+        assert.equal((await request('GET', `${path}?owner_id=${b.userId}`, a.admin)).status, 404)
+        const started = await request('POST', `${path}/sessions`, a.admin, { owner_id: a.userId })
+        assert.equal(started.status, 201, JSON.stringify(started.data))
+        const stored = (await ok('GET', `/api/v1/sessions/${started.data.sessionId}`, a.admin)).session
+        assert.equal(stored.clientMetadata.agent_manager_agent_name, name)
+        assert.equal(stored.userId, a.userId)
+      }
+      assert.equal((await request('GET', '/api/v1/agent-manager/agents')).status, 401)
+      assert(Array.isArray((await ok('GET', '/api/v1/agents/mine', a.user)).data),
+        'the legacy personal Agent endpoint retains its original response')
+    })
+    await t.test('disabled owner detail retains history visibility and disables execution', async () => {
+      await ok('PATCH', `/api/v1/users/${a.userId}`, a.admin, { status: 'disabled' })
+      const path = '/api/v1/agent-manager/agents/mine'
+      const detail = await ok('GET', `${path}?owner_id=${a.userId}`, a.admin)
+      assert.equal(detail.agent.isOwnerActive, false)
+      assert.equal(detail.agent.canStart, false)
+      assert.equal(detail.canUpgrade, false)
+      assert.equal((await request('POST', `${path}/sessions`, a.admin, { owner_id: a.userId })).status, 403)
+      await ok('PATCH', `/api/v1/users/${a.userId}`, a.admin, { status: 'active' })
+      a.user = await login('a-user')
+      assert.equal((await ok('GET', `${path}?owner_id=${a.userId}`, a.admin)).agent.canStart, true)
+    })
     assert.equal((await request('GET', `/api/v1/agents/persistent-agent?owner_id=${b.userId}`, a.admin)).status, 404)
     assert.equal((await request('POST', '/api/v1/agents/persistent-agent/sessions', a.user, { owner_id: b.userId })).status, 404)
     assert.equal((await request('POST', '/api/v1/agents/worker-agent/sessions', a.admin, { owner_id: a.userId })).status, 403)

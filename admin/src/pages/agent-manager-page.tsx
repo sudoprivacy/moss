@@ -129,7 +129,7 @@ export function AgentManagerDetailPage() {
             </div>}
             {detail.canUpgrade && detail.runtime.isPresent && <Button variant="outline" disabled={isUpgrading} onClick={() => void onUpgrade()}>{isUpgrading ? '更新中…' : detail.runtime.isDrifted ? '升级用户运行环境' : '重载模型凭据并恢复会话'}</Button>}
             <p className="text-sm text-muted-foreground">对话使用该 Agent 所有者的模型账户和额度。</p>
-            {!detail.agent.canStart && <p>当前权限或该 Agent 的运行类型不支持启动对话。</p>}
+            {detail.agent.isOwnerActive === false ? <p>该 Agent 的所有者已停用，启用后可继续对话。</p> : !detail.agent.canStart && <p>当前权限或该 Agent 的运行类型不支持启动对话。</p>}
             {!detail.isWorkspaceAvailable && <p>对话工作台尚未配置，请联系管理员。</p>}
             <Button disabled={!detail.agent.canStart || !detail.isWorkspaceAvailable || isStarting} onClick={() => void onStart()}>{isStarting ? '启动中…' : '开始对话'}</Button>
           </div>
