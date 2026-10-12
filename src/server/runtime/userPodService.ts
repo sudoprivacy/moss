@@ -33,7 +33,7 @@ export interface UserPodOptions {
 
 interface UserPodConnection {
   config: SessionConnectionConfig
-  close: () => void
+  close: () => Promise<void>
   configure: (configuration: Record<string, string>) => Promise<void>
 }
 
@@ -176,16 +176,18 @@ export class UserPodService {
       if (pending) await pending
       const pod = await this.resources.read('pod', name)
       if (pod && (pod.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId || !pod.metadata.uid)) throw new Error('User Pod belongs to another owner or lacks an identity')
+      await drain(pod ? await this.runtimeConnection(ownerId) : undefined)
+      const connection = this.connections.get(ownerId)
+      if (connection) await (await connection).close()
+      this.connections.delete(ownerId)
+      // Join configuration delivery and certificate renewal before capturing
+      // rollback state or replacing the Secret with the next runtime's data.
       const savedSecret = await this.resources.read('secret', name)
       if (savedSecret && savedSecret.metadata.annotations?.[OWNER_ANNOTATION] !== ownerId) throw new Error('User Pod Secret belongs to another owner')
       const saved: Record<string, string> = {}
       for (const key of ['sudocode.json', 'backend-config.json']) {
         if (savedSecret?.data?.[key]) saved[key] = Buffer.from(savedSecret.data[key], 'base64').toString('utf8')
       }
-      await drain(pod ? await this.runtimeConnection(ownerId) : undefined)
-      const connection = this.connections.get(ownerId)
-      if (connection) (await connection).close()
-      this.connections.delete(ownerId)
       if (pod) {
         await this.resources.remove('pods', name, pod.metadata.uid!)
         await this.waitForPodRemoval(name)
@@ -371,6 +373,7 @@ export class UserPodService {
     timer.unref()
     return {
       configure: async (next) => {
+        if (!isActive || this.lifecycle.signal.aborted) throw new Error('User Pod connection is closed')
         const replacement = { ...defaults, ...next }
         if (configuration['backend-config.json'] !== replacement['backend-config.json']) {
           throw new Error('User Pod model backend changes require an explicit runtime restart')
@@ -379,7 +382,11 @@ export class UserPodService {
         await refresh(replacement)
       },
       config,
-      close: () => { isActive = false; clearTimeout(timer) },
+      close: async () => {
+        isActive = false
+        clearTimeout(timer)
+        await updates.catch(() => {})
+      },
     }
   }
 

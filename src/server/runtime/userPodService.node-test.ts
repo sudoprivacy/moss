@@ -76,6 +76,33 @@ void test('an owner rollout waits for drain, retains the PVC and blocks competin
   assert.equal(kube.objects.has('upgrade-secret'), false)
 })
 
+void test('controller closure joins credential delivery before a replacement can write its Secret', async t => {
+  const kube = platform()
+  let isWaiting = false
+  let releaseCredential!: () => void
+  let markWaiting!: () => void
+  const waiting = new Promise<void>(resolve => { markWaiting = resolve })
+  const credentialReady = new Promise<void>(resolve => { releaseCredential = resolve })
+  t.mock.method(NexusZoneApiClient, 'withMtls', () => ({ mintUserRuntime: async () => {
+    if (isWaiting) { markWaiting(); await credentialReady }
+    return { subjectId: 'runtime-alice', caPem: Buffer.alloc(0), certPem: Buffer.alloc(0), keyPem: Buffer.alloc(0) }
+  }, close() {} }))
+  const service = new UserPodService(options, kube.resources, async () => {})
+  await service.resolve('alice')
+  isWaiting = true
+  const configuring = service.resolve('alice', { 'sudocode.json': '{"model":"next"}' })
+  await waiting
+  let isClosed = false
+  const closing = service.close().then(() => { isClosed = true })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(isClosed, false, 'the prior controller cannot outlive its configuration write')
+  releaseCredential()
+  await Promise.all([configuring, closing])
+  assert.equal(isClosed, true)
+  const delivered = Buffer.from(kube.objects.get('secret')!.data!['sudocode.json']!, 'base64').toString()
+  assert.equal(delivered, '{"model":"next"}')
+})
+
 void test('a failed replacement restores the prior owner image and model configuration on the retained volume', async t => {
   const kube = platform()
   t.mock.method(NexusZoneApiClient, 'withMtls', () => ({ mintUserRuntime: async () => ({
