@@ -311,7 +311,8 @@ async function readRunnerFailure(
   return includeStderrWithoutStatusError ? stderrTail : null
 }
 
-async function waitForRunnerReady(
+/** The runner listens during startup; only a running backend can accept a session. */
+export async function waitForRunnerReady(
   attachPath: string,
   statusPath: string,
   stderrLogPath: string,
@@ -319,14 +320,19 @@ async function waitForRunnerReady(
 ): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
-    const remainingMs = timeoutMs - (Date.now() - start)
-    if (await probeAttachPath(attachPath, Math.max(100, Math.min(remainingMs, 250)))) {
-      return
-    }
     const failure = await readRunnerFailure(statusPath, stderrLogPath)
     if (failure) {
       throw new Error(failure)
     }
+    let isRunning = false
+    try {
+      const status = JSON.parse(await readFile(statusPath, 'utf8')) as { state?: string }
+      isRunning = status.state === 'running'
+    } catch {
+      // A missing or partially written startup status is not readiness.
+    }
+    const remainingMs = timeoutMs - (Date.now() - start)
+    if (isRunning && await probeAttachPath(attachPath, Math.max(100, Math.min(remainingMs, 250)))) return
     await wait(100)
   }
   const failure = await readRunnerFailure(statusPath, stderrLogPath, true)
@@ -2436,7 +2442,10 @@ export class RuntimeService {
     }
 
     try {
-      await waitForRunnerReady(attachPath, statusPath, stderrLogPath, 5_000)
+      const readyTimeoutMs = session.runtime.type === 'k8s'
+        ? ((this.options.config.k8s?.podReadyTimeoutSec ?? 90) + 30) * 1000
+        : 5_000
+      await waitForRunnerReady(attachPath, statusPath, stderrLogPath, readyTimeoutMs)
     } catch (err) {
       // Runner failed to come up. Its child.once('close') will still fire
       // (the process is going to exit), so releaseGuard runs once. We just

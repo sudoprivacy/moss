@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
+  'src/server/runnerReadiness.node-test.ts',
   'src/server/runtime/userPodService.node-test.ts',
   'src/server/backends/cohostWorkspace.node-test.ts',
   'src/server/backends/cohostRecovery.node-test.ts',
