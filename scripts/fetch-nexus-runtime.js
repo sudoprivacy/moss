@@ -12,7 +12,7 @@
  * 由 scripts/build.js 在 `--target=node` 且 win32/darwin 且非 CI 时调用；也可
  * `bun scripts/fetch-nexus-runtime.js` 独立运行（便于单独验证与手动重取）。
  *
- * 版本来源：src/server/nexus/runtime-versions.json；升级版本时必须同步更新下方 SHA256 表。
+ * Versions and cluster checksums come from src/server/nexus/runtime-versions.json.
  */
 import { execFileSync } from 'child_process'
 import { createHash } from 'crypto'
@@ -45,19 +45,14 @@ const REPO_ROOT = process.cwd()
 const COS_RUNTIME = 'https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com'
 const COS_LEGACY = 'https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com'
 
-// sha256 真源（实测值）。仅列 build.js 触发平台（win/mac）所需；Linux 由
-// server.Dockerfile.local 内联 sha 各自维护。升级 runtime-versions.json 版本时必须同步此表。
-const SHA256 = {
+// Vault release checksums. Cluster checksums are shared with Docker assembly
+// through runtime-versions.json so updating a version has one checksum source.
+const VAULT_SHA256 = {
   'nexus-vault-linux-x86_64.tar.gz': '60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914',
   'nexus-vault-linux-aarch64.tar.gz': '2954afa5a5732451188b6e84a6d143805e3afebc77f67f4a1e8feebc67648f04',
   'nexus-vault-macos-arm64.tar.gz': '4d0a0814c94bc9dff4934331885d2d811ee51a13c9c661377fef0f9ca6f4c018',
   'nexus-vault-macos-x86_64.tar.gz': '6380f3435ea549db9f0c7399ea402600a07efce0f73df94a1bce54b966385525',
   'nexus-vault-windows-x86_64.zip': '2c8b0818a148a5e9d84b584ef577b62309eaff20a559b7c7c4f0a3a31a1e22cd',
-  'nexusd-cluster-macos-aarch64.tar.gz': 'cb0690cdb40eefbed99ca72ed5a40a60855193aa3baaab94af59044111eb2cd9',
-  'nexusd-cluster-macos-x86_64.tar.gz': '8d5d5ed28681a8e6639c1ee095962cd1dba4a0c7d47337536760688a2744775f',
-  'nexusd-cluster-windows-x86_64.zip': 'ba5b2b52b76459878d4c9ebacfb3c2bfe5ee9f33e60cf2c4839b348f93ddd155',
-  'nexusd-cluster-linux-x86_64.tar.gz': 'c1a68a14e636dbe3a408947b05c74765e28a16bfb0c7f129b9c39e62986372ff',
-  'nexusd-cluster-linux-aarch64.tar.gz': '48777cdf40a04623c77df5de4de89735a8b286288e7bd5955fbf22c0cef63444',
 }
 
 const GITHUB = 'https://github.com/nexi-lab/nexus/releases/download'
@@ -65,7 +60,11 @@ const GITHUB = 'https://github.com/nexi-lab/nexus/releases/download'
 function loadVersions() {
   const p = join(SCRIPT_DIR, '..', 'src', 'server', 'nexus', 'runtime-versions.json')
   const j = JSON.parse(readFileSync(p, 'utf8'))
-  return { vault: j['nexus-vault'], nexusd: j['nexusd-cluster'] }
+  return {
+    vault: j['nexus-vault'],
+    nexusd: j['nexusd-cluster'],
+    nexusdChecksums: j['nexusd-cluster-sha256'],
+  }
 }
 
 // ── 平台映射 ──────────────────────────────────────────────────────────────────
@@ -220,7 +219,7 @@ async function ensureVault(version) {
     console.warn(`[fetch-nexus] vault: no upstream artifact for ${platform}-${arch}; skip.`)
     return
   }
-  const expectedSha = SHA256[artifact]
+  const expectedSha = VAULT_SHA256[artifact]
   if (!expectedSha) {
     // 下载前判定：无 sha 条目视为不支持，跳过不下载（安全，不静默安装未校验字节）。
     console.warn(`[fetch-nexus] vault: no known sha256 for ${artifact}; skip (unsupported platform).`)
@@ -261,17 +260,16 @@ async function ensureVault(version) {
   }
 }
 
-async function ensureNexusd(version) {
+async function ensureNexusd(version, checksums) {
   const { platform, arch } = process
   const artifact = nexusdArtifact(platform, arch)
   if (!artifact) {
     console.warn(`[fetch-nexus] nexusd: no upstream artifact for ${platform}-${arch}; skip.`)
     return
   }
-  const expectedSha = SHA256[artifact]
-  if (!expectedSha) {
-    console.warn(`[fetch-nexus] nexusd: no known sha256 for ${artifact}; skip (unsupported platform).`)
-    return
+  const expectedSha = checksums?.[artifact]
+  if (typeof expectedSha !== 'string' || !/^[0-9a-f]{64}$/.test(expectedSha)) {
+    throw new Error(`Invalid or missing cluster checksum for ${artifact} at v${version}`)
   }
   const binDir = join(REPO_ROOT, 'bin', 'nexus')
   const targetName = platform === 'win32' ? 'nexusd.exe' : 'nexusd'
@@ -306,11 +304,11 @@ async function ensureNexusd(version) {
  * 运行期 assertVaultPluginAvailable / resolveCompatibleBinary 的 fail-fast 作为最终兜底。
  */
 export async function ensureNexusRuntime() {
-  const { vault, nexusd } = loadVersions()
+  const { vault, nexusd, nexusdChecksums } = loadVersions()
   await ensureVault(vault).catch(e =>
     console.warn(`[fetch-nexus] vault fetch failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`),
   )
-  await ensureNexusd(nexusd).catch(e =>
+  await ensureNexusd(nexusd, nexusdChecksums).catch(e =>
     console.warn(`[fetch-nexus] nexusd fetch failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`),
   )
 }
