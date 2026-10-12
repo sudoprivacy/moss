@@ -35,6 +35,8 @@ Kubernetes service account token or issuer private key.
 The existing SudoWork/Moss account, recharge and SudoRouter quota services remain
 the accounting path. Session startup resolves the model credential for the
 session's actual owner. Metered accounts without that credential fail startup.
+Metered cohost sessions also require an owner runtime; the legacy shared daemon
+cannot receive them using its deployment-level credential.
 
 Both standalone and native engines use the same proxy configuration builder.
 The native engine addresses `nexus:///model`; the upstream URL and owner API Key
@@ -95,6 +97,11 @@ each conversation control frame and terminal input, including established
 connections. Idle management subscribers are checked every five seconds.
 Management metadata identifies the intended actor and does not replace current
 permission.
+
+When owner Pods are configured, session creation and spawn reject `host` and
+`docker` execution on the Moss server. Legacy gVisor sessions may continue during
+migration. Private deployments without owner Pods retain their existing runtime
+choices. SudoWork desktop local execution remains on the user's machine.
 
 ## Deployment settings
 

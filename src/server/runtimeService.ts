@@ -69,6 +69,7 @@ import {
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import type { NexusClient } from './nexus/nexusClient.js'
 import { UserPodService } from './runtime/userPodService.js'
+import { assertRuntimePlacement } from './runtime/runtimePlacementPolicy.js'
 import { readRuntimeRelease } from './runtime/runtimeRelease.js'
 import { resolveCohostNexusConfig } from './nexus/nexusEnvConfig.js'
 import { resolveCohostConnection as externalCohostConnection, encodeCohostConnection } from './nexus/cohostConnection.js'
@@ -711,6 +712,7 @@ export class RuntimeService {
   }
 
   private assertCohostDeploymentAccess(runtimeType: string, userId: string | undefined): void {
+    assertRuntimePlacement(runtimeType, Boolean(this.userPods))
     const configured = process.env.MOSS_COHOST_ALLOWED_USERS
     if (runtimeType !== 'cohost' || configured === undefined) return
     const allowed = new Set(configured.split(',').map(value => value.trim()).filter(Boolean))
@@ -1851,6 +1853,7 @@ export class RuntimeService {
     const sharedBilling = this.authService.getOrganizationBillingService?.()
     const isSharedModelAccount = Boolean(session.orgId && sharedBilling && await sharedBilling.isShared(session.orgId))
     const isManagedModelAccount = await this.authService.isSudorouterManaged?.(session.orgId) ?? isSharedModelAccount
+    if (session.source !== 'cabin') assertRuntimePlacement(session.runtime.type, Boolean(this.userPods), isManagedModelAccount)
 
     // Get user model preference in main process (runner doesn't have DB access)
     // Model priority: user preference > system settings > default
