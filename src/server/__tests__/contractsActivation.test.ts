@@ -6,6 +6,7 @@ import { dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'bun:test'
 import { buildNexusArgs } from '../nexus/nexusManager.js'
+import { shellPathEnvironment } from '../testing/shellPaths.js'
 
 const root = resolve(import.meta.dir, '../../..')
 const candidateVersion = '0.2.1'
@@ -262,8 +263,7 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
           ...process.env,
           EXISTING_INSTALL: existingInstall,
           EXPLICIT_DECLARATION: explicitDeclaration,
-          ENV_PATH: envPath,
-          LOCK_PATH: lockPath,
+          ...shellPathEnvironment({ ENV_PATH: envPath, LOCK_PATH: lockPath }),
         },
       })
     try {

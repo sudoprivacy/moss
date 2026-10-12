@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
+import { shellPathEnvironment, toShellPath } from "../testing/shellPaths.js";
 
 const root = resolve(import.meta.dir, "../../..");
 
@@ -108,21 +109,23 @@ exit 99
         // Git Bash otherwise copies directories for ln -s on Windows, so the
         // rollback test would never exercise the production symlink switch.
         ...(process.platform === "win32" ? { MSYS: "winsymlinks:nativestrict" } : {}),
-        ACTION_LOG: actionLog,
-        CONFIG_BACKUP: configBackup,
-        CONFIG_PATH: configPath,
-        ENV_BACKUP: scenario.envExisted ? envBackup : "",
         ENV_EXISTED: scenario.envExisted ? "1" : "0",
-        ENV_PATH: envPath,
         EXISTING_INSTALL: "1",
         FAILURE_STATUS: String(scenario.failureStatus),
-        HOME: tempRoot,
-        INSTALL_DIR: installDir,
-        PREVIOUS_TARGET: scenario.previousRelease ? oldRelease : "",
         SERVICE_NAME: "moss-server-test",
         SERVICE_STOPPED: scenario.serviceStopped ? "1" : "0",
-        SYSTEMCTL_LOG: systemctlLog,
-        TMPDIR: tempRoot,
+        ...shellPathEnvironment({
+          ACTION_LOG: actionLog,
+          CONFIG_BACKUP: configBackup,
+          CONFIG_PATH: configPath,
+          ENV_BACKUP: scenario.envExisted ? envBackup : "",
+          ENV_PATH: envPath,
+          HOME: tempRoot,
+          INSTALL_DIR: installDir,
+          PREVIOUS_TARGET: scenario.previousRelease ? oldRelease : "",
+          SYSTEMCTL_LOG: systemctlLog,
+          TMPDIR: tempRoot,
+        }),
       },
     });
 
@@ -135,7 +138,7 @@ exit 99
       nexusLock: readFileSync(nexusLock, "utf8"),
       nexusState: readFileSync(nexusState, "utf8"),
       oldRelease: realpathSync(oldRelease),
-      previousTarget: oldRelease,
+      previousTarget: toShellPath(oldRelease),
       restartLog: existsSync(systemctlLog) ? readFileSync(systemctlLog, "utf8") : "",
       rollbackLinkExists: existsSync(resolve(installDir, ".current.rollback")),
       status: execution.status,
