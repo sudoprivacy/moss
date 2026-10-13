@@ -1,0 +1,56 @@
+[
+  {
+    "phase": "provider-review",
+    "name": "Sudowork 本地执行编排助手",
+    "appId": "6a5b8645-dfdb-4d43-bc24-e8b628ce8b86",
+    "mode": "advanced-chat",
+    "nodeTypes": [
+      "start",
+      "llm",
+      "answer"
+    ],
+    "sourceDigest": "sha256:b311fc5b4797376ed378c04d4b372ec14aafbfc67beca287b3211c401ce416f0"
+  },
+  {
+    "phase": "live-task",
+    "taskId": "25648575-f406-47e6-a556-0206404a0b04",
+    "sessionId": "6fbad3c5-4ab7-4000-83b4-d89aa3c3ab48",
+    "status": "succeeded",
+    "answer": "42",
+    "outputStatus": "valid",
+    "errorCode": null,
+    "events": 5,
+    "providerRefs": {
+      "conversation_id": "ce113db8-0585-4a09-8e62-625810709f02",
+      "message_id": "70497d3f-53d0-4ca3-ba5a-98f8ed0ea07c",
+      "task_id": "2b0e0fdc-ece1-4303-a884-7bec716e7bd2",
+      "workflow_run_id": "e4ded6f9-165e-45b1-906d-9cc3a7c40efc"
+    }
+  },
+  {
+    "phase": "live-task",
+    "taskId": "96132fd7-c15e-4020-8996-69e5ca7c44e4",
+    "sessionId": "6fbad3c5-4ab7-4000-83b4-d89aa3c3ab48",
+    "status": "succeeded",
+    "answer": "50",
+    "outputStatus": "valid",
+    "errorCode": null,
+    "events": 6,
+    "providerRefs": {
+      "conversation_id": "ce113db8-0585-4a09-8e62-625810709f02",
+      "message_id": "9d008793-1304-42cc-ba83-7bafea99bfda",
+      "task_id": "b2a438e4-9930-4d7a-a88e-389623756c2f",
+      "workflow_run_id": "7a91bca7-3b96-47f8-ac56-7b5420d4f9a1"
+    }
+  },
+  {
+    "phase": "passed",
+    "chain": "SudoWork shared client -> authenticated Moss HTTP task dispatcher/AuthService/DbDriver -> real Dify Chatflow",
+    "turns": 2,
+    "idempotency": true,
+    "historyReload": true,
+    "unauthenticatedDenied": true,
+    "secretPort": "real local Nexus vault",
+    "store": "isolated SQLite memory fixture"
+  }
+]
