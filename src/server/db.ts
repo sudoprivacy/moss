@@ -3030,11 +3030,14 @@ export class DirectConnectStore {
     if (status) { conds.push('status = ?'); params.push(status) }
     if (orgId) { conds.push('org_id = ?'); params.push(orgId) }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
-    return this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`, params as SqlParam[])
+    const rows = await this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`, params as SqlParam[])
+    // Hosted providers share Catalog storage but have no native template or rules artifact.
+    return rows.filter(row => parseJsonObject(row.provider_binding)?.executionMode !== 'external_hosted')
   }
 
   async getTenantAssistant(id: string, orgId?: string): Promise<SqlRow | null> {
-    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?${orgId ? " AND org_id = ? AND source_type = 'tenant'" : ''}`, orgId ? [id, orgId] : [id])) ?? null
+    const row = await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?${orgId ? " AND org_id = ? AND source_type = 'tenant'" : ''}`, orgId ? [id, orgId] : [id])
+    return row && parseJsonObject(row.provider_binding)?.executionMode !== 'external_hosted' ? row : null
   }
 
   async getTenantAssistantByName(name: string, orgId?: string): Promise<SqlRow | null> {

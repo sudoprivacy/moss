@@ -137,3 +137,11 @@ SudoWork **智能体列表 → 开始对话**（`/conversation/external%3A<sessi
 本轮验证沿用隔离数据目录 `~/.local/share/dify-pilot-20261012`，临时启动服务，结束后恢复停止，保留数据。完整 Electron 开发应用已验证，生产安装包仍未验证；Moss 任务数据库仍使用 SQLite，WebUI 使用 PostgreSQL 不代表 Moss 任务库已完成 PG/多副本验收。其他试点限制继续适用。
 
 本轮最终自动检查：SudoWork全量334个测试文件通过、8个跳过，3192项通过、36项跳过；含组织资源不进入个人页签的新增回归。renderer/desktop/WebUI三处`tsc --noEmit`通过，契约digest校验通过。Moss外部任务与兼容目录31项通过，`build:node`通过；变更文件lint与diff空白检查通过（renderer保留1条既有`any`警告）。10月12日全量Moss/sudostack记录属于上一轮，本轮未重复宣称全量复验。
+
+### 专属目录 404 修正
+
+2026-10-13 用户界面复验发现：`/api/v1/agents/tenant`（`agent-templates/tenant`别名）仍把Catalog中的Dify外部条目当作原生模板，点击详情会请求不存在的`/rules`文件并返回404。此前只覆盖Hub兼容目录过滤，遗漏了这条原生专属路径。
+
+现已在原生模板Store的列表与按ID读取入口排除`external_hosted`，避免错误的下载/规则编辑/原生审批入口；Catalog原始记录与外部执行接口保留。新增隔离回归与相关外部测试32项通过，原生专属HTTP路由10项通过，Node构建、变更lint与现有类型基线检查通过。实际管理员和普通用户的两种模板别名均排除Dify，已发布外部目录仍保留该智能体。完整WebUI复验专属页仅有一张正常外部Dify卡片，不再有原生模板重复条目；本地Moss已重启生效，其他服务保持运行。
+
+管理入口后续调整建议：Moss组织管理员在“智能体管理 → 专属智能体”统一接入和发布，按原生模板/外部托管类型分开表单与操作，外部接入沿用既有`external-agents/admin`及review接口；SudoWork保留获准目录和对话。当前尚未迁移管理界面，不能使用原生“创建专属智能体”表单代替外部接入审批。
