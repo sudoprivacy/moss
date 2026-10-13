@@ -626,9 +626,21 @@ export class RuntimeService {
     }
   }
 
-  private async resourceScope(session: { orgId: string; userId: string; role: string; scopes: string[] }) {
-    return { orgId: session.orgId, userId: session.userId, driver: this.store.driver,
+  private async resourceScope(session: { orgId: string; userId: string; role: string; scopes: string[]; assistantName?: string | null }) {
+    const base = { orgId: session.orgId, userId: session.userId, driver: this.store.driver,
       visibility: await this.authService.buildVisibilityFilter({ ...session, rawToken: '', keyId: '', jti: '', exp: 0 }) }
+    // Park cross-org grant (plan 2.6 #4): enterprise sessions targeting a
+    // park-assigned assistant resolve the owning park org's resources inside
+    // this scope. Business logic stays in the park domain — dynamic import so
+    // the core service keeps no static business-domain dependency.
+    if (!session.assistantName) return base
+    try {
+      const { resolveParkScopedResources } = await import('./park/parkAuthorization.js')
+      const granted = await resolveParkScopedResources(this.store.driver, session.orgId, session.assistantName)
+      return granted ? { ...base, grantedResources: granted } : base
+    } catch {
+      return base
+    }
   }
 
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {

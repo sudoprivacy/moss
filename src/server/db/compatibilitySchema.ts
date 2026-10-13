@@ -7,6 +7,7 @@ import { ensurePlatformIntegrationSettingsSchema } from '../configuration/platfo
 import { ensureOrganizationModelSettingsSchema } from '../configuration/organizationModelSettingsRepository.js'
 import { ensureDifySchema } from '../dify/difySchema.js'
 import { ensureIdentitySchema } from '../identity/identityRepository.js'
+import { ensureParkSchema } from '../park/parkSchema.js'
 import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 
 export function ensureSqliteCompatibilityDomainSchemas(
@@ -22,6 +23,7 @@ export function ensureSqliteCompatibilityDomainSchemas(
     ensurePlatformIntegrationSettingsSchema(db)
     ensureDifySchema(db)
     ensureBillingSchema(db)
+    ensureParkSchema(db)
   })
 }
 

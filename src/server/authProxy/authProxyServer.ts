@@ -276,6 +276,38 @@ const CONTROL_HEADERS = new Set([
   'x-auth-scheme', 'x-remote-url', 'x-remote-method', 'host', 'connection',
 ])
 
+/** Recursively drop `cache_control` keys from a parsed JSON value. */
+export function dropCacheControl(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(dropCacheControl)
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k === 'cache_control') continue
+      out[k] = dropCacheControl(v)
+    }
+    return out
+  }
+  return value
+}
+
+/**
+ * MOSS_STRIP_CACHE_CONTROL=1 compatibility shim: some Anthropic-compatible
+ * gateways (new-api based SudoRouter) reject prompt-cache `cache_control`
+ * fields with a bare 400. When the env switch is on, JSON request bodies are
+ * rewritten with every `cache_control` key removed; non-JSON / unparseable
+ * bodies pass through untouched. Default off — zero behavior change.
+ */
+export function stripCacheControlFromBody(body: Buffer): Buffer {
+  if (process.env.MOSS_STRIP_CACHE_CONTROL !== '1' || body.length === 0) return body
+  try {
+    const parsed = JSON.parse(body.toString('utf8'))
+    if (parsed === null || typeof parsed !== 'object') return body
+    return Buffer.from(JSON.stringify(dropCacheControl(parsed)), 'utf8')
+  } catch {
+    return body
+  }
+}
+
 /** Collect a request's body into a single Buffer (empty when there is none). */
 function readRequestBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -777,6 +809,23 @@ export class AuthProxyServer {
     // original zero-copy streaming pipe (request body and upstream response both
     // streamed) — unchanged behavior for every non-login-type credential.
     if (!mintRetry) {
+      // MOSS_STRIP_CACHE_CONTROL=1: buffer the body so cache_control can be
+      // stripped (JSON rewrite); otherwise keep the original zero-copy pipe.
+      if (process.env.MOSS_STRIP_CACHE_CONTROL === '1') {
+        const body = stripCacheControlFromBody(await readRequestBody(req))
+        const headers = { ...upstreamHeaders }
+        if (body.length > 0 && !headers['Content-Length'] && headers['content-length'] === undefined) {
+          headers['Content-Length'] = String(body.length)
+        }
+        const upstreamReq = doRequest({ ...baseRequestOptions, headers })
+        upstreamReq.on('response', (upstreamRes) => {
+          res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers)
+          upstreamRes.pipe(res)
+        })
+        if (body.length > 0) upstreamReq.write(body)
+        upstreamReq.end()
+        return
+      }
       const upstreamReq = doRequest({ ...baseRequestOptions, headers: upstreamHeaders })
       upstreamReq.on('response', (upstreamRes) => {
         res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers)
@@ -804,7 +853,7 @@ export class AuthProxyServer {
     // replayed, and buffer the upstream response so its status can be inspected
     // before we commit to the client. On a 401 (stale/invalidated minted token)
     // we force a fresh mint, swap the Bearer header, and forward once more.
-    const reqBody = await readRequestBody(req)
+    const reqBody = stripCacheControlFromBody(await readRequestBody(req))
 
     type UpstreamResult = { status: number; headers: IncomingMessage['headers']; body: Buffer }
     const sendUpstream = (headers: Record<string, string>): Promise<UpstreamResult> =>

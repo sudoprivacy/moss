@@ -2,6 +2,9 @@ import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
 import { dispatchOrganizationRecharge, parseOrganizationPaymentCallback } from './billing/organizationRechargeRoutes.js'
+import { dispatchParkApi, handleParkEnterpriseRegister } from './park/parkRoutes.js'
+import { dispatchParkAgentApi } from './park/parkAgentRoutes.js'
+import { assertParkAssistantAllowed } from './park/parkAuthorization.js'
 import { artifactManifestPath, readArtifacts, projectArtifactDrafts } from './artifacts.js'
 import { SudoworkCasService, SudoworkCasError } from './api/compat/sudowork/casService.js'
 import { PlatformConfigService } from './configuration/platformConfigService.js'
@@ -2493,6 +2496,22 @@ export function startServer(
       // else, so the management routes below still require a normal token.
       if (await eventTriggerIngest.handle(req, res, pathname)) {
         return
+      }
+
+      // Park prospect-enterprise registration (plan 2.3). Mounted above the
+      // bearer-JWT wall for the same reason as eventTriggerIngest above: the
+      // caller is an unauthenticated signup. The park module owns SMS-code
+      // verification; request-rate limiting is layered at the BFF plus the
+      // phone_login_codes attempt counter.
+      if (req.method === 'POST' && pathname === '/api/v1/park/register-enterprise') {
+        const result = await handleParkEnterpriseRegister(
+          { driver: runtime.store.driver, authService },
+          await readJsonBody(req),
+        )
+        if (result) {
+          writeJson(res, result.status, result.body)
+          return
+        }
       }
 
       if ((req.method === 'GET' || isHead) && pathname === '/') {
@@ -5130,6 +5149,24 @@ export function startServer(
         const filtered = access === null ? all : all.filter(w => access.has(w.id))
         writeJson(res, 200, { wikis: filtered })
         return
+      }
+
+      // ---- Agent-facing park tool endpoints (plan 2.4). Auth model mirrors
+      // the wiki endpoints above: the in-container token carries assistantId;
+      // the park module gates on assistant assignment (park_assistant_assignments).
+      if (pathname.startsWith('/api/v1/agent/park/')) {
+        const result = await dispatchParkAgentApi(
+          {
+            driver: runtime.store.driver,
+            vectorSearchOptions: config.wikiIndex.enabled
+              ? { modelId: config.wikiIndex.modelId, cacheDir: MOSS_MODELS_DIR, mirror: config.wikiIndex.modelMirror }
+              : null,
+          },
+          auth, req.method ?? 'GET', pathname, url, req, documentStore)
+        if (result) {
+          writeJson(res, result.status, result.body)
+          return
+        }
       }
 
       const agentWikiFilesMatch = pathname.match(/^\/api\/v1\/agent\/wikis\/([^/]+)\/files$/)
@@ -10585,6 +10622,12 @@ export function startServer(
           ? await resolveAssistantDisplayName(rawAssistantName)
           : rawAssistantName
 
+        // Park assignment gate (plan 2.6 #2): park-assisted assistants are
+        // only usable by their assigned enterprise orgs (or the owning park
+        // org itself — same-org users keep the regular visible_to path).
+        // Assistants outside the assignment table pass through untouched.
+        await assertParkAssistantAllowed(runtime.store.driver, auth, rawAssistantName)
+
         const created = await runtime.createSession({
           cwd,
           dangerouslySkipPermissions,
@@ -10621,6 +10664,21 @@ export function startServer(
           owner_live: owner.ownerLive,
         })
         return
+      }
+
+      // Park user-side business domain (plan 2.3) — last domain attempt
+      // before the 404 fallthrough; cron-style dispatch inside the auth wall.
+      // All park/enterprise context derives from `auth` (plan §6.2/§12.1).
+      if (pathname.startsWith('/api/v1/park/') || pathname.startsWith('/api/v1/enterprise/') || /^\/api\/v1\/parks\//.test(pathname)) {
+        const result = await dispatchParkApi(
+          { driver: runtime.store.driver },
+          auth, req.method ?? 'GET', url,
+          ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method ?? '') ? await readJsonBody(req) : {},
+          documentStore)
+        if (result) {
+          writeJson(res, result.status, result.body)
+          return
+        }
       }
 
       throw new HttpError(404, 'Not found')

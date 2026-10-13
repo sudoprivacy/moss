@@ -28,6 +28,20 @@ export type OrganizationResourceScope = {
   snapshot?: OrganizationResourceSnapshot
   isPersonalInstall?: boolean
   preparedResources?: Map<string, OrganizationResource>
+  /**
+   * Park cross-org grant (plan 2.6 #4): when the session's assistant is
+   * assigned (park_assistant_assignments) to the caller's enterprise org,
+   * the owning park org's assistant/skill resources resolve inside this
+   * scope. Authorization comes from the assignment table — an explicit
+   * grant — so granted rows also bypass the caller-visibility filter below
+   * (visible_to is park-org-internal semantics an enterprise user can never
+   * satisfy; the bypass mirrors that).
+   */
+  grantedResources?: {
+    parkOrgId: string
+    agentIds: string[]
+    skillIds: string[]
+  }
 }
 
 // An explicit request/session boundary creates the scope. No process-global
@@ -78,9 +92,23 @@ export async function listOrganizationResources(kind: ResourceKind): Promise<Org
     resources = scope.snapshot.resources.filter(r => r.kind === kind)
   } else {
     if (!scope.driver) throw new HttpError(403, 'Missing organization resource repository')
+    // Park cross-org grant (plan 2.6 #5): only the tenant tables gain the
+    // granted branch — org_resource_installations.id is the installation row
+    // UUID (resource id lives in source_resource_id), so an OR on it can
+    // never match a tenant-table resource id.
+    const granted = scope.grantedResources
+      ? (kind === 'agent' ? scope.grantedResources.agentIds : scope.grantedResources.skillIds)
+      : []
+    const tenantSql = granted.length > 0
+      ? `SELECT * FROM ${tableFor(kind)} WHERE (org_id = ? AND status = 'approved' AND source_type IN ('tenant', 'custom'))
+          OR (org_id = ? AND id IN (${granted.map(() => '?').join(', ')}))`
+      : `SELECT * FROM ${tableFor(kind)} WHERE org_id = ? AND status = 'approved' AND source_type IN ('tenant', 'custom')`
+    const tenantParams = granted.length > 0
+      ? [scope.orgId, scope.grantedResources!.parkOrgId, ...granted]
+      : [scope.orgId]
     const [installed, owned] = await Promise.all([
       scope.driver.all(`SELECT * FROM org_resource_installations WHERE org_id = ? AND resource_type = ?`, [scope.orgId, kind]),
-      scope.driver.all(`SELECT * FROM ${tableFor(kind)} WHERE org_id = ? AND status = 'approved' AND source_type IN ('tenant', 'custom')`, [scope.orgId]),
+      scope.driver.all(tenantSql, tenantParams),
     ])
     resources = installed.filter(row => !String(row.source_provider).startsWith('user:') || row.installed_by === scope.userId).map(row => {
       const meta = { ...json(row.manifest_json), ...json(row.config_json), id: String(row.source_resource_id), name: String(row.name), source_type: 'hub', installation_id: String(row.id) }
@@ -91,7 +119,13 @@ export async function listOrganizationResources(kind: ResourceKind): Promise<Org
     resources = resources.filter((resource, index, all) => all.findIndex(candidate => candidate.id === resource.id) === index)
     resources.push(...(await Promise.all(owned.map(row => privateResource(kind, row)))).filter((r): r is OrganizationResource => r !== null))
   }
-  return resources.filter(r => !scope.visibility || isVisibleTo(r.meta.visible_to as VisibleTo, scope.visibility))
+  const grantedIds = scope.grantedResources
+    ? new Set([...scope.grantedResources.agentIds, ...scope.grantedResources.skillIds])
+    : null
+  return resources.filter(r =>
+    (grantedIds !== null && grantedIds.has(r.id))
+    || !scope.visibility
+    || isVisibleTo(r.meta.visible_to as VisibleTo, scope.visibility))
 }
 
 export async function findOrganizationResource(kind: ResourceKind, reference: string): Promise<OrganizationResource | null> {

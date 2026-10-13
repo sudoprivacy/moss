@@ -1999,6 +1999,192 @@ interface PgMigration {
   sql: string
 }
 
+const MIGRATION_0012_PARK = `
+CREATE TABLE IF NOT EXISTS park_org_profiles (
+  moss_org_id TEXT CONSTRAINT park_org_profiles_pkey PRIMARY KEY,
+  org_type TEXT NOT NULL CONSTRAINT park_org_profiles_org_type_check
+    CHECK (org_type IN ('park', 'enterprise')),
+  display_name TEXT NOT NULL,
+  lifecycle TEXT,
+  external_id TEXT,
+  metadata_json TEXT,
+  is_default_park BIGINT NOT NULL DEFAULT 0 CONSTRAINT park_org_profiles_default_check
+    CHECK (is_default_park IN (0, 1)),
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS park_org_profiles_default_park_idx
+  ON park_org_profiles (is_default_park)
+  WHERE org_type = 'park' AND is_default_park = 1;
+
+CREATE TABLE IF NOT EXISTS park_enterprise_bindings (
+  binding_id TEXT CONSTRAINT park_enterprise_bindings_pkey PRIMARY KEY,
+  park_org_id TEXT NOT NULL,
+  enterprise_org_id TEXT NOT NULL,
+  lifecycle TEXT NOT NULL DEFAULT 'prospect'
+    CONSTRAINT park_bindings_lifecycle_check CHECK (lifecycle IN ('prospect', 'active', 'exiting', 'exited')),
+  relationship_type TEXT NOT NULL DEFAULT 'prospective'
+    CONSTRAINT park_bindings_relationship_check CHECK (relationship_type IN ('prospective', 'resident', 'partner')),
+  service_scope_json TEXT,
+  assigned_owner_id TEXT,
+  joined_at BIGINT,
+  exited_at BIGINT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  CONSTRAINT park_bindings_pair_unique UNIQUE (park_org_id, enterprise_org_id)
+);
+CREATE INDEX IF NOT EXISTS park_bindings_enterprise_idx
+  ON park_enterprise_bindings (enterprise_org_id);
+
+CREATE TABLE IF NOT EXISTS park_members (
+  id TEXT CONSTRAINT park_members_pkey PRIMARY KEY,
+  park_org_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  park_role TEXT NOT NULL
+    CONSTRAINT park_members_role_check CHECK (park_role IN ('park_leader', 'park_ops', 'park_system_operator')),
+  created_at BIGINT NOT NULL,
+  CONSTRAINT park_members_pair_unique UNIQUE (park_org_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS enterprise_profiles (
+  enterprise_org_id TEXT CONSTRAINT enterprise_profiles_pkey PRIMARY KEY,
+  park_org_id TEXT NOT NULL,
+  lifecycle TEXT NOT NULL DEFAULT 'prospect',
+  enterprise_name TEXT NOT NULL,
+  industry TEXT,
+  scale TEXT,
+  contact_name TEXT,
+  contact_phone TEXT,
+  assigned_owner_id TEXT,
+  tags_json TEXT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS enterprise_profiles_park_idx
+  ON enterprise_profiles (park_org_id);
+
+CREATE TABLE IF NOT EXISTS inquiries (
+  inquiry_id TEXT CONSTRAINT inquiries_pkey PRIMARY KEY,
+  park_org_id TEXT NOT NULL,
+  enterprise_org_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  assistant_session_id TEXT,
+  question_ref TEXT,
+  redacted_question TEXT,
+  answer_ref TEXT,
+  redacted_answer TEXT,
+  category TEXT NOT NULL DEFAULT 'consultation'
+    CONSTRAINT inquiries_category_check CHECK (category IN ('consultation', 'service_request')),
+  intent TEXT,
+  confidence INTEGER CONSTRAINT inquiries_confidence_check
+    CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 100)),
+  source_refs_json TEXT,
+  consent_state TEXT NOT NULL DEFAULT 'granted',
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS inquiries_park_created_idx
+  ON inquiries (park_org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS inquiries_enterprise_idx
+  ON inquiries (enterprise_org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS inquiries_user_idx
+  ON inquiries (user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS leads (
+  lead_id TEXT CONSTRAINT leads_pkey PRIMARY KEY,
+  park_org_id TEXT NOT NULL,
+  enterprise_org_id TEXT NOT NULL,
+  source TEXT NOT NULL CONSTRAINT leads_source_check CHECK (source IN ('inquiry', 'manual')),
+  source_inquiry_id TEXT,
+  score INTEGER CONSTRAINT leads_score_check CHECK (score IS NULL OR (score >= 0 AND score <= 100)),
+  score_explanation TEXT,
+  industry_tags_json TEXT,
+  policy_matches_json TEXT,
+  suggested_action TEXT,
+  owner_id TEXT,
+  status TEXT NOT NULL DEFAULT 'proposed'
+    CONSTRAINT leads_status_check
+    CHECK (status IN ('proposed', 'confirmed', 'assigned', 'following_up', 'converted', 'lost', 'rejected')),
+  idempotency_key TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  CONSTRAINT leads_park_idempotency_unique UNIQUE (park_org_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS leads_park_status_idx
+  ON leads (park_org_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS leads_owner_idx ON leads (owner_id);
+
+CREATE TABLE IF NOT EXISTS lead_watches (
+  lead_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  CONSTRAINT lead_watches_pkey PRIMARY KEY (lead_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS park_assistant_assignments (
+  id TEXT CONSTRAINT park_assistant_assignments_pkey PRIMARY KEY,
+  park_org_id TEXT NOT NULL,
+  assistant_id TEXT NOT NULL,
+  enterprise_org_id TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  CONSTRAINT park_assignments_triple_unique UNIQUE (park_org_id, assistant_id, enterprise_org_id)
+);
+CREATE INDEX IF NOT EXISTS park_assignments_enterprise_idx
+  ON park_assistant_assignments (enterprise_org_id);
+CREATE INDEX IF NOT EXISTS park_assignments_assistant_idx
+  ON park_assistant_assignments (assistant_id);
+
+CREATE TABLE IF NOT EXISTS park_audit_events (
+  audit_id TEXT CONSTRAINT park_audit_events_pkey PRIMARY KEY,
+  park_org_id TEXT NOT NULL,
+  actor_user_id TEXT NOT NULL,
+  actor_org_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT,
+  reason TEXT,
+  before_summary_json TEXT,
+  after_summary_json TEXT,
+  result TEXT,
+  request_id TEXT,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS park_audit_park_created_idx
+  ON park_audit_events (park_org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS park_audit_actor_idx
+  ON park_audit_events (actor_user_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION moss_reject_park_audit_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'park audit events are append-only';
+END $$;
+DROP TRIGGER IF EXISTS park_audit_events_no_update ON park_audit_events;
+CREATE TRIGGER park_audit_events_no_update
+  BEFORE UPDATE ON park_audit_events
+  FOR EACH ROW EXECUTE FUNCTION moss_reject_park_audit_mutation();
+DROP TRIGGER IF EXISTS park_audit_events_no_delete ON park_audit_events;
+CREATE TRIGGER park_audit_events_no_delete
+  BEFORE DELETE ON park_audit_events
+  FOR EACH ROW EXECUTE FUNCTION moss_reject_park_audit_mutation();
+
+CREATE TABLE IF NOT EXISTS exit_cases (
+  exit_case_id TEXT CONSTRAINT exit_cases_pkey PRIMARY KEY,
+  park_org_id TEXT NOT NULL,
+  enterprise_org_id TEXT NOT NULL,
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'proposed'
+    CONSTRAINT exit_cases_status_check
+    CHECK (status IN ('proposed', 'approved', 'inventorying', 'archived', 'completed', 'cancelled')),
+  retention_policy TEXT,
+  asset_recovery_status TEXT,
+  data_cleanup_status TEXT,
+  approved_by TEXT,
+  completed_at BIGINT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+`
+
 const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
@@ -2026,6 +2212,7 @@ const MIGRATIONS: PgMigration[] = [
       ON user_agents (org_id, user_id, created_at);
   ` },
   { version: 11, name: 'cohost-session-bindings', sql: COHOST_SESSION_SCHEMA },
+  { version: 12, name: 'park-ai-domain', sql: MIGRATION_0012_PARK },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */
