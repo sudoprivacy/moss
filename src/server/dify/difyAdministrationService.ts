@@ -4,6 +4,7 @@ import JSZip from 'jszip'
 import { assertTrustedCommandContext, onlineCommandContext, type CommandContext } from '../application/commandContext.js'
 import type { AuthCenterDb } from '../authCenter/db.js'
 import type { CatalogAgent, CatalogRepository } from '../catalog/catalogRepository.js'
+import { isExternalHosted } from '../catalog/executionMode.js'
 import type { CatalogService } from '../catalog/catalogService.js'
 import type { CatalogArtifactPort } from '../catalog/catalogUploadService.js'
 import type { IdentityRepository, IntegrationConnection } from '../identity/identityRepository.js'
@@ -282,6 +283,9 @@ export class DifyAdministrationService {
 
   async deleteAgent(orgId: string, assistantId: string, context: CommandContext): Promise<void> {
     assertTrustedCommandContext(context)
+    // Reject hosted records before reserving a legacy operation; keep deleted-native replay intact.
+    const existing = await this.options.catalog.getAgent(assistantId, orgId)
+    if (existing && isExternalHosted(existing.providerBinding)) throw new Error('not found')
     const operation = await this.prepareOperation({
       orgId,
       operationType: 'app.delete',
@@ -328,13 +332,13 @@ export class DifyAdministrationService {
 
   async listAgents(orgId: string): Promise<DifyAgentSummary[]> {
     const agents = (await this.options.catalog.listAgents({ orgId, includeDisabled: true })).items
-      .filter(agent => agent.providerType === 'dify' && Boolean(agent.providerBinding?.appId))
+      .filter(agent => !isExternalHosted(agent.providerBinding) && agent.providerType === 'dify' && Boolean(agent.providerBinding?.appId))
     return Promise.all(agents.map(agent => this.agentSummary(agent)))
   }
 
   async getAgent(orgId: string, assistantId: string): Promise<DifyAgentSummary | null> {
     const agent = await this.options.catalog.getAgent(assistantId, orgId)
-    return agent?.providerType === 'dify' && agent.providerBinding?.appId
+    return agent && !isExternalHosted(agent.providerBinding) && agent.providerType === 'dify' && agent.providerBinding?.appId
       ? this.agentSummary(agent)
       : null
   }
@@ -419,7 +423,7 @@ export class DifyAdministrationService {
     const profile = await this.requireProfile(orgId)
     const enterpriseId = await this.options.identities.getNumericAlias('enterprise', orgId)
     const agents = (await this.options.catalog.listAgents({ orgId, includeDisabled: true })).items
-      .filter(agent => agent.orgId === orgId)
+      .filter(agent => agent.orgId === orgId && !isExternalHosted(agent.providerBinding))
     return Promise.all(agents.map(async (agent) => {
       const sharedTenantCodes = await this.organizationCodes(
         await this.options.catalog.listAssignedOrganizationIds('agent', agent.id),
@@ -656,7 +660,7 @@ export class DifyAdministrationService {
 
   private async defaultConnection(orgId: string): Promise<IntegrationConnection | null> {
     const enabled = (await this.options.identities.listIntegrationConnections(orgId, 'dify'))
-      .filter(connection => connection.enabled)
+      .filter(connection => connection.enabled && !isExternalHosted(connection.config))
     return enabled.find(connection => connection.config.isDefault === true)
       ?? (enabled.length === 1 ? enabled[0]! : null)
   }
@@ -669,7 +673,7 @@ export class DifyAdministrationService {
 
   private async requireAgent(orgId: string, assistantId: string): Promise<CatalogAgent> {
     const agent = await this.options.catalog.getAgent(assistantId, orgId)
-    if (!agent) throw new Error('not found')
+    if (!agent || isExternalHosted(agent.providerBinding)) throw new Error('not found')
     return agent
   }
 

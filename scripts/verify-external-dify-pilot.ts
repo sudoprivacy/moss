@@ -1,3 +1,4 @@
+import { parseNexusSecretRef } from '../src/server/dify/difyConnectionService.js'
 /** Opt-in live verification; credentials arrive on stdin and stay in memory. Never run against customer data. */
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
@@ -91,7 +92,7 @@ async function main() {
   const port = (server.address() as { port: number }).port
   const origin = `http://127.0.0.1:${port}`
   try {
-    const { createMossExternalProviderPort } = await import(pathToFileURL(resolve(input.sudoworkPath, 'packages/moss-client/dist/MossExternalProviderClient.js')).href)
+    const { createMossExternalProviderPort, applyExternalEventsPage } = await import(pathToFileURL(resolve(input.sudoworkPath, 'packages/moss-client/dist/MossExternalProviderClient.js')).href)
     const request = async ({ path, method, body }: { path: string; method: string; body?: unknown }) => {
       const response = await fetch(`${origin}${path}`, { method, headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
       const data = await response.json()
@@ -103,7 +104,8 @@ async function main() {
       const binding = (await service.store.bindings({ orgId, userId }))[0]
       assert(binding, 'UI did not register a binding')
       await manager.stop(); await manager.start()
-      const restoredSecret = await new NexusClient(manager.grpcUrl).getSecret(`org:${orgId}:external:${binding.id}`, 'app-key')
+      const reference = parseNexusSecretRef(binding.credential_ref)
+      const restoredSecret = await new NexusClient(manager.grpcUrl).getSecret(reference.namespace, reference.key)
       assert.equal(restoredSecret?.value, key)
       const persistenceEvidence = { phase: 'nexus-persistence-passed', secretPort: 'real local Nexus vault', restarted: true, plainKeyInBinding: JSON.stringify(binding).includes(key) }
       assert.equal(persistenceEvidence.plainKeyInBinding, false)
@@ -112,7 +114,7 @@ async function main() {
       return
     }
     const registered = await request({ method: 'POST', path: '/api/v1/external-agents', body: { name: app.name, endpoint: `${base}/v1`, app_id: appId, workspace_id: workspaceId, credential_ref: `nexus://org:${orgId}:system:dify/app-key`, source_digest: digest(JSON.stringify(workflow.graph)), decoder: 'reply_actions_v1', allowed_user_ids: [userId], review_expires_at: Date.now() + 3600000, review_note: 'Synthetic live check; published Start/LLM/Answer only; no provider-side actions' } })
-    await request({ method: 'POST', path: `/api/v1/external-agents/${registered.data.id}/review`, body: { approved: true } })
+    await request({ method: 'POST', path: `/api/v1/external-agents/${registered.data.id}/review`, body: { approved: true, revision: 1 } })
     const client = createMossExternalProviderPort(request)
     const agents = await client.agents(); assert.equal(agents.length, 1)
     let sessionId: string | undefined, conversationId: string | undefined
@@ -124,7 +126,7 @@ async function main() {
       const deadline = Date.now() + 130000
       while (!['succeeded', 'failed', 'unknown', 'rejected'].includes(final.status) && Date.now() < deadline) {
         const page = await client.events(accepted.id, cursor)
-        final = page.task; cursor = page.next_cursor; events += page.events.length
+        final = applyExternalEventsPage(final, cursor, page); cursor = page.next_cursor; events += page.events.length
         if (!['succeeded', 'failed', 'unknown', 'rejected'].includes(final.status)) await new Promise(done => setTimeout(done, 500))
       }
       console.log(JSON.stringify({ phase: 'live-task', taskId: final.id, sessionId: final.session_id, status: final.status, answer: final.answer, outputStatus: final.output_status, errorCode: final.error_code, events, providerRefs: final.provider_refs }))

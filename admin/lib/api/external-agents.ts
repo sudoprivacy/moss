@@ -1,6 +1,7 @@
 import { dcClient } from './client'
 import type {
   ExternalAgentAdmin,
+  ExternalTask,
   ExternalConnectionInspection,
   ExternalPilotPolicy,
   ExternalProviderAccess,
@@ -11,6 +12,7 @@ import type {
 } from '../../../contracts/external-provider/v1/contract'
 
 export type {
+  ExternalTask,
   ExternalAgentAdmin,
   ExternalPilotPolicy,
   ExternalProviderAccess,
@@ -47,6 +49,9 @@ export function createExternalAgentsApi(
   return {
     access: () => get<ExternalProviderAccess>(`${base}/access`),
     list: () => get<ExternalAgentAdmin[]>(`${base}/admin/agents`),
+    unknownTasks: () => get<ExternalTask[]>(`${base}/admin/unknown-tasks`),
+    reconcileTask: (taskId: string, note: string) =>
+      post<ExternalTask>(`${base}/admin/reconcile-task`, { task_id: taskId, action: 'close', note }),
     members: () => get<ExternalProviderMember[]>(`${base}/admin/members`),
     policy: () => get<ExternalPilotPolicy>(`${base}/admin/policy`),
     savePolicy: (body: ExternalPilotPolicy) => post<ExternalPilotPolicy>(`${base}/admin/policy`, body),

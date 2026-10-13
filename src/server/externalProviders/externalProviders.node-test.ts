@@ -1,3 +1,6 @@
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { crashFixture } from '../testing/externalProviderCrashFixture.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,12 +11,15 @@ import { randomUUID } from 'node:crypto'
 import { SqliteDriver } from '../db/driver.js'
 import { AuthCenterDb } from '../authCenter/db.js'
 import { createCatalogTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
+import { onlineCommandContext } from '../application/commandContext.js'
 import { ExternalTaskStore } from './store.js'
 import { ExternalProviderService } from './service.js'
 import { DifyPilotTransport } from './difyTransport.js'
 import { decodeOutput } from './decoder.js'
 import { canonicalEndpoint, parseRegistration, ExternalProviderError } from './policy.js'
 import { dispatchExternalProvider } from './routes.js'
+import { CredentialOperations } from './operations.js'
+import { DifyAdministrationService } from '../dify/difyAdministrationService.js'
 
 const actor = { orgId: 'org-a', userId: 'u' }
 const policy = { orgIds: ['org-a'], endpoints: ['http://127.0.0.1:8089/v1'], timeoutMs: 2000 }
@@ -51,7 +57,7 @@ async function setup(options: { events?: unknown[]; status?: number; parameters?
   } } })
   cleanups.push(async () => { await service.close(); await driver.close() })
   const registered = await service.register(actor, definition())
-  if (!options.failBeforeSend) await service.review(actor, registered.id, true)
+  if (!options.failBeforeSend) await service.review(actor, registered.id, true, 1)
   const request = (session_id?: string, query = '6 * 7') => ({ agent_id: registered.id, session_id, query, idempotency_key: randomUUID() })
   const run = async (input = request()) => { const task = await service.create(actor, input); await service.waitForTask(task.id); return store.task(actor, task.id) }
   return { db, driver, catalog, identities, store, service, calls, registered, request, run }
@@ -62,7 +68,8 @@ void test('success persists answer, attempt, ordered events and a provider conve
   assert.equal(task.status, 'succeeded'); assert.equal(task.answer, '42'); assert.equal(task.output_status, 'valid')
   assert(task.attempt_id); assert.equal((await f.store.session(actor, task.session_id)).active_task_id, null)
   const page = await f.store.events(actor, task.id, 0)
-  assert.deepEqual(page.events.map(e => e.sequence), page.events.map((_, i) => i + 1))
+  assert.equal(page.task?.answer, '42'); assert.equal(page.next_cursor, page.snapshot_sequence)
+  assert.deepEqual(page.events, [])
   await f.run(f.request(task.session_id, 'plus 8'))
   assert.equal(f.calls[1].conversation_id, 'conv-1'); assert.equal(f.calls[0].user, f.calls[1].user)
   assert.equal((await f.store.history(actor, task.session_id)).length, 2)
@@ -214,7 +221,7 @@ void test('task intent survives a database close/reopen and unconfirmed work is 
     assert.equal((await recovered.task(actor, task.id)).status, 'unknown')
     assert.equal((await recovered.session(actor, task.session_id)).active_task_id, task.id)
     assert.equal(await recovered.mutate(task.id, value => { value.status = 'succeeded'; return 'status' }), null)
-    assert.equal((await recovered.events(actor, task.id, 0)).events.length, 3)
+    assert.equal((await recovered.events(actor, task.id, 0)).task?.status, 'unknown')
     await second.close()
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
@@ -224,7 +231,8 @@ async function administrationSetup() {
   await authDb.createOrganization(actor.orgId, 'Pilot', Date.now())
   const catalog = createCatalogTestRepository(db, driver), identities = createIdentityTestRepository(db, {}, driver)
   const values = new Map<string, string>(), writes: string[] = []
-  const control = { failWrite: false, beforeWrite: async () => {} }
+  const control = { failWrite: false, beforeWrite: async () => {}, beforeParameters: async () => {} }
+  const requestKeys: string[] = []
   const secrets = {
     getSecret: async (namespace: string, key: string) => ({ value: values.get(`${namespace}/${key}`) ?? null, status: 'enabled', version: 1 }),
     putSecret: async (namespace: string, key: string, value: string) => { await control.beforeWrite(); if (control.failWrite) throw new Error('private-secret-detail'); writes.push(namespace); values.set(`${namespace}/${key}`, value) },
@@ -233,7 +241,8 @@ async function administrationSetup() {
   const transport = new DifyPilotTransport((async (url, init) => {
     if (init?.headers && (init.headers as Record<string, string>).Authorization === 'Bearer wrong-key') return Response.json({}, { status: 401 })
     if (String(url).endsWith('/info')) return Response.json({ name: 'Synthetic Dify', description: '', tags: [] })
-    if (String(url).endsWith('/parameters')) return Response.json({ user_input_form: [], file_upload: { enabled: false } })
+    if (String(url).endsWith('/parameters')) { await control.beforeParameters(); return Response.json({ user_input_form: [], file_upload: { enabled: false } }) }
+    requestKeys.push((init?.headers as Record<string, string>).Authorization)
     return new Response(frames(successful()), { headers: { 'Content-Type': 'text/event-stream' } })
   }) as typeof fetch)
   const store = new ExternalTaskStore(driver)
@@ -242,7 +251,7 @@ async function administrationSetup() {
   const admin = service.administration
   const body = () => ({ request_id: randomUUID(), name: 'Pilot', endpoint: policy.endpoints[0], api_key: 'private-ui-key', app_id: 'app-1', workspace_id: 'workspace-1', source_definition: JSON.stringify({ workflow: { graph: { nodes: ['start', 'llm', 'answer'].map(type => ({ data: { type } })), edges: [] } } }), decoder: 'reply_actions_v1', allowed_user_ids: ['u'], review_days: 7, review_note: 'Synthetic reviewed definition' })
   const enable = () => admin.setPolicy(actor, { enabled: true, endpoints: policy.endpoints, revision: 0 })
-  return { db, driver, store, service, admin, body, enable, values, writes, control }
+  return { db, driver, store, service, admin, body, enable, values, writes, control, catalog, identities, secrets, transport, requestKeys }
 }
 
 void test('administration policy persists per organization, CAS prevents stale updates, and only platform admins can write it', async () => {
@@ -288,7 +297,9 @@ void test('failed Secret writes leave no draft or reservation and allow a safe r
   await assert.rejects(f.admin.onboard(actor, body), { code: 'REGISTRATION_FAILED' })
   assert.deepEqual(await f.admin.list(actor), []); assert.equal((await f.driver.all('SELECT * FROM external_pilot_admin_operations')).length, 0)
   f.control.failWrite = false
-  assert.equal((await f.admin.onboard(actor, body)).id, body.request_id)
+  const retried = await f.admin.onboard(actor, body)
+  assert.equal((await f.admin.onboard(actor, body)).id, retried.id)
+  assert.notEqual(retried.id, body.request_id)
 })
 
 void test('editing revokes approval; stale reviews conflict; archive preserves history and prevents new tasks', async () => {
@@ -319,7 +330,9 @@ void test('credential rotation revokes before write and prevents concurrent edit
   } finally { release() }
   const result = await rotation
   assert.equal(result.approved, false); assert.equal(result.revision, 4)
-  assert.equal([...f.values.values()][0], 'replacement-key')
+  const binding = await f.store.binding(actor, agent.id)
+  assert.equal(f.values.get(binding.credential_ref.slice(8)), 'replacement-key')
+  assert.equal([...f.values.values()][0], 'private-ui-key')
   await f.service.review(actor, agent.id, true, 4, 7)
   assert.equal((await f.service.list(actor)).length, 1)
 })
@@ -331,4 +344,227 @@ void test('admin HTTP routes reject ordinary users and cross-organization bindin
     assert.equal(result.status, 403)
   }
   await assert.rejects(f.admin.testSaved({ ...actor, orgId: 'other' }, agent.id), { code: 'AGENT_NOT_FOUND' })
+})
+
+void test('review requires the exact positive integer revision at both HTTP and service boundaries', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body())
+  await f.admin.update(actor, agent.id, { revision: 1, name: 'Changed', allowed_user_ids: ['u'], decoder: 'text', review_days: 1, review_note: 'Changed' })
+  const url = new URL(`http://moss.test/api/v1/external-agents/${agent.id}/review`)
+  for (const revision of [undefined, 0, -1, 1.5, '2']) {
+    assert.equal((await dispatchExternalProvider(f.service, actor, 'POST', url, { approved: true, revision }, () => {})).status, 400)
+    await assert.rejects(f.service.review(actor, agent.id, true, revision as number), { code: 'INVALID_REVIEW' })
+  }
+  assert.equal((await dispatchExternalProvider(f.service, actor, 'POST', url, { approved: true, revision: 1 }, () => {})).status, 409)
+  assert.equal((await dispatchExternalProvider(f.service, actor, 'POST', url, { approved: true, revision: 2 }, () => {})).status, 200)
+})
+
+void test('query-only capability profile rejects modern and legacy attachment switches', async () => {
+  for (const file_upload of [{ enabled: true }, { image: { enabled: true } }]) {
+    const transport = new DifyPilotTransport((async (_url: string | URL | Request) => Response.json({ user_input_form: [], file_upload })) as typeof fetch)
+    await assert.rejects(transport.parameters(policy.endpoints[0], 'synthetic-key', AbortSignal.timeout(1000)), { code: 'UNSUPPORTED_PROVIDER_ATTACHMENTS' })
+  }
+})
+
+void test('rotation and reapproval during preflight reject the old execution snapshot before any POST', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body())
+  await f.service.review(actor, agent.id, true, 1)
+  let enter!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { release = resolve })
+  f.control.beforeParameters = async () => { f.control.beforeParameters = async () => {}; enter(); await barrier }
+  const task = await f.service.create(actor, { agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() })
+  await entered
+  try {
+    const rotated = await f.admin.rotate(actor, agent.id, { revision: 2, api_key: 'replacement-key' })
+    await f.service.review(actor, agent.id, true, rotated.revision)
+  } finally { release() }
+  await f.service.waitForTask(task.id)
+  assert.equal((await f.store.task(actor, task.id)).error_code, 'CONFIGURATION_CHANGED')
+  assert.deepEqual(f.requestKeys, [])
+  const next = await f.service.create(actor, { agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() })
+  await f.service.waitForTask(next.id)
+  assert.deepEqual(f.requestKeys, ['Bearer replacement-key'])
+})
+
+void test('legacy management cannot view, change ACL, attach datasets, or delete external agents', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body())
+  const legacy = new DifyAdministrationService({ catalog: f.catalog } as never)
+  assert.deepEqual(await legacy.listAgents(actor.orgId), [])
+  assert.equal(await legacy.getAgent(actor.orgId, agent.id), null)
+  for (const action of [() => legacy.deleteAgent(actor.orgId, agent.id, onlineCommandContext('external-delete')), () => legacy.listAcl(actor.orgId, agent.id), () => legacy.replaceAcl(actor.orgId, agent.id, []), () => legacy.replaceDatasets(actor.orgId, agent.id, []), () => legacy.getEnhancement(actor.orgId, agent.id)]) {
+    await assert.rejects(action(), /not found/)
+  }
+  assert.deepEqual((await f.catalog.getAgent(agent.id, actor.orgId))?.visibleTo, { user_ids: ['u'] })
+})
+
+void test('the same onboarding UUID can complete independently in two organizations', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const other = { orgId: 'org-b', userId: 'u' }
+  await new AuthCenterDb(f.db).createOrganization(other.orgId, 'Second', Date.now())
+  const second = new ExternalProviderService(f.store, { catalog: f.catalog, identities: f.identities, secrets: f.secrets, transport: f.transport, policy: { ...policy, orgIds: ['org-b'] }, isActive: async () => true })
+  cleanups.unshift(() => second.close())
+  const input = f.body()
+  const a = await f.admin.onboard(actor, input), b = await second.administration.onboard(other, input)
+  assert.notEqual(a.id, b.id)
+  assert.equal((await second.administration.onboard(other, input)).id, b.id)
+  await assert.rejects(f.store.binding(actor, b.id), { code: 'AGENT_NOT_FOUND' })
+})
+
+void test('expired rotation recovers an immutable written Secret as an unapproved draft', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body())
+  await f.service.review(actor, agent.id, true, 1)
+  let release!: () => void, enter!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { release = resolve })
+  f.control.beforeWrite = async () => { enter(); await barrier }
+  const rotation = f.admin.rotate(actor, agent.id, { revision: 2, api_key: 'replacement-key' })
+  await entered
+  const row = await f.driver.get("SELECT document FROM external_pilot_operations WHERE kind = 'rotate' AND status = 'pending'")
+  const operation = JSON.parse(String(row!.document))
+  f.values.set(operation.targetRef.slice(8), 'replacement-key')
+  await f.driver.run('UPDATE external_pilot_operations SET lease_until = 0 WHERE id = ?', [operation.id])
+  const restarted = new CredentialOperations(new ExternalTaskStore(f.driver), { catalog: f.catalog, identities: f.identities, secrets: f.secrets, policy, isActive: async () => true })
+  await restarted.reconcile()
+  const recovered = await f.store.binding(actor, agent.id)
+  assert.equal(recovered.approved, false); assert.equal(recovered.credentialUpdating, false)
+  assert.equal(recovered.credential_ref, operation.targetRef)
+  release(); await rotation
+  assert.equal((await f.store.binding(actor, agent.id)).revision, recovered.revision)
+})
+
+void test('an expired unwritten rotation cannot be published by a late writer and its Secret is cleaned', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body())
+  let release!: () => void, enter!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { release = resolve })
+  f.control.beforeWrite = async () => { enter(); await barrier }
+  const rotation = f.admin.rotate(actor, agent.id, { revision: 1, api_key: 'replacement-key' })
+  const failed = assert.rejects(rotation, { code: 'CREDENTIAL_OPERATION_EXPIRED' })
+  await entered
+  await f.driver.run("UPDATE external_pilot_operations SET lease_until = 0 WHERE status = 'pending'")
+  await f.admin.operations.reconcile()
+  release(); await failed
+  const recovered = await f.store.binding(actor, agent.id)
+  assert.equal(recovered.credentialRecoveryRequired, true); assert.equal(recovered.credentialUpdating, false)
+  await assert.rejects(f.service.review(actor, agent.id, true, recovered.revision!), { code: 'CREDENTIAL_ROTATION_REQUIRED' })
+  await f.admin.operations.reconcile(Date.now() + 120_000)
+  assert(![...f.values.values()].includes('replacement-key'))
+})
+
+void test('SIGKILL before and after vault writes leaves recoverable onboarding and rotation operations', async () => {
+  for (const kind of ['onboard', 'rotate']) for (const stage of ['before-write', 'after-write']) {
+    const directory = await mkdtemp(join(tmpdir(), 'moss-external-kill-'))
+    try {
+      assert.throws(() => execFileSync(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('../testing/externalProviderCrashFixture.ts', import.meta.url)), directory, kind, stage], { stdio: 'pipe', timeout: 10000 }), error => (error as { signal: string }).signal === 'SIGKILL')
+      const f = await crashFixture(directory)
+      try {
+        await f.store.ready
+        await f.driver.run("UPDATE external_pilot_operations SET lease_until = 0 WHERE status = 'pending'")
+        await f.service.administration.operations.reconcile()
+        const bindings = await f.store.bindings(f.actor)
+        if (kind === 'onboard' && stage === 'before-write') assert.equal(bindings.length, 0)
+        else {
+          assert.equal(bindings.length, 1)
+          assert.equal(bindings[0].approved, false)
+          assert.equal(Boolean(bindings[0].credentialUpdating), false)
+          assert.equal(Boolean(bindings[0].credentialRecoveryRequired), kind === 'rotate' && stage === 'before-write')
+        }
+        assert.equal((await f.driver.all("SELECT id FROM external_pilot_operations WHERE status = 'pending'")).length, 0)
+      } finally { await f.service.close(); await f.driver.close() }
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  }
+})
+
+void test('incremental events bound storage, support replacements, page cursors and checkpoint resync without read writes', async t => {
+  const f = await setup(), binding = await f.store.binding(actor, f.registered.id)
+  const task = await f.store.create(actor, f.request(), binding, 120000)
+  const initial = await f.store.events(actor, task.id, 0)
+  const writes: string[] = [], run = f.driver.run.bind(f.driver)
+  f.driver.run = async (sql, params) => { writes.push(sql); return run(sql, params) }
+  await f.store.events(actor, task.id, initial.next_cursor)
+  assert.deepEqual(writes, [])
+  let answer = ''
+  for (let i = 1; i <= 128; i++) {
+    answer += 'x'.repeat(1000)
+    await f.store.mutate(task.id, current => { current.status = 'running'; current.answer = answer; current.raw_answer = answer; return 'answer' })
+  }
+  const size = await f.driver.get('SELECT SUM(LENGTH(document)) AS size FROM external_pilot_events WHERE task_id = ?', [task.id])
+  t.diagnostic(`128000 answer characters: ${size?.size} event document characters`)
+  assert(Number(size?.size) < 250000, `Event size ${size?.size} must grow approximately linearly`)
+  const first = await f.store.events(actor, task.id, initial.next_cursor)
+  assert.equal(first.task, undefined); assert.equal(first.events.length, 100); assert.equal(first.has_more, true)
+  const second = await f.store.events(actor, task.id, first.next_cursor)
+  let projected = initial.task!.answer
+  for (const event of [...first.events, ...second.events]) if (event.delta) projected = projected.slice(0, event.delta.offset) + event.delta.text
+  assert.equal(projected, answer); assert.equal((await f.store.task(actor, task.id)).answer, answer)
+  await f.store.mutate(task.id, current => { current.answer = 'replacement'; current.raw_answer = 'replacement'; return 'answer' })
+  const replacement = await f.store.events(actor, task.id, second.next_cursor)
+  assert.deepEqual(replacement.events[0].delta, { offset: 0, text: 'replacement' })
+  await f.store.mutate(task.id, current => { current.status = 'succeeded'; current.output_status = 'valid'; return 'status' })
+  const final = await f.store.events(actor, task.id, replacement.next_cursor)
+  assert.equal(final.task?.answer, 'replacement'); assert.equal(final.task?.raw_answer, 'replacement')
+  assert.equal((await f.store.events(actor, task.id, 100000)).task?.answer, 'replacement')
+})
+
+void test('administrator reconciliation preserves unknown status, audit and the session fence', async () => {
+  const f = await setup({ events: successful().slice(0, 2) }), task = await f.run()
+  const note = 'Checked provider run; local conversation closed without replay.'
+  const result = await f.store.reconcileUnknown(actor, task.id, note)
+  assert.equal(result.status, 'unknown'); assert.equal(result.reconciliation?.note, note)
+  assert.equal((await f.store.unresolved(actor.orgId)).length, 0)
+  await assert.rejects(f.store.reconcileUnknown({ ...actor, orgId: 'other' }, task.id, note), { code: 'TASK_NOT_FOUND' })
+  await assert.rejects(f.service.create(actor, f.request(task.session_id)), { code: 'SESSION_BUSY_OR_AGENT_MISMATCH' })
+  assert.equal(f.calls.length, 1)
+  const audit = await f.driver.all("SELECT * FROM external_pilot_admin_audit WHERE action = 'task.unknown_closed'")
+  assert.equal(audit.length, 1)
+})
+
+void test('upgrading a legacy interrupted rotation requires a fresh key and never republishes it', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body())
+  const binding = await f.store.binding(actor, agent.id)
+  binding.credentialUpdating = true; binding.approved = true; delete binding.credentialVersion
+  await f.store.saveBinding(binding)
+  const restarted = new ExternalTaskStore(f.driver)
+  await restarted.ready
+  const operations = new CredentialOperations(restarted, f.admin.options)
+  await operations.reconcile()
+  const recovered = await restarted.binding(actor, agent.id)
+  assert.equal(recovered.approved, false)
+  assert.equal(recovered.credentialUpdating, false)
+  assert.equal(recovered.credentialRecoveryRequired, true)
+  await assert.rejects(f.service.review(actor, agent.id, true, recovered.revision!), { code: 'CREDENTIAL_ROTATION_REQUIRED' })
+  await f.admin.archive(actor, agent.id, { revision: recovered.revision })
+  assert.equal((await f.identities.getIntegrationConnection(binding.connectionId))?.enabled, false)
+})
+
+void test('configuration and policy mutations during preflight invalidate pending dispatch', async () => {
+  for (const field of ['endpoint', 'decoder', 'allowed_user_ids', 'approved', 'policy']) {
+    const f = await administrationSetup(); await f.enable()
+    const agent = await f.admin.onboard(actor, f.body())
+    await f.service.review(actor, agent.id, true, 1)
+    let enter!: () => void, release!: () => void
+    const entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { release = resolve })
+    f.control.beforeParameters = async () => { f.control.beforeParameters = async () => {}; enter(); await barrier }
+    const task = await f.service.create(actor, { agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() })
+    await entered
+    try {
+      if (field === 'policy') {
+        const current = await f.admin.policy(actor)
+        await f.admin.setPolicy(actor, { ...current, enabled: false })
+      } else {
+        const binding = await f.store.binding(actor, agent.id)
+        if (field === 'endpoint') binding.endpoint = 'http://127.0.0.1:9999/v1'
+        if (field === 'decoder') binding.decoder = binding.decoder === 'text' ? 'reply_actions_v1' : 'text'
+        if (field === 'allowed_user_ids') binding.allowed_user_ids = []
+        if (field === 'approved') binding.approved = false
+        await f.store.saveBinding(binding)
+      }
+    } finally { release() }
+    await f.service.waitForTask(task.id)
+    assert.equal((await f.store.task(actor, task.id)).status, 'rejected', field)
+    assert.deepEqual(f.requestKeys, [], field)
+  }
 })

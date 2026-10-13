@@ -413,6 +413,12 @@ export class CatalogRepository {
     return true
   }
 
+  async getOrganizationAgentsByIds(orgId: string, ids: string[]): Promise<CatalogAgent[]> {
+    if (!ids.length) return []
+    if (ids.length > 100) throw new Error('agent lookup limit exceeded')
+    return (await this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants WHERE org_id = ? AND id IN (${ids.map(() => '?').join(',')})`, [orgId, ...ids])).map(mapAgent)
+  }
+
   async listAgents(options: ListOptions): Promise<{ items: CatalogAgent[]; hasMore: boolean; nextCursor: string | null }> {
     return paginate(
       await this.driver.all<SqlRow>(`

@@ -16,6 +16,9 @@ void test('native tenant listing and management exclude hosted agents without de
     assert.equal(await store.getTenantAssistant('native', 'org-b'), null)
     assert.equal(await store.getTenantAssistant('hosted', 'org-a'), null)
     assert.equal(await store.getTenantAssistant('hosted'), null)
+    assert.equal(await store.getTenantAssistantByName('Dify agent', 'org-a'), null)
+    assert.equal(await store.getTenantAssistantByName('Dify agent'), null)
+    assert.equal((await store.getTenantAssistantByName('Native template', 'org-a'))?.id, 'native')
     assert.equal((await catalog.getAgent('hosted', 'org-a'))?.providerBinding?.executionMode, 'external_hosted')
   } finally {
     await store.close()

@@ -19,6 +19,7 @@ import { useAuth } from '@/lib/hooks/use-auth'
 import {
   createExternalAgentsApi,
   type ExternalAgentAdmin,
+  type ExternalTask,
   type ExternalPilotPolicy,
   type ExternalProviderAccess,
   type ExternalProviderMember,
@@ -377,6 +378,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
       {access?.can_manage && !policy.enabled && !access.can_manage_policy ? (
         <Feedback>请平台管理员为当前组织启用试点并配置允许的 Dify 服务地址。</Feedback>
       ) : null}
+      {access?.can_manage ? <UnknownExternalTasks api={api} /> : null}
       {error && !dialog ? <Feedback error>{error}</Feedback> : null}
       {notice ? <Feedback>{notice}</Feedback> : null}
       <div className="grid gap-4 md:grid-cols-2">
@@ -393,6 +395,15 @@ function ScopedExternalAgents({ query }: { query: string }) {
                   </Badge>
                 </div>
               </div>
+              {agent.credential_state === 'updating' ? (
+                <Feedback>正在更新凭据；中断的操作会自动核对，恢复后仍需审核发布。</Feedback>
+              ) : null}
+              {agent.credential_state === 'rotation_required' ? (
+                <Feedback error>上次凭据更新未能确认，请更换密钥后重新审核。</Feedback>
+              ) : null}
+              {agent.definition_evidence === 'digest_only' ? (
+                <Feedback>兼容引用接入：仅保留定义摘要，尚未验证上传的应用定义。发布前请核对实际 Dify 配置。</Feedback>
+              ) : null}
               <p className="break-all text-sm text-muted-foreground">{agent.endpoint}</p>
               <p className="text-sm">
                 授权用户：
@@ -437,7 +448,12 @@ function ScopedExternalAgents({ query }: { query: string }) {
                 {!isPublished ? (
                   <Button
                     size="sm"
-                    disabled={isBusy || !policy.enabled}
+                    disabled={
+                      isBusy ||
+                      !policy.enabled ||
+                      agent.credential_state === 'updating' ||
+                      agent.credential_state === 'rotation_required'
+                    }
                     onClick={() => onOpen({ kind: 'approve', agent })}
                   >
                     审核发布
@@ -680,5 +696,112 @@ function Feedback({ error, children }: { error?: boolean; children: ReactNode })
     <Alert variant={error ? 'destructive' : 'default'}>
       <AlertDescription>{children}</AlertDescription>
     </Alert>
+  )
+}
+
+function UnknownExternalTasks({ api }: { api: ReturnType<typeof createExternalAgentsApi> }) {
+  const [tasks, setTasks] = useState<ExternalTask[]>([])
+  const [selected, setSelected] = useState<ExternalTask | null>(null)
+  const [note, setNote] = useState('')
+  const [isBusy, setIsBusy] = useState(false)
+  const [error, setError] = useState('')
+  const onRefresh = useCallback(async () => {
+    setTasks(await api.unknownTasks())
+  }, [api])
+  useEffect(() => {
+    let isActive = true
+    void api
+      .unknownTasks()
+      .then((rows) => {
+        if (isActive) setTasks(rows)
+      })
+      .catch((cause) => {
+        if (isActive) setError(externalAgentError(cause))
+      })
+    return () => {
+      isActive = false
+    }
+  }, [api])
+  return (
+    <section className="space-y-3 rounded-lg border p-4" aria-label="待核对的外部任务">
+      <div className="flex items-center justify-between">
+        <h4 className="font-medium">待核对的外部任务（{tasks.length}）</h4>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={isBusy}
+          onClick={() => void onRefresh().catch((cause) => setError(externalAgentError(cause)))}
+        >
+          刷新任务
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        结果未知的任务不会自动重发。请在 Dify
+        核对运行记录后填写结论并关闭本地会话；此操作不会取消远端任务或将其标记为成功。
+      </p>
+      {error ? <Feedback error>{error}</Feedback> : null}
+      {tasks.map((task) => (
+        <div key={task.id} className="flex items-center justify-between gap-2 text-sm">
+          <span className="break-all">
+            {task.agent_name} · {task.id}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setSelected(task)
+              setNote('')
+              setError('')
+            }}
+          >
+            核对并关闭
+          </Button>
+        </div>
+      ))}
+      <Dialog
+        open={Boolean(selected)}
+        onOpenChange={(open) => {
+          if (!open && !isBusy) setSelected(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>核对外部任务</DialogTitle>
+            <DialogDescription>
+              请核对远端运行记录，记录结果。关闭后保留原始 unknown 状态与历史，用户需新建对话，原会话不会解锁或重放。
+            </DialogDescription>
+          </DialogHeader>
+          <pre className="overflow-auto whitespace-pre-wrap text-xs">
+            {JSON.stringify(selected?.provider_refs, null, 2)}
+          </pre>
+          <Label htmlFor="external-reconcile-note">核对依据和结论（至少 10 个字符）</Label>
+          <Textarea
+            id="external-reconcile-note"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            maxLength={2000}
+          />
+          <DialogFooter>
+            <Button
+              disabled={isBusy || note.trim().length < 10}
+              onClick={() => {
+                if (!selected) return
+                setIsBusy(true)
+                void api
+                  .reconcileTask(selected.id, note)
+                  .then(async () => {
+                    setSelected(null)
+                    await onRefresh()
+                  })
+                  .catch((cause) => setError(externalAgentError(cause)))
+                  .finally(() => setIsBusy(false))
+              }}
+            >
+              记录核对并关闭会话
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </section>
   )
 }

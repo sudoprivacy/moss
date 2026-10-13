@@ -45,6 +45,9 @@ export class DifyPilotTransport {
     const value = JSON.parse(await readBounded(response, 256_000)) as Record<string, unknown>
     // First profile sends only a query: required custom inputs and attachments need a different reviewed profile.
     if (!value || !Array.isArray(value.user_input_form) || value.user_input_form.length) throw new ExternalProviderError(409, 'UNSUPPORTED_PROVIDER_INPUTS')
+    const upload = value.file_upload as Record<string, unknown> | undefined
+    const images = upload?.image as Record<string, unknown> | undefined
+    if (upload?.enabled === true || images?.enabled === true) throw new ExternalProviderError(409, 'UNSUPPORTED_PROVIDER_ATTACHMENTS')
     return digest(stable(value))
   }
 
@@ -64,6 +67,7 @@ export class DifyPilotTransport {
     }
     const reader = response.body.getReader(), decoder = new TextDecoder()
     let buffer = '', raw = '', isMessageEnded = false, isWorkflowSucceeded = false, lastPublished = 0, count = 0
+    let publishedRaw = '', publishedCharacters = 0
     const refs: ExternalTask['provider_refs'] = {}
     try {
       while (true) {
@@ -95,6 +99,11 @@ export class DifyPilotTransport {
           }
           if (event.event === 'error') throw new ExternalProviderError(502, 'PROVIDER_STREAM_ERROR')
           if (Date.now() - lastPublished >= 100 || isMessageEnded || isWorkflowSucceeded) {
+            let offset = 0
+            while (offset < publishedRaw.length && offset < raw.length && publishedRaw[offset] === raw[offset]) offset++
+            publishedCharacters += raw.length - offset
+            if (publishedCharacters > 512_000) throw new ExternalProviderError(502, 'PROVIDER_RESPONSE_LIMIT')
+            publishedRaw = raw
             await onProgress({ raw, refs: { ...refs } })
             lastPublished = Date.now()
           }

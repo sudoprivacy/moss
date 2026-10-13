@@ -1,6 +1,12 @@
 import { ApiRequestError } from './api/client'
 
 const messages: Record<string, string> = {
+  INVALID_REVIEW: '审核必须携带当前配置版本，请刷新后重试。',
+  INVALID_RECONCILIATION: '请填写至少 10 个字符的核对依据和结论。',
+  CREDENTIAL_ROTATION_REQUIRED: '凭据状态无法确认，请更换密钥后重新审核。',
+  CREDENTIAL_OPERATION_EXPIRED: '操作已超时并进入恢复流程，请刷新查看当前状态。',
+  CREDENTIAL_ROTATION_FAILED: '密钥更新失败，智能体保持未发布，请重试换钥。',
+  UNSUPPORTED_PROVIDER_ATTACHMENTS: '当前仅支持纯文本应用，请关闭 Dify 文件和图片上传能力。',
   CONFIGURATION_CHANGED: '配置已被修改，请关闭弹窗并刷新列表后重试。',
   INVALID_MEMBER: '请选择当前组织的有效成员。',
   INVALID_POLICY: '请检查试点地址和启用状态。',

@@ -19,12 +19,16 @@ test('management uses external contract routes with revisions and no client-supp
   await api.review('agent-a', { approved: true, revision: 3, review_days: 1 })
   await api.review('agent-a', { approved: false, revision: 4 })
   await api.archive('agent-a', 5)
+  await api.unknownTasks()
+  await api.reconcileTask('task-a', 'Checked provider run without replay.')
   assert.deepEqual(
     calls.map((call) => [call.path, call.body]),
     [
       ['http://moss.test/api/v1/external-agents/agent-a/review', { approved: true, revision: 3, review_days: 1 }],
       ['http://moss.test/api/v1/external-agents/agent-a/review', { approved: false, revision: 4 }],
       ['http://moss.test/api/v1/external-agents/admin/agent-a/archive', { revision: 5 }],
+      ['http://moss.test/api/v1/external-agents/admin/unknown-tasks', {}],
+      ['http://moss.test/api/v1/external-agents/admin/reconcile-task', { task_id: 'task-a', action: 'close', note: 'Checked provider run without replay.' }],
     ],
   )
 })

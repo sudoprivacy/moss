@@ -72,6 +72,9 @@ jobs:
       - name: Run server tests
         run: bun run test
 
+      - name: Verify external provider concurrency on real PostgreSQL
+        run: node --import tsx --test src/server/externalProviders/externalProviders.pg-test.ts
+
       # `scripts/e2e/session-owner-live.ts` needs a live auth-on daemon and an
       # operator's node certificate, so CI cannot run it. Keeping it compiling
       # is what stops it rotting into something nobody can run — and it lives

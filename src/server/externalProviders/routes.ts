@@ -16,7 +16,6 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
     }
     if (!service) throw new ExternalProviderError(503, 'EXTERNAL_PROVIDER_UNAVAILABLE')
     await service.authorize(actor)
-    await service.store.expire()
     const path = url.pathname, base = '/api/v1'
     let data: unknown, status = 200
     if (path.startsWith(`${base}/external-agents/admin/`)) {
@@ -27,6 +26,12 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
       else if (action === 'policy' && method === 'POST') { requirePlatformAdmin(); data = await admin.setPolicy(actor, body) }
       else if (action === 'members' && method === 'GET') data = await admin.members(actor)
       else if (action === 'agents' && method === 'GET') data = await admin.list(actor)
+      else if (action === 'unknown-tasks' && method === 'GET') data = await service.store.unresolved(actor.orgId)
+      else if (action === 'reconcile-task' && method === 'POST') {
+        const input = body as { task_id?: unknown; note?: unknown; action?: unknown } | null
+        if (!input || input.action !== 'close' || typeof input.task_id !== 'string' || typeof input.note !== 'string' || input.note.trim().length < 10 || input.note.length > 2000 || Object.keys(input).some(key => !['task_id', 'note', 'action'].includes(key))) throw new ExternalProviderError(400, 'INVALID_RECONCILIATION')
+        data = await service.store.reconcileUnknown(actor, input.task_id, input.note.trim())
+      }
       else if (action === 'inspect' && method === 'POST') data = await admin.inspect(actor, body)
       else if (action === 'onboard' && method === 'POST') { data = await admin.onboard(actor, body); status = 201 }
       else {
@@ -49,8 +54,8 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
       const task = /^\/api\/v1\/tasks\/([\w-]+)(?:\/(events|cancel))?$/.exec(path)
       if (review && method === 'POST') {
         requireAdmin()
-        if (!body || typeof body !== 'object' || typeof (body as { approved?: unknown }).approved !== 'boolean' || Object.keys(body).some(key => !['approved', 'revision', 'review_days'].includes(key))) throw new ExternalProviderError(400, 'INVALID_REVIEW')
-        data = await service.review(actor, review[1], (body as { approved: boolean }).approved, (body as { revision?: number }).revision, (body as { review_days?: number }).review_days)
+        if (!body || typeof body !== 'object' || typeof (body as { approved?: unknown }).approved !== 'boolean' || !Number.isSafeInteger((body as { revision?: unknown }).revision) || Number((body as { revision?: unknown }).revision) < 1 || Object.keys(body).some(key => !['approved', 'revision', 'review_days'].includes(key))) throw new ExternalProviderError(400, 'INVALID_REVIEW')
+        data = await service.review(actor, review[1], (body as { approved: boolean }).approved, (body as { revision: number }).revision, (body as { review_days?: number }).review_days)
       } else if (session && method === 'GET') data = await service.store.history(actor, session[1])
       else if (task && method === 'GET' && !task[2]) data = await service.store.task(actor, task[1])
       else if (task && method === 'GET' && task[2] === 'events') {
