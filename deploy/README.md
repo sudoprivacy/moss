@@ -1,304 +1,162 @@
-# Moss Server 部署
+# Moss Server 容器部署
 
-## 环境要求
+本文说明仅部署 Moss/Nexus 控制面的入口。完整客户套件（含 SudoWork、PostgreSQL、Caddy）
+使用配套 `sudostack` 仓库的 Helm 安装包，Moss 与 Nexus 各有独立 Deployment；
+已验收的一键部署命令见 [主 README](../README.md#完整套件一键部署)。
 
-- Linux x86_64/amd64，glibc 2.39+（推荐 Ubuntu 24.04+）
-- systemd
-- root/sudo 权限
-- `curl`、`tar`、`gzip`、`sha256sum`
-- 仅当会话运行时选 `docker` 时才需要 Docker 20.10+；默认的 `k8s` 运行时不需要
+一键安装将 Moss Server 与 Nexus 部署为 **k3s 中一个单副本 Pod 的两个独立容器**。
+用户会话继续运行在独立的 scode/gVisor Pod 中。
 
-安装包自带 Node.js 22、编译后的 `moss-server.mjs`、host 模式 `scode`、运行依赖
-和官方 `nexusd-cluster`；Runtime 镜像包含 Docker 模式 `scode`，无需系统 Node.js
-或 Docker Compose。
-
-host 会话使用 `current/app/bin/scode`，Docker 会话使用容器内
-`/usr/local/bin/scode`，对应 `runtimeDefaults.hostScodePath` 和
-`runtimeDefaults.dockerScodePath`。两者统一读取
-`src/server/nexus/runtime-versions.json` 中的 `scode` 版本；升级时只修改这一处。
-
-## 安装入口
-
-只有一个安装脚本 `install.sh`，用 `--role` 指定这台机器承担什么：
-
-| `--role` | 装什么 | 需要 Docker |
+| 组件 | 镜像 | 生命周期 |
 | --- | --- | --- |
-| `all-in-one`（默认） | 会话运行时（k3s + gvisor + runtime 镜像）+ Moss Server | 否 |
-| `control-plane` | 只装 Moss Server，会话跑在另一台计算节点上 | 仅当选 `docker` 运行时 |
-| `compute` | 只装会话运行时（可 `--join` 加入已有 k3s 集群） | 否 |
+| Server、管理后台、API | `moss-server:<版本>-amd64` | Kubernetes Deployment |
+| Nexus、vault 插件、会话 exec 进程 | `moss-nexus:<版本>-amd64` | 同一 Deployment 的独立容器 |
+| scode 会话 | `my-moss-runtime:<版本>-amd64` | 每个会话一个 Pod |
 
-计算节点由 `install.sh --role compute` 一键装好（旧的 `install-k3s.sh` 已移除）。
+Server 镜像不含 Nexus；Nexus 镜像不含 Server、后台或模型文件。两个镜像均包含
+`kubectl`：Server 创建会话 Pod，Nexus 负责执行 `kubectl exec` 并管理会话通道。
+Moss 使用 `MOSS_NEXUS_MODE=external` 连接同 Pod 的 `127.0.0.1:2126`。
+Nexus 使用 `serve-local`，不通过 Service、hostPort 或 Ingress 暴露。
 
-## 在线安装
+Moss/Nexus 不创建业务 systemd 服务。k3s 本身仍由宿主机服务机制管理。
 
-国内：
+## Moss 控制面安装
 
-```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh | sudo bash
-```
+要求 Linux amd64、root/sudo、Python 3.9+、curl、tar、gzip、flock。不要求宿主机 Node.js 或 Docker。
+默认部署 k3s `v1.34.1+k3s1`，镜像内 kubectl 为 `v1.34.1`；更换集群版本时应保持受支持的客户端版本差距。
 
-国外：
+当前公网 `moss/server/latest/install.sh` 尚未切换到本仓库的新容器安装器。
+以下命令要求已取得新安装器及配套版本资产；客户完整套件请使用主 README 中的候选包。
 
-```bash
-BASE=https://github.com/sudoprivacy/moss/releases/latest/download
-curl -fL --progress-bar "$BASE/install.sh" | sudo env MOSS_DOWNLOAD_BASE="$BASE" bash
-```
-
-默认安装目录是发起安装用户的 `$HOME/.moss/server`，服务也以该用户运行；直接
-使用 root 安装时才会使用 `/root/.moss/server`。默认端口为 `43127`。
-
-非交互或自定义安装：
+非交互安装：
 
 ```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
-  | sudo env MOSS_NON_INTERACTIVE=1 \
-      MOSS_INSTALL_DIR=/data/moss \
-      MOSS_PORT=43127 \
-      MOSS_ADVERTISED_HOST=10.0.1.206 \
-      MOSS_ADMIN_USERNAME=admin \
-      MOSS_ADMIN_PASSWORD='replace-with-a-strong-password' \
-      bash
+sudo env MOSS_NON_INTERACTIVE=1 \
+  MOSS_INSTALL_DIR=/data/moss \
+  MOSS_ADVERTISED_HOST=10.0.1.206 \
+  MOSS_ADMIN_USERNAME=admin \
+  MOSS_ADMIN_PASSWORD='replace-with-a-strong-password' \
+  ./install.sh
 ```
 
-还可设置 `MOSS_INSTALL_USER`、`ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY`。
+安装器会校验发布资产、导入三个镜像，并创建 Namespace、ServiceAccount、Role/RoleBinding、
+Secret、PVC/PV、Service 和 Deployment。默认端口 `43127`，访问
+`http://服务器IP:43127/admin/`。端口通过控制节点的 hostPort 提供；也可另外配置 Ingress。
+`ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY` 可在首次安装时设置；API Key 启动后写入 vault。
 
-## 离线安装
+| 参数 | 用途 |
+| --- | --- |
+| `--role all-in-one` | 默认；安装 k3s/gVisor 并部署 Server/Nexus |
+| `--role control-plane` | 在本机已有的 k3s server 上部署 Server/Nexus |
+| `--role compute` | 仅安装会话计算节点 |
+| `--join URL --token TOKEN` | 计算节点加入种子集群 |
+| `--install-dir PATH` | 指定数据和安装目录 |
+| `--upgrade` | 获取最新版安装器并升级 |
+| `--offline` | 仅使用脚本旁的离线资产 |
+| `MOSS_CONTROL_NAMESPACE` | 控制命名空间，默认 `moss-control` |
+| `MOSS_K8S_NAMESPACE` | 会话命名空间，默认 `moss-sessions`，须与控制命名空间不同 |
+| `MOSS_CONTROL_NODE` | 控制节点的 `kubernetes.io/hostname` 标签；默认按本机 IP 识别 |
+| `MOSS_K8S_RUNTIME_CLASS` | 默认 `gvisor`；已有集群可显式留空以使用默认运行时 |
 
-在有网络的机器执行：
+首次运行 `--role control-plane` 时，计算节点的 runtime 镜像和 gVisor 须已准备好。
+控制服务使用节点本地存储，固定在安装节点上。其他计算节点可运行会话；每次升级前须在各计算节点
+导入对应版本的 Runtime 镜像（可运行同版本 `install.sh --role compute`）。镜像使用固定版本，
+不依赖各节点的 `latest` 标签。
 
-```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
-  | bash -s -- --download ./moss-offline
-```
-
-将生成的 `moss-offline` 目录传到离线服务器后执行：
-
-```bash
-cd moss-offline
-sudo ./install.sh --offline
-```
-
-目录内包含 `install.sh`、Server 包、Docker Runtime 镜像包和 `SHA256SUMS`。
-
-## 会话运行时（k3s + gvisor）
-
-默认运行时是 k8s：每个会话跑在 gvisor 沙箱 Pod 里。单机一次装完：
-
-```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh | sudo bash
-```
-
-Server 和计算节点分开部署时，在**计算节点**上：
-
-```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
-  | sudo bash -s -- --role compute
-```
-
-脚本会提示节点 IP、命名空间等必要参数（`--non-interactive` 全部取默认值），完成后
-在 moss server.json 旁写出 `moss-k3s-kubeconfig.yaml`，并打印 Server 侧要填的值。
-`--role all-in-one` 会把这些值直接写进 server.json，无需手工编辑。
-
-再在 **Server 机器**上：
-
-```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
-  | sudo bash -s -- --role control-plane
-```
-
-把计算节点写出的 `moss-k3s-kubeconfig.yaml` 拷到 Server 的安装目录，或在 `server.json`
-的 `k8s.kubeconfig` 里指向它。Server 机器需要有 `kubectl`。
-
-离线安装：在有网络的机器运行 `fetch-offline-deps.sh` 生成 `./offline`，连同 `deploy/k3s`
-目录拷到节点后执行 `sudo OFFLINE_MODE=on ./install.sh --role compute`。
-
-已装好的 Server 改用 k8s：编辑 `~/.moss/server/server.json`，把
-`runtimeDefaults.type` 改成 `"k8s"`，重启 moss-server。
-
-### 扩容：多计算节点（k3s 集群）
-
-`--role compute` / `all-in-one` 默认起一个单节点 k3s。要让多台机器一起跑会话，把额外
-机器作为 **agent** 加入**种子节点**（第一台 `all-in-one` 或 `compute`）。种子节点装完会在
-结尾打印一条可直接复制的加入命令，含 node-token：
-
-```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
-  | sudo bash -s -- --join https://<种子IP>:6443 --token <node-token>
-```
-
-`--join` 自动隐含 `--role compute`。每台 agent 会各自装 k3s-agent + gvisor，并**各自**把
-moss-runtime 镜像 import 进本机 containerd —— 因为 `imagePullPolicy` 默认 `IfNotPresent`
-且调度器可能把 Pod 排到任意节点，所以每个节点本地都要有镜像，不存在中心推送。离线扩容时
-把 `moss-runtime-*-linux-amd64.tar.gz` 拷到 agent 的脚本旁（或 `OFFLINE_DIR/images`）即走
-本地导入，省去重复下载。
-
-节点间需放行的端口：种子的 API `6443/tcp`（agent → 种子），以及 flannel `8472/udp`、kubelet
-`10250/tcp`（节点互通）。脚本会在已启用的 ufw/firewalld 上尽力打开；云主机还需在安全组放行。
-
-Server 侧**无需任何改动**：继续用种子节点写出的 `moss-k3s-kubeconfig.yaml`，新增 agent 由
-调度器自动纳入。多 server 高可用（embedded etcd）不在此范围，仍是单 server + 多 agent。
-
-### 接入已有的 k8s 集群
-
-若客户已有 k8s 集群，无需 `--role compute`，只需在 `server.json` 的 `k8s` 块里
-指向他们的 kubeconfig。moss-server 通过本机 `kubectl` + kubeconfig 操作集群，前提是
-集群满足：
-
-- `runtimeClassName`：默认 `gvisor`。集群若无 gvisor RuntimeClass，设为 `""`（留空）即
-  省略该字段，Pod 使用集群默认运行时。
-- 镜像：`image` 需在集群各节点可拉取；私有仓库用 `imagePullSecrets`（预先创建的
-  dockerconfigjson Secret 名），`imagePullPolicy` 默认 `IfNotPresent`。
-- 命名空间：不存在时 moss 会自动创建（需 kubeconfig 具备相应权限）。
-
-## 目录与配置
+## 数据与权限
 
 ```text
 ~/.moss/server/
   current -> releases/server-vX.Y.Z
-  releases/          # Server、Node.js、host scode 和运行依赖
-  packages/          # 按版本保留安装脚本、校验文件和两个原始压缩包
-  data/              # SQLite、transcript 和 session 数据
-  .moss/             # 设置、Skill、Assistant 和 Nexus 数据
-  server.json        # 主配置
-  moss-server.env    # systemd 环境变量
-  install.sh         # 安装与升级脚本
-  start.sh
-  stop.sh
-  status.sh
-  uninstall.sh
+  releases/          # 已生成的部署清单、配置和管理工具
+  packages/          # 校验清单、镜像包、部署包
+  backups/           # 停止写入后创建的升级快照；失败版本数据也保留在此
+  data/              # SQLite、transcript、运行目录
+  .moss/             # 用户设置、Skill、Assistant、Nexus/vault 数据
+  server.json        # 持久配置；编辑后执行 restart.sh
+  server-env.json    # 附加环境变量（JSON；不执行 shell）
+  kubeconfig.json    # 使用 Pod 内投射的 ServiceAccount tokenFile
+  k8s-install.json   # 已完成安装的版本、命名空间与节点
+  install.sh
+  start.sh / stop.sh / restart.sh / status.sh / logs.sh / uninstall.sh
 ```
 
-`server.json`、`moss-server.env` 和 `.moss/settings.json` 权限为 `600`。修改配置后
-重启服务生效。在线安装包保留在 `packages/server-vX.Y.Z/`，重复执行同版本安装时
-直接退出，不重新下载，也不重启服务。
+控制数据用 `Retain` 策略的 local PV/PVC，两个容器挂到同一绝对路径，保留现有文件引用和 Nexus
+工作目录。SQLite 和 vault 都只有一个写入实例。Deployment 使用 `Recreate`，不得手工增加副本。
+会话工作区默认通过 k3s 的 `local-path` PVC 持久化；普通会话结束不会删除工作区。
 
-### Nexus vault 插件（敏感值加密存储）
+集群权限只覆盖会话命名空间中的 Pod、exec、Secret、PVC。控制容器使用自动轮换的 ServiceAccount
+令牌；用户会话 Pod 不挂载该令牌。配置和环境变量通过 Secret 注入，磁盘文件权限为 `600`。
 
-服务端敏感值（系统设置 / 服务器凭据 / 凭据中心）经 nexus vault 插件
-（`GenericSecretsService`）以 AES-256-GCM 密文落盘，`<Nexus 数据目录>/vault/` 下的
-`master.key` 为加密主密钥——**丢失该文件则全部已存密文不可恢复**，请将其纳入备份。
-镜像/安装包已内置插件（`bin/nexus/plugins/libnexus_vault.so` 与 `.sig` 成对）。
-
-- **本地开发（非容器）**：需将插件放入仓库 `bin/nexus/plugins/`（该目录不入库）。
-  Linux/WSL 从 [nexi-lab/nexus releases](https://github.com/nexi-lab/nexus/releases)
-  下载 `vault-v*` 对应平台的 `nexus-vault-linux-x86_64.tar.gz` 解压得到
-  `libnexus_vault.so` + `.sig`；版本以 `src/server/nexus/runtime-versions.json` 的
-  `nexus-vault` 为准。
-- **arm64 边界**：nexus 尚未发布 `linux-aarch64` 插件产物，本地 arm64 镜像构建会
-  显式报错（CI 发布为 amd64 不受影响）；待 nexus 发布后放开。
-- **Windows / macOS 原生开发**：无需手工下载。在**仓库根目录**运行 `bun run build:node`
-  会自动从阶梯下载源（COS Runtime → Legacy COS → GitHub）获取当前平台的 vault 插件
-  （Windows `nexus_vault.dll` / macOS `libnexus_vault.dylib`，与 `.sig` 成对）和 nexusd
-  二进制，落盘到 `bin/nexus/plugins/` 与 `bin/nexus/`（已装同版本则跳过；版本以
-  `src/server/nexus/runtime-versions.json` 为准，实现见 `scripts/fetch-nexus-runtime.js`）。
-  **注意**：须在仓库根目录既 `bun run build:node` 又启动 server——运行期按
-  `process.cwd()` 定位 `bin/nexus/plugins`，构建与启动的工作目录必须一致，否则运行期找不到插件。
-
-### Embedded Nexus ZoneId（可选）
-
-单机 embedded 模式可在首次启动前显式设置 `MOSS_NEXUS_ZONE_ID`。该值不是密钥；它会按原始字节
-交给内置的 `@sudo/contracts` ZoneId 校验器，不会 trim、改写或从实例 ID、主机名、组织、路径推导。
-未设置且没有既有锁时保持旧行为，不传 `--cluster-init`。
-
-```bash
-MOSS_NEXUS_ZONE_ID=customer-a docker compose -f deploy/docker-compose.yml up -d
-```
-
-非容器安装可在首次安装时传入同一变量；安装器会把它原样保存在权限为 `600` 的
-`moss-server.env` 中，并在升级时保留：
-
-```bash
-sudo env MOSS_NEXUS_ZONE_ID=customer-a ./install.sh --non-interactive
-```
-
-已有安装不能在同一次原地升级中首次声明 ZoneId：升级失败时旧版本无法安全回滚新创建的不可变绑定。
-应先不带该变量完成升级并确认健康，再在 Nexus 数据仍为空时单独配置 `moss-server.env` 并重启。
-已有锁的安装仍可正常升级；显式值必须与锁逐字节一致。
-
-首次声明只允许 Nexus 数据目录不存在或完全为空。接受后，Moss 以 exclusive-create 写入版本化锁：
-
-- Docker 默认：`./.moss/nexus/data.zone-id.lock.json`（容器内
-  `/root/.moss/nexus/data.zone-id.lock.json`）；
-- 安装器默认：`<安装目录>/.moss/nexus/data.zone-id.lock.json`。
-
-备份和恢复必须把整个 Nexus 目录作为一个单元：同时包含 `data/`（包括 `vault/master.key`）和同级
-`data.zone-id.lock.json`，并保留 `moss-server.env` 中相关的 `MOSS_NEXUS_ZONE_ID` 声明。不得只恢复
-数据而漏掉锁，也不得单独恢复、删除或替换锁；否则在环境变量省略时会落回 legacy argv，无法证明
-恢复后的数据与 ZoneId 绑定一致。
-
-之后即使不再提供环境变量，启动也会复用锁中的精确值；显式值必须逐字节相同。锁不可重命名、
-覆盖或删除来切换 ZoneId。格式损坏、值不匹配、首次声明时已有数据都会在启动子进程和改动 Nexus
-数据前失败。若首次子进程启动失败，锁仍会保留，同一 ZoneId 可安全重试。
-
-`MOSS_NEXUS_ZONE_ID` 不适用于 `MOSS_NEXUS_MODE=external`：外部 Nexus 自己拥有拓扑。存在本地锁时
-也不得直接切换到 external；这需要另行批准的拓扑迁移方案，Moss 不会自动删除、忽略或迁移锁和数据。
-HA / external 部署清单因此不会注入这个变量。
-
-## 常用操作
+## 启停、日志和升级
 
 ```bash
 sudo ~/.moss/server/status.sh
 sudo ~/.moss/server/stop.sh
 sudo ~/.moss/server/start.sh
-sudo systemctl restart moss-server
-sudo journalctl -u moss-server -f
-curl http://127.0.0.1:43127/healthz
-```
-
-管理后台：`http://服务器IP:43127/admin/`
-
-## 升级与卸载
-
-在线升级默认使用固定 COS 地址：
-
-```bash
+sudo ~/.moss/server/restart.sh
+sudo ~/.moss/server/logs.sh server
+sudo ~/.moss/server/logs.sh nexus
 sudo ~/.moss/server/install.sh --upgrade
 ```
 
-国外可使用 GitHub Release：
+这些管理脚本操作 Kubernetes 资源，不调用业务 systemd 服务。升级先下载并校验所有资产、验证清单，
+再停止旧 Pod，备份 `data/`、`.moss/` 与配置。新容器及 `/readyz` 正常后才提交新版本。
+失败时先确认新写入进程已停止，再恢复原数据和原部署。若无法确认停止，不自动覆盖数据；保留快照供恢复。
+同版本重复执行不会下载镜像或重启已存在的 Deployment。卸载后重复安装同版本会重新部署。
+
+## 从旧进程安装迁移
+
+对旧一键安装生成的 **embedded Nexus** 部署，运行新安装器并指定原安装目录即可。
+迁移检查和镜像准备完成后才停止旧 `moss-server.service`，随后备份原数据并启动容器。
+切换成功才禁用并移走旧业务 unit；启动失败恢复数据并重新启动原服务。旧 `moss-server.env` 会解析为数据，
+不会当作 shell 执行。
+
+以下情况在停止服务前拒绝自动迁移：独立 external Nexus/Co-host、自定义安装目录外的数据路径、
+已经声明 `MOSS_NEXUS_ZONE_ID` 或存在 `data.zone-id.lock.json`。这些环境需要先明确服务、卷和证书的迁移关系。
+备份应把整个 Nexus 目录作为一个单元，包含 `vault/master.key`、证书和 ZoneId 锁；不得只恢复数据而遗漏锁或密钥。
+
+原进程安装器归档在 `deploy/legacy/install-host.sh`，仅用于旧版本回归与维护，不通过新一键入口发布。
+
+## 离线交付
 
 ```bash
-BASE=https://github.com/sudoprivacy/moss/releases/latest/download
-sudo env MOSS_INSTALLER_URL="$BASE/install.sh" MOSS_DOWNLOAD_BASE="$BASE" \
-  ~/.moss/server/install.sh --upgrade
-```
+# 联网机器：下载三个镜像、部署工具及 k3s/gVisor 离线依赖
+bash install.sh --download ./moss-offline
 
-离线升级使用新版本离线目录，不访问网络：
-
-```bash
+# 拷贝整个目录到目标机器
 cd moss-offline
-sudo ./install.sh --offline --upgrade
+sudo ./install.sh --offline
 ```
 
-升级无需重新输入配置，只替换 Server 版本目录、Runtime 镜像及其内部镜像引用；
-`data/`、管理员信息、Anthropic 配置和其他用户配置保持不变。启动或健康检查失败
-会自动恢复上一版程序和配置。同版本仅获取小安装脚本确认版本，不下载 Server 包和
-Runtime 镜像，也不重启服务。
+离线目录包含 `install.sh`、`SHA256SUMS`、`moss-server-image-*`、`moss-nexus-image-*`、
+`moss-runtime-*`、`moss-deploy-*` 及 `offline/` 基础设施资产。已有 k3s 环境无需重复准备基础设施，
+仍须提供四个发布压缩包和校验清单。离线模式缺文件或校验失败会退出，不回退在线下载。
+国内网络可使用 `K3S_MIRROR=cn bash install.sh --download ./moss-offline`；下载器校验
+k3s 二进制和基础镜像，并兼容国内源的 `.tar.gz` 与上游的 `.tar.zst` 基础镜像包。
 
-固定版本脚本（例如 `/root/install.sh`）已经知道目标版本；目标版本与当前版本相同时，
-普通安装和 `--upgrade` 都会在联网前直接退出。安装目录内的
-`~/.moss/server/install.sh --upgrade` 是长期升级入口，会从 `latest` 获取小安装脚本
-以发现后续版本。
-
-卸载：
+## 本地构建与发布
 
 ```bash
-# 保留配置和数据
-sudo ~/.moss/server/uninstall.sh
-
-# 删除程序、配置和数据
-sudo ~/.moss/server/uninstall.sh --purge
+bash deploy/package-control-images.sh <版本号> amd64 ./dist
 ```
 
-每个 Release 提供 amd64 Server 包、Runtime 镜像包、`install.sh`、k3s 计算节点脚本
-（`uninstall-k3s.sh`、`fetch-offline-deps.sh`）和 `SHA256SUMS`。
+该命令构建独立的 Server/Nexus 镜像并导出镜像包和部署工具包。完整发行还需要现有的 Runtime
+构建步骤和带版本号的安装器。`build-release.yml` 在发布资产前执行镜像检查、安装/会话/重启/离线重装
+测试；COS/GitHub Release 同步包含新镜像。完成发布后 `latest/install.sh` 才切换到新安装入口。
+构建会话 Runtime 时可通过 `--build-arg HF_ENDPOINT=https://hf-mirror.com --build-arg HF_HUB_DISABLE_XET=1` 指定模型镜像源，
+通过 `--build-arg SCODE_DOWNLOAD_URL=<地址>` 指定 scode 下载地址；scode 仍按仓库固定 SHA256 校验。
 
-### Runtime upgrade verification
+## 卸载
 
-The embedded daemon is pinned to Nexus VFS 0.8.0 and the signed vault plugin to
-0.5.68 (plugin ABI 7), matching SDK 0.5.0. Update the platform checksums with
-the versions. CI runs `scripts/e2e/embedded-nexus-live.ts` against installed
-release artifacts on Linux, macOS and Windows: it starts the real manager,
-writes and updates a fresh value, restarts the daemon, then verifies persistence,
-deletion and restoration. The script header has the local commands. Both data
-and identity are isolated; the report contains only synthetic fixture metadata.
+```bash
+sudo ~/.moss/server/uninstall.sh          # 移除业务工作负载，保留 PVC 和数据
+sudo ~/.moss/server/uninstall.sh --purge  # 同时删除本安装及会话工作区数据
+```
+
+卸载不删除 k3s，也不删除命名空间中的其他工作负载。local PV 不提供跨节点数据复制；控制节点磁盘故障恢复
+依赖备份，多副本与跨节点高可用不属于本安装形态。
+
+### 完整套件的 Helm 入口
+
+`sudostack/tools/deploy/package.py` 消费这里生成的三个镜像及 `bootstrap-nexus.mjs`，增加 SudoWork、PostgreSQL、Caddy 和 Helm Chart。`bootstrap-nexus.ts` 使用随 Nexus 客户端发布的官方 proto，为 Moss 签发专用 Agent 证书并登记会话签发权限；单节点 profile 不注入多实例路由参数。候选包的一键入口为 `install-atlas.sh --host HOST --manage-k3s`。

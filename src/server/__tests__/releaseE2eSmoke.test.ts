@@ -18,7 +18,7 @@ const root = resolve(import.meta.dir, "../../..");
 
 function extractShellFunction(source: string, name: string): string {
   const match = source.match(new RegExp(`(?:^|\\n)${name}\\(\\) \\{[\\s\\S]*?\\n\\}`));
-  expect(match, `${name} must remain extractable from deploy/install.sh`).not.toBeNull();
+  expect(match, `${name} must remain extractable from deploy/legacy/install-host.sh`).not.toBeNull();
   return match![0].replace(/^\n/, "");
 }
 
@@ -162,7 +162,7 @@ function expectRollbackResult(result: RollbackResult, scenario: RollbackScenario
 
 describe("packaged Server E2E smoke", () => {
   it("restores failed upgrades without touching Nexus state", () => {
-    const installer = readFileSync(resolve(root, "deploy/install.sh"), "utf8");
+    const installer = readFileSync(resolve(root, "deploy/legacy/install-host.sh"), "utf8");
     const restoreInstallConfig = extractShellFunction(installer, "restore_install_config");
     const rollbackOnError = extractShellFunction(installer, "rollback_on_error");
 
@@ -180,7 +180,7 @@ describe("packaged Server E2E smoke", () => {
   }, process.platform === "win32" ? 60_000 : 5_000);
 
   it("detects rollback behavior removed from the test-local function copy", () => {
-    const installer = readFileSync(resolve(root, "deploy/install.sh"), "utf8");
+    const installer = readFileSync(resolve(root, "deploy/legacy/install-host.sh"), "utf8");
     const restoreInstallConfig = extractShellFunction(installer, "restore_install_config");
     const rollbackOnError = extractShellFunction(installer, "rollback_on_error");
     const scenario: RollbackScenario = {

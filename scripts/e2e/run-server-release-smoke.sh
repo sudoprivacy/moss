@@ -118,8 +118,9 @@ fi
 sudo useradd --create-home --home-dir "$TEST_HOME" --shell /bin/bash "$TEST_USER"
 sudo install -d -m 0755 -o "$TEST_USER" -g "$TEST_USER" "$WORKSPACE_DIR"
 mkdir -p "$OFFLINE_DIR"
-cp "$DIST_DIR/install.sh" "$OFFLINE_DIR/install.sh"
-cp "$DIST_DIR/SHA256SUMS-$ARCH" "$OFFLINE_DIR/SHA256SUMS"
+sed "s/@@MOSS_RELEASE_TAG@@/server-v$VERSION/g" "$ROOT_DIR/deploy/legacy/install-host.sh" > "$OFFLINE_DIR/install.sh"
+awk -v s="$SERVER_ARCHIVE" -v r="$RUNTIME_ARCHIVE" '$2 == s || $2 == r' \
+  "$DIST_DIR/SHA256SUMS-$ARCH" > "$OFFLINE_DIR/SHA256SUMS"
 cp "$DIST_DIR/$SERVER_ARCHIVE" "$DIST_DIR/$RUNTIME_ARCHIVE" "$OFFLINE_DIR/"
 chmod 755 "$OFFLINE_DIR/install.sh"
 (cd "$OFFLINE_DIR" && sha256sum -c SHA256SUMS)

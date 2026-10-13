@@ -76,10 +76,12 @@ RUN apt-get update && apt-get install -y \
 ENV SUDOWORK_SUBTITLE_PYTHON=/opt/sudowork-subtitles/bin/python \
     SUDOWORK_WHISPER_MODEL_DIR=/opt/sudowork-models/faster-whisper-small
 COPY deploy/runtime/fetch-whisper-model.py /tmp/fetch-whisper-model.py
+RUN python3 -m venv /opt/sudowork-subtitles \
+    && /opt/sudowork-subtitles/bin/python -m pip install --no-cache-dir faster-whisper==1.2.1 av==16.1.0
+ARG HF_ENDPOINT=https://huggingface.co
+ARG HF_HUB_DISABLE_XET=0
 RUN --mount=type=secret,id=hf_token \
-    python3 -m venv /opt/sudowork-subtitles \
-    && /opt/sudowork-subtitles/bin/python -m pip install --no-cache-dir faster-whisper==1.2.1 av==16.1.0 \
-    && HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
+    HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
        /opt/sudowork-subtitles/bin/python /tmp/fetch-whisper-model.py \
     && rm -f /tmp/fetch-whisper-model.py \
     && /opt/sudowork-subtitles/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('/opt/sudowork-models/faster-whisper-small', device='cpu', compute_type='int8', cpu_threads=2)" \
@@ -101,12 +103,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # 版本与 Server host 安装包共用仓库配置
 # 当前 Release 仅发布 linux/amd64 bundle
 ARG TARGETARCH
+ARG SCODE_DOWNLOAD_URL
 COPY src/server/nexus/runtime-versions.json /tmp/moss-runtime-versions.json
 RUN SCODE_VERSION="$(node -p 'require("/tmp/moss-runtime-versions.json").scode')" && \
     SCODE_SHA256="$(node -p 'require("/tmp/moss-runtime-versions.json")["scode-linux-x64-bundle-sha256"]')" && \
     case "$TARGETARCH" in amd64) ;; *) echo "scode bundle only supports amd64, got: $TARGETARCH"; exit 1 ;; esac && \
     SCODE_ASSET=scode-linux-x64-bundle.tar.gz && \
-    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/${SCODE_ASSET}" -o "/tmp/$SCODE_ASSET" && \
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -H 'Accept: application/octet-stream' \
+      "${SCODE_DOWNLOAD_URL:-https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/${SCODE_ASSET}}" -o "/tmp/$SCODE_ASSET" && \
     echo "$SCODE_SHA256  /tmp/$SCODE_ASSET" | sha256sum -c - && \
     tar -xzf "/tmp/$SCODE_ASSET" -C /tmp && \
     (cd /tmp/scode-linux-x64-bundle && sha256sum -c SHA256SUMS.txt) && \

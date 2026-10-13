@@ -49,8 +49,12 @@ EXPECTED_FILES=(
   uninstall-k3s.sh
   fetch-offline-deps.sh
   SHA256SUMS
+  bootstrap-nexus.mjs
   "moss-server-$VERSION-linux-amd64.tar.gz"
   "moss-runtime-$VERSION-linux-amd64.tar.gz"
+  "moss-server-image-$VERSION-linux-amd64.tar.gz"
+  "moss-nexus-image-$VERSION-linux-amd64.tar.gz"
+  "moss-deploy-$VERSION-linux-amd64.tar.gz"
 )
 
 # Scripts also mirrored to the fixed latest/ entrypoint (like install.sh). The
