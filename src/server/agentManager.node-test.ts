@@ -91,6 +91,8 @@ void test('Agent references round trip Unicode and refuse path traversal or malf
 })
 
 void test('workbench links use the configured secure origin and contain no credential parameters', () => {
+  assert.equal(agentWorkspaceUrl('session-1', 'https://webui.sudoprivacy.com', 'org-2'), 'https://webui.sudoprivacy.com/#/conversation/session-1?org_id=org-2')
+  for (const orgId of ['../org', 'org&token=secret', 'x'.repeat(129)]) assert.equal(agentWorkspaceUrl('session-1', 'https://webui.sudoprivacy.com', orgId), null)
   assert.equal(agentWorkspaceUrl('session-1', 'https://webui.sudoprivacy.com'), 'https://webui.sudoprivacy.com/#/conversation/session-1')
   assert.equal(agentWorkspaceUrl('session-1', 'http://localhost:26808'), 'http://localhost:26808/#/conversation/session-1')
   assert.equal(agentWorkspaceUrl('session-1', 'https://example.com/workspace/'), 'https://example.com/workspace/#/conversation/session-1')

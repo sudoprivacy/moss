@@ -7124,7 +7124,7 @@ export function startServer(
               createdAt: session.createdAt, title: session.title,
               workspaceUrl: session.userId === auth.userId ||
                 (session.source === 'agent-manager' && session.clientMetadata?.agent_manager_actor_id === auth.userId)
-                ? agentWorkspaceUrl(session.sessionId) : null }))
+                ? agentWorkspaceUrl(session.sessionId, undefined, session.orgId) : null }))
           writeJson(res, 200, { agent, sessions, runtime: await runtime.inspectUserRuntime(ownerId),
             canUpgrade: agent.isOwnerActive && canUpgradeAgentRuntime(auth, ownerId), isWorkspaceAvailable: Boolean(agentWorkspaceUrl('probe')) })
           return
@@ -7145,7 +7145,7 @@ export function startServer(
           })
           logger.info(`agent_manager_session_created ${JSON.stringify({ actorUserId: auth.userId,
             ownerId, orgId: auth.orgId, agentName: name, sessionId: session.sessionId })}`)
-          writeJson(res, 201, { sessionId: session.sessionId, workspaceUrl: agentWorkspaceUrl(session.sessionId) })
+          writeJson(res, 201, { sessionId: session.sessionId, workspaceUrl: agentWorkspaceUrl(session.sessionId, undefined, session.orgId) })
           return
         }
       }
