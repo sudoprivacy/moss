@@ -18,7 +18,7 @@ import { readAgentNamespace } from '../../src/server/nexus/agentNamespace.js'
 assert.equal(process.env.MOSS_OWNER_KEY_E2E, '1', 'Explicit owner model acceptance selection is required')
 const binary = resolve(process.env.NEXUSD_COHOST_BIN!)
 const work = mkdtempSync(join(process.env.MOSS_COHOST_ARTIFACTS!, 'owner-keys-'))
-const model = 'moss-owner-key-fixture'
+const model = 'claude-moss-owner-key-fixture'
 const processes: ChildProcess[] = []
 const logs: string[] = []
 const clients: NexusVfsClient[] = []
