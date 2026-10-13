@@ -10,6 +10,41 @@ import { createAcpBridgeHandle } from './acpBridge.js'
 import { readSharedAgentMemory } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
 
+void test('closing a live turn retains the rendered answer once without a prompt response', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'moss-close-turn-history-'))
+  const transcriptPath = join(cwd, 'transcript.jsonl')
+  const sent: any[] = []
+  const output: any[] = []
+  let events!: import('./acpTransport.js').AcpTransportEvents
+  const transport: import('./acpTransport.js').AcpMessageTransport = {
+    connected: true, start(value) { events = value },
+    async send(message) { sent.push(message) }, async close() {},
+  }
+  const handle = createAcpBridgeHandle({ transport, sessionId: 'closed-history', cwd,
+    model: 'fixture', transcriptPath, enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
+  handle.onStdoutLine(line => output.push(JSON.parse(line)))
+  try {
+    for (let i = 0; i < 200 && !sent.some(message => message.id === 'm-init'); i++) await delay(10)
+    events.onMessage({ id: 'm-init', result: {} })
+    events.onMessage({ id: 'm-session-new', result: { sessionId: 'native-closed-history' } })
+    handle.writeStdin(JSON.stringify({ type: 'user', message: { role: 'user', content: 'A slow reply' } }))
+    for (let i = 0; i < 200 && !sent.some(message => message.method === 'session/prompt'); i++) await delay(10)
+    assert(sent.some(message => message.method === 'session/prompt'))
+    events.onMessage({ method: 'session/update', params: {
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Visible partial answer' } },
+    } })
+    await handle.destroy(true)
+    await handle.destroy(true)
+    const records = (await readFile(transcriptPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    const assistants = records.filter(record => record.type === 'assistant')
+    assert.equal(assistants.length, 1)
+    assert.equal(assistants[0].message.content[0].text, 'Visible partial answer')
+    assert.equal(assistants[0].message.partial, true)
+    assert.equal(assistants[0].uuid, output.find(event => event.type === 'assistant').uuid)
+    assert.equal(assistants[0].parentUuid, records.find(record => record.type === 'user').uuid)
+  } finally { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) }
+})
+
 for (const chunks of [[], ['api returned 403 Forbidden: ', 'enterprise balance is insufficient']]) {
   void test(`failed prompt diagnostics survive context reload with ${chunks.length} streamed chunks`, async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'moss-failed-turn-history-'))
