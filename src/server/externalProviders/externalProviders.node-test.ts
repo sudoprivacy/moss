@@ -288,6 +288,10 @@ void test('onboarding rejects inactive members, tool DSL and unapproved endpoint
   await assert.rejects(f.admin.onboard(actor, { ...f.body(), allowed_user_ids: ['outsider'] }), { code: 'INVALID_MEMBER' })
   await assert.rejects(f.admin.onboard(actor, { ...f.body(), source_definition: f.body().source_definition.replace('llm', 'http-request') }), { code: 'UNSUPPORTED_DIFY_DEFINITION' })
   await assert.rejects(f.admin.onboard(actor, { ...f.body(), endpoint: 'http://127.0.0.2/v1' }), ExternalProviderError)
+  await assert.rejects(f.admin.onboard(actor, { ...f.body(), api_key: 'wrong-key' }), { code: 'PROVIDER_PREFLIGHT_FAILED' })
+  await f.admin.operations.reconcile()
+  assert.equal((await f.driver.all("SELECT id FROM external_pilot_operations WHERE status = 'cleanup_complete'")).length, 1)
+  assert.equal((await f.driver.all("SELECT id FROM external_pilot_operations WHERE status = 'cleanup_guard'")).length, 0)
   assert.equal(f.writes.length, 0)
 })
 

@@ -27,7 +27,7 @@ export class CredentialOperations {
     [operation.id, operation.actor.orgId, operation.kind, requestId, requestHash, Date.now() + 60_000, JSON.stringify(operation)]))
   }
 
-  /** A returned vault write proves this operation has no outstanding write call. */
+  /** Record an acknowledged vault write, or a preflight rejection before any write was started. */
   async confirmWrite(operation: CredentialOperation): Promise<void> {
     await this.store.db.transaction(async () => {
       await this.store.db.run('UPDATE external_pilot_operations SET status = status WHERE id = ?', [operation.id])

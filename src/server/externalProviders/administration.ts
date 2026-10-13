@@ -115,12 +115,16 @@ export class ExternalProviderAdministration {
       if (existing.status !== 'complete') return fail('REGISTRATION_IN_PROGRESS', 409)
       return this.describe(await this.store.binding(actor, original.binding.id))
     }
+    let writeStarted = false
     try {
       await this.inspect(actor, { endpoint: definition.endpoint, api_key: body.api_key })
+      writeStarted = true
       await this.options.secrets.putSecret!(namespace, 'app-key', apiKey, `org:${actor.orgId}`)
       await this.operations.confirmWrite(operation)
       return this.describe(await this.operations.finish(operation))
     } catch (error) {
+      // A rejected preflight never started a remote write, so it needs no indefinite guard.
+      if (!writeStarted) await this.operations.confirmWrite(operation)
       await this.operations.abandon(operation)
       if (error instanceof ExternalProviderError) throw error
       return fail('REGISTRATION_FAILED', 503)
