@@ -99,7 +99,7 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
     const created = await request('POST', '/api/v1/agents/persistent-agent/sessions', a.admin,
       { owner_id: a.userId, management_actor_id: b.userId, source: 'forged' })
     assert.equal(created.status, 201, JSON.stringify(created.data))
-    assert.equal(created.data.workspaceUrl, `https://workbench.example/#/conversation/${created.data.sessionId}`)
+    assert.equal(created.data.workspaceUrl, `https://workbench.example/#/conversation/${created.data.sessionId}?org_id=${a.orgId}`)
     const session = (await ok('GET', `/api/v1/sessions/${created.data.sessionId}`, a.admin)).session
     const adminId = JSON.parse(Buffer.from(a.admin.split('.')[1]!, 'base64url').toString()).sub
     assert.equal(session.userId, a.userId, 'the Agent owner remains the billing principal')
