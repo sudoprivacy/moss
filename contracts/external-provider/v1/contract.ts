@@ -1,5 +1,5 @@
 /** Moss-owned external-provider pilot wire contract. ADR-003/004 remain Proposed. */
-export const EXTERNAL_PROVIDER_API = 'external-provider.sudo.dev/v1alpha1' as const
+export const EXTERNAL_PROVIDER_API = 'external-provider.sudo.dev/v1alpha2' as const
 export type Capability = 'supported' | 'unsupported' | 'unknown'
 export type ExternalTaskStatus = 'accepted' | 'dispatching' | 'running' | 'succeeded' | 'failed' | 'unknown' | 'rejected'
 export type OutputDecoder = 'text' | 'reply_actions_v1'
@@ -40,6 +40,8 @@ export interface ExternalTask {
   session_id: string
   agent_id: string
   agent_name: string
+  configuration_revision?: number
+  dispatch_authorized_at?: number
   attempt_id: string | null
   status: ExternalTaskStatus
   query: string
@@ -50,6 +52,7 @@ export interface ExternalTask {
   source_digest: string
   provider: string
   provider_refs: { conversation_id?: string; message_id?: string; task_id?: string; workflow_run_id?: string }
+  reconciliation?: { action: 'closed'; note: string; user_id: string; created_at: number }
   cancellation: { status: 'none' | 'unsupported'; reason: string | null }
   created_at: number
   updated_at: number
@@ -61,14 +64,17 @@ export interface ExternalTaskEvent {
   sequence: number
   type: 'status' | 'answer' | 'provider_refs'
   status: ExternalTaskStatus
-  answer?: string
+  delta?: { offset: number; text: string }
+  state: Pick<ExternalTask, 'status' | 'attempt_id' | 'output_status' | 'error_code' | 'provider_refs' | 'updated_at' | 'dispatch_authorized_at' | 'reconciliation'>
   created_at: number
 }
 
 export interface ExternalEventsPage {
   events: ExternalTaskEvent[]
   next_cursor: number
-  task: ExternalTask
+  task?: ExternalTask
+  snapshot_sequence?: number
+  has_more: boolean
 }
 
 export interface RegisterExternalAgent {
@@ -103,6 +109,9 @@ export interface ExternalAgentAdmin extends ExternalAgent {
   revision: number
   archived: boolean
   credential_configured: boolean
+  credential_state: 'ready' | 'updating' | 'rotation_required'
+  registration_mode: 'onboarding' | 'reference_compat'
+  definition_evidence: 'validated_dsl' | 'digest_only'
 }
 export interface InspectExternalConnection { endpoint: string; api_key: string }
 export interface ExternalConnectionInspection { name: string; parameters_digest: string; checked_at: number }
