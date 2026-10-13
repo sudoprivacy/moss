@@ -98,6 +98,15 @@ export function verifyCabinTokenDetailed(
 
 export function buildConversationKey(context: CabinPassengerContext): string {
   const passenger = context.passengerId || context.passengerRef || `tablet:${context.tabletId}`
+  if (context.contextMode === 'seat') {
+    return [
+      context.aircraftNo || '',
+      context.flightId,
+      context.flightDate,
+      context.seatId || '',
+      passenger,
+    ].map(value => value.trim().toLowerCase()).join('|')
+  }
   return [
     passenger.trim().toLowerCase(),
     context.flightId.trim().toLowerCase(),

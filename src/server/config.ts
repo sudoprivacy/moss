@@ -75,6 +75,7 @@ export function getDefaultServerConfig(): ServerFileConfig {
     },
     cabin: {
       enabled: false,
+      contextMode: 'tablet-token',
       tokenSecret: 'dev-cabin-token-secret',
       tokenTtlSeconds: 2 * 60 * 60,
       passengerInfoPrivacyLevel: 2,
@@ -193,6 +194,9 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       enabled: process.env.CABIN_ENABLED
         ? process.env.CABIN_ENABLED === '1' || process.env.CABIN_ENABLED === 'true'
         : raw.cabin.enabled,
+      contextMode: process.env.CABIN_CONTEXT_MODE === 'seat' || process.env.CABIN_CONTEXT_MODE === 'tablet-token'
+        ? process.env.CABIN_CONTEXT_MODE
+        : raw.cabin.contextMode,
       tokenSecret: process.env.CABIN_TOKEN_SECRET || raw.cabin.tokenSecret,
       tokenTtlSeconds: readIntEnv('CABIN_TOKEN_TTL_SECONDS', raw.cabin.tokenTtlSeconds),
       passengerInfoUrl: process.env.CABIN_PASSENGER_INFO_URL || raw.cabin.passengerInfoUrl,

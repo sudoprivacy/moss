@@ -10,8 +10,9 @@
 {
   "cabin": {
     "enabled": true,
-    "tokenSecret": "请替换为现场随机长密钥",
-    "passengerInfoUrl": "http://对方服务地址/admin-api/cabin/tablet-passenger-info/current",
+    "contextMode": "seat",
+    "passengerInfoUrl": "http://对方服务地址/admin-api/cabin/public/current-seat-context/get",
+    "passengerInfoAuth": "对方提供的服务端 Authorization",
     "aircraftNo": "现场飞机编号",
 
     "asrUrl": "http://本地ASR服务/v1/audio/transcriptions",
@@ -29,7 +30,7 @@
 
     "automationEnabled": true,
     "flightStateWsUrl": "ws://对方服务地址/infra/ws",
-    "managedSeats": "A,B",
+    "managedSeats": "01A,01B",
 
     "broadcastApiBaseUrl": "http://对方硬件服务地址",
     "broadcastApiKey": "对方提供的 hardware api key",
@@ -61,12 +62,13 @@ MOSS_HOST_PATH_MAP={"/data/yin/moss-cabin-gateway/moss/data":"/app/data","/data/
 
 | 字段 | 默认值 | 是否必须 | 建议配置 | 说明 | 环境变量覆盖 |
 | --- | --- | --- | --- | --- | --- |
-| `enabled` | `false` | 启用 cabin 时必须为 `true` | `true` | 是否开启 Pad 端 cabin API，例如 `/v1/auth/token`、聊天、语音、生理检测报告接口。 | `CABIN_ENABLED` |
-| `tokenSecret` | `dev-cabin-token-secret` | 生产必须改 | 随机长密钥 | Pad cabin access token 签名密钥。生产不能使用默认值。 | `CABIN_TOKEN_SECRET` |
+| `enabled` | `false` | 启用 cabin 时必须为 `true` | `true` | 是否开启 Pad 端聊天、语音、TTS 和生理检测报告接口。 | `CABIN_ENABLED` |
+| `contextMode` | `tablet-token` | 是 | 新接入使用 `seat` | `tablet-token` 保留原 Moss token + 平板 token 流程；`seat` 使用 UE 请求头中的 aircraftNo + seatNo 查询上下文，并禁用 `/v1/auth/token`。 | `CABIN_CONTEXT_MODE` |
+| `tokenSecret` | `dev-cabin-token-secret` | `tablet-token` 模式生产必须改 | 随机长密钥 | 旧模式 Pad cabin access token 签名密钥；seat 模式不签发该 token。 | `CABIN_TOKEN_SECRET` |
 | `tokenTtlSeconds` | `7200` | 否 | `7200` | Pad cabin access token 有效期，单位秒。 | `CABIN_TOKEN_TTL_SECONDS` |
-| `passengerInfoUrl` | 无 | cabin 对接真实 Pad 时必须 | 对方乘客/座位上下文接口 | Pad 获取 token、聊天、报告接口会用 tablet token 查询航班、座位、乘客上下文。 | `CABIN_PASSENGER_INFO_URL` |
-| `passengerInfoAuth` | 无 | 视对方接口而定 | 对方要求鉴权时配置 | 调用 `passengerInfoUrl` 时携带的 `Authorization`。 | `CABIN_PASSENGER_INFO_AUTH` |
-| `passengerInfoPrivacyLevel` | `2` | 否 | `2` | 请求乘客信息时传给对方接口的隐私级别。 | `CABIN_PASSENGER_INFO_PRIVACY_LEVEL` |
+| `passengerInfoUrl` | 无 | cabin 对接真实乘客信息时必须 | 对方乘客/座位上下文接口 | 两种模式复用该字段：`tablet-token` 模式按原逻辑 POST；`seat` 模式将 UE 的 aircraftNo、seatNo 作为 Query 发起 GET。 | `CABIN_PASSENGER_INFO_URL` |
+| `passengerInfoAuth` | 无 | 视对方接口而定 | 对方要求鉴权时配置 | 两种模式调用 `passengerInfoUrl` 时携带的 `Authorization`。 | `CABIN_PASSENGER_INFO_AUTH` |
+| `passengerInfoPrivacyLevel` | `2` | 否 | `2` | 仅旧 `tablet-token` 模式使用，请求乘客信息时传给对方接口的隐私级别。 | `CABIN_PASSENGER_INFO_PRIVACY_LEVEL` |
 | `aircraftNo` | 无 | 自动化/广播建议配置 | 现场飞机编号 | 用于广播、告警、健康报告、托管座位的飞机编号。 | `CABIN_AIRCRAFT_NO` |
 | `asrUrl` | `http://127.0.0.1:8002/v1/audio/transcriptions` | 使用语音输入时必须可用 | 本地 ASR 地址 | 语音转文字接口，兼容 OpenAI transcription 风格。 | `CABIN_ASR_URL` |
 | `asrModel` | `Qwen/Qwen3-ASR-1.7B` | 否 | 现场 ASR 模型名 | ASR 请求中的模型名。 | `CABIN_ASR_MODEL` |
@@ -89,7 +91,7 @@ MOSS_HOST_PATH_MAP={"/data/yin/moss-cabin-gateway/moss/data":"/app/data","/data/
 | `flightStateWsIdleTimeoutMs` | `60000` | 否 | `60000` | 超过该时间没有任何 WS 活动则断开重连。设为 `0` 可关闭空闲检测。 | `CABIN_FLIGHT_STATE_WS_IDLE_TIMEOUT_MS` |
 | `flightStateWsReconnectMinMs` | `3000` | 否 | `3000` | WS 断开后的最小重连间隔。 | `CABIN_FLIGHT_STATE_WS_RECONNECT_MIN_MS` |
 | `flightStateWsReconnectMaxMs` | `30000` | 否 | `30000` | WS 指数退避的最大重连间隔。 | `CABIN_FLIGHT_STATE_WS_RECONNECT_MAX_MS` |
-| `managedSeats` | 无 | 建议配置 | `A,B` 或现场座位号列表 | 自动化托管座位列表，逗号分隔。Pad 获取 token 时也会自动写入托管座位。 | `CABIN_MANAGED_SEATS` |
+| `managedSeats` | 无 | 建议配置 | `01A,01B` 或现场完整座位号列表 | 自动化托管座位列表，逗号分隔。值会原样用作硬件 target，不会自动补排号；Pad 获取 token 时也会自动写入托管座位。 | `CABIN_MANAGED_SEATS` |
 | `broadcastBaseUrl` | 无 | 通常不必配置 | 不配置或公网/内网可访问音频 URL 前缀 | Moss 对外提供已缓存 TTS 音频时使用的 URL 前缀；未配置时返回 `/v1/cabin/broadcasts/<file>`。 | `CABIN_BROADCAST_BASE_URL` |
 | `broadcastApiBaseUrl` | 无 | 使用对方广播接口时建议配置 | 对方硬件/广播服务基础地址 | 调用 `/admin-api/cabin/broadcast/audio-all` 和 `/admin-api/cabin/broadcast/error-seat` 的基础地址。不配置时回退 `controlBaseUrl`。 | `CABIN_BROADCAST_API_BASE_URL` |
 | `broadcastApiKey` | 无 | `broadcastEnabled=true` 且要推送对方广播时必须 | 对方提供的 hardware api key | 广播接口请求头 `x-hardware-api-key`。缺失时广播请求会跳过。 | `CABIN_BROADCAST_API_KEY` |
@@ -114,14 +116,17 @@ MOSS_HOST_PATH_MAP={"/data/yin/moss-cabin-gateway/moss/data":"/app/data","/data/
 | `logEnabled` | `true` | 否 | `true` | 是否写 cabin API 调用日志。 | `CABIN_LOG_ENABLED` |
 | `logFile` | 无 | 否 | `/app/data/logs/cabin.jsonl` | Pad cabin API、外部 passengerInfo、LLM/ASR/TTS 等接口日志。不配置时默认 `<rootDir>/logs/cabin.jsonl`。 | `CABIN_LOG_FILE` |
 
+当前版本没有 `healthReportModelTimeoutMs` 配置项。即使在 `server.json` 中填写，该字段也会被忽略；健康报告文案模型超时实际复用 `controlTimeoutMs`。如需独立超时，必须先在配置 schema、运行配置和健康报告服务中增加正式字段。
+
 ## 功能依赖关系
 
-- 只启用 Pad 基础接口：需要 `enabled=true`、`tokenSecret`、`passengerInfoUrl`。
+- 新座位上下文模式：需要 `enabled=true`、`contextMode=seat`、`passengerInfoUrl`，如对方要求鉴权则沿用 `passengerInfoAuth`。UE 业务请求携带 `X-Cabin-Aircraft-No`、`X-Cabin-Seat-No`。
+- 旧平板 token 模式：需要 `enabled=true`、`contextMode=tablet-token`、`tokenSecret`、`passengerInfoUrl`。
 - 启用语音聊天：还需要 `asrUrl/asrModel`、`llmBaseUrl/llmModel`。
 - 启用硬件控制：还需要 `controlBaseUrl`，如对方接口需要鉴权则配置 `controlAuth`。
 - 启用飞行状态自动化：需要 `automationEnabled=true`、`flightStateWsUrl`、`controlBaseUrl`，建议配置 `aircraftNo`、`managedSeats`、`automationLogFile`。
 - 启用阶段全机广播和座位异常推送：需要 `broadcastEnabled=true`、`broadcastApiKey`，建议配置 `broadcastApiBaseUrl`、`broadcastTtsCacheDir`。
-- 启用生理检测报告：需要 `healthReportEnabled=true`、`llmBaseUrl/llmModel`，并确保 `flightStateWsUrl` 的健康遥测消息中至少带 `seatNo`。
+- 启用生理检测报告：需要 `healthReportEnabled=true`、`automationEnabled=true`、`flightStateWsUrl`、`llmBaseUrl/llmModel`，并确保 WS 健康遥测消息中至少带 `seatNo`。
 
 ## 运行机制补充
 

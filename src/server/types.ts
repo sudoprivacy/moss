@@ -176,6 +176,7 @@ export const serverFileConfigSchema = lazySchema(() =>
     }),
     cabin: z.object({
       enabled: z.boolean().default(false),
+      contextMode: z.enum(['tablet-token', 'seat']).default('tablet-token'),
       tokenSecret: z.string().default('dev-cabin-token-secret'),
       tokenTtlSeconds: z.number().int().min(60).default(2 * 60 * 60),
       passengerInfoUrl: z.string().optional(),
@@ -350,6 +351,7 @@ export type ServerConfig = {
   }
   cabin: {
     enabled: boolean
+    contextMode?: 'tablet-token' | 'seat'
     tokenSecret: string
     tokenTtlSeconds: number
     passengerInfoUrl?: string

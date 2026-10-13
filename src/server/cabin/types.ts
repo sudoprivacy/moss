@@ -3,6 +3,7 @@ import type { ServerConfig } from '../types.js'
 export type CabinConfig = ServerConfig['cabin']
 
 export type CabinPassengerContext = {
+  contextMode?: 'tablet-token' | 'seat'
   passengerId?: string
   passengerRef?: string
   passengerName?: string

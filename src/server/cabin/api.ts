@@ -4,7 +4,7 @@ import { readFile, stat } from 'fs/promises'
 import path from 'path'
 import type { RuntimeService } from '../runtimeService.js'
 import type { ServerConfig } from '../types.js'
-import { issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
+import { buildConversationKey, issueCabinToken, verifyCabinTokenDetailed } from './auth.js'
 import { CabinDemoState } from './demo.js'
 import {
   CabinServices,
@@ -32,6 +32,10 @@ type MultipartForm = {
   file: UploadedFile
   fields: Record<string, string>
 }
+
+type CabinRequestIdentity =
+  | { mode: 'seat'; seat: { aircraftNo: string; seatNo: string } }
+  | { mode: 'tablet-token'; payload: CabinTokenPayload; tablet: { tabletToken: string; tabletId: string } }
 
 class CabinHttpError extends Error {
   constructor(
@@ -102,6 +106,24 @@ function requireTabletHeaders(req: http.IncomingMessage): { tabletToken: string;
     throw new CabinHttpError(400, 'MISSING_TABLET_ID', 'X-Cabin-Tablet-Id is required')
   }
   return { tabletToken, tabletId }
+}
+
+function requireSeatHeaders(req: http.IncomingMessage): { aircraftNo: string; seatNo: string } {
+  const aircraftNo = getHeader(req, 'x-cabin-aircraft-no')?.trim()
+  const seatNo = getHeader(req, 'x-cabin-seat-no')?.trim()
+  if (!aircraftNo) {
+    throw new CabinHttpError(400, 'MISSING_AIRCRAFT_NO', 'X-Cabin-Aircraft-No is required')
+  }
+  if (!seatNo) {
+    throw new CabinHttpError(400, 'MISSING_SEAT_NO', 'X-Cabin-Seat-No is required')
+  }
+  if (aircraftNo.length > 128 || /[\u0000-\u001f\u007f]/.test(aircraftNo)) {
+    throw new CabinHttpError(400, 'INVALID_AIRCRAFT_NO', 'X-Cabin-Aircraft-No is invalid')
+  }
+  if (seatNo.length > 128 || /[\u0000-\u001f\u007f]/.test(seatNo)) {
+    throw new CabinHttpError(400, 'INVALID_SEAT_NO', 'X-Cabin-Seat-No is invalid')
+  }
+  return { aircraftNo, seatNo }
 }
 
 function requireCabinToken(req: http.IncomingMessage, config: ServerConfig['cabin']): CabinTokenPayload {
@@ -446,6 +468,167 @@ async function fetchPassengerContext(
   return context
 }
 
+async function fetchSeatContext(
+  config: ServerConfig['cabin'],
+  seat: { aircraftNo: string; seatNo: string },
+  logger?: CabinLogger,
+  logContext?: CabinLogContext,
+): Promise<CabinPassengerContext> {
+  if (!config.passengerInfoUrl) {
+    throw new CabinHttpError(500, 'SEAT_CONTEXT_NOT_CONFIGURED', 'cabin.passengerInfoUrl is required')
+  }
+  let url: URL
+  try {
+    url = new URL(config.passengerInfoUrl)
+  } catch {
+    throw new CabinHttpError(500, 'SEAT_CONTEXT_NOT_CONFIGURED', 'cabin.passengerInfoUrl is invalid')
+  }
+  url.searchParams.set('aircraftNo', seat.aircraftNo)
+  url.searchParams.set('seatNo', seat.seatNo)
+
+  let response: Response | null = null
+  let lastError: unknown
+  const start = Date.now()
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10_000)
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: config.passengerInfoAuth ? { authorization: config.passengerInfoAuth } : undefined,
+      })
+      break
+    } catch (error) {
+      lastError = error
+      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 300))
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  const logUrl = `${url.origin}${url.pathname}`
+  if (!response) {
+    const message = lastError instanceof Error ? lastError.message : String(lastError)
+    logger?.log({
+      type: 'outbound',
+      ...summarizeContext({ ...logContext, seatNo: seat.seatNo }),
+      upstream: 'seat-context',
+      method: 'GET',
+      url: logUrl,
+      ok: false,
+      elapsedMs: Date.now() - start,
+      errorCode: 'SEAT_CONTEXT_FAILED',
+      errorMessage: message,
+      details: { aircraft_no: seat.aircraftNo, seat_no: seat.seatNo },
+    })
+    throw new CabinHttpError(502, 'SEAT_CONTEXT_FAILED', `Seat context request failed: ${message}`)
+  }
+  if (!response.ok) {
+    logger?.log({
+      type: 'outbound',
+      ...summarizeContext({ ...logContext, seatNo: seat.seatNo }),
+      upstream: 'seat-context',
+      method: 'GET',
+      url: logUrl,
+      status: response.status,
+      ok: false,
+      elapsedMs: Date.now() - start,
+      errorCode: 'SEAT_CONTEXT_FAILED',
+      details: { aircraft_no: seat.aircraftNo, seat_no: seat.seatNo },
+    })
+    throw new CabinHttpError(502, 'SEAT_CONTEXT_FAILED', `Seat context request failed: ${response.status}`)
+  }
+
+  const failInvalidResponse = (code: 'SEAT_CONTEXT_FAILED' | 'SEAT_CONTEXT_INVALID', message: string): never => {
+    logger?.log({
+      type: 'outbound',
+      ...summarizeContext({ ...logContext, seatNo: seat.seatNo }),
+      upstream: 'seat-context',
+      method: 'GET',
+      url: logUrl,
+      status: response.status,
+      ok: false,
+      elapsedMs: Date.now() - start,
+      errorCode: code,
+      errorMessage: message,
+      details: { aircraft_no: seat.aircraftNo, seat_no: seat.seatNo },
+    })
+    throw new CabinHttpError(502, code, message)
+  }
+
+  let envelope: unknown
+  try {
+    envelope = await response.json()
+  } catch {
+    return failInvalidResponse('SEAT_CONTEXT_INVALID', 'Seat context response is not valid JSON')
+  }
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+    return failInvalidResponse('SEAT_CONTEXT_INVALID', 'Seat context response must be an object')
+  }
+  const code = (envelope as Record<string, unknown>).code
+  if (code !== 0 && code !== '0') {
+    const msg = (envelope as Record<string, unknown>).msg
+    const message = typeof msg === 'string' && msg.trim() ? msg.trim() : 'Seat context request was rejected'
+    return failInvalidResponse('SEAT_CONTEXT_FAILED', message)
+  }
+  const data = objectField(envelope, 'data')
+  if (!data) {
+    return failInvalidResponse('SEAT_CONTEXT_INVALID', 'Seat context response missing data')
+  }
+  const flight = objectField(data, 'flight')
+  const passenger = objectField(data, 'passenger')
+  const flightId = stringFromObject(data, 'flightId', 'flight_id') || stringFromObject(flight, 'flightId', 'flight_id')
+  const flightDate = stringFromObject(data, 'flightDate', 'flight_date') || stringFromObject(flight, 'flightDate', 'flight_date')
+  const passengerRef = stringFromObject(passenger, 'passengerRef', 'passenger_ref')
+    || stringFromObject(data, 'passengerRef', 'passenger_ref')
+  if (!flightId) return failInvalidResponse('SEAT_CONTEXT_INVALID', 'Seat context response missing flightId')
+  if (!flightDate) return failInvalidResponse('SEAT_CONTEXT_INVALID', 'Seat context response missing flightDate')
+  if (!passengerRef) return failInvalidResponse('SEAT_CONTEXT_INVALID', 'Seat context response missing passengerRef')
+
+  const context: CabinPassengerContext = {
+    contextMode: 'seat',
+    passengerId: stringFromObject(passenger, 'passengerId', 'id'),
+    passengerRef,
+    passengerName: stringFromObject(passenger, 'displayName', 'passengerName', 'passengerNameMasked')
+      || stringFromObject(data, 'displayName', 'passengerName', 'passengerNameMasked'),
+    passengerGender: stringFromObject(passenger, 'gender', 'sex', 'passengerGender', 'passengerSex')
+      || stringFromObject(data, 'gender', 'sex', 'passengerGender', 'passengerSex'),
+    passengerTitle: stringFromObject(passenger, 'title', 'salutation', 'passengerTitle')
+      || stringFromObject(data, 'title', 'salutation', 'passengerTitle'),
+    flightId,
+    flightDate,
+    flightNo: stringFromObject(flight, 'flightNo', 'flight_no') || stringFromObject(data, 'flightNo', 'flight_no'),
+    flightSeatId: stringFromObject(data, 'flightSeatId', 'flight_seat_id'),
+    seatId: seat.seatNo,
+    columnNo: stringFromObject(data, 'columnNo', 'column_no'),
+    aircraftSeatId: stringFromObject(data, 'aircraftSeatId', 'aircraft_seat_id'),
+    aircraftId: stringFromObject(data, 'aircraftId', 'aircraft_id'),
+    aircraftNo: seat.aircraftNo,
+    tabletId: stringFromObject(data, 'tabletId', 'tablet_id') || `seat:${seat.aircraftNo}:${seat.seatNo}`,
+    tabletType: stringFromObject(data, 'tabletType', 'tablet_type'),
+    bindingId: stringFromObject(data, 'bindingId', 'binding_id'),
+    language: stringFromObject(passenger, 'language') || stringFromObject(data, 'language'),
+  }
+  logger?.log({
+    type: 'outbound',
+    ...summarizeContext({
+      ...logContext,
+      tabletId: context.tabletId,
+      seatNo: context.seatId,
+      flightId: context.flightId,
+    }),
+    upstream: 'seat-context',
+    method: 'GET',
+    url: logUrl,
+    status: response.status,
+    ok: true,
+    elapsedMs: Date.now() - start,
+    details: { aircraft_no: seat.aircraftNo, seat_no: seat.seatNo },
+  })
+  return context
+}
+
 async function contextFromToken(
   config: ServerConfig['cabin'],
   payload: CabinTokenPayload,
@@ -509,7 +692,9 @@ export function createCabinApi(options: {
         assistantName: cabinConfig.assistantName,
         assistantDisplayName: cabinConfig.assistantDisplayName,
         source: 'cabin',
-        channelChatId: `${context.flightId}:${context.passengerId || context.passengerRef || context.tabletId}`,
+        channelChatId: context.contextMode === 'seat'
+          ? `cabin:${buildConversationKey(context)}`
+          : `${context.flightId}:${context.passengerId || context.passengerRef || context.tabletId}`,
         runtime: {
           type: options.config.defaultRuntime,
           engine: 'scode',
@@ -576,7 +761,57 @@ export function createCabinApi(options: {
     }
   }
 
+  function requireCabinRequestIdentity(req: http.IncomingMessage): CabinRequestIdentity {
+    if ((cabinConfig.contextMode ?? 'tablet-token') === 'seat') {
+      return { mode: 'seat', seat: requireSeatHeaders(req) }
+    }
+    return {
+      mode: 'tablet-token',
+      payload: requireCabinToken(req, cabinConfig),
+      tablet: requireTabletHeaders(req),
+    }
+  }
+
+  async function resolveCabinContext(identity: CabinRequestIdentity, requestId: string): Promise<CabinPassengerContext> {
+    if (identity.mode === 'seat') {
+      const context = await fetchSeatContext(cabinConfig, identity.seat, cabinLogger, {
+        requestId,
+        seatNo: identity.seat.seatNo,
+      })
+      try {
+        store.upsertManagedSeatFromContext(context)
+      } catch (error) {
+        cabinLogger.log({
+          type: 'outbound',
+          requestId,
+          tabletId: context.tabletId,
+          seatNo: context.seatId,
+          flightId: context.flightId,
+          upstream: 'cabin-managed-seat',
+          method: 'UPSERT',
+          ok: false,
+          elapsedMs: 0,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          details: { source: 'seat-context' },
+        })
+        throw new CabinHttpError(
+          500,
+          'MANAGED_SEAT_REGISTER_FAILED',
+          'Failed to register cabin managed seat',
+        )
+      }
+      return context
+    }
+    return contextFromToken(cabinConfig, identity.payload, identity.tablet, cabinLogger, {
+      requestId,
+      tabletId: identity.tablet.tabletId,
+    })
+  }
+
   async function handleAuthToken(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
+    if ((cabinConfig.contextMode ?? 'tablet-token') === 'seat') {
+      throw new CabinHttpError(404, 'AUTH_TOKEN_DISABLED', 'Cabin access tokens are disabled in seat context mode')
+    }
     const tablet = requireTabletHeaders(req)
     const body = await readJsonBody(req)
     const tokenContext = optionalCabinTokenFields(body)
@@ -611,12 +846,11 @@ export function createCabinApi(options: {
   }
 
   async function handleVoiceQuery(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
-    const payload = requireCabinToken(req, cabinConfig)
-    const tablet = requireTabletHeaders(req)
+    const identity = requireCabinRequestIdentity(req)
     const form = await readMultipartForm(req)
     const file = form.file
     const language = validateLanguage(form.fields.language)
-    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    const context = await resolveCabinContext(identity, requestId)
     const conversation = await services.ensureConversation(context)
     const logContext = {
       requestId,
@@ -905,15 +1139,14 @@ export function createCabinApi(options: {
   }
 
   async function handleChatSend(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
-    const payload = requireCabinToken(req, cabinConfig)
-    const tablet = requireTabletHeaders(req)
+    const identity = requireCabinRequestIdentity(req)
     const body = await readJsonBody(req)
     const text = stringField(body, 'content') || stringField(body, 'text')
     if (!text) throw new CabinHttpError(400, 'MISSING_CONTENT', 'content is required')
     const source = parseMessageSource(stringField(body, 'source'))
     validateLanguage(stringField(body, 'language'))
 
-    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    const context = await resolveCabinContext(identity, requestId)
     const conversation = await services.ensureConversation(context)
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -932,15 +1165,14 @@ export function createCabinApi(options: {
   }
 
   async function handleVoiceChatSend(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
-    const payload = requireCabinToken(req, cabinConfig)
-    const tablet = requireTabletHeaders(req)
+    const identity = requireCabinRequestIdentity(req)
     const form = await readMultipartForm(req)
     const file = form.file
     const language = validateLanguage(form.fields.language)
     const source = form.fields.source
       ? parseMessageSource(form.fields.source)
       : 'voice'
-    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    const context = await resolveCabinContext(identity, requestId)
     const conversation = await services.ensureConversation(context)
     const logContext = {
       requestId,
@@ -1008,9 +1240,8 @@ export function createCabinApi(options: {
   }
 
   async function handleHistory(req: http.IncomingMessage, res: http.ServerResponse, url: URL, requestId: string): Promise<void> {
-    const payload = requireCabinToken(req, cabinConfig)
-    const tablet = requireTabletHeaders(req)
-    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    const identity = requireCabinRequestIdentity(req)
+    const context = await resolveCabinContext(identity, requestId)
     const conversation = await services.ensureConversation(context)
     const limit = Number.parseInt(url.searchParams.get('limit') || '20', 10)
     const normalizedLimit = Math.max(1, Math.min(Number.isFinite(limit) ? limit : 20, 100))
@@ -1040,21 +1271,19 @@ export function createCabinApi(options: {
   }
 
   async function handleReset(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
-    const payload = requireCabinToken(req, cabinConfig)
-    const tablet = requireTabletHeaders(req)
-    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    const identity = requireCabinRequestIdentity(req)
+    const context = await resolveCabinContext(identity, requestId)
     const conversation = await services.ensureConversation(context)
     store.resetConversation(conversation.id)
     writeJson(res, 200, { status: 'ok', cleared: true })
   }
 
   async function handleSpeech(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
-    const payload = requireCabinToken(req, cabinConfig)
-    const tablet = requireTabletHeaders(req)
+    const identity = requireCabinRequestIdentity(req)
     const body = await readJsonBody(req)
     const text = stringField(body, 'text') || stringField(body, 'content')
     if (!text) throw new CabinHttpError(400, 'MISSING_TEXT', 'text is required')
-    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    const context = await resolveCabinContext(identity, requestId)
     const conversation = await services.ensureConversation(context)
     const logContext = {
       requestId,
@@ -1082,10 +1311,9 @@ export function createCabinApi(options: {
     if (!cabinConfig.healthReportEnabled) {
       throw new CabinHttpError(404, 'HEALTH_REPORT_DISABLED', 'Health report API is disabled')
     }
-    const tablet = requireTabletHeaders(req)
-    const payload = requireCabinToken(req, cabinConfig)
+    const identity = requireCabinRequestIdentity(req)
     const body = await readJsonBody(req)
-    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    const context = await resolveCabinContext(identity, requestId)
     try {
       const result = healthReports.startReport(context, {
         requestId,
@@ -1106,9 +1334,8 @@ export function createCabinApi(options: {
     if (!cabinConfig.healthReportEnabled) {
       throw new CabinHttpError(404, 'HEALTH_REPORT_DISABLED', 'Health report API is disabled')
     }
-    const tablet = requireTabletHeaders(req)
-    const payload = requireCabinToken(req, cabinConfig)
-    const context = await contextFromToken(cabinConfig, payload, tablet, cabinLogger, { requestId, tabletId: tablet.tabletId })
+    const identity = requireCabinRequestIdentity(req)
+    const context = await resolveCabinContext(identity, requestId)
     try {
       const result = healthReports.getReport(reportId, context)
       writeJson(res, 200, result)
