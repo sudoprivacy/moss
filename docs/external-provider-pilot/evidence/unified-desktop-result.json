@@ -1,0 +1,13 @@
+{
+  "checks": [
+    "desktop My Agents excludes organization-published agent",
+    "desktop installed/My tab excludes organization-published agent",
+    "desktop directory opens unified external chat through IPC-backed directory",
+    "desktop IPC restores two turns from the WebUI session",
+    "desktop IPC -> Moss -> Dify continues same conversation: 50 -> 51",
+    "desktop reload restores completed three-turn history"
+  ],
+  "pageErrors": [],
+  "sessionId": "b750fa47-c228-4c3e-937d-7d68dec39b13",
+  "host": "full Electron development app, production installer not tested"
+}

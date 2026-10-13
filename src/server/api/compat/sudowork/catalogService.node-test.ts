@@ -218,3 +218,15 @@ void describe('Sudowork Catalog 协议投影', () => {
     }
   })
 })
+
+void test('external hosted agents stay out of native template installation and enhancement paths', async () => {
+  const { db, repository, compatibility, orgA } = await setup()
+  await repository.createAgent({ id: 'external', orgId: orgA.organizationId, name: 'Organization Dify', authorId: 'admin-a', status: 'approved', providerType: 'dify', supportedModes: 'both', providerBinding: { executionMode: 'external_hosted', appId: 'remote-app' } })
+  const admin = { userId: 'admin-a', orgId: orgA.organizationId, role: 'admin' }
+  const user = { userId: 'user-a', orgId: orgA.organizationId, role: 'user' }
+  assert.deepEqual((await compatibility.listAgents({ actor: admin })).data.assistants, [])
+  assert.deepEqual((await compatibility.listVisibleBindings(user)).data, [])
+  await assert.rejects(compatibility.getAgentDetail(admin, 'external'), (error: unknown) => error instanceof SudoworkCatalogError && error.statusCode === 404)
+  assert.ok(await repository.getAgent('external', orgA.organizationId))
+  db.close()
+})

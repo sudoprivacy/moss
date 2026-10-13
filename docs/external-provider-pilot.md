@@ -1,10 +1,10 @@
 # Dify 外部智能体试点
 
-2026-10-12，本实现将已发布的 Dify Chatflow 作为外部执行方，通过 Moss 统一任务接口供 SudoWork 选择和调用。Dify 中的定义不复制到本地 Runtime；`reply/actions` 中的 actions 不会自动执行。
+2026-10-13 更新。本实现将已发布的 Dify Chatflow 作为外部执行方，通过 Moss 统一任务接口供 SudoWork 选择和调用。Dify 中的定义不复制到本地 Runtime；`reply/actions` 中的 actions 不会自动执行。
 
 ## 已实现链路
 
-SudoWork 共用页面 `/app/agents/external` → desktop IPC 或 WebUI Session 代理 → Moss `/api/v1/tasks` → Dify `/v1/chat-messages`。Dify SSE 被归一化并持久化；客户端每 750ms 按 cursor 读取事件及当前任务投影，断开页面不影响执行。
+SudoWork **智能体列表 → 开始对话**（`/conversation/external%3A<session-id>`）→ desktop IPC 或 WebUI Session 代理 → Moss `/api/v1/tasks` → Dify `/v1/chat-messages`。Dify SSE 被归一化并持久化；客户端每 750ms 按 cursor 读取事件及当前任务投影，断开页面不影响执行。
 
 - Agent 注册复用 Catalog，Connection 复用 IdentityRepository；密钥通过现有 Nexus Secret port 加密保存和读取。
 - 组织、用户、端点均需明确批准。审批到期最长 7 天，默认未启用。
@@ -20,12 +20,14 @@ SudoWork 共用页面 `/app/agents/external` → desktop IPC 或 WebUI Session �
 
 基础条件：运行本分支的 Moss 与配套 SudoWork，Moss 已连接可写的 Nexus Secret。首次部署 Nexus 属于基础设施配置；每个智能体的接入、发布、停用均在界面完成，不需要编辑环境变量、计算摘要或手工调用接口。
 
-1. 平台管理员登录 SudoWork，进入侧栏 **外部智能体（试点） → 外部智能体管理 → 配置试点范围**。填写允许的 Dify API 地址（例如 `http://10.0.1.158:8089/v1`），启用当前组织并保存。范围持久化到 Moss 数据库，立即生效，无须重启。组织管理员可查看范围；仅 `super_admin` 能修改网络范围。
+1. 平台管理员登录 SudoWork，进入侧栏 **智能体列表 → 外部智能体管理 → 配置试点范围**。填写允许的 Dify API 地址（例如 `http://10.0.1.158:8089/v1`），启用当前组织并保存。范围持久化到 Moss 数据库，立即生效，无须重启。组织管理员可查看范围；仅 `super_admin` 能修改网络范围。
 2. 组织管理员点击 **接入 Dify 智能体**，选择获准的服务地址，输入应用的 **App API Key**，点击 **测试连接并继续**。这里使用 Dify 应用“访问 API”页的 key，不是 Dify 登录密码。
 3. 输入 App ID、Workspace ID，上传从 Dify 导出的 YAML / JSON；选择本组织的授权用户、结果格式，并填写审核说明。点击 **保存待审核配置**。服务端解析定义、拒绝非 Start/LLM/Answer 节点、生成摘要，并把 key 写入当前组织的 Nexus Secret。原始定义和明文 key 不写入业务数据库，不回显给客户端。
 4. 核对定义与 Dify 当前发布版本、用途及用户范围，点击 **审核发布**，选择 1 / 3 / 7 天有效期并确认。预检通过后，授权用户即可看到此智能体。Dify Service API 不能可靠提供 App/Workspace 身份或锁定发布版本，因此 ID 与发布定义需要管理员核对，不能把连接成功理解为版本已固定。
-5. 普通用户进入 **外部智能体（试点）**，选择智能体，输入合成问题，点击 **发送**；页面显示增量结果和任务状态。继续发送使用同一个 Dify conversation；刷新页面可恢复历史。
+5. 普通用户进入 **智能体列表 → 组织发布的智能体**，点击 **开始对话**。在统一对话页底部输入合成问题，Enter 或点击 **发送**；Shift+Enter 换行。页面显示增量回答及任务状态；继续追问复用同一个 Dify conversation。左侧 **对话 → 最近 / 时间分组** 可找回会话，刷新或跨 WebUI/桌面端登录同一账号可恢复历史。
 6. 管理员可 **测试连接、编辑配置、更换密钥、停用、归档**。更改用户范围/名称/结果格式或密钥会撤销发布，重新审核后才允许新任务。更换密钥先验证再写入 Secret；失败不会继续沿用“已发布”的状态。归档隐藏接入条目，保留会话和加密凭据；不是销毁凭据的功能。
+
+组织发布的智能体不进入 **我的 Agent**，也不进入目录的 **我的智能体 / 已安装模板** 页签；组织管理权和个人会话归属分开。旧 `/app/agents/external?session=<id>` 自动跳转统一对话；无 session 的旧地址跳转智能体列表。独立试点侧栏入口已移除。
 
 配置被其他管理员更新时返回冲突，界面提示刷新后重试。普通用户无管理入口，后端也独立检查权限。停用只阻止新派发，不声称已取消发往 Dify 的任务。
 
@@ -84,7 +86,7 @@ SudoWork 共用页面 `/app/agents/external` → desktop IPC 或 WebUI Session �
 - 共用客户端 → Moss HTTP dispatcher/AuthService/DbDriver → 真实 Dify：42 → 50，同 provider conversation、幂等重试未新增 Task、重新创建客户端后历史恢复、无 Bearer 请求 401。
 - 浏览器 → 真实 WebUI Session 解密/requireSession/proxy → 实际 bridgeAdapter → 实际共用页面：两次 POST 均 202，两轮显示42/50，刷新后重新选择历史可恢复；pageErrors 为空。[请求证据](external-provider-pilot/evidence/browser-result.json)、[恢复截图](external-provider-pilot/evidence/browser-restored.png)。
 - 前一轮验证使用内存 Secret port；本轮管理验收改用独立的真实 Nexus daemon + vault，并从空策略、空目录开始。数据库、身份、WebUI Session 仍为隔离测试环境，未写入生产服务。
-- 桌面验证范围是真实 host transport 的单元测试、共用页面 DOM 测试和类型检查；未启动完整 Electron 应用验收。
+- 桌面最初验证了真实 host transport 的单元测试、共用页面 DOM 测试和类型检查。2026-10-12 后续已启动完整 Electron 开发应用，并经正式密码登录、管理页面、已保存凭据的 Dify 连接测试验证；发布与对话操作留给用户本轮人工验收。renderer 生产打包曾内存不足，不能据此声称安装包验证通过。
 - 首期不执行 actions，不支持取消/执行恢复/不可变版本 pin；客户端使用 cursor 轮询增量展示，未实现 Moss→客户端 SSE 推送。
 - SQLite 执行了并发与数据库重开恢复测试；PG 复用 DbDriver 与事务/CAS SQL，尚未进行真实 PG/多副本联调。生产启用仍需 Nexus egress、版本变更治理、reconciliation 和部署验收。
 
@@ -109,3 +111,29 @@ SudoWork 共用页面 `/app/agents/external` → desktop IPC 或 WebUI Session �
 真实服务复验中曾出现一次 Dify 明确的 `PROVIDER_WORKFLOW_FAILED`，Moss 如实显示 failed 并释放该会话的任务锁。只读算术验收脚本允许对已确认 failed/rejected 的合成问题有限重试；产品不会自动重发，unknown 始终禁止自动重放。
 
 默认高并发全量运行曾出现既有 ontology 慢测试超时；降低执行并发后全量通过，未修改测试超时或跳过用例。另修复了客户端 import 自动整理造成的值导入问题，并通过定向与全量回归。
+
+### 2026-10-12 完整应用启动记录（历史状态）
+
+已启动独立 Nexus、完整 Moss server（43128）、WebUI 前端/后端（26808/26809）和完整 Electron 开发应用。WebUI 会话使用本地 PostgreSQL；Moss 任务数据库仍为独立 SQLite。两端使用正式登录流程，管理员管理页面及 Dify 连接测试通过；普通用户 WebUI 登录通过，无管理入口、看不到待审核条目。
+
+本地数据目录 `~/.local/share/dify-pilot-20261012`；详细操作见该目录的 `manual-verification.md`。10月12日交付时预置“Dify 验收助手”为待审核，桌面停留在管理员页面。10月13日复验时该智能体已由用户发布；当前服务状态与验证结果以下节为准。
+
+启动修复：补齐 Electron main 的 `@sudowork/moss-client/external-providers` 精确路径别名，安装开发 Electron 和内置 Node 运行时资源。桌面类型检查、定向 lint 与 main/preload 开发编译通过。原生本地凭据清理存在 `password-vault.secret_delete: method not found` 兼容性告警，本次外部链路使用 Moss 的独立凭据服务并已连接测试成功；此验收不覆盖原生本地执行全功能。
+
+### 2026-10-13 组织目录与统一对话验收
+
+管理员发布的智能体从 **智能体列表 → 组织发布的智能体** 开始对话，复用 ChatLayout、左侧时间线、底部输入和消息展示。组织智能体不进入 **我的 Agent** 或目录的个人/已安装页签；管理入口在目录内以抽屉打开，仅管理员可见。Moss 旧模板列表、详情和 enhancement 绑定排除 `external_hosted`，避免重复安装入口。
+
+客户端为外部 Session 创建 `external:<id>` 命名空间的只读展示投影，合并到最近8条与完整时间分组；Moss 仍保存外部 Session/Task 的唯一事实源，原生会话数据库、个人智能体归属、定时任务及原生操作接口不变。旧会话链接可继续使用，授权撤销后的个人历史仍可读取。
+
+真实链路证据：
+
+- 完整 WebUI → Moss → 已发布 Dify：从目录开始对话，42→50、Enter 续聊、左侧找回、刷新恢复、旧地址跳转、普通用户目录可见但不可管理且不能读取管理员会话，7组检查通过，`pageErrors=[]`。[记录](external-provider-pilot/evidence/unified-ui-result.json) / [对话截图](external-provider-pilot/evidence/unified-chat-webui.png) / [目录截图](external-provider-pilot/evidence/unified-agent-directory.png)。
+- 完整 Electron 开发应用 → 正式 desktop IPC → Moss → Dify：验证个人/已安装页签不显示组织智能体、目录进入统一对话、读取同一 WebUI 会话42/50、继续追问得到51、刷新恢复三轮历史，6组检查通过，`pageErrors=[]`。[记录](external-provider-pilot/evidence/unified-desktop-result.json) / [桌面对话截图](external-provider-pilot/evidence/unified-chat-desktop.png)。
+- 本轮使用现有“Dify 验收助手”的已发布配置和已保存凭据，仅增加合成测试会话，没有修改远端 Dify 定义/密钥，也没有重新发布接入配置。
+
+外部会话当前只提供查看、续聊、新建和复制回答；暂无重命名、置顶、删除、批量删除或导出接口，批量操作时不可选。模型、工具由 Dify 发布配置决定，界面不提供不支持的模型选择、附件、工作区、本地工具或停止执行按钮。provider 返回内容不解释为本地 action/file 标记，不自动加载远端图片。提交结果不明保持同一幂等 key，事件读取失败只重读；unknown 仍锁定、只读。
+
+本轮验证沿用隔离数据目录 `~/.local/share/dify-pilot-20261012`，临时启动服务，结束后恢复停止，保留数据。完整 Electron 开发应用已验证，生产安装包仍未验证；Moss 任务数据库仍使用 SQLite，WebUI 使用 PostgreSQL 不代表 Moss 任务库已完成 PG/多副本验收。其他试点限制继续适用。
+
+本轮最终自动检查：SudoWork全量334个测试文件通过、8个跳过，3192项通过、36项跳过；含组织资源不进入个人页签的新增回归。renderer/desktop/WebUI三处`tsc --noEmit`通过，契约digest校验通过。Moss外部任务与兼容目录31项通过，`build:node`通过；变更文件lint与diff空白检查通过（renderer保留1条既有`any`警告）。10月12日全量Moss/sudostack记录属于上一轮，本轮未重复宣称全量复验。
