@@ -70,7 +70,7 @@ Moss **智能体管理 → 专属智能体** 接入发布；SudoWork **智能体
 - SudoWork：`packages/contracts/src/external-provider.gen.ts`，只读派生；`bun run check:external-contract` 校验。
 - 这是首期实验契约，不是宣称 `task.sudo.dev/v1`、ADR-003/004/005 已 Accepted，也不改变 `@sudo/contracts` 稳定 exports。
 
-2026-10-13 rebase 后基线：Moss origin/dev `586fa29`；SudoWork origin/dev `aad96f70`；sudostack origin/main `d856bd7`。分支统一为 `codex/dify-external-pilot-20261012`。
+2026-10-13 rebase 后基线：Moss origin/dev `586fa29`；SudoWork origin/dev `a4913f1d`；sudostack origin/main `d856bd7`。分支统一为 `codex/dify-external-pilot-20261012`。
 
 ## 真实验证与边界
 

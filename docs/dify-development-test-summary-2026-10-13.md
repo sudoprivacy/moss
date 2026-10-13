@@ -16,11 +16,15 @@
 
 | 仓库 | rebase 目标及本次拉取的基线 | PR |
 |---|---|---|
-| moss | dev · `586fa29` | 待创建 |
-| sudowork | dev · `aad96f70` | 待创建 |
-| sudostack | main · `d856bd7` | 待创建 |
+| moss | dev · `586fa29` | [#369](https://github.com/sudoprivacy/moss/pull/369) |
+| sudowork | dev · `a4913f1d` | [#1234](https://github.com/sudoprivacy/sudowork/pull/1234) |
+| sudostack | main · `d856bd7` | [#43](https://github.com/sudoprivacy/sudostack/pull/43) |
+
+三个 PR 均为已推送的正式 PR，目标分支如表所示。SudoWork 当前提交 `82b87d96`，sudostack 当前提交 `5320aa1`；Moss 代码/验收提交为 `b2913bf`，其后的提交仅补齐本总结及 PR 链接。
 
 三个原工作区及其他 worktree 均保留。rebase 前的提交保存于各仓库本地 `refs/codex-backups/dify-before-rebase-20261013`；未合并 PR、未部署生产。
+
+收尾时 SudoWork dev 新增 `docs/sudowork-browser-sessions.md`，已再次 rebase 至 `a4913f1d` 并以显式 lease 更新远端；前后差异仅为新增该文档，代码、测试与配置内容完全相同，因此沿用下述验证结果。
 
 冲突处理保留最新 SudoWork 0.2.29 版本字段与 packageManager，沿用上游共享 ConversationHistoryContext 和“最近”默认折叠，再叠加外部会话展示投影；Moss 测试清单保留双方新增用例，并补登记目录隔离用例。
 
@@ -101,7 +105,7 @@ Moss 外部任务库不是全部 Sudo Task/Session 的长期事实源；长期�
 | renderer、desktop、WebUI、Moss admin 类型检查 | 通过 |
 | SudoWork 全量 | 3136 通过 / 30 跳过（单 worker 完整复跑） |
 | WebUI 单元测试 | 239 通过 |
-| SudoWork 格式与 lint | 两处格式已修正；renderer 0 错误、152 个现有警告 |
+| SudoWork 格式与 lint | 两处格式已修正并检查通过；renderer 0 错误、152 个现有警告 |
 | sudostack 测试 | 139 通过 |
 | sudostack 类型、离线生成及实验契约核验 | 通过 |
 | 三仓契约来源/摘要一致性 | 通过 |
@@ -117,7 +121,7 @@ Moss 外部任务库不是全部 Sudo Task/Session 的长期事实源；长期�
 - 临时接入已归档，原有“Dify 验收助手”、远端 Dify 应用和 App key 保持不变。各服务保持运行。
 - 管理验收第一次完整操作后，末尾校验仍使用旧“原生模板”文案而超时；更新测试选择器为当前“内部托管”后，完整复跑通过。未因此修改产品逻辑。
 
-此前已通过的界面验收：平台管理员配置范围；组织管理员接入、选择成员并发布；错误 key 被拒绝；编辑/换钥撤销发布；停用/归档保留只读历史；普通用户无管理入口；WebUI 真实42→50，桌面真实7×8→56并刷新恢复。三端名称及两个分区按钮也已验证。
+此前阶段另外验证过跨端同会话恢复与续聊（WebUI 42→50，Electron 读取并续聊至 51），记录保留。此前已通过的界面验收：平台管理员配置范围；组织管理员接入、选择成员并发布；错误 key 被拒绝；编辑/换钥撤销发布；停用/归档保留只读历史；普通用户无管理入口；WebUI 真实42→50，桌面真实7×8→56并刷新恢复。三端名称及两个分区按钮也已验证。
 
 证据入口：Moss `docs/external-provider-pilot/evidence/`。本次对应 `moss-management-migration-result.json`、`moss-exclusive-management.png`、`moss-published-client-chat.png`、`rebase-desktop-result.json` 和 `rebase-desktop-chat.png`；其他文件保留为此前阶段证据。开发机完整日志为 `/tmp/dify-rebase-*.log`，本地运行指南为 `~/.local/share/dify-pilot-20261012/manual-verification.md`。文档不保存登录密码或 App Key。
 
@@ -142,6 +146,37 @@ Moss 外部任务库不是全部 Sudo Task/Session 的长期事实源；长期�
 
 ## 8. 合并与发布建议
 
-优先评审 Moss 的语义源和服务，再评审 sudostack 实验派生，最后配套 SudoWork 客户端。固定来源提交发布后需验证可获取性；三仓按同一契约版本配套上线。
+优先评审 Moss 的语义源和服务，再评审 sudostack 实验派生，最后配套 SudoWork 客户端。已从 GitHub API 读取固定 Moss 源提交并核对 SHA-256 一致；三仓按同一契约版本配套上线。
 
-本次只创建 PR。最终合并、生产发布和生产准入需另行执行。CI 状态以对应 PR 页面为准。
+本次已创建三个 PR，未合并。最终合并、生产发布和生产准入需另行执行。GitHub CI 已触发，交付时仍有排队/执行项，不能将本地通过等同于远端全绿；最新状态以对应 PR 页面为准。
+
+
+## 9. 复验命令与证据
+
+在表中三个独立 worktree 的仓库根目录运行；Moss admin 和 WebUI 检查需进入相应子目录。真实 Dify 界面复验按第 6 节进行，使用本地独立环境及合成问题。
+
+```sh
+# Moss：完整 server 兼容套件 + 显式 Node 套件
+bun run test
+bun run build:node
+bun run typecheck
+bunx eslint src/server
+
+# SudoWork：共享包、全量 desktop、类型和契约
+bun run build:packages
+bun run test --maxWorkers=1
+bun run type:check
+bun run check:external-contract
+bun run format:check
+bun run --filter '@sudowork/renderer' format:check
+
+# sudostack：稳定契约回归 + 实验派生校验
+npm test
+npm run typecheck
+npm run generate:check-offline
+node contracts/experimental/external-provider/generate.mjs --owner /path/to/moss-worktree --check
+```
+
+Moss 本轮完整命令中的 server 部分先通过，随后测试清单完整性检查发现新增用例未登记；修正后单独运行 `node scripts/run-node-tests.js`，902 通过 / 3 跳过。没有把首次命令的非零退出记成整体通过。SudoWork `bun run test` 的根脚本实际执行 desktop 全量，WebUI 239 项是另行运行的结果。
+
+开发机日志：`/tmp/dify-rebase-moss-tests.log`、`/tmp/dify-rebase-moss-node-tests.log`、`/tmp/dify-rebase-moss-admin-tests.log`、`/tmp/dify-rebase-sudowork-tests-final.log`、`/tmp/dify-rebase-webui-unit.log`、`/tmp/dify-rebase-stack-tests.log`。这些临时日志未提交，PR 内的结构化结果和截图位于 `docs/external-provider-pilot/evidence/`。
