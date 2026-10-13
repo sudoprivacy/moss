@@ -44,6 +44,7 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     const input = { request_id: randomUUID(), name: 'Concurrent pilot', endpoint: 'http://127.0.0.1:8089/v1', api_key: 'synthetic-original', app_id: 'app', workspace_id: 'workspace', source_definition: JSON.stringify({ graph: { nodes: ['start', 'llm', 'answer'].map(type => ({ data: { type } })), edges: [] } }), decoder: 'text', allowed_user_ids: [actor.userId], review_days: 1, review_note: 'Synthetic concurrency fixture' }
     const agent = await first.administration.onboard(actor, input)
     assert.equal((await second.administration.onboard(actor, input)).id, agent.id)
+    await assert.rejects(second.administration.onboard(actor, { ...input, api_key: 'different-synthetic-key' }), { code: 'IDEMPOTENCY_CONFLICT' })
     await first.review(actor, agent.id, true, 1)
     const request = { agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() }
     const accepted = await Promise.all(Array.from({ length: 12 }, (_, i) => services[i % 2].create(actor, request)))
@@ -77,11 +78,14 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
 
     const binding = await first.store.binding(actor, agent.id)
     const pending = await first.store.create(actor, { ...request, idempotency_key: randomUUID() }, binding, 1)
-    await first.store.mutate(pending.id, task => { task.status = 'dispatching'; task.attempt_id = randomUUID(); return 'status' })
+    await first.store.mutate(pending.id, task => { task.status = 'running'; task.attempt_id = randomUUID(); task.answer = 'partial'; task.raw_answer = '{\"reply\":\"partial'; return 'answer' })
+    assert.equal((await second.store.task(actor, pending.id)).raw_answer, '{\"reply\":\"partial')
     await Promise.all(services.map(service => service.store.expire(Date.now() + 100)))
     assert.equal((await second.store.task(actor, pending.id)).status, 'unknown')
     await first.store.reconcileUnknown(actor, pending.id, 'Checked synthetic provider run; close without replay.')
     assert((await second.store.task(actor, pending.id)).reconciliation)
+    const attempt = await drivers[1].get('SELECT a.status, r.document FROM external_pilot_attempts a JOIN external_pilot_reconciliations r ON r.task_id = a.task_id WHERE a.task_id = ?', [pending.id])
+    assert.equal(attempt?.status, 'unknown'); assert(attempt?.document)
     assert.equal((await second.store.session(actor, pending.session_id)).active_task_id, pending.id)
     assert.equal(calls.length, 1)
   } finally {

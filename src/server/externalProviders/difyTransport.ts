@@ -27,6 +27,46 @@ async function readBounded(response: Response, limit: number): Promise<string> {
   } finally { await reader.cancel().catch(() => {}) }
 }
 
+/** At most one database write and one latest snapshot are retained per stream. */
+export class ProgressCoalescer {
+  private pending: ProviderProgress | undefined
+  private active: Promise<void> | undefined
+  private timer: ReturnType<typeof setTimeout> | undefined
+  private lastStarted = 0
+  private failure: unknown
+  constructor(private readonly write: (progress: ProviderProgress) => Promise<void>, private readonly interval = 500) {}
+
+  push(progress: ProviderProgress): void {
+    if (this.failure) throw this.failure
+    this.pending = progress
+    if (!this.active && !this.timer) {
+      const delay = Math.max(0, this.interval - (Date.now() - this.lastStarted))
+      if (!delay) this.start()
+      else this.timer = setTimeout(() => { this.timer = undefined; this.start() }, delay)
+    }
+  }
+
+  private start(): void {
+    if (!this.pending || this.failure) return
+    const progress = this.pending
+    this.pending = undefined; this.lastStarted = Date.now()
+    this.active = Promise.resolve().then(() => this.write(progress)).catch(error => { this.failure = error }).finally(() => {
+      this.active = undefined
+      if (this.pending && !this.failure) this.push(this.pending)
+    })
+  }
+
+  async flush(): Promise<void> {
+    while (this.active || this.pending) {
+      clearTimeout(this.timer); this.timer = undefined
+      if (this.failure) throw this.failure
+      if (!this.active) this.start()
+      await this.active
+    }
+    if (this.failure) throw this.failure
+  }
+}
+
 export class DifyPilotTransport {
   constructor(private readonly request: ProviderFetch = fetch) {}
 
@@ -66,9 +106,11 @@ export class DifyPilotTransport {
       throw new ExternalProviderError(502, 'INVALID_PROVIDER_STREAM')
     }
     const reader = response.body.getReader(), decoder = new TextDecoder()
-    let buffer = '', raw = '', isMessageEnded = false, isWorkflowSucceeded = false, lastPublished = 0, count = 0
+    let buffer = '', raw = '', isMessageEnded = false, isWorkflowSucceeded = false, count = 0
     let publishedRaw = '', publishedCharacters = 0
     const refs: ExternalTask['provider_refs'] = {}
+    const progress = new ProgressCoalescer(onProgress)
+    let lastRefs = ''
     try {
       while (true) {
         const next = await reader.read()
@@ -98,20 +140,24 @@ export class DifyPilotTransport {
             if (status === 'succeeded') isWorkflowSucceeded = true
           }
           if (event.event === 'error') throw new ExternalProviderError(502, 'PROVIDER_STREAM_ERROR')
-          if (Date.now() - lastPublished >= 100 || isMessageEnded || isWorkflowSucceeded) {
+          const serializedRefs = JSON.stringify(refs)
+          if (raw !== publishedRaw || serializedRefs !== lastRefs) {
             let offset = 0
             while (offset < publishedRaw.length && offset < raw.length && publishedRaw[offset] === raw[offset]) offset++
             publishedCharacters += raw.length - offset
             if (publishedCharacters > 512_000) throw new ExternalProviderError(502, 'PROVIDER_RESPONSE_LIMIT')
-            publishedRaw = raw
-            await onProgress({ raw, refs: { ...refs } })
-            lastPublished = Date.now()
+            publishedRaw = raw; lastRefs = serializedRefs
+            progress.push({ raw, refs: { ...refs } })
           }
           // advanced-chat requires both answer completion and a successful workflow terminal event.
           if (isMessageEnded && isWorkflowSucceeded) return { raw, refs }
         }
         if (buffer.length > 256_000) throw new ExternalProviderError(502, 'PROVIDER_RESPONSE_LIMIT')
       }
-    } finally { await reader.cancel().catch(() => {}) }
+    } finally {
+      await reader.cancel().catch(() => {})
+      // Flush before success or failure is persisted, so a late progress write cannot overwrite a terminal.
+      await progress.flush()
+    }
   }
 }

@@ -43,6 +43,9 @@ export class ExternalTaskStore {
       CREATE TABLE IF NOT EXISTS external_pilot_attempts (
         id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, started_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS external_pilot_reconciliations (
+        task_id TEXT PRIMARY KEY, attempt_id TEXT, document TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS external_pilot_events (
         task_id TEXT NOT NULL, sequence INTEGER NOT NULL, document TEXT NOT NULL, PRIMARY KEY(task_id, sequence)
       );
@@ -60,6 +63,11 @@ export class ExternalTaskStore {
             VALUES (?, ?, ?, ?, ?, ?, 0, ?) ON CONFLICT(org_id, kind, request_id) DO NOTHING`,
           [operation.id, actor.orgId, complete ? 'onboard' : 'cleanup', String(row.id), String(row.request_hash), complete ? 'complete' : 'cleanup', JSON.stringify(operation)])
           await db.run("UPDATE external_pilot_admin_operations SET status = 'migrated' WHERE id = ?", [String(row.id)])
+        }
+        const closed = await db.all("SELECT id, document FROM external_pilot_tasks WHERE status = 'unknown' AND document LIKE '%\"reconciliation\"%'")
+        for (const row of closed) {
+          const task = JSON.parse(String(row.document)) as ExternalTask
+          if (task.reconciliation) await db.run('INSERT INTO external_pilot_reconciliations(task_id, attempt_id, document) VALUES (?, ?, ?) ON CONFLICT(task_id) DO NOTHING', [task.id, task.attempt_id, JSON.stringify(task.reconciliation)])
         }
         const bindings = await db.all('SELECT document FROM external_pilot_bindings')
         for (const row of bindings) {
@@ -99,7 +107,7 @@ export class ExternalTaskStore {
       const task: ExternalTask = {
         api_version: EXTERNAL_PROVIDER_API, id, session_id: sessionId, agent_id: binding.id,
         agent_name: sessionAgentName(actor.userId, binding.id), attempt_id: null, status: 'accepted',
-        configuration_revision: binding.revision ?? 1, query: input.query, answer: '', raw_answer: '', output_status: 'pending', error_code: null,
+        configuration_revision: binding.revision ?? 1, query: input.query, answer: '', raw_answer: '', raw_answer_freshness: 'current', output_status: 'pending', error_code: null,
         source_digest: binding.source_digest, provider: 'dify', provider_refs: {},
         cancellation: { status: 'unsupported', reason: 'Provider termination cannot be confirmed in this pilot' },
         created_at: now, updated_at: now, deadline_at: now + timeoutMs,
@@ -148,7 +156,7 @@ export class ExternalTaskStore {
   async history(actor: ExternalActor, sessionId: string): Promise<ExternalTask[]> {
     await this.session(actor, sessionId)
     const rows = await this.db.all<TaskRow>('SELECT * FROM external_pilot_tasks WHERE session_id = ? ORDER BY deadline_at, id LIMIT 200', [sessionId])
-    return Promise.all(rows.map(row => this.project(row)))
+    return this.projectMany(rows)
   }
 
   async task(actor: ExternalActor, id: string): Promise<ExternalTask> {
@@ -165,24 +173,42 @@ export class ExternalTaskStore {
     const row = await this.db.get<TaskRow>('SELECT * FROM external_pilot_tasks WHERE id = ? AND org_id = ? AND user_id = ?', [id, actor.orgId, actor.userId])
     if (!row) throw new ExternalProviderError(404, 'TASK_NOT_FOUND')
     const horizon = Number(row.sequence)
-    const snapshot = async () => ({ task: await this.project(row), snapshot_sequence: horizon, events: [], next_cursor: horizon, has_more: false })
+    const envelope = { api_version: EXTERNAL_PROVIDER_API, kind: 'ExternalEventsPage' as const }
+    const snapshot = async () => ({ ...envelope, task: await this.project(row), snapshot_sequence: horizon, events: [], next_cursor: horizon, has_more: false })
     if (cursor === 0 || cursor > horizon) return snapshot()
     const rows = await this.db.all('SELECT document FROM external_pilot_events WHERE task_id = ? AND sequence > ? AND sequence <= ? ORDER BY sequence LIMIT 100', [id, cursor, horizon])
     const events = rows.map(item => JSON.parse(String(item.document)) as ExternalTaskEvent)
     // Pre-upgrade events use cumulative answers. Explicitly resync old streams.
-    if ((cursor < horizon && events[0]?.sequence !== cursor + 1) || events.some(event => !event.state)) return snapshot()
+    if ((cursor < horizon && events[0]?.sequence !== cursor + 1) || events.some(event => !event.state || event.api_version !== EXTERNAL_PROVIDER_API || event.kind !== 'ExternalTaskEvent')) return snapshot()
     const next = events.at(-1)?.sequence ?? cursor
     if (next === horizon && next > cursor && isTerminal(String(row.status) as ExternalTask['status'])) return { ...await snapshot(), events }
-    return { events, next_cursor: next, has_more: next < horizon }
+    return { ...envelope, events, next_cursor: next, has_more: next < horizon }
   }
 
-  private async project(row: TaskRow): Promise<ExternalTask> {
+  private async projectMany(rows: TaskRow[]): Promise<ExternalTask[]> {
+    const pending = rows.map(row => ({ row, checkpoint: (JSON.parse(row.document) as Checkpoint)._checkpoint_sequence ?? Number(row.sequence) }))
+      .filter(({ row, checkpoint }) => checkpoint < Number(row.sequence))
+    const grouped = new Map<string, SqlRow[]>()
+    if (pending.length) {
+      const events = await this.db.all(`SELECT task_id, document FROM external_pilot_events WHERE ${pending.map(() => '(task_id = ? AND sequence > ? AND sequence <= ?)').join(' OR ')} ORDER BY task_id, sequence`, pending.flatMap(({ row, checkpoint }) => [String(row.id), checkpoint, Number(row.sequence)]))
+      for (const event of events) {
+        const id = String(event.task_id), list = grouped.get(id) ?? []
+        list.push(event); grouped.set(id, list)
+      }
+    }
+    return Promise.all(rows.map(row => this.project(row, grouped.get(String(row.id)) ?? [])))
+  }
+
+  private async project(row: TaskRow, loaded?: SqlRow[]): Promise<ExternalTask> {
     const { _checkpoint_sequence: checkpoint = Number(row.sequence), ...task } = JSON.parse(row.document) as Checkpoint
+    if (task.api_version !== EXTERNAL_PROVIDER_API) task.raw_answer_freshness = 'legacy_checkpoint'
     task.api_version = EXTERNAL_PROVIDER_API
-    const events = await this.db.all('SELECT document FROM external_pilot_events WHERE task_id = ? AND sequence > ? AND sequence <= ? ORDER BY sequence', [task.id, checkpoint, Number(row.sequence)])
+    if (checkpoint >= Number(row.sequence)) return task
+    const events = loaded ?? await this.db.all('SELECT document FROM external_pilot_events WHERE task_id = ? AND sequence > ? AND sequence <= ? ORDER BY sequence', [task.id, checkpoint, Number(row.sequence)])
     for (const row of events) {
       const event = JSON.parse(String(row.document)) as ExternalTaskEvent
       if (event.delta) task.answer = task.answer.slice(0, event.delta.offset) + event.delta.text
+      if (event.raw_delta) task.raw_answer = 'from_answer' in event.raw_delta ? task.answer : task.raw_answer.slice(0, event.raw_delta.offset) + event.raw_delta.text
       Object.assign(task, event.state)
     }
     return task
@@ -190,8 +216,8 @@ export class ExternalTaskStore {
 
   async unresolved(orgId: string): Promise<ExternalTask[]> {
     await this.ready
-    const rows = await this.db.all<TaskRow>("SELECT * FROM external_pilot_tasks WHERE org_id = ? AND status = 'unknown' ORDER BY deadline_at DESC LIMIT 100", [orgId])
-    return (await Promise.all(rows.map(row => this.project(row)))).filter(task => !task.reconciliation)
+    const rows = await this.db.all<TaskRow>("SELECT * FROM external_pilot_tasks t WHERE org_id = ? AND status = 'unknown' AND NOT EXISTS (SELECT 1 FROM external_pilot_reconciliations r WHERE r.task_id = t.id) ORDER BY deadline_at DESC LIMIT 100", [orgId])
+    return (await this.projectMany(rows)).filter(task => !task.reconciliation)
   }
 
   async reconcileUnknown(actor: ExternalActor, id: string, note: string): Promise<ExternalTask> {
@@ -204,6 +230,8 @@ export class ExternalTaskStore {
       if (task.status !== 'unknown') throw new ExternalProviderError(409, 'TASK_NOT_UNKNOWN')
       if (task.reconciliation) return task
       task.reconciliation = { action: 'closed', note, user_id: actor.userId, created_at: Date.now() }
+      await this.db.run('INSERT INTO external_pilot_reconciliations(task_id, attempt_id, document) VALUES (?, ?, ?) ON CONFLICT(task_id) DO NOTHING', [task.id, task.attempt_id, JSON.stringify(task.reconciliation)])
+      if (task.attempt_id) await this.db.run("UPDATE external_pilot_attempts SET status = 'unknown', updated_at = ? WHERE task_id = ?", [task.reconciliation.created_at, task.id])
       task.updated_at = Date.now()
       const sequence = Number(row.sequence) + 1
       await this.db.run('UPDATE external_pilot_tasks SET sequence = ?, document = ? WHERE id = ?', [sequence, JSON.stringify({ ...task, _checkpoint_sequence: sequence }), id])
@@ -222,7 +250,7 @@ export class ExternalTaskStore {
       const row = await this.db.get<TaskRow>('SELECT * FROM external_pilot_tasks WHERE id = ?', [id])
       if (!row) return null
       const task = await this.project(row)
-      const before = task.answer
+      const before = task.answer, rawBefore = task.raw_answer
       if (isTerminal(task.status)) return null
       const type = change(task)
       if (!type) return null
@@ -230,10 +258,10 @@ export class ExternalTaskStore {
       const sequence = Number(row.sequence) + 1
       const previous = JSON.parse(row.document) as Checkpoint
       const checkpoint = previous._checkpoint_sequence ?? Number(row.sequence)
-      const saveCheckpoint = isTerminal(task.status) || sequence - checkpoint >= 64 || Math.abs(task.answer.length - previous.answer.length) >= 8192
+      const saveCheckpoint = isTerminal(task.status) || sequence - checkpoint >= 64 || Math.abs(task.answer.length - previous.answer.length) >= 8192 || Math.abs(task.raw_answer.length - previous.raw_answer.length) >= 8192
       if (saveCheckpoint) await this.db.run('UPDATE external_pilot_tasks SET status = ?, sequence = ?, document = ? WHERE id = ?', [task.status, sequence, JSON.stringify({ ...task, _checkpoint_sequence: sequence }), id])
       else await this.db.run('UPDATE external_pilot_tasks SET status = ?, sequence = ? WHERE id = ?', [task.status, sequence, id])
-      await this.db.run('INSERT INTO external_pilot_events(task_id, sequence, document) VALUES (?, ?, ?)', [id, sequence, JSON.stringify(this.event(task, sequence, type, before))])
+      await this.db.run('INSERT INTO external_pilot_events(task_id, sequence, document) VALUES (?, ?, ?)', [id, sequence, JSON.stringify(this.event(task, sequence, type, before, rawBefore))])
       if (task.attempt_id) await this.db.run(`INSERT INTO external_pilot_attempts(id, task_id, status, started_at, updated_at)
         VALUES (?, ?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
       [task.attempt_id, id, task.status, task.updated_at, task.updated_at])
@@ -253,11 +281,14 @@ export class ExternalTaskStore {
     })
   }
 
-  private event(task: ExternalTask, sequence: number, type: ExternalTaskEvent['type'], before = ''): ExternalTaskEvent {
+  private event(task: ExternalTask, sequence: number, type: ExternalTaskEvent['type'], before = '', rawBefore = ''): ExternalTaskEvent {
     let offset = 0
     while (offset < before.length && offset < task.answer.length && before[offset] === task.answer[offset]) offset++
-    return { task_id: task.id, sequence, type, status: task.status,
-      ...(type === 'answer' ? { delta: { offset, text: task.answer.slice(offset) } } : {}),
+    let rawOffset = 0
+    while (rawOffset < rawBefore.length && rawOffset < task.raw_answer.length && rawBefore[rawOffset] === task.raw_answer[rawOffset]) rawOffset++
+    return { api_version: EXTERNAL_PROVIDER_API, kind: 'ExternalTaskEvent', task_id: task.id, sequence, type, status: task.status,
+      ...(rawBefore !== task.raw_answer ? { raw_delta: task.raw_answer === task.answer ? { from_answer: true as const } : { offset: rawOffset, text: task.raw_answer.slice(rawOffset) } } : {}),
+      ...(before !== task.answer ? { delta: { offset, text: task.answer.slice(offset) } } : {}),
       state: { status: task.status, attempt_id: task.attempt_id, output_status: task.output_status, error_code: task.error_code, provider_refs: task.provider_refs, updated_at: task.updated_at, dispatch_authorized_at: task.dispatch_authorized_at, reconciliation: task.reconciliation },
       created_at: task.updated_at }
   }

@@ -1,5 +1,7 @@
 # Dify 外部智能体试点
 
+> **历史记录，已被第二轮修复取代。** 下文的 alpha1/alpha2、旧 SHA、旧操作说明及测试结果仅代表当时状态；当前契约、兼容边界及验证见 [第二轮复审修复说明](dify-review-round2-fixes-2026-10-13.md)。请勿按本文旧来源重新生成产物。
+
 2026-10-13 更新。本实现将已发布的 Dify Chatflow 作为外部执行方，通过 Moss 统一任务接口供 SudoWork 选择和调用。Dify 中的定义不复制到本地 Runtime；`reply/actions` 中的 actions 不会自动执行。
 
 ## 已实现链路

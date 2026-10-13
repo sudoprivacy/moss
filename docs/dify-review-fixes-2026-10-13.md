@@ -1,5 +1,7 @@
 # Dify / Moss / SudoWork 评审问题修复说明
 
+> **历史记录，已被第二轮修复取代。** 下文的 alpha1/alpha2、旧 SHA、旧操作说明及测试结果仅代表当时状态；当前契约、兼容边界及验证见 [第二轮复审修复说明](dify-review-round2-fixes-2026-10-13.md)。请勿按本文旧来源重新生成产物。
+
 日期：2026-10-13  
 对应评审：`dify-moss-sudowork-pr-merge-decision-2026-10-13.md`  
 执行依据：`dify-moss-sudowork-merge-review-response-2026-10-13.md`

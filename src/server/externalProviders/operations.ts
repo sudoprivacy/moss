@@ -11,6 +11,8 @@ export interface CredentialOperation {
   binding: Binding
   targetRef: string
   previousRef?: string
+  writeConfirmed?: boolean
+  cleanupAttempts?: number
 }
 
 /** A durable saga: vault writes use unique references and never overwrite an active key. */
@@ -23,6 +25,18 @@ export class CredentialOperations {
       (id, org_id, kind, request_id, request_hash, status, lease_until, document)
       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(org_id, kind, request_id) DO NOTHING`,
     [operation.id, operation.actor.orgId, operation.kind, requestId, requestHash, Date.now() + 60_000, JSON.stringify(operation)]))
+  }
+
+  /** A returned vault write proves this operation has no outstanding write call. */
+  async confirmWrite(operation: CredentialOperation): Promise<void> {
+    await this.store.db.transaction(async () => {
+      await this.store.db.run('UPDATE external_pilot_operations SET status = status WHERE id = ?', [operation.id])
+      const row = await this.store.db.get('SELECT status, document FROM external_pilot_operations WHERE id = ?', [operation.id])
+      if (!row) throw new ExternalProviderError(409, 'CREDENTIAL_OPERATION_EXPIRED')
+      const document = { ...JSON.parse(String(row.document)), writeConfirmed: true }
+      await this.store.db.run('UPDATE external_pilot_operations SET document = ? WHERE id = ?', [JSON.stringify(document), operation.id])
+      if (['cleanup', 'cleanup_guard'].includes(String(row.status))) await this.store.db.run("UPDATE external_pilot_operations SET status = 'cleanup', lease_until = 0 WHERE id = ?", [operation.id])
+    })
   }
 
   async finish(operation: CredentialOperation, recovering = false): Promise<Binding> {
@@ -77,16 +91,20 @@ export class CredentialOperations {
     // Reference-only integrations do not transfer ownership of their existing vault entries.
     if (!ref.namespace.startsWith(`org:${actor.orgId}:external:`)) return
     const id = randomUUID()
+    const ownerId = ref.namespace.split(':external:')[1]
+    const owner = await this.store.db.get('SELECT document FROM external_pilot_operations WHERE id = ? AND org_id = ?', [ownerId, actor.orgId])
+    const original = owner ? JSON.parse(String(owner.document)) as CredentialOperation : null
+    const writeConfirmed = original?.targetRef === targetRef && original.writeConfirmed === true
     await this.store.db.run(`INSERT INTO external_pilot_operations (id, org_id, kind, request_id, request_hash, status, lease_until, document)
-      VALUES (?, ?, 'cleanup', ?, '', 'cleanup', 0, ?)`, [id, actor.orgId, id, JSON.stringify({ actor, targetRef })])
+      VALUES (?, ?, 'cleanup', ?, '', 'cleanup', 0, ?)`, [id, actor.orgId, id, JSON.stringify({ actor, targetRef, writeConfirmed })])
   }
 
   async reconcile(now = Date.now()): Promise<void> {
     await this.store.ready
-    const rows = await this.store.db.all("SELECT * FROM external_pilot_operations WHERE status IN ('pending', 'cleanup') AND lease_until <= ? ORDER BY lease_until LIMIT 25", [now])
+    const rows = await this.store.db.all("SELECT * FROM external_pilot_operations WHERE status IN ('pending', 'cleanup', 'cleanup_guard') AND lease_until <= ? ORDER BY lease_until LIMIT 25", [now])
     for (const row of rows) {
-      // CAS coalesces workers. A retained cleanup tombstone also catches a late vault write
-      // from an expired process; no delayed callback can publish an abandoned operation.
+      // CAS coalesces workers. Unacknowledged writes retain a low-frequency guard;
+      // a timeout cannot prove a remote write has stopped.
       if (!await this.store.db.run('UPDATE external_pilot_operations SET lease_until = ? WHERE id = ? AND lease_until = ? AND status = ?', [now + 60_000, String(row.id), Number(row.lease_until), String(row.status)])) continue
       const operation = JSON.parse(String(row.document)) as CredentialOperation
       if (row.status === 'pending') {
@@ -98,11 +116,34 @@ export class CredentialOperations {
       } else if (this.options.secrets.deleteSecret) {
         const ref = parseNexusSecretRef(operation.targetRef)
         try {
-          await this.options.secrets.deleteSecret(ref.namespace, ref.key, `org:${operation.actor.orgId}`)
-          await this.store.db.run('UPDATE external_pilot_operations SET lease_until = ? WHERE id = ?', [now + 3600_000, String(row.id)])
-        } catch { /* Retain the tombstone and retry; never discard an uncertain cleanup. */ }
+          const secret = await this.options.secrets.getSecret(ref.namespace, ref.key, `org:${operation.actor.orgId}`)
+          if (secret?.value) await this.options.secrets.deleteSecret(ref.namespace, ref.key, `org:${operation.actor.orgId}`)
+          await this.store.db.transaction(async () => {
+            await this.store.db.run('UPDATE external_pilot_operations SET status = status WHERE id = ?', [String(row.id)])
+            const current = await this.store.db.get('SELECT status, document FROM external_pilot_operations WHERE id = ?', [String(row.id)])
+            if (!current || !['cleanup', 'cleanup_guard'].includes(String(current.status))) return
+            const document = JSON.parse(String(current.document)) as CredentialOperation
+            // The acknowledgment may have arrived after our absence check. Run cleanup
+            // once more after it before declaring a terminal deletion.
+            if (document.writeConfirmed && !operation.writeConfirmed) {
+              await this.store.db.run("UPDATE external_pilot_operations SET status = 'cleanup', lease_until = 0 WHERE id = ?", [String(row.id)])
+              return
+            }
+            // Keep only reference/audit context after cleanup, never the whole binding.
+            const compact = { actor: document.actor, targetRef: document.targetRef, writeConfirmed: document.writeConfirmed === true }
+            const status = compact.writeConfirmed ? 'cleanup_complete' : 'cleanup_guard'
+            await this.store.db.run('UPDATE external_pilot_operations SET status = ?, lease_until = ?, document = ? WHERE id = ?', [status, now + (compact.writeConfirmed ? 30 : 1) * 86400_000, JSON.stringify(compact), String(row.id)])
+            if (current.status !== status) await this.audit(document.actor, `credential.${status}`, String(row.id))
+          })
+        } catch {
+          const attempts = Math.min((operation.cleanupAttempts ?? 0) + 1, 12)
+          // Only update the retry counter if no returning writer changed the document.
+          await this.store.db.run('UPDATE external_pilot_operations SET lease_until = ?, document = ? WHERE id = ? AND document = ?', [now + Math.min(86400_000, 60_000 * 2 ** attempts), JSON.stringify({ ...operation, cleanupAttempts: attempts }), String(row.id), String(row.document)])
+        }
       }
     }
+    const retired = await this.store.db.all("SELECT id FROM external_pilot_operations WHERE status = 'cleanup_complete' AND lease_until <= ? LIMIT 25", [now])
+    for (const row of retired) await this.store.db.run("DELETE FROM external_pilot_operations WHERE id = ? AND status = 'cleanup_complete' AND lease_until <= ?", [String(row.id), now])
     // Upgrade recovery for the old finally-only rotation. Its key state is unknowable,
     // so unblock management but require a fresh rotation before approval.
     const bindings = await this.store.db.all(`SELECT document FROM external_pilot_bindings WHERE document LIKE '%"credentialUpdating":true%' AND document NOT LIKE '%"credentialOperationId":%' LIMIT 25`)

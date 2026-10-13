@@ -95,28 +95,30 @@ export class ExternalProviderAdministration {
   async onboard(actor: ExternalActor, input: unknown): Promise<ExternalAgentAdmin> {
     if (!this.credentialStorageAvailable) return fail('CREDENTIAL_STORAGE_UNAVAILABLE', 503)
     const body = object(input, ['request_id', 'name', 'endpoint', 'api_key', 'app_id', 'workspace_id', 'source_definition', 'decoder', 'allowed_user_ids', 'review_days', 'review_note'])
+    const apiKey = string(body.api_key, 1024)
     const requestId = string(body.request_id)
     if (!/^[a-f\d]{8}-[a-f\d-]{27,36}$/i.test(requestId)) return fail('INVALID_REQUEST_ID')
     const source_digest = definitionDigest(body.source_definition)
     const id = randomUUID(), operationId = randomUUID(), namespace = `org:${actor.orgId}:external:${operationId}`, credential_ref = `nexus://${namespace}/app-key`
     const definition = await this.definition(actor, { ...body, source_digest, credential_ref })
     const { review_expires_at: _expiry, credential_ref: _ref, ...stableDefinition } = definition
-    const hash = digest(JSON.stringify({ ...stableDefinition, review_days: body.review_days }))
+    const credentialFingerprint = digest(JSON.stringify([actor.orgId, requestId, apiKey]))
+    const hash = digest(JSON.stringify({ ...stableDefinition, review_days: body.review_days, credentialFingerprint }))
     const binding: Binding = { ...definition, id, orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, registrationMode: 'onboarding' }
     const operation: CredentialOperation = { id: operationId, actor, kind: 'onboard', binding, targetRef: credential_ref }
     if (!await this.operations.reserve(operation, requestId, hash)) {
       const existing = await this.store.db.get('SELECT * FROM external_pilot_operations WHERE org_id = ? AND kind = ? AND request_id = ?', [actor.orgId, 'onboard', requestId])
       if (!existing) return fail('REGISTRATION_IN_PROGRESS', 409)
-      const original = JSON.parse(String(existing.document)) as CredentialOperation & { legacy?: boolean }
-      const { review_expires_at: _legacyExpiry, ...legacyDefinition } = { ...definition, credential_ref: original.targetRef }
-      const legacyHash = digest(JSON.stringify({ ...legacyDefinition, review_days: body.review_days }))
-      if (existing.request_hash !== hash && !(original.legacy && existing.request_hash === legacyHash)) return fail('IDEMPOTENCY_CONFLICT', 409)
+      const original = JSON.parse(String(existing.document)) as CredentialOperation
+      // Pre-fingerprint requests cannot prove credential equality; fail closed.
+      if (existing.request_hash !== hash) return fail('IDEMPOTENCY_CONFLICT', 409)
       if (existing.status !== 'complete') return fail('REGISTRATION_IN_PROGRESS', 409)
       return this.describe(await this.store.binding(actor, original.binding.id))
     }
     try {
       await this.inspect(actor, { endpoint: definition.endpoint, api_key: body.api_key })
-      await this.options.secrets.putSecret!(namespace, 'app-key', string(body.api_key, 1024), `org:${actor.orgId}`)
+      await this.options.secrets.putSecret!(namespace, 'app-key', apiKey, `org:${actor.orgId}`)
+      await this.operations.confirmWrite(operation)
       return this.describe(await this.operations.finish(operation))
     } catch (error) {
       await this.operations.abandon(operation)
@@ -150,6 +152,7 @@ export class ExternalProviderAdministration {
     const ref = parseNexusSecretRef(targetRef)
     try {
       await this.options.secrets.putSecret!(ref.namespace, ref.key, string(body.api_key, 1024), `org:${actor.orgId}`)
+      await this.operations.confirmWrite(operation)
       return this.describe(await this.operations.finish(operation))
     } catch (error) {
       await this.operations.abandon(operation)

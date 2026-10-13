@@ -14,7 +14,7 @@ import { createCatalogTestRepository, createIdentityTestRepository } from '../te
 import { onlineCommandContext } from '../application/commandContext.js'
 import { ExternalTaskStore } from './store.js'
 import { ExternalProviderService } from './service.js'
-import { DifyPilotTransport } from './difyTransport.js'
+import { DifyPilotTransport, ProgressCoalescer } from './difyTransport.js'
 import { decodeOutput } from './decoder.js'
 import { canonicalEndpoint, parseRegistration, ExternalProviderError } from './policy.js'
 import { dispatchExternalProvider } from './routes.js'
@@ -567,4 +567,139 @@ void test('configuration and policy mutations during preflight invalidate pendin
     assert.equal((await f.store.task(actor, task.id)).status, 'rejected', field)
     assert.deepEqual(f.requestKeys, [], field)
   }
+})
+
+void test('onboarding rejects changed credentials, including completed retries and old unfingerprinted hashes', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const body = f.body(), agent = await f.admin.onboard(actor, body)
+  await assert.rejects(f.admin.onboard(actor, { ...body, api_key: 'replacement-key' }), { code: 'IDEMPOTENCY_CONFLICT' })
+  await assert.rejects(f.admin.onboard(actor, { ...body, api_key: '' }), { code: 'INVALID_ADMIN_INPUT' })
+  assert.equal(f.writes.length, 1)
+  assert.equal((await f.admin.onboard(actor, body)).id, agent.id)
+  assert(!JSON.stringify(await f.driver.all('SELECT * FROM external_pilot_operations')).includes(body.api_key))
+  await f.driver.run("UPDATE external_pilot_operations SET request_hash = 'legacy-unfingerprinted'")
+  await assert.rejects(f.admin.onboard(actor, body), { code: 'IDEMPOTENCY_CONFLICT' })
+})
+
+void test('raw deltas survive checkpoint gaps, restart, replacement and unknown finalization', async () => {
+  const f = await setup(), binding = await f.store.binding(actor, f.registered.id)
+  const task = await f.store.create(actor, f.request(), binding, 120000)
+  for (const raw of ['{"reply":"a', '{"reply":"ab', '{"reply":"replacement']) {
+    await f.store.mutate(task.id, current => { current.status = 'running'; current.raw_answer = raw; current.answer = decodeOutput(raw, 'reply_actions_v1').answer; return 'answer' })
+    const restarted = new ExternalTaskStore(f.driver)
+    assert.equal((await restarted.task(actor, task.id)).raw_answer, raw)
+  }
+  await f.store.mutate(task.id, current => { current.status = 'unknown'; return 'status' })
+  assert.equal((await f.store.task(actor, task.id)).raw_answer, '{"reply":"replacement')
+  assert.equal((await f.store.events(actor, task.id, 0)).api_version, 'external-provider.sudo.dev/v1alpha3')
+})
+
+void test('legacy alpha2 streams resync to a labelled snapshot and unknown versions are not replayed', async () => {
+  const f = await setup(), task = await f.run()
+  const row = await f.driver.get('SELECT document FROM external_pilot_tasks WHERE id = ?', [task.id])
+  const legacy = JSON.parse(String(row!.document)); legacy.api_version = 'external-provider.sudo.dev/v1alpha2'; delete legacy.raw_answer_freshness
+  await f.driver.run('UPDATE external_pilot_tasks SET document = ? WHERE id = ?', [JSON.stringify(legacy), task.id])
+  const page = await f.store.events(actor, task.id, 0)
+  assert.equal(page.task?.raw_answer_freshness, 'legacy_checkpoint')
+  const eventRow = await f.driver.get('SELECT sequence, document FROM external_pilot_events WHERE task_id = ? AND sequence = 2', [task.id])
+  const event = JSON.parse(String(eventRow!.document)); delete event.api_version; delete event.kind
+  await f.driver.run('UPDATE external_pilot_events SET document = ? WHERE task_id = ? AND sequence = 2', [JSON.stringify(event), task.id])
+  assert((await f.store.events(actor, task.id, 1)).task)
+})
+
+void test('history batches pending projections and skips event queries for completed checkpoints', async () => {
+  const f = await setup(), first = await f.run()
+  for (let i = 0; i < 5; i++) await f.run(f.request(first.session_id, `synthetic ${i}`))
+  const all = f.driver.all.bind(f.driver); let eventQueries = 0
+  f.driver.all = async (sql, params) => { if (sql.includes('FROM external_pilot_events')) eventQueries++; return all(sql, params) }
+  assert.equal((await f.store.history(actor, first.session_id)).length, 6)
+  assert.equal(eventQueries, 0)
+  const binding = await f.store.binding(actor, first.agent_id)
+  const pending = await f.store.create(actor, f.request(first.session_id), binding, 120000)
+  await f.store.mutate(pending.id, current => { current.answer = 'partial'; current.raw_answer = 'partial'; return 'answer' })
+  eventQueries = 0
+  const history = await f.store.history(actor, first.session_id)
+  assert.equal(history.at(-1)?.answer, 'partial'); assert.equal(eventQueries, 1)
+})
+
+void test('reconciliation records attempt closure while preserving unknown outcome and is idempotent', async () => {
+  const f = await setup({ events: successful().slice(0, 2) }), task = await f.run()
+  await f.store.reconcileUnknown(actor, task.id, 'checked')
+  await f.store.reconcileUnknown(actor, task.id, 'duplicate')
+  const row = await f.driver.get('SELECT a.status, r.document FROM external_pilot_attempts a JOIN external_pilot_reconciliations r ON r.task_id = a.task_id WHERE a.task_id = ?', [task.id])
+  assert.equal(row?.status, 'unknown'); assert.equal(JSON.parse(String(row?.document)).note, 'checked')
+  assert.equal((await f.store.unresolved(actor.orgId)).length, 0)
+})
+
+void test('acknowledged cleanup becomes terminal, stops vault calls and expires after retention', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body())
+  await f.admin.archive(actor, agent.id, { revision: agent.revision })
+  const now = Date.now()
+  await f.admin.operations.reconcile(now)
+  assert.equal(f.values.size, 0)
+  const rows = await f.driver.all("SELECT * FROM external_pilot_operations WHERE status = 'cleanup_complete'")
+  assert.equal(rows.length, 1)
+  let reads = 0; const read = f.secrets.getSecret
+  f.secrets.getSecret = async (...args) => { reads++; return read(...args) }
+  await f.admin.operations.reconcile(now + 86400_000)
+  assert.equal(reads, 0)
+  await f.admin.operations.reconcile(now + 31 * 86400_000)
+  assert.equal((await f.driver.all("SELECT * FROM external_pilot_operations WHERE status = 'cleanup_complete'")).length, 0)
+})
+
+void test('uncertain cleanup retains a compact guard without repeated deletes and catches late writes', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const ref = 'nexus://org:org-a:external:uncertain/app-key'
+  await f.admin.operations.queueCleanup(actor, ref)
+  let deletes = 0; const remove = f.secrets.deleteSecret
+  f.secrets.deleteSecret = async (...args) => { deletes++; await remove(...args) }
+  const now = Date.now()
+  await f.admin.operations.reconcile(now)
+  await f.admin.operations.reconcile(now + 86400_000)
+  assert.equal(deletes, 0)
+  f.values.set(ref.slice(8), 'late-synthetic-key')
+  await f.admin.operations.reconcile(now + 2 * 86400_000)
+  assert.equal(deletes, 1); assert.equal(f.values.size, 0)
+  const row = await f.driver.get("SELECT document FROM external_pilot_operations WHERE status = 'cleanup_guard'")
+  assert(row); assert(!String(row.document).includes('binding'))
+})
+
+void test('progress coalesces a blocked writer to one latest snapshot and flushes before terminal', async () => {
+  let release!: () => void
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  const writes: string[] = []
+  const progress = new ProgressCoalescer(async value => { writes.push(value.raw); if (writes.length === 1) await barrier })
+  progress.push({ raw: 'first', refs: {} })
+  await Promise.resolve()
+  for (let i = 0; i < 100; i++) progress.push({ raw: `latest-${i}`, refs: {} })
+  assert.deepEqual(writes, ['first'])
+  const flushed = progress.flush()
+  release(); await flushed
+  assert.deepEqual(writes, ['first', 'latest-99'])
+  const failed = new ProgressCoalescer(async () => { throw new Error('database unavailable') })
+  failed.push({ raw: 'pending', refs: {} })
+  await assert.rejects(failed.flush(), /database unavailable/)
+})
+
+void test('a write acknowledged during an absence check is cleaned again before terminal retirement', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const ref = 'nexus://org:org-a:external:race/app-key'
+  await f.admin.operations.queueCleanup(actor, ref)
+  const row = await f.driver.get("SELECT id, document FROM external_pilot_operations WHERE status = 'cleanup'")
+  const read = f.secrets.getSecret
+  let raced = false
+  f.secrets.getSecret = async (...args) => {
+    if (raced) return read(...args)
+    raced = true
+    f.values.set(ref.slice(8), 'late-acknowledged')
+    const document = { ...JSON.parse(String(row!.document)), writeConfirmed: true }
+    await f.driver.run('UPDATE external_pilot_operations SET document = ? WHERE id = ?', [JSON.stringify(document), String(row!.id)])
+    return {value: null, status: 'enabled', version: 1}
+  }
+  await f.admin.operations.reconcile()
+  assert.equal((await f.driver.get('SELECT status FROM external_pilot_operations WHERE id = ?', [String(row!.id)]))?.status, 'cleanup')
+  await f.admin.operations.reconcile()
+  assert.equal(f.values.size, 0)
+  assert.equal((await f.driver.get('SELECT status FROM external_pilot_operations WHERE id = ?', [String(row!.id)]))?.status, 'cleanup_complete')
 })
