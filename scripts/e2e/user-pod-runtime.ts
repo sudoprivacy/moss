@@ -5,8 +5,8 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { NexusRpcError, NexusVfsClient, userRuntimeServerName } from '@nexus-ai-fs/vfs-client'
-import { UserPodService, userPodName, type UserPodOptions } from '../../src/server/runtime/userPodService.js'
-import { connectSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
+import { UserPodService, userPodName, type UserPodOptions } from '@sudo/user-runtime'
+import { connectSessionRuntime, waitForSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
 import { buildCohostProxyConfig } from '../../src/server/backends/scodeProxyConfig.js'
 import { connectController } from './cohost-controller-live.js'
@@ -17,7 +17,7 @@ assert.equal(process.env.MOSS_USER_POD_E2E, '1', 'Explicit runtime E2E selection
 const options = JSON.parse(await readFile(optionsFile, 'utf8')) as UserPodOptions
 const model = z.object({ model: z.string().min(1), baseUrl: z.string().url(), apiKey: z.string() })
   .parse(JSON.parse(await readFile(modelFile, 'utf8')))
-const service = new UserPodService(options)
+const service = new UserPodService(options, undefined, waitForSessionRuntime)
 const owner = `user-pod-e2e-${randomUUID()}`
 const otherOwner = `user-pod-e2e-${randomUUID()}`
 const agentId = `agent-${randomUUID()}`

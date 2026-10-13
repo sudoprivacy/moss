@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream, readFileSync, writeFileSync } from 'node:fs'
 import { basename } from 'node:path'
-import { RuntimeReleaseSchema, requirePairedEngine } from '../src/server/runtime/runtimeRelease.js'
+import { RuntimeReleaseSchema, requirePairedEngine } from '@sudo/user-runtime/release'
 import pins from '../src/server/nexus/runtime-versions.json' with { type: 'json' }
 
 const [releaseId, imageReference, imageDigest, archivePath, scodeVersionPath, cohostVersionPath, binaryDigest, outputPath] = process.argv.slice(2)

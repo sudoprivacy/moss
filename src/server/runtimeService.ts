@@ -68,12 +68,12 @@ import {
 } from './sharedAgentMemory.js'
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import type { NexusClient } from './nexus/nexusClient.js'
-import { UserPodService } from './runtime/userPodService.js'
+import { UserPodService } from '@sudo/user-runtime'
 import { assertRuntimePlacement } from './runtime/runtimePlacementPolicy.js'
-import { readRuntimeRelease } from './runtime/runtimeRelease.js'
+import { readRuntimeRelease } from '@sudo/user-runtime/release'
 import { resolveCohostNexusConfig } from './nexus/nexusEnvConfig.js'
 import { resolveCohostConnection as externalCohostConnection, encodeCohostConnection } from './nexus/cohostConnection.js'
-import { connectSessionRuntime, type SessionConnectionConfig } from './nexus/sessionConnection.js'
+import { connectSessionRuntime, waitForSessionRuntime, type SessionConnectionConfig } from './nexus/sessionConnection.js'
 import { buildCohostProxyConfig } from './backends/scodeProxyConfig.js'
 import {
   openInternalSessionChannel,
@@ -493,7 +493,7 @@ export class RuntimeService {
         runtimeClassName: k8s.runtimeClassName, cpuLimit: k8s.cpuLimit, memoryLimit: k8s.memoryLimit,
         imagePullPolicy: k8s.imagePullPolicy, imagePullSecrets: k8s.imagePullSecrets,
         issuer: { endpoint: issuer.endpoint, tls: issuer.tls },
-      })
+      }, undefined, waitForSessionRuntime)
     }
     if (options.nexusClient) {
       this.mcpStore = new McpStore(this.store.driver)

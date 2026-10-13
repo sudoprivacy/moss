@@ -15,8 +15,9 @@ standalone session image.
 `MOSS_USER_RUNTIME_HOST` (`k8s.userRuntimeHost`) supplies the private compute
 node host used to reach each runtime's Kubernetes NodePort Service.
 
-[`UserPodService`](../src/server/runtime/userPodService.ts) belongs to the main
-`RuntimeService`. It coordinates one owner-bound Pod and retained PVC for each
+[`UserPodService`](https://github.com/sudoprivacy/sudostack/tree/user-runtime-v0.1.0/packages/user-runtime)
+is the shared Sudostack lifecycle used by the main `RuntimeService`.
+It coordinates one owner-bound Pod and retained PVC for each
 user. Session runners receive its resolved connection and reuse the same box.
 The control plane issues short-lived owner credentials; each connection
 validates the runtime server name derived from that owner.

@@ -8,9 +8,8 @@ import { createServer as portServer } from 'node:net'
 import { join, resolve } from 'node:path'
 import grpc from '@grpc/grpc-js'
 import protoLoader from '@grpc/proto-loader'
-import { NexusVfsClient, NexusZoneApiClient, userRuntimeServerName } from '@nexus-ai-fs/vfs-client'
+import { createUserRuntimeCredentialBundle, NexusVfsClient, NexusZoneApiClient, userRuntimeServerName } from '@nexus-ai-fs/vfs-client'
 import { buildCohostProxyConfig } from '../../src/server/backends/scodeProxyConfig.js'
-import { userRuntimeCredentialData } from '../../src/server/runtime/userPodService.js'
 import { connectSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
 import { connectController } from './cohost-controller-live.js'
@@ -115,7 +114,8 @@ try {
     const configRoot = join(directory, 'config')
     mkdirSync(configRoot, { recursive: true })
     const runtimeCredential = await issuer.mintUserRuntime(ownerId, { validitySecs: 300 })
-    for (const [name, value] of Object.entries(userRuntimeCredentialData(ownerId, runtimeCredential))) {
+    const bundle = createUserRuntimeCredentialBundle(ownerId, runtimeCredential)
+    for (const [name, value] of Object.entries({ ...bundle.files, [bundle.manifestName]: bundle.manifest })) {
       writeFileSync(join(directory, name), value, { mode: 0o600 })
     }
     const configuration = buildCohostProxyConfig(providerUrl, apiKey, model)

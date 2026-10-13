@@ -24,7 +24,7 @@ Nexus RPC and the native ACP mailbox. The embedded engine runs inside the
 owner's Pod; Moss does not execute it inside its server process. Desktop local
 execution remains an alternative placement for the same scode engine core.
 
-`UserPodService` creates one gVisor Pod, retained PVC and private NodePort Service
+`UserPodService` from `@sudo/user-runtime` creates one gVisor Pod, retained PVC and private NodePort Service
 per owner. It uses a namespace-scoped Kubernetes identity. Each execution
 controller proves its owner with a short-lived delegated certificate. The Pod
 receives its own runtime certificate and private configuration; it receives no
@@ -72,6 +72,19 @@ Disabled owners remain visible for inspection. New conversations and runtime
 upgrades remain unavailable until the owner is active again.
 
 ## Shared release and upgrades
+
+Sudostack publishes the common lifecycle implementation as `@sudo/user-runtime`.
+Moss pins its verified release archive and supplies authenticated readiness,
+owner model configuration and Session binding. The common package delegates
+credential formatting to `@nexus-ai-fs/vfs-client`; Moss does not maintain a
+second Pod controller, Kubernetes resource implementation or release parser.
+Lifecycle and release regressions live with the package. Moss retains the real
+native and Kubernetes journeys that verify its control plane integration.
+
+Current Pod delivery uses projected Kubernetes Secrets for short-lived server
+credentials and model configuration. Volatile delivery must also support cold
+recovery before replacing that transport. This package adoption does not change
+the existing storage or authorization boundary.
 
 `runtime-release.json` records the observed engine commit, CLI and cohost
 versions, compiled Nexus version, plugin ABI, issuer version, image digest and
