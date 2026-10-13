@@ -4,9 +4,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { UserPodService, userPodName, type UserPodOptions } from '../../src/server/runtime/userPodService.js'
-import { RuntimeReleaseSchema } from '../../src/server/runtime/runtimeRelease.js'
-import { connectSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
+import { UserPodService, userPodName, type UserPodOptions } from '@sudo/user-runtime'
+import { RuntimeReleaseSchema } from '@sudo/user-runtime/release'
+import { connectSessionRuntime, waitForSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
 import { connectController } from './cohost-controller-live.js'
 
@@ -24,7 +24,7 @@ assert.equal(fixture.image, options.image)
 assert.equal(fixture.pods[0], userPodName(fixture.owner))
 const paths = [`/agents/${fixture.agentId}/memory/MEMORY.md`,
   ...previous.durableSessionIds.map(sid => `/sessions/${sid}/transcript.jsonl`)]
-const original = new UserPodService(options)
+const original = new UserPodService(options, undefined, waitForSessionRuntime)
 const originalConnection = await connectSessionRuntime(await original.resolve(fixture.owner), fixture.owner)
 const snapshots = await Promise.all(paths.map(path => originalConnection.client.read(path, '')))
 assert(snapshots.every(bytes => bytes.length > 0))
@@ -46,11 +46,11 @@ const drain = async (connection?: Parameters<typeof connectSessionRuntime>[0]): 
 const rejected = new UserPodService({ ...options, release: { ...release,
   releaseId: `${release.releaseId}-rejected`,
   cohost: { ...release.cohost, binaryDigest: `sha256:${'0'.repeat(64)}` },
-} })
+} }, undefined, waitForSessionRuntime)
 try {
   await assert.rejects(rejected.upgrade(fixture.owner, drain), /differs from the verified release manifest/)
 } finally { await rejected.close() }
-const restored = new UserPodService(options)
+const restored = new UserPodService(options, undefined, waitForSessionRuntime)
 try {
   const connection = await connectSessionRuntime(await restored.resolve(fixture.owner), fixture.owner)
   try {
@@ -61,7 +61,7 @@ try {
 } finally { await restored.close() }
 
 const targetRelease = { ...release, releaseId: `${release.releaseId}-accepted` }
-const target = new UserPodService({ ...options, release: targetRelease })
+const target = new UserPodService({ ...options, release: targetRelease }, undefined, waitForSessionRuntime)
 let agent: ManagedAgentClient | undefined
 const sessions: Awaited<ReturnType<ManagedAgentClient['startSession']>>[] = []
 const controllers: ReturnType<typeof connectController>[] = []

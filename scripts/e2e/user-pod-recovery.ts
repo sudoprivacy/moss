@@ -6,9 +6,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
-import { buildKubectlBaseArgs, readK8sResource } from '../../src/server/backends/k8sResources.js'
-import { UserPodService, userPodName, type UserPodOptions } from '../../src/server/runtime/userPodService.js'
-import { connectSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
+import { buildKubectlBaseArgs, readK8sResource } from '@sudo/user-runtime/kubernetes'
+import { UserPodService, userPodName, type UserPodOptions } from '@sudo/user-runtime'
+import { connectSessionRuntime, waitForSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
 import { connectController } from './cohost-controller-live.js'
 
@@ -30,7 +30,7 @@ assert.equal(beforePod?.metadata.annotations?.['moss.sudo.dev/runtime-owner'], f
 assert(beforePod?.metadata.uid)
 const paths = [`/agents/${fixture.agentId}/memory/MEMORY.md`,
   ...result.durableSessionIds.map(sid => `/sessions/${sid}/transcript.jsonl`)]
-const originalService = new UserPodService(options)
+const originalService = new UserPodService(options, undefined, waitForSessionRuntime)
 const original = await connectSessionRuntime(await originalService.resolve(fixture.owner), fixture.owner)
 let snapshots: Buffer[]
 try { snapshots = await Promise.all(paths.map(path => original.client.read(path, ''))) }
@@ -38,7 +38,7 @@ finally { original.client.close(); await originalService.close() }
 assert(snapshots.every(content => content.length > 0))
 await promisify(execFile)('kubectl', [...kubectl, 'delete', 'pod', podName, '--wait=true', '--timeout=90s'],
   { timeout: 100_000, windowsHide: true })
-const service = new UserPodService(options)
+const service = new UserPodService(options, undefined, waitForSessionRuntime)
 let agent: ManagedAgentClient | undefined
 const sessions: Awaited<ReturnType<ManagedAgentClient['startSession']>>[] = []
 const controllers: ReturnType<typeof connectController>[] = []
