@@ -1,0 +1,18 @@
+
+ RUN  v4.0.18 /Users/yobach/VSCodeProject/sudowork.worktrees/codex-dify-external-pilot-20261012/apps/desktop
+
+ ✓ |node| tests/unit/mossExternalProviderClient.test.ts (8 tests) 9ms
+fatal: no tag exactly matches 'baa09966932d334a7bfc2a58e0c8995a0c17cffc'
+fatal: no tag exactly matches 'baa09966932d334a7bfc2a58e0c8995a0c17cffc'
+ ✓ |node| tests/integration/externalProviderBuild.test.ts (2 tests) 673ms
+   ✓ bundles the external provider client in main without generated package dist  569ms
+stderr | tests/unit/externalAgents.dom.test.tsx > starts from the organization directory and uses the conversation route without installing a personal agent
+`NaN` is an invalid value for the `height` css style property.
+
+ ✓ |dom| tests/unit/externalAgents.dom.test.tsx (13 tests) 1087ms
+
+ Test Files  3 passed (3)
+      Tests  23 passed (23)
+   Start at  17:06:37
+   Duration  2.72s (transform 370ms, setup 136ms, import 1.24s, tests 1.77s, environment 589ms)
+

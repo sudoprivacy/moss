@@ -1,0 +1,269 @@
+{
+  "captured_at": "2026-10-13T17:25:45+08:00",
+  "note": "Moss snapshot is the preceding published 6681abc revision; ced61fd and the evidence-only commit are pending final push/CI. Do not transfer old green checks to a new head.",
+  "moss": {
+    "head": "6681abc3cdc4ab3f250638d18d51662e4976f595",
+    "checks": [
+      {
+        "name": "server-tests",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/moss/actions/runs/38374564671/job/115219597949"
+      },
+      {
+        "name": "lint",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/moss/actions/runs/38374564627/job/115219596689"
+      },
+      {
+        "name": "Installed Nexus runtime (ubuntu-latest)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/moss/actions/runs/38374564671/job/115219597940"
+      },
+      {
+        "name": "Installed Nexus runtime (macos-latest)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/moss/actions/runs/38374564671/job/115219598078"
+      },
+      {
+        "name": "Installed Nexus runtime (windows-latest)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/moss/actions/runs/38374564671/job/115219597827"
+      },
+      {
+        "name": "Moss durable session recovery (real daemon)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/moss/actions/runs/38374564671/job/115219597473"
+      },
+      {
+        "name": "build-amd64",
+        "state": "QUEUED",
+        "url": "https://github.com/sudoprivacy/moss/actions/runs/38374564671/job/115221785815"
+      }
+    ]
+  },
+  "stack": {
+    "head": "f6ec49b2a7e917878a2db7bb21377bf8fc521bd7",
+    "checks": [
+      {
+        "name": "candidate-offline-gates",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudostack/actions/runs/38374649914/job/115219878712"
+      },
+      {
+        "name": "external-provider-contract",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudostack/actions/runs/38374649918/job/115219878335"
+      },
+      {
+        "name": "evaluation-adapters",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudostack/actions/runs/38374650000/job/115219878867"
+      },
+      {
+        "name": "owner-source-availability",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudostack/actions/runs/38374649914/job/115219878605"
+      },
+      {
+        "name": "workspace-safety",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudostack/actions/runs/38374650000/job/115219878514"
+      },
+      {
+        "name": "every-clause-names-what-enforces-it",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudostack/actions/runs/38374649914/job/115219878153"
+      },
+      {
+        "name": "chinese-analyzer-quality",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudostack/actions/runs/38374650000/job/115219878814"
+      }
+    ]
+  },
+  "work": {
+    "head": "4a112610edadd7379e98a0bcae58ed06255f56e9",
+    "checks": [
+      {
+        "name": "Browser Backend Live (ubuntu-latest)",
+        "state": "IN_PROGRESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132430"
+      },
+      {
+        "name": "Check PR Base Branch",
+        "state": "SKIPPED",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724824/job/115220134960"
+      },
+      {
+        "name": "Check PR Base Branch",
+        "state": "SKIPPED",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38375105533/job/115221462530"
+      },
+      {
+        "name": "Published ACP pair (ubuntu-22.04)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724826/job/115220131942"
+      },
+      {
+        "name": "Block AI Authorship Signatures",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724878/job/115220131176"
+      },
+      {
+        "name": "Block Merge Commits in PR",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724857/job/115220131354"
+      },
+      {
+        "name": "Cold Start Smoke (linux-x64)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724895/job/115220131747"
+      },
+      {
+        "name": "media (ubuntu-latest)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724868/job/115220131884"
+      },
+      {
+        "name": "External Provider Contract",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132041"
+      },
+      {
+        "name": "Dev Shim Smoke (linux-x64)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724888/job/115220133150"
+      },
+      {
+        "name": "WebUI Checks",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724831/job/115220131403"
+      },
+      {
+        "name": "Published ACP pair (windows-latest)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724826/job/115220131771"
+      },
+      {
+        "name": "Cold Start Smoke (windows-x64)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724895/job/115220132202"
+      },
+      {
+        "name": "media (windows-latest)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724868/job/115220131390"
+      },
+      {
+        "name": "Browser Backend Live (windows-latest)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132375"
+      },
+      {
+        "name": "Cold Start Smoke (macos-arm64)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724895/job/115220132117"
+      },
+      {
+        "name": "Secrets Unit Tests",
+        "state": "QUEUED",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132095"
+      },
+      {
+        "name": "Browser Port Isolation",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132454"
+      },
+      {
+        "name": "Hub Unit Tests",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220131773"
+      },
+      {
+        "name": "Browser-Panel MCP Server",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132231"
+      },
+      {
+        "name": "Format Check",
+        "state": "QUEUED",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132273"
+      },
+      {
+        "name": "AuthProxy /secrets HTTP E2E",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132099"
+      },
+      {
+        "name": "Type Check",
+        "state": "QUEUED",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132176"
+      },
+      {
+        "name": "Runtime Release E2E (ubuntu-22.04)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132479"
+      },
+      {
+        "name": "Runtime Release E2E (windows-latest)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132560"
+      },
+      {
+        "name": "Runtime Release E2E (macos-14)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132800"
+      },
+      {
+        "name": "Runtime Release E2E (macos-15-intel)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132571"
+      },
+      {
+        "name": "Conversation Reaper Unit Tests",
+        "state": "QUEUED",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132125"
+      },
+      {
+        "name": "Scode Config-Home Isolation",
+        "state": "IN_PROGRESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724904/job/115220132581"
+      },
+      {
+        "name": "Full Unit Test Suite",
+        "state": "QUEUED",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132436"
+      },
+      {
+        "name": "Full Unit Test Suite (Windows)",
+        "state": "IN_PROGRESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132240"
+      },
+      {
+        "name": "Build Test (macos-arm64)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132067"
+      },
+      {
+        "name": "Build Test (macos-x64)",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132336"
+      },
+      {
+        "name": "Build Test (windows-x64)",
+        "state": "IN_PROGRESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132475"
+      },
+      {
+        "name": "Build Test (windows-arm64)",
+        "state": "IN_PROGRESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132237"
+      },
+      {
+        "name": "Release Script Test",
+        "state": "SUCCESS",
+        "url": "https://github.com/sudoprivacy/sudowork/actions/runs/38374724821/job/115220132159"
+      }
+    ]
+  }
+}

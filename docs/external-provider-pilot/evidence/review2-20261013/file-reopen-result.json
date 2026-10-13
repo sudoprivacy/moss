@@ -1,0 +1,9 @@
+{
+  "date": "2026-10-13T09:17:30.786Z",
+  "mode": "file-backed SQLite service and driver closed/reopened twice; synthetic fixture; no process kill",
+  "checks": {
+    "beforeCheckpointRawReopen": true,
+    "displayRawConsistent": true,
+    "unknownTerminalRawReopen": true
+  }
+}

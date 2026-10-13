@@ -1,0 +1,40 @@
+{
+  "date": "2026-10-13T09:12:46.049Z",
+  "mode": "live Dify HTTP + isolated Moss service/routes + current SudoWork client; no production auth UI or existing pilot DB mutation",
+  "checks": {
+    "twoTurnContext": true,
+    "alpha3Envelopes": true,
+    "rawReplay": true,
+    "history": true
+  },
+  "results": [
+    {
+      "status": "succeeded",
+      "answer": "6 乘以 7 等于 42。",
+      "raw": "{\n  \"reply\": \"6 乘以 7 等于 42。\",\n  \"actions\": []\n}",
+      "version": "external-provider.sudo.dev/v1alpha3",
+      "sequence": 7,
+      "polls": 14,
+      "providerRefs": {
+        "conversation_id": "e78ab620-b57f-46f4-8f6a-cafbabee1f68",
+        "message_id": "d6f68dbc-c8d8-4c16-a107-7d6849752366",
+        "task_id": "7f4ba6ec-4396-463a-ae39-4989e523b379",
+        "workflow_run_id": "d4d7de75-f302-4e4d-bf96-4e484ffc52be"
+      }
+    },
+    {
+      "status": "succeeded",
+      "answer": "在 42 的基础上加 8 等于 50。",
+      "raw": "{\n  \"reply\": \"在 42 的基础上加 8 等于 50。\",\n  \"actions\": []\n}",
+      "version": "external-provider.sudo.dev/v1alpha3",
+      "sequence": 7,
+      "polls": 9,
+      "providerRefs": {
+        "conversation_id": "e78ab620-b57f-46f4-8f6a-cafbabee1f68",
+        "message_id": "325f3b75-7b73-4aa3-ade3-473d845338c0",
+        "task_id": "67657309-7d30-4fb7-af36-838916558922",
+        "workflow_run_id": "66fe768c-0bdf-4362-a77b-762037a3e667"
+      }
+    }
+  ]
+}
