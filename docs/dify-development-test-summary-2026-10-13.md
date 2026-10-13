@@ -20,7 +20,7 @@
 | sudowork | dev · `a4913f1d` | [#1234](https://github.com/sudoprivacy/sudowork/pull/1234) |
 | sudostack | main · `d856bd7` | [#43](https://github.com/sudoprivacy/sudostack/pull/43) |
 
-三个 PR 均为已推送的正式 PR，目标分支如表所示。SudoWork 当前提交 `82b87d96`，sudostack 当前提交 `5320aa1`；Moss 代码/验收提交为 `b2913bf`，其后的提交仅补齐本总结及 PR 链接。
+三个 PR 均为已推送的正式 PR，目标分支如表所示。SudoWork 当前提交 `777578da`，sudostack 当前提交 `5320aa1`；Moss 代码/验收提交为 `b2913bf`，其后的提交仅补齐本总结及 PR 链接。
 
 三个原工作区及其他 worktree 均保留。rebase 前的提交保存于各仓库本地 `refs/codex-backups/dify-before-rebase-20261013`；未合并 PR、未部署生产。
 
@@ -180,3 +180,19 @@ node contracts/experimental/external-provider/generate.mjs --owner /path/to/moss
 Moss 本轮完整命令中的 server 部分先通过，随后测试清单完整性检查发现新增用例未登记；修正后单独运行 `node scripts/run-node-tests.js`，902 通过 / 3 跳过。没有把首次命令的非零退出记成整体通过。SudoWork `bun run test` 的根脚本实际执行 desktop 全量，WebUI 239 项是另行运行的结果。
 
 开发机日志：`/tmp/dify-rebase-moss-tests.log`、`/tmp/dify-rebase-moss-node-tests.log`、`/tmp/dify-rebase-moss-admin-tests.log`、`/tmp/dify-rebase-sudowork-tests-final.log`、`/tmp/dify-rebase-webui-unit.log`、`/tmp/dify-rebase-stack-tests.log`。这些临时日志未提交，PR 内的结构化结果和截图位于 `docs/external-provider-pilot/evidence/`。
+
+
+## 10. SudoWork PR 首轮 CI 失败与修复
+
+首次 PR CI 暴露两个本地检查遗漏，修复提交为 SudoWork `777578da`：
+
+- WebUI 独立的 Prettier 检查发现三个文件格式不合规。已按 WebUI 配置格式化，并将旧版源码重新格式化后逐字节比对，确认仅格式变化。
+- Electron main 缺少 `@sudowork/contracts/external-provider` 的源码别名。已有本地契约 `dist` 掩盖了缺失，干净的 macOS/Windows 生产构建和 Linux dev shim 都在此 import 失败。已补齐源码映射，未通过 externalize 或关闭检查绕过问题。
+
+新增实际构建回归读取正式生产配置、打包外部客户端，并拒绝任何 `contracts/dist` 加载。修复前失败，修复后通过；完整生产 main bundle 在同样限制下也通过。新增回归进入根全量测试。
+
+修复后验证结果：根全量 **3137 通过 / 30 跳过**；desktop 类型及定向 lint/格式通过；WebUI 按 CI 顺序完成类型、lint、格式、**239 单元 / 46 契约 / 88 PostgreSQL 集成**，全部通过。数据库集成使用独立临时容器，验收结束已删除；原有试点服务和数据保留。此结果补充第 5 节的首次交付记录，不把先前尚未运行的检查追溯记为通过。
+
+修复已推送到 [SudoWork PR #1234](https://github.com/sudoprivacy/sudowork/pull/1234) 并重跑 CI。远端构建与安装包状态以新提交的检查为准。
+
+三个 PR 可并行提交和评审。建议合并顺序为 **Moss → sudostack → SudoWork**：先确定语义源，再核验派生分发，最后配套客户端。如果 Moss 采用 squash/rebase merge 改写源提交，先更新另外两仓的来源锁并核验摘要后再合并。此处为合并建议，不表示已执行任何合并。
