@@ -1,0 +1,12 @@
+{
+  "checkedAt": "2026-10-13T03:17:59.139489+00:00",
+  "checks": [
+    "Organization agent appears under exclusive external hosting; client has no management entry",
+    "External hosting is absent from template library and installed templates",
+    "Full Electron IPC -> Moss -> Dify returns 56 for 7 * 8 through unified chat",
+    "Desktop reload restores completed conversation"
+  ],
+  "pageErrors": [],
+  "sessionUrl": "http://localhost:5173/#/conversation/external%3Abfbabd6a-7827-44ba-b787-5b300b5f123e",
+  "host": "Full Electron development app; production installer not tested"
+}

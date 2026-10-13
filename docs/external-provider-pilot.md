@@ -4,7 +4,7 @@
 
 ## 已实现链路
 
-SudoWork **智能体列表 → 开始对话**（`/conversation/external%3A<session-id>`）→ desktop IPC 或 WebUI Session 代理 → Moss `/api/v1/tasks` → Dify `/v1/chat-messages`。Dify SSE 被归一化并持久化；客户端每 750ms 按 cursor 读取事件及当前任务投影，断开页面不影响执行。
+Moss **智能体管理 → 专属智能体** 接入发布；SudoWork **智能体列表 → 专属智能体 → 开始对话**（`/conversation/external%3A<session-id>`）→ desktop IPC 或 WebUI Session 代理 → Moss `/api/v1/tasks` → Dify `/v1/chat-messages`。Dify SSE 被归一化并持久化；客户端每 750ms 按 cursor 读取事件及当前任务投影，断开页面不影响执行。
 
 - Agent 注册复用 Catalog，Connection 复用 IdentityRepository；密钥通过现有 Nexus Secret port 加密保存和读取。
 - 组织、用户、端点均需明确批准。审批到期最长 7 天，默认未启用。
@@ -20,14 +20,14 @@ SudoWork **智能体列表 → 开始对话**（`/conversation/external%3A<sessi
 
 基础条件：运行本分支的 Moss 与配套 SudoWork，Moss 已连接可写的 Nexus Secret。首次部署 Nexus 属于基础设施配置；每个智能体的接入、发布、停用均在界面完成，不需要编辑环境变量、计算摘要或手工调用接口。
 
-1. 平台管理员登录 SudoWork，进入侧栏 **智能体列表 → 外部智能体管理 → 配置试点范围**。填写允许的 Dify API 地址（例如 `http://10.0.1.158:8089/v1`），启用当前组织并保存。范围持久化到 Moss 数据库，立即生效，无须重启。组织管理员可查看范围；仅 `super_admin` 能修改网络范围。
-2. 组织管理员点击 **接入 Dify 智能体**，选择获准的服务地址，输入应用的 **App API Key**，点击 **测试连接并继续**。这里使用 Dify 应用“访问 API”页的 key，不是 Dify 登录密码。
+1. 平台管理员登录 Moss 管理后台，进入 **智能体管理 → 专属智能体 → 外部托管 → 配置接入范围**。填写允许的 Dify API 地址（例如 `http://10.0.1.158:8089/v1`），启用当前组织并保存。范围持久化到 Moss 数据库，立即生效，无须重启。组织管理员可查看范围；仅 `super_admin` 能修改网络范围。
+2. 组织管理员在 Moss 的 **外部托管** 分区点击 **接入外部智能体**，选择 **外部托管 / Dify** 和获准的服务地址，输入应用的 **App API Key**，点击 **测试连接并继续**。这里使用 Dify 应用“访问 API”页的 key，不是 Dify 登录密码。
 3. 输入 App ID、Workspace ID，上传从 Dify 导出的 YAML / JSON；选择本组织的授权用户、结果格式，并填写审核说明。点击 **保存待审核配置**。服务端解析定义、拒绝非 Start/LLM/Answer 节点、生成摘要，并把 key 写入当前组织的 Nexus Secret。原始定义和明文 key 不写入业务数据库，不回显给客户端。
 4. 核对定义与 Dify 当前发布版本、用途及用户范围，点击 **审核发布**，选择 1 / 3 / 7 天有效期并确认。预检通过后，授权用户即可看到此智能体。Dify Service API 不能可靠提供 App/Workspace 身份或锁定发布版本，因此 ID 与发布定义需要管理员核对，不能把连接成功理解为版本已固定。
-5. 普通用户进入 **智能体列表 → 组织发布的智能体**，点击 **开始对话**。在统一对话页底部输入合成问题，Enter 或点击 **发送**；Shift+Enter 换行。页面显示增量回答及任务状态；继续追问复用同一个 Dify conversation。左侧 **对话 → 最近 / 时间分组** 可找回会话，刷新或跨 WebUI/桌面端登录同一账号可恢复历史。
+5. 普通用户进入 **智能体列表 → 专属智能体 → 外部托管**，点击 **开始对话**。在统一对话页底部输入合成问题，Enter 或点击 **发送**；Shift+Enter 换行。页面显示增量回答及任务状态；继续追问复用同一个 Dify conversation。左侧 **对话 → 最近 / 时间分组** 可找回会话，刷新或跨 WebUI/桌面端登录同一账号可恢复历史。
 6. 管理员可 **测试连接、编辑配置、更换密钥、停用、归档**。更改用户范围/名称/结果格式或密钥会撤销发布，重新审核后才允许新任务。更换密钥先验证再写入 Secret；失败不会继续沿用“已发布”的状态。归档隐藏接入条目，保留会话和加密凭据；不是销毁凭据的功能。
 
-组织发布的智能体不进入 **我的 Agent**，也不进入目录的 **我的智能体 / 已安装模板** 页签；组织管理权和个人会话归属分开。旧 `/app/agents/external?session=<id>` 自动跳转统一对话；无 session 的旧地址跳转智能体列表。独立试点侧栏入口已移除。
+组织发布的智能体不进入 **我的 Agent**，也不进入目录的 **我的智能体 / 已安装模板** 页签；组织管理权和个人会话归属分开。旧 `/app/agents/external?session=<id>` 自动跳转统一对话；无 session 的旧地址跳转智能体列表。独立试点侧栏入口已移除。管理功能已迁移至 Moss，SudoWork 只保留用户目录和统一对话。
 
 配置被其他管理员更新时返回冲突，界面提示刷新后重试。普通用户无管理入口，后端也独立检查权限。停用只阻止新派发，不声称已取消发往 Dify 的任务。
 
@@ -122,7 +122,7 @@ SudoWork **智能体列表 → 开始对话**（`/conversation/external%3A<sessi
 
 ### 2026-10-13 组织目录与统一对话验收
 
-管理员发布的智能体从 **智能体列表 → 组织发布的智能体** 开始对话，复用 ChatLayout、左侧时间线、底部输入和消息展示。组织智能体不进入 **我的 Agent** 或目录的个人/已安装页签；管理入口在目录内以抽屉打开，仅管理员可见。Moss 旧模板列表、详情和 enhancement 绑定排除 `external_hosted`，避免重复安装入口。
+此节记录当天较早的实现。管理员发布的智能体从 **智能体列表 → 组织发布的智能体** 开始对话，复用 ChatLayout、左侧时间线、底部输入和消息展示。组织智能体不进入 **我的 Agent** 或目录的个人/已安装页签；当时管理入口在目录内以抽屉打开，仅管理员可见，现已迁移至 Moss（见下文）。Moss 旧模板列表、详情和 enhancement 绑定排除 `external_hosted`，避免重复安装入口。
 
 客户端为外部 Session 创建 `external:<id>` 命名空间的只读展示投影，合并到最近8条与完整时间分组；Moss 仍保存外部 Session/Task 的唯一事实源，原生会话数据库、个人智能体归属、定时任务及原生操作接口不变。旧会话链接可继续使用，授权撤销后的个人历史仍可读取。
 
@@ -144,4 +144,29 @@ SudoWork **智能体列表 → 开始对话**（`/conversation/external%3A<sessi
 
 现已在原生模板Store的列表与按ID读取入口排除`external_hosted`，避免错误的下载/规则编辑/原生审批入口；Catalog原始记录与外部执行接口保留。新增隔离回归与相关外部测试32项通过，原生专属HTTP路由10项通过，Node构建、变更lint与现有类型基线检查通过。实际管理员和普通用户的两种模板别名均排除Dify，已发布外部目录仍保留该智能体。完整WebUI复验专属页仅有一张正常外部Dify卡片，不再有原生模板重复条目；本地Moss已重启生效，其他服务保持运行。
 
-管理入口后续调整建议：Moss组织管理员在“智能体管理 → 专属智能体”统一接入和发布，按原生模板/外部托管类型分开表单与操作，外部接入沿用既有`external-agents/admin`及review接口；SudoWork保留获准目录和对话。当前尚未迁移管理界面，不能使用原生“创建专属智能体”表单代替外部接入审批。
+当时提出的管理入口调整已在下一节落实：Moss组织管理员在“智能体管理 → 专属智能体”统一接入和发布，按原生模板/外部托管类型分开表单与操作，外部接入沿用既有`external-agents/admin`及review接口；SudoWork保留获准目录和对话。原生“创建原生模板”表单不能代替外部接入审批。
+
+### 2026-10-13 管理入口迁至 Moss
+
+最终入口：**Moss → 智能体管理 → 专属智能体**。组织管理员在“外部托管”分区完成Dify连接测试、定义上传、成员授权、审核发布、编辑、换密钥、停用、归档。平台管理员额外可配置当前组织的端点范围；普通用户无外部管理区。原生模板单独展示、单独操作，不共用原生自动审批和规则文件接口。
+
+SudoWork仅在 **智能体列表 → 专属智能体 → 外部托管** 展示当前用户可执行的条目。智能体库与个人/已安装页签不展示外部托管；删除客户端管理组件，保留已有transport兼容接口。外部契约与数据事实源不变，既有智能体、凭据和会话直接沿用。
+
+Moss管理API直接消费同仓契约类型。页面按用户与当前组织重建，关闭表单清空明文key；离开页面或切换组织中止请求并丢弃迟到响应。结构化服务端错误码映射为可操作的提示，不回显provider原始错误。
+
+真实界面通过10组检查：平台管理员保存端点范围；真实组织管理员（role=admin）不可修改范围但能接入；错误key不能进入下一步、关闭后key清空；完整接入保存待审核；明确审批后SudoWork用户42→50；编辑撤销发布；换密钥后重新审核；停用保留只读历史；归档退出目录并保留历史；普通Moss用户没有管理区。浏览器pageErrors为空。
+
+- [管理迁移验收记录](external-provider-pilot/evidence/moss-management-migration-result.json)
+- [Moss专属智能体管理截图](external-provider-pilot/evidence/moss-exclusive-management.png)
+- [最终组织管理员页面](external-provider-pilot/evidence/moss-exclusive-management-final.png)
+- [SudoWork真实对话截图](external-provider-pilot/evidence/moss-published-client-chat.png)
+- [完整Electron验收](external-provider-pilot/evidence/moss-management-desktop-result.json)
+- [Electron真实对话截图](external-provider-pilot/evidence/moss-management-desktop-chat.png)
+
+完整Electron开发应用另行验证专属目录与其他页签隔离、无客户端管理入口、IPC → Moss → Dify执行7×8得到56，以及刷新后恢复历史；pageErrors为空。完成后桌面应用停留在专属智能体列表。
+
+测试仅在本地隔离组织新建并最终归档一条验收接入，使用已有Dify应用及已有App key，没有创建或修改远端Dify应用和key。原有“Dify 验收助手”保持发布且配置不变。增加本地组织管理员pilot-org-admin供人工验证。
+
+自动检查：SudoWork全量3187通过/36跳过（客户端5项旧管理组件测试随组件迁移移除），Moss管理API与已有凭据/组织客户端回归13项通过；admin/renderer/desktop/WebUI类型检查通过，Moss Node与admin生产资源构建通过。已有试点边界继续适用，未宣称Electron生产安装包或Moss任务库PG多副本验收。
+
+按用户要求先停服务实施，完成后重新启动完整Moss/WebUI/Electron/Nexus和测试PG并保持运行。入口和测试账号见本地manual-verification.md。前文2026-10-12及10-13早期管理入口属于历史记录，以本节和开头操作指南为准。

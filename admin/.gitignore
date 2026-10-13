@@ -30,3 +30,5 @@ node_modules
 !/tests/config-scope.test.ts
 !/tests/config-scope.browser.py
 !/tests/organizations-api.test.ts
+
+!/tests/external-agents-api.test.ts
