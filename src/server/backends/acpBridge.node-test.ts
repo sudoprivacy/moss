@@ -25,12 +25,12 @@ void test('closing a live turn retains the rendered answer once without a prompt
   handle.onStdoutLine(line => output.push(JSON.parse(line)))
   try {
     for (let i = 0; i < 200 && !sent.some(message => message.id === 'm-init'); i++) await delay(10)
-    events.onMessage({ id: 'm-init', result: {} })
-    events.onMessage({ id: 'm-session-new', result: { sessionId: 'native-closed-history' } })
+    events.onMessage({ jsonrpc: '2.0', id: 'm-init', result: {} })
+    events.onMessage({ jsonrpc: '2.0', id: 'm-session-new', result: { sessionId: 'native-closed-history' } })
     handle.writeStdin(JSON.stringify({ type: 'user', message: { role: 'user', content: 'A slow reply' } }))
     for (let i = 0; i < 200 && !sent.some(message => message.method === 'session/prompt'); i++) await delay(10)
     assert(sent.some(message => message.method === 'session/prompt'))
-    events.onMessage({ method: 'session/update', params: {
+    events.onMessage({ jsonrpc: '2.0', method: 'session/update', params: {
       update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Visible partial answer' } },
     } })
     await handle.destroy(true)
