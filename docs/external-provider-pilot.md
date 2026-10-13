@@ -65,12 +65,12 @@ Moss **智能体管理 → 专属智能体** 接入发布；SudoWork **智能体
 ## 契约与仓库
 
 - Moss 语义源：`contracts/external-provider/v1/contract.ts`，版本 `external-provider.sudo.dev/v1alpha1`。
-- 语义源固定提交：`c15c9f026b1d8ca25b729d85a9874e028a77fc37`。
+- 语义源固定提交：`5034b39feaa770d72e7cdfc36362d149f76fd617`。
 - sudostack：`contracts/experimental/external-provider/`，可重生成并按提交和 digest 校验。
 - SudoWork：`packages/contracts/src/external-provider.gen.ts`，只读派生；`bun run check:external-contract` 校验。
 - 这是首期实验契约，不是宣称 `task.sudo.dev/v1`、ADR-003/004/005 已 Accepted，也不改变 `@sudo/contracts` 稳定 exports。
 
-基线：Moss origin/dev `56ed339`；SudoWork origin/dev `d1d8e49`；sudostack 没有 dev，使用 origin/main `c9f8faa`。分支统一为 `codex/dify-external-pilot-20261012`。
+2026-10-13 rebase 后基线：Moss origin/dev `586fa29`；SudoWork origin/dev `aad96f70`；sudostack origin/main `d856bd7`。分支统一为 `codex/dify-external-pilot-20261012`。
 
 ## 真实验证与边界
 
@@ -172,3 +172,18 @@ Moss管理API直接消费同仓契约类型。页面按用户与当前组织重�
 自动检查：SudoWork全量3187通过/36跳过（客户端5项旧管理组件测试随组件迁移移除），Moss管理API与已有凭据/组织客户端回归13项通过；admin/renderer/desktop/WebUI类型检查通过，Moss Node与admin生产资源构建通过。已有试点边界继续适用，未宣称Electron生产安装包或Moss任务库PG多副本验收。
 
 按用户要求先停服务实施，完成后重新启动完整Moss/WebUI/Electron/Nexus和测试PG并保持运行。入口和测试账号见本地manual-verification.md。前文2026-10-12及10-13早期管理入口属于历史记录，以本节和开头操作指南为准。
+
+
+### 2026-10-13 rebase 后交付验证
+
+三个仓库已 rebase 到上述基线。冲突处理保留上游共享原生会话上下文、“最近”默认折叠、版本及包管理器字段，并保留外部会话只读展示投影；新增回归覆盖外部历史不污染原生数据源。契约摘要未变，派生来源提交同步为 `5034b39feaa770d72e7cdfc36362d149f76fd617`。
+
+本次 Moss Node 套件 902 通过 / 3 跳过，admin 回归 13 通过，构建、server lint 及类型基线检查通过（104 / 104，非全仓零错误）。SudoWork 全量单 worker 复跑 3136 通过 / 30 跳过，WebUI 单元 239 通过，workspace 构建和各端类型检查通过；首轮已有 ontology DOM 用例超时，未修改时限，复跑通过。sudostack 测试 139 通过，类型、生成及契约来源检查通过。
+
+重新运行真实 Moss 管理和 WebUI Dify 链路，10 组检查通过，42→50、停用/归档后历史保留，`pageErrors=[]`。验收脚本末尾旧名称“原生模板”已按当前“内部托管”修正，并完整复跑通过。完整 Electron 开发应用再次得到 56，刷新恢复且外部历史进入统一时间线，4 组检查通过，`pageErrors=[]`。临时接入已归档，原有智能体和远端 Dify 应用/密钥未改动。服务保持运行。
+
+- [rebase 后管理与 WebUI 验收](external-provider-pilot/evidence/moss-management-migration-result.json)
+- [rebase 后 Electron 验收](external-provider-pilot/evidence/rebase-desktop-result.json) / [截图](external-provider-pilot/evidence/rebase-desktop-chat.png)
+- [本次开发测试及 PR 交付总结](dify-development-test-summary-2026-10-13.md)
+
+本节为最新验收结果，前文测试数量和截图保留为各阶段记录。生产安装包、Moss TaskStore PostgreSQL/多副本与生产出口治理仍未验收。

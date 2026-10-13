@@ -84,6 +84,7 @@ const nodeTestFiles = [
   'src/server/billing/sudorouterAdapter.node-test.ts',
   'src/server/billing/walletService.node-test.ts',
   'src/server/catalog/catalogArtifactStore.node-test.ts',
+  'src/server/catalog/tenantExternalIsolation.node-test.ts',
   'src/server/catalog/catalogRepository.node-test.ts',
   'src/server/catalog/organizationResources.node-test.ts',
   'src/server/catalog/organizationResourceRoutes.node-test.ts',

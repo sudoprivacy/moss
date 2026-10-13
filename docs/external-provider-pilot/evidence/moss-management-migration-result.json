@@ -1,4 +1,5 @@
 {
+  "verifiedAt": "2026-10-13T14:05:25+0800",
   "checks": [
     "platform administrator can save organization endpoint policy and test the existing connection",
     "organization administrator has onboarding but no policy write; invalid key cannot advance; cancel clears key",
@@ -12,8 +13,8 @@
     "ordinary Moss user has no external management section"
   ],
   "pageErrors": [],
-  "testAgentId": "8fa1c82e-d74f-485e-8f58-022511832215",
+  "testAgentId": "e764dba7-7a9c-4fcd-b486-48b14e9f73c2",
   "testAgentArchived": true,
-  "sessionUrl": "http://localhost:26808/#/conversation/external%3A4faf20f1-e312-4e15-95ce-c2a700a26916",
+  "sessionUrl": "http://localhost:26808/#/conversation/external%3A2a269248-9619-4ce7-8ec4-4c494f0411e4",
   "originalAgentPreserved": true
 }
