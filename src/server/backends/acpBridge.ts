@@ -1367,7 +1367,18 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     },
     async destroy(force = false) {
       try { await transport.close(force) }
-      finally { await transcriptWrites }
+      finally {
+        // Closing a live stream can precede its prompt response. Keep the text
+        // already shown to the user even when no stopReason arrives.
+        if (currentAssistantText && !currentTurnUsedSendUserMessage) {
+          persistThoughtText()
+          persistAssistantText(currentAssistantText, { partial: true })
+          currentAssistantText = ''
+          currentThoughtText = ''
+          currentTurnAssistantUuid = null
+        }
+        await transcriptWrites
+      }
 
       // Host mode session mode cleans configDir.
       if (runtime.type === 'host' && runtime.hostMode === 'session' && runtime.configDir) {
