@@ -6,7 +6,7 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.57.2 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.57.4 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
@@ -88,6 +88,11 @@ explicit recovery instead of replaying the request.
 the managed-browser CI image verifies CDP and signed extension mode, including
 headless-to-headful restart, persistent login, stale requests, human stop and
 return without relaunching Chrome.
+
+Concurrent Stop and status polling retain the human lease. During lifecycle
+transitions the public worker reports `pausing` and disables page/window
+capabilities instead of querying a retiring driver. The consumer journey
+checks concurrent HTTP status reads during actual Chrome shutdown.
 
 Workers run as UID 10001 with a 1.5 GiB memory limit, 1.5 CPUs, a PID limit,
 dropped capabilities and no new privileges. Limit enabled accounts during
