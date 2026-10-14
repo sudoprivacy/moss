@@ -7,6 +7,7 @@ import type {
 import { sessionAgentName } from '../agentIdentity.js'
 import { buildAvailableSkillSnapshot, buildSessionEnv, getAssistantRuntimeConfig } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
+import { acpMcpServers } from './acpMcpServers.js'
 import { NexusAcpTransport } from './nexusAcpTransport.js'
 import { resolveCohostConnection } from '../nexus/cohostConnection.js'
 import { isUnknownManagedSession, ManagedAgentClient } from '../nexus/managedAgentClient.js'
@@ -27,6 +28,7 @@ import { startCohostExecution } from './cohostRecovery.js'
 export class CohostBackend implements SessionBackend {
   async spawn(options: BackendSpawnOptions): Promise<BackendHandle> {
     options.signal?.throwIfAborted()
+    const mcpServers = acpMcpServers(options.mcpSettings)
     const assistantConfig = await getAssistantRuntimeConfig(options.assistantName)
     const enabledSkills = options.assistantName
       ? [...new Set([...assistantConfig.enabledSkills, ...(options.enabledSkillNames ?? [])])]
@@ -99,6 +101,7 @@ export class CohostBackend implements SessionBackend {
     const transport = new NexusAcpTransport(agent, session)
     const handle = createAcpBridgeHandle({
       transport,
+      mcpServers,
       sessionId: options.sessionId,
       cwd: options.cwd,
       ...(repositoryPath && session.workspacePath ? {

@@ -37,6 +37,9 @@ import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from './runtimeService.js'
 import { HttpError, writeError, writeJson } from './httpRespond.js'
+import { invokeSessionBrowser } from './browser/browserGateway.js'
+import { BrowserWorkerRegistry, managedBrowserConfigured } from './browser/browserWorkerRegistry.js'
+import { notifyBrowserReturn } from './browser/browserHandoff.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, SystemSettingsScopeError, updateSystemSettings } from './systemSettings.js'
@@ -2015,6 +2018,7 @@ export function startServer(
   /** Live connection count (idle keepalive conns included) — drain bookkeeping. */
   getConnections: () => Promise<number>
 } {
+  const browserWorkers = new BrowserWorkerRegistry(id => runtime.getSession(id))
   const adminDistDir = resolveAdminDistDir()
   const agentManager = new AgentManager({
     visibleOwners: auth => authService.listAgentOwners(auth),
@@ -2480,6 +2484,22 @@ export function startServer(
       const pathname = canonicalAgentTemplatePath(url.pathname)
       if (pathname.startsWith('/api/v1/auth/') || pathname === '/api/v1/client/local-runtime') res.setHeader('Cache-Control', 'no-store')
       const isHead = req.method === 'HEAD'
+
+      const browserAgentMatch = pathname.match(/^\/api\/v1\/agent\/browser\/([^/]+)\/mcp$/)
+      if (req.method === 'POST' && browserAgentMatch) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (!managedBrowserConfigured()) throw new HttpError(503, 'Managed browser is not configured')
+        const binding = await runtime.browserCapabilities.authorize(browserAgentMatch[1]!, getBearerToken(req), {
+          getSession: id => runtime.getSession(id),
+          // Browser access fails closed and re-reads the current account, rather
+          // than using the general login status cache's availability fallback.
+          isUserActive: async principal => (await authService.getUserOrNull(principal.userId, principal.orgId))?.status === 'active',
+        })
+        const result = await browserWorkers.mcp(binding, await readJsonBody(req))
+        if (result === null) { res.writeHead(202); res.end() }
+        else writeJson(res, 200, result)
+        return
+      }
 
       // Sticky-routing cookie (no-op unless MOSS_INSTANCE_ID is configured).
       // Injected before CORS so every response — including preflights, static
@@ -10408,6 +10428,29 @@ export function startServer(
           users: await Promise.all(stats.users.map(async u => ({ ...u, userName: await resolveName(u.userId) }))),
         }
         writeJson(res, 200, statsWithNames)
+        return
+      }
+
+      const sessionBrowserMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/browser$/)
+      if (req.method === 'POST' && sessionBrowserMatch) {
+        if (!managedBrowserConfigured()) throw new HttpError(503, 'Managed browser is not configured')
+        const action = await readJsonBody(req)
+        const result = await invokeSessionBrowser({
+          getSession: id => runtime.getSession(id),
+          isUserActive: async principal => (await authService.getUserOrNull(principal.userId, principal.orgId))?.status === 'active',
+          worker: browserWorkers,
+        }, auth, sessionBrowserMatch[1]!, action)
+        if (action.kind === 'return') {
+          const current = await runtime.getSession(sessionBrowserMatch[1]!)
+          if (current?.desiredState === 'active' && current.currentAttemptId) {
+            try {
+              await notifyBrowserReturn({ authService, store: runtime.store, config }, current.sessionId, action.note)
+            } catch {
+              throw new HttpError(503, 'browser_return_notification_failed')
+            }
+          }
+        }
+        writeJson(res, 200, result)
         return
       }
 

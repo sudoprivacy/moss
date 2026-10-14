@@ -101,12 +101,14 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export async function openInternalSessionChannel(
   deps: ChannelDeps,
   sessionId: string,
+  options: { maxAttempts?: number; handshakeTimeoutMs?: number } = {},
 ): Promise<InternalSessionChannel> {
   const session = await deps.store.getSession(sessionId)
   if (!session) throw new Error(`Session not found: ${sessionId}`)
 
   let lastError: unknown = null
-  for (let attempt = 1; attempt <= CONNECT_MAX_ATTEMPTS; attempt += 1) {
+  const maxAttempts = options.maxAttempts ?? CONNECT_MAX_ATTEMPTS
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (attempt > 1) await sleep(retryDelayMs(attempt - 1))
 
     // Resolve owner/route freshly each attempt: after a failover the owner
@@ -127,7 +129,7 @@ export async function openInternalSessionChannel(
     if (!token) throw new Error(`Cannot mint internal token for session ${sessionId}`)
 
     try {
-      return await connectOnce(url, token)
+      return await connectOnce(url, token, options.handshakeTimeoutMs)
     } catch (error) {
       lastError = error
       // Permanent handshake failures only: 401/403 (auth) and 404
@@ -201,13 +203,13 @@ export async function revokeInternalSessionToken(
   }
 }
 
-function connectOnce(url: string, token: string): Promise<InternalSessionChannel> {
+function connectOnce(url: string, token: string, handshakeTimeoutMs?: number): Promise<InternalSessionChannel> {
   return new Promise((resolve, reject) => {
     const emitter = new EventEmitter() as InternalSessionChannel & { destroyed: boolean }
     let settled = false
     let ws: WebSocket
     try {
-      ws = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } })
+      ws = new WebSocket(url, { headers: { authorization: `Bearer ${token}` }, handshakeTimeout: handshakeTimeoutMs })
     } catch (error) {
       reject(error)
       return

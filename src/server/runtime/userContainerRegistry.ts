@@ -20,7 +20,7 @@
  */
 
 import { createHash } from 'crypto'
-import { spawn } from 'child_process'
+import { runDocker } from './dockerCommand.js'
 import { readdirSync } from 'fs'
 import { join } from 'path'
 import { MOSS_HOME } from '../../utils/skills/localSkillDirectories.js'
@@ -53,11 +53,7 @@ export type EnsureContext = {
   image: string | undefined
 }
 
-export type DockerExecResult = {
-  code: number
-  stdout: string
-  stderr: string
-}
+export type { DockerExecResult } from './dockerCommand.js'
 
 // Module-level singleton so the registry is shared across imports in the
 // main process. The dynamic import from runtimeService picks this up.
@@ -133,22 +129,6 @@ function isDesiredContainer(rec: UserContainerRecord, desired: {
   configHash: string
 }): boolean {
   return rec.imageDigest === desired.image && rec.configHash === desired.configHash
-}
-
-function runDocker(args: string[]): Promise<DockerExecResult> {
-  return new Promise(resolve => {
-    const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let stdout = ''
-    let stderr = ''
-    child.stdout?.on('data', d => { stdout += d.toString('utf8') })
-    child.stderr?.on('data', d => { stderr += d.toString('utf8') })
-    child.on('error', err => {
-      resolve({ code: -1, stdout, stderr: stderr || String(err) })
-    })
-    child.on('close', code => {
-      resolve({ code: code ?? -1, stdout, stderr })
-    })
-  })
 }
 
 async function dockerInspectAlive(name: string): Promise<boolean> {
