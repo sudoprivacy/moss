@@ -142,3 +142,62 @@ void test('corrupted persisted ResourceRefs and resolution correlations fail clo
   await f.driver.run('UPDATE product_task_records SET document = ? WHERE task_id = ?', [JSON.stringify(record), task.id])
   await assert.rejects(f.store.taskRecord(f.actor, task.id), { code: 'TASK_RECORD_MISMATCH' })
 })
+
+void test('legacy HTTP submissions cannot bypass classification or create any task state', async () => {
+  const f = await setup(), url = new URL('http://test/api/v1/tasks')
+  const legacy = { agent_id: f.agent.id, query: 'synthetic fixture', idempotency_key: randomUUID() }
+  for (const body of [legacy, { ...legacy, data_classification: 'confidential' }, { ...legacy, required_capabilities: ['verified_source_identity'] }]) {
+    const response = await dispatchExternalProvider(f.service, f.actor, 'POST', url, body, () => {})
+    assert.equal(response.status, 409)
+    assert.match(JSON.stringify(response.body), /TASK_CLIENT_UPGRADE_REQUIRED/)
+  }
+  for (const table of ['product_task_records', 'external_pilot_tasks', 'external_pilot_sessions', 'external_pilot_attempts', 'external_pilot_events']) {
+    assert.equal((await f.driver.get(`SELECT COUNT(*) AS count FROM ${table}`))?.count, 0)
+  }
+  assert.equal(f.calls.length, 0)
+  const task = await f.run({ ...f.input(), constraints: { idempotency_key: legacy.idempotency_key } })
+  assert.equal(task.status, 'succeeded', 'A rejected legacy request never reserves the upgraded request key')
+})
+
+void test('source identity remains explicitly unverified and strong-audit tasks reject before provider I/O', async () => {
+  const f = await setup()
+  let preflights = 0
+  f.control.beforeManifest = async () => { preflights++ }
+  assert.equal(f.agent.source_identity_evidence, 'unverified')
+  assert.equal((await f.service.list(f.actor))[0].source_identity_evidence, 'unverified')
+  const request = { ...f.input(), required_capabilities: ['verified_source_identity'] }
+  const rejected = await f.run(request)
+  assert.equal(rejected.status, 'rejected'); assert.equal(rejected.error_code, 'SOURCE_IDENTITY_UNVERIFIED')
+  assert.equal(rejected.attempt_id, null); assert.equal(preflights, 0); assert.equal(f.calls.length, 0)
+  assert.equal((await f.run(request)).id, rejected.id)
+  const task = await f.run(), record = await f.store.taskRecord(f.actor, task.id)
+  assert.equal(task.source_identity_evidence, 'unverified')
+  assert.equal((await f.store.runBinding(f.actor, task.id))?.source_identity_evidence, 'unverified')
+  if (record?.resolution.status !== 'accepted') assert.fail('expected accepted synthetic task')
+  assert.equal(record.resolution.agent.source_identity_evidence, 'unverified')
+  assert.equal(record.resolution.agent.claimed_app_id, f.manifest.external_agent_id)
+  assert.equal(record.resolution.agent.claimed_workspace_id, 'custom-http')
+  const snapshot = JSON.parse(String((await f.driver.get('SELECT policy_snapshot FROM product_task_records WHERE task_id = ?', [task.id]))?.policy_snapshot))
+  assert.equal(snapshot.source_identity_evidence, 'unverified')
+  assert.equal(snapshot.claimed_app_id, f.manifest.external_agent_id)
+})
+
+void test('history follows durable session creation order despite deadlines and clock changes', async () => {
+  const f = await setup(), first = await f.run()
+  const second = await f.run({ ...f.input(), session_id: first.session_id, constraints: { idempotency_key: randomUUID(), timeout_ms: 1000 } })
+  assert(second.deadline_at < first.deadline_at)
+  const third = await f.run({ ...f.input(), session_id: first.session_id })
+  // Simulate equal timestamps and a clock rollback without changing the durable ordinal.
+  for (const task of [second, third]) {
+    const row = await f.driver.get('SELECT document FROM external_pilot_tasks WHERE id = ?', [task.id])
+    const document = JSON.parse(String(row?.document))
+    document.created_at = task.id === second.id ? first.created_at : first.created_at - 60_000
+    await f.driver.run('UPDATE external_pilot_tasks SET document = ? WHERE id = ?', [JSON.stringify(document), task.id])
+  }
+  const { ExternalTaskStore } = await import('../externalProviders/store.js')
+  const reopened = new ExternalTaskStore(f.driver)
+  const history = await reopened.history(f.actor, first.session_id)
+  assert.deepEqual(history.map(task => task.id), [first.id, second.id, third.id])
+  assert.deepEqual(history.map(task => task.session_sequence), [1, 2, 3])
+  assert.equal(f.calls.length, 3)
+})

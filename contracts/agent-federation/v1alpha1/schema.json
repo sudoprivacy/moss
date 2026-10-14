@@ -245,6 +245,9 @@
           "minLength": 1,
           "maxLength": 200,
           "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "source_identity_evidence": {
+          "const": "unverified"
         }
       },
       "required": [

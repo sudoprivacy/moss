@@ -81,7 +81,7 @@ export class ExternalProviderAdministration {
     try {
       if (body.provider_kind === 'custom_http') {
         const source = providerDefinition(body.provider_kind, body.source_definition)
-        return await new CustomHttpAdapter({ manifest: source.sourceManifest!, digest: source.source_digest }, this.options.httpRequest).inspect(endpoint, key, AbortSignal.timeout(10000))
+        return { ...await new CustomHttpAdapter({ manifest: source.sourceManifest!, digest: source.source_digest }, this.options.httpRequest).inspect(endpoint, key, AbortSignal.timeout(10000)), source_identity_evidence: 'unverified' as const }
       }
       if (body.provider_kind !== undefined && body.provider_kind !== 'dify') return fail('PROVIDER_NOT_IMPLEMENTED')
       return await this.transport.inspect(endpoint, key, AbortSignal.timeout(10000))
@@ -192,6 +192,7 @@ export class ExternalProviderAdministration {
 
   async assertCredentialUsable(actor: ExternalActor, binding: Binding): Promise<void> {
     if (binding.archived) return fail('AGENT_ARCHIVED', 409)
+    if (binding.review_expires_at <= Date.now()) return fail('AGENT_REVIEW_EXPIRED', 409)
     if (binding.credentialUpdating) return fail('CREDENTIAL_UPDATE_IN_PROGRESS', 409)
     if (binding.credentialRecoveryRequired) return fail('CREDENTIAL_ROTATION_REQUIRED', 409)
     const connection = await this.options.identities.getIntegrationConnection(binding.connectionId)
@@ -228,7 +229,7 @@ export class ExternalProviderAdministration {
     await this.store.db.run('INSERT INTO external_pilot_admin_audit(id, org_id, user_id, action, resource_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), actor.orgId, actor.userId, action, id, Date.now()])
   }
   describe(binding: Binding): ExternalAgentAdmin {
-    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: { streaming: binding.provider_kind === 'custom_http' ? 'unsupported' : 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' }, endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, allowed_user_ids: binding.allowed_user_ids, review_note: binding.review_note, revision: binding.revision ?? 1, archived: binding.archived ?? false, credential_configured: Boolean(binding.credential_ref), credential_state: binding.credentialUpdating ? 'updating' : binding.credentialRecoveryRequired ? 'rotation_required' : 'ready', registration_mode: binding.registrationMode ?? 'reference_compat', definition_evidence: binding.definitionProfileVersion === DEFINITION_PROFILE_VERSION ? binding.provider_kind === 'custom_http' ? 'validated_manifest' : 'validated_dsl' : 'digest_only' }
+    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_identity_evidence: 'unverified', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: { streaming: binding.provider_kind === 'custom_http' ? 'unsupported' : 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' }, endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, allowed_user_ids: binding.allowed_user_ids, review_note: binding.review_note, revision: binding.revision ?? 1, archived: binding.archived ?? false, credential_configured: Boolean(binding.credential_ref), credential_state: binding.credentialUpdating ? 'updating' : binding.credentialRecoveryRequired ? 'rotation_required' : 'ready', registration_mode: binding.registrationMode ?? 'reference_compat', definition_evidence: binding.definitionProfileVersion === DEFINITION_PROFILE_VERSION ? binding.provider_kind === 'custom_http' ? 'validated_manifest' : 'validated_dsl' : 'digest_only' }
   }
   private async definition(actor: ExternalActor, body: Record<string, unknown>) {
     if (![1, 3, 7].includes(Number(body.review_days))) return fail('INVALID_REVIEW_DAYS')

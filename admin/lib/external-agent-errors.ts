@@ -24,6 +24,7 @@ const messages: Record<string, string> = {
   UNSUPPORTED_DIFY_DEFINITION: '请上传包含 workflow.features 的完整定义，仅支持 Start → LLM → Answer；附件、工具、知识库或未支持配置不可发布。',
   DEFINITION_REVIEW_REQUIRED: '请编辑并重新上传完整应用定义，再审核发布。',
   DEFINITION_DIGEST_MISMATCH: '应用定义与提供的摘要不一致。',
+  AGENT_REVIEW_EXPIRED: '接入审核已过期，请更新配置并重新审核。',
   AGENT_ARCHIVED: '智能体已归档，不能再测试或使用凭据。',
   CONNECTION_DISABLED_OR_CHANGED: '连接已停用或配置已变更，请刷新后核对。',
   DEFINITION_TOO_LARGE: '定义文件超过 256 KB。',

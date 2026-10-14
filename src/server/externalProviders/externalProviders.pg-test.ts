@@ -1,3 +1,4 @@
+import { syntheticTaskSubmission } from '../testing/externalProviderDefinitionFixture.js'
 import { TASK_API } from '../../../contracts/task/v1alpha1/contract.js'
 import { AGENT_FEDERATION_API, AGENT_HTTP_API } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { HTTP_CAPABILITIES } from '../agentFederation/manifest.js'
@@ -66,7 +67,7 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     assert((await second.register(actor, retry)).id, 'Same request can succeed after rollback')
     await first.review(actor, agent.id, true, 1)
     const request = { agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() }
-    const accepted = await Promise.all(Array.from({ length: 12 }, (_, i) => services[i % 2].create(actor, request)))
+    const accepted = await Promise.all(Array.from({ length: 12 }, (_, i) => services[i % 2].create(actor, syntheticTaskSubmission(request))))
     assert.equal(new Set(accepted.map(task => task.id)).size, 1)
     await Promise.all(services.map(service => service.waitForTask(accepted[0].id)))
     assert.equal(calls.length, 1)
@@ -87,7 +88,7 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
 
     entered = new Promise<void>(resolve => { enter = resolve }); barrier = new Promise<void>(resolve => { release = resolve })
     control.preflight = async () => { control.preflight = async () => {}; enter(); await barrier }
-    const stale = await first.create(actor, { ...request, idempotency_key: randomUUID() })
+    const stale = await first.create(actor, syntheticTaskSubmission({ ...request, idempotency_key: randomUUID() }))
     await entered
     try {
       const rotated = await second.administration.rotate(actor, agent.id, { revision: 2, api_key: 'synthetic-replacement' })
@@ -111,7 +112,7 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     assert.equal(calls.length, 1)
     const saveRun = first.store.saveRunBinding.bind(first.store)
     first.store.saveRunBinding = async (currentActor, run) => { await saveRun(currentActor, run); throw new Error('Synthetic failure after run binding write') }
-    const incomplete = await first.create(actor, { ...request, idempotency_key: randomUUID() })
+    const incomplete = await first.create(actor, syntheticTaskSubmission({ ...request, idempotency_key: randomUUID() }))
     await first.waitForTask(incomplete.id)
     first.store.saveRunBinding = saveRun
     assert.equal((await second.store.task(actor, incomplete.id)).status, 'unknown')

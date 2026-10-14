@@ -27,7 +27,8 @@ export function parseTaskRecord(value: unknown): TaskRecord {
     }
   } catch { throw new ExternalProviderError(500, 'INVALID_TASK_RECORD') }
   if (spec.task_id !== resolution.task_id || (resolution.status === 'accepted' && (
-    spec.agent.principal.trust_domain !== resolution.agent.principal.trust_domain
+    spec.required_capabilities.includes('verified_source_identity')
+    || spec.agent.principal.trust_domain !== resolution.agent.principal.trust_domain
     || spec.agent.principal.agent_name !== resolution.agent.principal.agent_name
     || resolution.agent.version !== snapshotVersion(resolution.agent.source_digest)
     || (spec.agent.requested_version !== undefined && spec.agent.requested_version !== resolution.agent.version)

@@ -1,3 +1,6 @@
+import type { CreateExternalTask } from '../../../contracts/external-provider/v1/contract.js'
+import { TASK_API, type SubmitTask } from '../../../contracts/task/v1alpha1/contract.js'
+
 /** Synthetic Chatflow matching the supported Dify export shape; contains no provider secrets. */
 export function queryOnlyDefinition() {
   return {
@@ -15,4 +18,12 @@ export function queryOnlyDefinition() {
       },
     },
   }
+}
+
+/** Only test fixtures may assert that their predefined inputs are synthetic. */
+export function syntheticTaskSubmission(request: CreateExternalTask): SubmitTask {
+  return { api_version: TASK_API, kind: 'SubmitTask', agent: { catalog_id: request.agent_id },
+    ...(request.session_id ? { session_id: request.session_id } : {}), request_source: 'api',
+    input: { instruction: request.query, resource_refs: [] }, workspace_refs: [], requested_mode: 'auto',
+    data_classification: 'synthetic', required_capabilities: [], constraints: { idempotency_key: request.idempotency_key } }
 }

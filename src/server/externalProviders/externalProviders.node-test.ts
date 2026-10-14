@@ -1,3 +1,4 @@
+import { syntheticTaskSubmission } from '../testing/externalProviderDefinitionFixture.js'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 import { queryOnlyDefinition } from '../testing/externalProviderDefinitionFixture.js'
 import { execFileSync } from 'node:child_process'
@@ -38,7 +39,7 @@ void test('saved credential tests allow drafts but block revoked, updating, reco
   await f.admin.testSaved(actor, agent.id)
   assert.equal(requests, 1); assert.equal(reads, 1)
   reads = 0; requests = 0
-  for (const patch of [{ archived: true }, { credentialUpdating: true }, { credentialRecoveryRequired: true }]) {
+  for (const patch of [{ archived: true }, { credentialUpdating: true }, { credentialRecoveryRequired: true }, { review_expires_at: 1 }]) {
     await f.store.saveBinding({ ...original, ...patch })
     await assert.rejects(f.admin.testSaved(actor, agent.id), ExternalProviderError)
   }
@@ -163,7 +164,7 @@ async function setup(options: { events?: unknown[]; status?: number; parameters?
   const registered = await service.register(actor, { ...definition(), request_id: randomUUID(), source_definition: JSON.stringify(queryOnlyDefinition()), source_digest: definitionDigest(JSON.stringify(queryOnlyDefinition())) })
   if (!options.failBeforeSend) await service.review(actor, registered.id, true, 1)
   const request = (session_id?: string, query = '6 * 7') => ({ agent_id: registered.id, session_id, query, idempotency_key: randomUUID() })
-  const run = async (input = request()) => { const task = await service.create(actor, input); await service.waitForTask(task.id); return store.task(actor, task.id) }
+  const run = async (input = request()) => { const task = await service.create(actor, syntheticTaskSubmission(input)); await service.waitForTask(task.id); return store.task(actor, task.id) }
   return { db, driver, catalog, identities, store, service, calls, registered, request, run }
 }
 
@@ -189,10 +190,10 @@ void test('success persists answer, attempt, ordered events and a provider conve
 
 void test('concurrent idempotent retries dispatch once and mismatching body conflicts', async () => {
   const f = await setup(), request = f.request()
-  const tasks = await Promise.all(Array.from({ length: 6 }, () => f.service.create(actor, request)))
+  const tasks = await Promise.all(Array.from({ length: 6 }, () => f.service.create(actor, syntheticTaskSubmission(request))))
   assert.equal(new Set(tasks.map(t => t.id)).size, 1)
   await f.service.waitForTask(tasks[0].id); assert.equal(f.calls.length, 1)
-  await assert.rejects(f.service.create(actor, { ...request, query: 'different' }), { code: 'IDEMPOTENCY_CONFLICT' })
+  await assert.rejects(f.service.create(actor, syntheticTaskSubmission({ ...request, query: 'different' })), { code: 'IDEMPOTENCY_CONFLICT' })
 })
 
 void test('session CAS serializes different prompts; wrong owner and wrong organization are hidden', async () => {
@@ -205,7 +206,7 @@ void test('session CAS serializes different prompts; wrong owner and wrong organ
     await assert.rejects(f.store.events(other, task.id, 0), { code: 'TASK_NOT_FOUND' })
     await assert.rejects(f.store.history(other, task.session_id), { code: 'SESSION_NOT_FOUND' })
     assert.deepEqual(await f.store.sessions(other), [])
-    await assert.rejects(f.service.create(other, f.request(task.session_id)), ExternalProviderError)
+    await assert.rejects(f.service.create(other, syntheticTaskSubmission(f.request(task.session_id))), ExternalProviderError)
   }
 })
 
@@ -213,7 +214,7 @@ void test('stream EOF without confirmed terminals is unknown and retains session
   const f = await setup({ events: successful().slice(0, 2) }), request = f.request(), task = await f.run(request)
   assert.equal(task.status, 'unknown'); assert.equal((await f.store.session(actor, task.session_id)).active_task_id, task.id)
   await f.run(request); assert.equal(f.calls.length, 1)
-  await assert.rejects(f.service.create(actor, f.request(task.session_id)), { code: 'SESSION_BUSY_OR_AGENT_MISMATCH' })
+  await assert.rejects(f.service.create(actor, syntheticTaskSubmission(f.request(task.session_id))), { code: 'SESSION_BUSY_OR_AGENT_MISMATCH' })
 })
 
 void test('workflow success alone or message_end alone cannot prove Chatflow answer completed', async () => {
@@ -222,8 +223,8 @@ void test('workflow success alone or message_end alone cannot prove Chatflow ans
   }
 })
 
-void test('provider 4xx is rejected; 5xx acceptance stays unknown', async () => {
-  const denied = await setup({ status: 401 }); assert.equal((await denied.run()).status, 'rejected')
+void test('provider 4xx fails the admitted Attempt; 5xx acceptance stays unknown', async () => {
+  const denied = await setup({ status: 401 }); assert.equal((await denied.run()).status, 'failed')
   const uncertain = await setup({ status: 503 }); assert.equal((await uncertain.run()).status, 'unknown')
 })
 
@@ -245,31 +246,31 @@ void test('restart expires claimed work to unknown, never reassigns it, and expi
   assert.equal((await restarted.task(actor, unsent.id)).status, 'rejected'); assert.equal(f.calls.length, 0)
 })
 
-void test('parameters drift rejects before provider POST', async () => {
+void test('parameters drift fails the admitted Attempt before provider POST', async () => {
   let changed = false
   const f = await setup({ parameters: () => ({ user_input_form: [], marker: changed }) })
   changed = true
-  const task = await f.run(); assert.equal(task.status, 'rejected'); assert.equal(task.error_code, 'PROVIDER_PARAMETERS_CHANGED'); assert.equal(f.calls.length, 0)
+  const task = await f.run(); assert.equal(task.status, 'failed'); assert.equal(task.policy_decision?.status, 'accepted'); assert.equal(task.error_code, 'PROVIDER_PARAMETERS_CHANGED'); assert.equal(f.calls.length, 0)
 })
 
 void test('approval, user allowlist, review expiry, catalog revoke and connection revoke gate dispatch', async () => {
   const f = await setup(), binding = await f.store.binding(actor, f.registered.id)
   for (const patch of [{ approved: false }, { allowed_user_ids: ['v'] }, { review_expires_at: 1 }]) {
     await f.store.saveBinding({ ...binding, ...patch })
-    await assert.rejects(f.service.create(actor, f.request()), ExternalProviderError)
+    await assertAdmissionRejected(f.service.create(actor, syntheticTaskSubmission(f.request())), { code: 'AGENT_NOT_APPROVED_FOR_USER' })
   }
   await f.store.saveBinding(binding)
   const original = (await f.catalog.getAgent(binding.id, actor.orgId))!
   await f.catalog.updateAgentConfiguration(binding.id, actor.orgId, { providerBinding: { ...original.providerBinding, appId: 'changed-app' } })
-  await assert.rejects(f.service.create(actor, f.request()), { code: 'AGENT_DISABLED_OR_CHANGED' })
+  await assertAdmissionRejected(f.service.create(actor, syntheticTaskSubmission(f.request())), { code: 'AGENT_DISABLED_OR_CHANGED' })
   await f.catalog.updateAgentConfiguration(binding.id, actor.orgId, { providerBinding: original.providerBinding, visibleTo: { user_ids: ['v'] } })
-  await assert.rejects(f.service.create(actor, f.request()), { code: 'AGENT_DISABLED_OR_CHANGED' })
+  await assertAdmissionRejected(f.service.create(actor, syntheticTaskSubmission(f.request())), { code: 'AGENT_DISABLED_OR_CHANGED' })
   await f.catalog.updateAgentConfiguration(binding.id, actor.orgId, { visibleTo: original.visibleTo, enabled: false })
-  await assert.rejects(f.service.create(actor, f.request()), { code: 'AGENT_DISABLED_OR_CHANGED' })
+  await assertAdmissionRejected(f.service.create(actor, syntheticTaskSubmission(f.request())), { code: 'AGENT_DISABLED_OR_CHANGED' })
   await f.catalog.updateAgentConfiguration(binding.id, actor.orgId, { enabled: true })
   const connection = (await f.identities.getIntegrationConnection(binding.connectionId))!
   await f.identities.putIntegrationConnection({ ...connection, enabled: false })
-  await assert.rejects(f.service.create(actor, f.request()), { code: 'CONNECTION_DISABLED_OR_CHANGED' })
+  await assertAdmissionRejected(f.service.create(actor, syntheticTaskSubmission(f.request())), { code: 'CONNECTION_DISABLED_OR_CHANGED' })
   assert.equal(f.calls.length, 0)
 })
 
@@ -312,7 +313,7 @@ void test('transport abort deadline marks unknown without pretending remote canc
   }) as typeof fetch)
   const service = new ExternalProviderService(f.store, { catalog: f.catalog, identities: f.identities, policy: { ...policy, timeoutMs: 30 }, transport, isActive: async () => true, secrets: { getSecret: async () => ({ value: 'private-app-key', status: 'enabled', version: 1 }) } })
   cleanups.unshift(async () => service.close())
-  const task = await service.create(actor, { ...f.request(), agent_id: binding.id }); await service.waitForTask(task.id)
+  const task = await service.create(actor, syntheticTaskSubmission({ ...f.request(), agent_id: binding.id })); await service.waitForTask(task.id)
   const final = await f.store.task(actor, task.id)
   assert.equal(final.status, 'unknown'); assert.equal(final.cancellation.status, 'unsupported')
 })
@@ -421,13 +422,13 @@ void test('editing revokes approval; stale reviews conflict; archive preserves h
   const f = await administrationSetup(); await f.enable()
   let agent = await f.admin.onboard(actor, f.body())
   await f.service.review(actor, agent.id, true, agent.revision, 7)
-  const task = await f.service.create(actor, { agent_id: agent.id, query: '6 * 7', idempotency_key: randomUUID() }); await f.service.waitForTask(task.id)
+  const task = await f.service.create(actor, syntheticTaskSubmission({ agent_id: agent.id, query: '6 * 7', idempotency_key: randomUUID() })); await f.service.waitForTask(task.id)
   agent = await f.admin.update(actor, agent.id, { name: 'Renamed', revision: 2, allowed_user_ids: ['u', 'v'], review_note: 'Reviewed changed membership', decoder: 'text', review_days: 7 })
   assert.equal(agent.approved, false); assert.deepEqual(await f.service.list(actor), [])
   await assert.rejects(f.service.review(actor, agent.id, true, 2, 7), { code: 'CONFIGURATION_CHANGED' })
   await f.admin.archive(actor, agent.id, { revision: agent.revision })
   assert.deepEqual(await f.admin.list(actor), []); assert.equal((await f.store.history(actor, task.session_id))[0].answer, '42')
-  await assert.rejects(f.service.create(actor, { agent_id: agent.id, query: 'again', idempotency_key: randomUUID() }), ExternalProviderError)
+  await assertAdmissionRejected(f.service.create(actor, syntheticTaskSubmission({ agent_id: agent.id, query: 'again', idempotency_key: randomUUID() })), { code: 'AGENT_NOT_APPROVED_FOR_USER' })
 })
 
 void test('credential rotation revokes before write and prevents concurrent edit, archive and publication', async () => {
@@ -488,7 +489,7 @@ void test('rotation and reapproval during preflight reject the old execution sna
   let enter!: () => void, release!: () => void
   const entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { release = resolve })
   f.control.beforeParameters = async () => { f.control.beforeParameters = async () => {}; enter(); await barrier }
-  const task = await f.service.create(actor, { agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() })
+  const task = await f.service.create(actor, syntheticTaskSubmission({ agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() }))
   await entered
   try {
     const rotated = await f.admin.rotate(actor, agent.id, { revision: 2, api_key: 'replacement-key' })
@@ -497,7 +498,7 @@ void test('rotation and reapproval during preflight reject the old execution sna
   await f.service.waitForTask(task.id)
   assert.equal((await f.store.task(actor, task.id)).error_code, 'CONFIGURATION_CHANGED')
   assert.deepEqual(f.requestKeys, [])
-  const next = await f.service.create(actor, { agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() })
+  const next = await f.service.create(actor, syntheticTaskSubmission({ agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() }))
   await f.service.waitForTask(next.id)
   assert.deepEqual(f.requestKeys, ['Bearer replacement-key'])
 })
@@ -630,7 +631,7 @@ void test('administrator reconciliation preserves unknown status, audit and the 
   assert.equal(result.status, 'unknown'); assert.equal(result.reconciliation?.note, note)
   assert.equal((await f.store.unresolved(actor.orgId)).length, 0)
   await assert.rejects(f.store.reconcileUnknown({ ...actor, orgId: 'other' }, task.id, note), { code: 'TASK_NOT_FOUND' })
-  await assert.rejects(f.service.create(actor, f.request(task.session_id)), { code: 'SESSION_BUSY_OR_AGENT_MISMATCH' })
+  await assert.rejects(f.service.create(actor, syntheticTaskSubmission(f.request(task.session_id))), { code: 'SESSION_BUSY_OR_AGENT_MISMATCH' })
   assert.equal(f.calls.length, 1)
   const audit = await f.driver.all("SELECT * FROM external_pilot_admin_audit WHERE action = 'task.unknown_closed'")
   assert.equal(audit.length, 1)
@@ -663,7 +664,7 @@ void test('configuration and policy mutations during preflight invalidate pendin
     let enter!: () => void, release!: () => void
     const entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { release = resolve })
     f.control.beforeParameters = async () => { f.control.beforeParameters = async () => {}; enter(); await barrier }
-    const task = await f.service.create(actor, { agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() })
+    const task = await f.service.create(actor, syntheticTaskSubmission({ agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() }))
     await entered
     try {
       if (field === 'policy') {
@@ -679,7 +680,8 @@ void test('configuration and policy mutations during preflight invalidate pendin
       }
     } finally { release() }
     await f.service.waitForTask(task.id)
-    assert.equal((await f.store.task(actor, task.id)).status, 'rejected', field)
+    assert.equal((await f.store.task(actor, task.id)).status, 'failed', field)
+    assert.equal((await f.store.taskRecord(actor, task.id))?.resolution.status, 'accepted')
     assert.deepEqual(f.requestKeys, [], field)
   }
 })
@@ -706,19 +708,19 @@ void test('raw deltas survive checkpoint gaps, restart, replacement and unknown 
   }
   await f.store.mutate(task.id, current => { current.status = 'unknown'; return 'status' })
   assert.equal((await f.store.task(actor, task.id)).raw_answer, '{"reply":"replacement')
-  assert.equal((await f.store.events(actor, task.id, 0)).api_version, 'external-provider.sudo.dev/v1alpha4')
+  assert.equal((await f.store.events(actor, task.id, 0)).api_version, 'external-provider.sudo.dev/v1alpha5')
 })
 
-void test('alpha3 checkpoints retain complete raw answers when resynced to alpha4', async () => {
+for (const oldApi of ['external-provider.sudo.dev/v1alpha3', 'external-provider.sudo.dev/v1alpha4']) void test(`${oldApi} checkpoints retain complete raw answers when resynced to alpha5`, async () => {
   const f = await setup(), task = await f.run()
   const row = await f.driver.get('SELECT document FROM external_pilot_tasks WHERE id = ?', [task.id])
-  const legacy = JSON.parse(String(row!.document)); legacy.api_version = 'external-provider.sudo.dev/v1alpha3'
+  const legacy = JSON.parse(String(row!.document)); legacy.api_version = oldApi
   await f.driver.run('UPDATE external_pilot_tasks SET document = ? WHERE id = ?', [JSON.stringify(legacy), task.id])
   const eventRow = await f.driver.get('SELECT document FROM external_pilot_events WHERE task_id = ? AND sequence = 2', [task.id])
-  const event = JSON.parse(String(eventRow!.document)); event.api_version = 'external-provider.sudo.dev/v1alpha3'
+  const event = JSON.parse(String(eventRow!.document)); event.api_version = oldApi
   await f.driver.run('UPDATE external_pilot_events SET document = ? WHERE task_id = ? AND sequence = 2', [JSON.stringify(event), task.id])
   const page = await f.store.events(actor, task.id, 1)
-  assert.equal(page.api_version, 'external-provider.sudo.dev/v1alpha4')
+  assert.equal(page.api_version, 'external-provider.sudo.dev/v1alpha5')
   assert.equal(page.task?.raw_answer, task.raw_answer)
   assert.equal(page.task?.raw_answer_freshness, 'current')
 })
@@ -831,4 +833,44 @@ void test('a write acknowledged during an absence check is cleaned again before 
   await f.admin.operations.reconcile()
   assert.equal(f.values.size, 0)
   assert.equal((await f.driver.get('SELECT status FROM external_pilot_operations WHERE id = ?', [String(row!.id)]))?.status, 'cleanup_complete')
+})
+
+async function assertAdmissionRejected(taskPromise: Promise<import('../../../contracts/external-provider/v1/contract.js').ExternalTask>, expected: { code: string }) {
+  const task = await taskPromise
+  assert.equal(task.status, 'rejected'); assert.equal(task.attempt_id, null)
+  assert.equal(task.policy_decision?.reason_code, expected.code)
+}
+
+void test('Dify preflight never treats supplied or returned app metadata as verified key identity', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const inspect = await new DifyPilotTransport((async url => Response.json(String(url).endsWith('/info')
+    ? { name: 'App B', app_id: 'app-b', workspace_id: 'workspace-b', source_identity_evidence: 'verified' }
+    : { user_input_form: [], file_upload: { enabled: false } })) as typeof fetch).inspect(policy.endpoints[0], 'synthetic-key-b', AbortSignal.timeout(1000))
+  assert.equal(inspect.source_identity_evidence, 'unverified')
+  const agent = await f.admin.onboard(actor, { ...f.body(), app_id: 'claimed-app-a', workspace_id: 'claimed-workspace-a' })
+  assert.equal(agent.app_id, 'claimed-app-a'); assert.equal(agent.source_identity_evidence, 'unverified')
+  await f.service.review(actor, agent.id, true, agent.revision)
+  const request = syntheticTaskSubmission({ agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() })
+  let reads = 0
+  f.control.beforeRead = async () => { reads++ }
+  const task = await f.service.create(actor, { ...request, required_capabilities: ['verified_source_identity'] })
+  assert.equal(task.status, 'rejected'); assert.equal(task.error_code, 'SOURCE_IDENTITY_UNVERIFIED')
+  assert.equal(task.attempt_id, null); assert.equal(reads, 0)
+})
+
+void test('archive removes owned credentials, retains history and never deletes referenced credentials', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const owned = await f.admin.onboard(actor, f.body())
+  await f.service.review(actor, owned.id, true, owned.revision)
+  const task = await f.service.create(actor, syntheticTaskSubmission({ agent_id: owned.id, query: 'synthetic', idempotency_key: randomUUID() }))
+  await f.service.waitForTask(task.id)
+  await f.admin.archive(actor, owned.id, { revision: 2 })
+  await f.admin.operations.reconcile()
+  assert.equal(f.values.size, 0)
+  assert.equal((await f.store.history(actor, task.session_id))[0].id, task.id)
+  await assert.rejects(f.admin.testSaved(actor, owned.id), { code: 'AGENT_ARCHIVED' })
+  await assert.rejects(f.service.review(actor, owned.id, true, 3), { code: 'AGENT_ARCHIVED' })
+  const other = await setup(), binding = await other.store.binding(actor, other.registered.id)
+  await other.service.administration.archive(actor, binding.id, { revision: 2 })
+  assert.equal((await other.driver.get("SELECT COUNT(*) AS count FROM external_pilot_operations WHERE kind = 'cleanup'"))?.count, 0)
 })

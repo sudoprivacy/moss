@@ -33,6 +33,7 @@ export async function admitExternalTask(store: ExternalTaskStore, actor: Externa
     for (const related of [input.parent_task_id, input.supersedes_task_id]) {
       if (related) await store.task(actor, related)
     }
+    if (input.required_capabilities.includes('verified_source_identity')) deny('SOURCE_IDENTITY_UNVERIFIED', '当前接入不能证明服务凭据与声明的应用、工作区及审核来源一致，无法满足强来源审计。')
     if (binding) {
       try { await hooks.executable(binding) }
       catch (error) {
@@ -52,7 +53,7 @@ export async function admitExternalTask(store: ExternalTaskStore, actor: Externa
     if (input.constraints.max_attempts !== undefined && input.constraints.max_attempts !== 1) deny('RETRY_UNSUPPORTED', '此接入只允许一次执行，不会自动重试外部任务。')
     if (input.output_contract && Object.keys(input.output_contract).length) deny('OUTPUT_VERIFICATION_UNAVAILABLE', '此接入尚未实现输出契约验证。')
     const principal = catalogPrincipal(input.agent.catalog_id)
-    const snapshot = { profile: 'external-query-only/v1', organization: actor.orgId, policy, binding_revision: binding?.revision ?? null, source_digest: binding?.source_digest ?? null }
+    const snapshot = { profile: 'external-query-only/v1', organization: actor.orgId, policy, binding_revision: binding?.revision ?? null, source_digest: binding?.source_digest ?? null, source_identity_evidence: 'unverified', claimed_app_id: binding?.app_id ?? null, claimed_workspace_id: binding?.workspace_id ?? null }
     const policyVersion = `${snapshot.profile}:revision-${policy.revision}`
     // An unresolved selector is preserved as a rejected task without inventing source or provider facts.
     const selected: Binding = binding ?? { id: input.agent.catalog_id, orgId: actor.orgId, name: input.agent.catalog_id, source_digest: 'unresolved', revision: 1 } as Binding
@@ -66,7 +67,7 @@ export async function admitExternalTask(store: ExternalTaskStore, actor: Externa
         const record: TaskRecord = {
           api_version: TASK_API, kind: 'TaskRecord',
           spec: { ...rest, kind: 'TaskSpec', task_id: task.id, session_id: task.session_id, created_at: new Date(task.created_at).toISOString(), requested_by: { subject_type: 'user', subject_id: actor.userId }, agent: { principal, ...(agent.requested_version ? { requested_version: agent.requested_version } : {}), ...(agent.requested_channel ? { requested_channel: agent.requested_channel } : {}) } },
-          resolution: code !== 'ALLOWED' ? { ...base, status: 'rejected' } : { ...base, status: 'accepted', attempt_id: task.attempt_id!, execution_mode: 'external_hosted', resolved_runtime: 'external_provider', resolution_mode: 'default', governance_org_id: actor.orgId, agent: { principal, version: snapshotVersion(selected.source_digest), source_digest: selected.source_digest, version_evidence: 'source_snapshot_only' }, binding_id: selected.id, configuration_revision: selected.revision ?? 1, provider_kind: selected.provider_kind ?? 'dify' },
+          resolution: code !== 'ALLOWED' ? { ...base, status: 'rejected' } : { ...base, status: 'accepted', attempt_id: task.attempt_id!, execution_mode: 'external_hosted', resolved_runtime: 'external_provider', resolution_mode: 'default', governance_org_id: actor.orgId, agent: { principal, version: snapshotVersion(selected.source_digest), source_digest: selected.source_digest, version_evidence: 'source_snapshot_only', source_identity_evidence: 'unverified', claimed_app_id: selected.app_id, claimed_workspace_id: selected.workspace_id }, binding_id: selected.id, configuration_revision: selected.revision ?? 1, provider_kind: selected.provider_kind ?? 'dify' },
         }
         return record
       },

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { CatalogAgent } from '../catalog/catalogRepository.js'
 import type { IntegrationConnection } from '../identity/identityRepository.js'
 import { parseNexusSecretRef, type DifySecretPort } from '../dify/difyConnectionService.js'
-import type { CreateExternalTask, ExternalAgent } from '../../../contracts/external-provider/v1/contract.js'
+import type { ExternalAgent } from '../../../contracts/external-provider/v1/contract.js'
 import { ExternalTaskStore, digest, type Binding, type ExternalActor } from './store.js'
 import { ExternalProviderError, assertPilot, parseRegistration, type PilotPolicy } from './policy.js'
 import { DifyPilotTransport } from './difyTransport.js'
@@ -129,20 +129,13 @@ export class ExternalProviderService {
 
   async create(actor: ExternalActor, input: unknown) {
     await this.authorize(actor)
-    let task
-    if (input && typeof input === 'object' && 'api_version' in input) {
-      task = await admitExternalTask(this.store, actor, input, {
-        lockPolicy: () => this.administration.lockPolicy(actor),
-        policy: () => this.administration.policy(actor),
-        executable: binding => this.executable(actor, binding),
-        timeoutMs: this.options.policy.timeoutMs,
-      })
-    } else {
-      const request = this.parseTask(input)
-      const binding = await this.store.binding(actor, request.agent_id)
-      await this.executable(actor, binding)
-      task = await this.store.create(actor, request, binding, this.options.policy.timeoutMs)
-    }
+    if (!input || typeof input !== 'object' || !('api_version' in input)) throw new ExternalProviderError(409, 'TASK_CLIENT_UPGRADE_REQUIRED')
+    const task = await admitExternalTask(this.store, actor, input, {
+      lockPolicy: () => this.administration.lockPolicy(actor),
+      policy: () => this.administration.policy(actor),
+      executable: binding => this.executable(actor, binding),
+      timeoutMs: this.options.policy.timeoutMs,
+    })
     if (task.status === 'accepted' && !this.executions.has(task.id)) {
       const execution = this.execute(actor, task.id).catch(() => { /* Persisted dispatch intent is expired to unknown if the DB is unavailable. */ }).finally(() => this.executions.delete(task.id))
       this.executions.set(task.id, execution)
@@ -259,12 +252,8 @@ export class ExternalProviderService {
   }
 
   private describe(binding: Binding): ExternalAgent {
-    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: { streaming: binding.provider_kind === 'custom_http' ? 'unsupported' : 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' } }
+    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_identity_evidence: 'unverified', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: { streaming: binding.provider_kind === 'custom_http' ? 'unsupported' : 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' } }
   }
 
-  private parseTask(value: unknown): CreateExternalTask {
-    const input = value as CreateExternalTask | null
-    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['agent_id', 'session_id', 'query', 'idempotency_key'].includes(key)) || typeof input.agent_id !== 'string' || !/^[\w-]{1,100}$/.test(input.agent_id) || (input.session_id !== undefined && (typeof input.session_id !== 'string' || !/^[\w-]{1,100}$/.test(input.session_id))) || typeof input.query !== 'string' || !input.query.trim() || input.query.length > 8000 || typeof input.idempotency_key !== 'string' || !/^[\w-]{8,128}$/.test(input.idempotency_key)) throw new ExternalProviderError(400, 'INVALID_TASK')
-    return input
-  }
+
 }

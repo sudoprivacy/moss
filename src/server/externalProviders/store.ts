@@ -37,6 +37,7 @@ export class ExternalTaskStore {
       CREATE INDEX IF NOT EXISTS external_pilot_operations_pending ON external_pilot_operations(status, lease_until);
       CREATE TABLE IF NOT EXISTS external_pilot_admin_audit (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL, action TEXT NOT NULL, resource_id TEXT NOT NULL, created_at BIGINT NOT NULL);
       CREATE TABLE IF NOT EXISTS external_pilot_bindings (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, document TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS external_pilot_bindings_org ON external_pilot_bindings(org_id, id);
       CREATE TABLE IF NOT EXISTS external_pilot_sessions (
         id TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL, agent_id TEXT NOT NULL,
         agent_name TEXT NOT NULL, title TEXT NOT NULL, active_task_id TEXT, conversation_id TEXT,
@@ -162,7 +163,7 @@ export class ExternalTaskStore {
         api_version: EXTERNAL_PROVIDER_API, id, session_id: sessionId, agent_id: binding.id,
         agent_name: sessionAgentName(actor.userId, binding.id), attempt_id: null, status: 'accepted',
         configuration_revision: binding.revision ?? 1, query: input.query, answer: '', raw_answer: '', raw_answer_freshness: 'current', output_status: 'pending', error_code: null,
-        source_digest: binding.source_digest, provider: binding.source_digest === 'unresolved' ? 'unresolved' : binding.provider_kind ?? 'dify', provider_refs: {},
+        source_identity_evidence: 'unverified', source_digest: binding.source_digest, provider: binding.source_digest === 'unresolved' ? 'unresolved' : binding.provider_kind ?? 'dify', provider_refs: {},
         cancellation: { status: 'unsupported', reason: 'Provider termination cannot be confirmed in this pilot' },
         created_at: now, updated_at: now, deadline_at: now + timeoutMs,
       }
@@ -198,6 +199,9 @@ export class ExternalTaskStore {
       }
       const count = await this.db.get('SELECT COUNT(*) AS total FROM external_pilot_tasks WHERE session_id = ?', [sessionId])
       if (Number(count?.total) > 200) throw new ExternalProviderError(409, 'SESSION_TASK_LIMIT')
+      // The session row is locked above. Creation order is independent of deadlines and wall-clock changes.
+      task.session_sequence = Number(count?.total)
+      await this.db.run('UPDATE external_pilot_tasks SET document = ? WHERE id = ?', [JSON.stringify({ ...task, _checkpoint_sequence: 1 }), id])
       if (admission) {
         const record = parseTaskRecord(admission.record(task))
         await this.db.run('INSERT INTO product_task_records(task_id, org_id, user_id, document, policy_snapshot) VALUES (?, ?, ?, ?, ?)', [id, actor.orgId, actor.userId, JSON.stringify(record), JSON.stringify(admission.policySnapshot)])
@@ -223,8 +227,15 @@ export class ExternalTaskStore {
 
   async history(actor: ExternalActor, sessionId: string): Promise<ExternalTask[]> {
     await this.session(actor, sessionId)
-    const rows = await this.db.all<TaskRow>('SELECT * FROM external_pilot_tasks WHERE session_id = ? ORDER BY deadline_at, id LIMIT 200', [sessionId])
-    return this.projectMany(rows)
+    const rows = await this.db.all<TaskRow>('SELECT * FROM external_pilot_tasks WHERE session_id = ? LIMIT 200', [sessionId])
+    const tasks = await this.projectMany(rows)
+    return tasks.sort((a, b) => {
+      if (a.session_sequence !== undefined && b.session_sequence !== undefined) return a.session_sequence - b.session_sequence
+      // Historical records predate sequenced creation. Their original timestamps remain unchanged.
+      if (a.session_sequence !== undefined) return 1
+      if (b.session_sequence !== undefined) return -1
+      return a.created_at - b.created_at || a.id.localeCompare(b.id)
+    })
   }
 
   async task(actor: ExternalActor, id: string): Promise<ExternalTask> {
@@ -269,7 +280,7 @@ export class ExternalTaskStore {
 
   private async project(row: TaskRow, loaded?: SqlRow[]): Promise<ExternalTask> {
     const { _checkpoint_sequence: checkpoint = Number(row.sequence), ...task } = JSON.parse(row.document) as Checkpoint
-    if (![EXTERNAL_PROVIDER_API, 'external-provider.sudo.dev/v1alpha3'].includes(task.api_version)) task.raw_answer_freshness = 'legacy_checkpoint'
+    if (![EXTERNAL_PROVIDER_API, 'external-provider.sudo.dev/v1alpha4', 'external-provider.sudo.dev/v1alpha3'].includes(task.api_version)) task.raw_answer_freshness = 'legacy_checkpoint'
     task.api_version = EXTERNAL_PROVIDER_API
     if (checkpoint >= Number(row.sequence)) return task
     const events = loaded ?? await this.db.all('SELECT document FROM external_pilot_events WHERE task_id = ? AND sequence > ? AND sequence <= ? ORDER BY sequence', [task.id, checkpoint, Number(row.sequence)])

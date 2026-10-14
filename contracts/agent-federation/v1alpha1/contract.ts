@@ -41,7 +41,9 @@ export interface ExternalRunBinding extends TaskCorrelation {
   kind: 'ExternalRunBinding'
   binding_id: string
   provider_kind: 'dify' | 'custom_http'
+  /** Claimed provider identity; missing evidence on legacy rows is not verification. */
   external_agent_id: string
+  source_identity_evidence?: 'unverified'
   source_digest: string
   provider_run_id: string
   provider_session_id?: string

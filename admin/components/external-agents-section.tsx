@@ -428,7 +428,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                   <dt>审核说明</dt>
                   <dd>{agent.review_note}</dd>
                 </dl>
-                <p className="mt-2 text-xs text-muted-foreground">密钥保存在凭据服务，不会回显。</p>
+                <p className="mt-2 text-xs text-muted-foreground">密钥保存在凭据服务，不会回显。应用与工作区身份尚未验证，仅允许管理员核对后的合成数据试点，不支持强来源审计。</p>
               </details>
               <div className="flex flex-wrap gap-2 border-t pt-3">
                 <Button
@@ -438,7 +438,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                   onClick={() =>
                     void onRun(async () => {
                       await api.test(agent.id)
-                      if (isLive()) setNotice('连接成功，应用参数符合当前试点要求。')
+                      if (isLive()) setNotice('连接成功，应用参数符合当前试点要求；应用身份仍未验证。')
                     })
                   }
                 >
@@ -565,14 +565,14 @@ function ScopedExternalAgents({ query }: { query: string }) {
                   <>
                     {draft.provider_kind === 'custom_http' ? <Feedback>已核对接入说明。服务智能体：{draft.app_id}。此接入仅返回最终文本结果。</Feedback> : <>
                     <div className="grid gap-4 sm:grid-cols-2">
-                      <Field id="external-app-id" label="Dify App ID">
+                      <Field id="external-app-id" label="声明的 Dify App ID" hint="测试连接不能证明密钥与填写的应用、工作区和上传定义属于同一来源，请核对实际发布内容。">
                         <Input
                           id="external-app-id"
                           value={draft.app_id}
                           onChange={(event) => setDraft({ ...draft, app_id: event.target.value })}
                         />
                       </Field>
-                      <Field id="external-workspace-id" label="Dify Workspace ID">
+                      <Field id="external-workspace-id" label="声明的 Dify Workspace ID">
                         <Input
                           id="external-workspace-id"
                           value={draft.workspace_id}
@@ -678,7 +678,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
               <p className="text-sm">停用将阻止新任务，已发往外部平台的任务不会因此取消。既有会话保留。</p>
             ) : null}
             {dialog?.kind === 'archive' ? (
-              <p className="text-sm">归档后智能体将退出接入目录，无法再发起任务。既有会话和加密凭据保留。</p>
+              <p className="text-sm">归档后智能体将退出接入目录，无法再发起任务。既有会话保留，无法恢复接入。Moss 创建的专用凭据会被清理；引用的已有凭据由其所有者管理，不会删除。</p>
             ) : null}
           </fieldset>
           <DialogFooter>

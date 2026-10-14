@@ -8,7 +8,7 @@ Status: experimental implementation baseline. ADR-003 and ADR-004 remain Propose
 - `ProviderCapabilities` states adapter capabilities. The HTTP query-only profile requires every flag to be false; Dify additionally supports streaming. An uploaded manifest cannot enable cancellation, replay, strong version pinning, tool observation or approval callbacks.
 - `InvokeHttpAgent` / `HttpAgentResult` are a distinct self-hosted HTTP protocol. They are not LangGraph, Coze, OpenOcta, OpenAI Chat Completions or an arbitrary configurable URL. Only implemented adapter kinds can be resolved.
 - `ProviderObservation` preserves Sudo task/attempt/session correlation, adapter version, local observation time and a monotonic sequence per invocation. `output_snapshot` is a replaceable partial answer, not an append delta; HTTP emits a single terminal observation and does not synthesize streaming.
-- `ExternalRunBinding` records the actual remote run handle separately from Sudo IDs. `version_evidence=source_snapshot_only`, partial observability and unsupported resume/replay are explicit. Dify uses `workflow_run_id` with a `task_id` fallback; supplemental provider IDs retain their original names through the compatibility adapter.
+- `ExternalRunBinding` records the actual remote run handle separately from Sudo IDs. Its external_agent_id is a claimed application identity, with source_identity_evidence=unverified on new rows; neither it nor missing evidence on historical rows proves the API key belongs to that App/Workspace. `version_evidence=source_snapshot_only`, partial observability and unsupported resume/replay are explicit. Dify uses `workflow_run_id` with a `task_id` fallback; supplemental provider IDs retain their original names through the compatibility adapter.
 
 ## HTTP service profile
 
@@ -25,7 +25,7 @@ One total deadline spans metadata and invocation. Responses are bounded to 2 MiB
 
 The existing Dify Pilot executes through `DifyGatewayAdapter`. Successful terminal results and their canonical run binding are committed atomically in the existing Pilot store; `GET /api/v1/tasks/{task_id}/external-run` requires the same authenticated task ownership as task reads. Legacy tasks and unknown runs without a confirmed binding return `null`; historical evidence is not fabricated.
 
-POST `/api/v1/tasks` now accepts the experimental `SubmitTask` envelope and persists an immutable `TaskSpec` / `TaskExecutionResolution` before execution. The earlier `CreateExternalTask` remains an explicit compatibility ingress; historical tasks have no invented specification. See [Task contract](../../task/v1alpha1/README.md).
+POST `/api/v1/tasks` now accepts the experimental `SubmitTask` envelope and persists an immutable `TaskSpec` / `TaskExecutionResolution` before execution. Legacy `CreateExternalTask` HTTP submissions now fail with `TASK_CLIENT_UPGRADE_REQUIRED`; all new execution enters the same admission. Historical tasks remain readable and have no invented specification. See [Task contract](../../task/v1alpha1/README.md).
 
 Moss administrators can choose Custom HTTP, upload the Manifest, validate the remote source, grant users and review publication under 专属智能体 → 外部托管. Changed definitions or credentials revoke publication. SudoWork desktop/WebUI use the same directory and conversation components and the new submission envelope.
 

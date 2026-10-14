@@ -77,7 +77,7 @@ export class DifyPilotTransport {
     if (!response.ok) { await response.body?.cancel(); throw new ExternalProviderError(502, 'PROVIDER_PREFLIGHT_FAILED') }
     const info = JSON.parse(await readBounded(response, 256_000)) as Record<string, unknown>
     if (typeof info.name !== 'string') throw new ExternalProviderError(409, 'INVALID_PROVIDER_INFO')
-    return { name: info.name.slice(0, 200), parameters_digest, checked_at: Date.now() }
+    return { name: info.name.slice(0, 200), parameters_digest, checked_at: Date.now(), source_identity_evidence: 'unverified' as const }
   }
 
   async parameters(endpoint: string, key: string, signal: AbortSignal): Promise<string> {
