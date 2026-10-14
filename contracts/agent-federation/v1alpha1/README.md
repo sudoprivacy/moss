@@ -25,7 +25,11 @@ One total deadline spans metadata and invocation. Responses are bounded to 2 MiB
 
 The existing Dify Pilot executes through `DifyGatewayAdapter`. Successful terminal results and their canonical run binding are committed atomically in the existing Pilot store; `GET /api/v1/tasks/{task_id}/external-run` requires the same authenticated task ownership as task reads. Legacy tasks and unknown runs without a confirmed binding return `null`; historical evidence is not fabricated.
 
-The Pilot POST `/api/v1/tasks` still accepts the earlier `CreateExternalTask`; it is **not** the formal immutable TaskSpec/Resolution ingress. The HTTP adapter is currently exercised through conformance tests and a local HTTP fixture. Custom Manifest onboarding/catalog UI, immutable candidate/version/channel governance, formal TaskSpec, Nexus canonical persistence, second real Provider acceptance and deployment/production governance are still pending. Do not advertise those capabilities from this baseline.
+POST `/api/v1/tasks` now accepts the experimental `SubmitTask` envelope and persists an immutable `TaskSpec` / `TaskExecutionResolution` before execution. The earlier `CreateExternalTask` remains an explicit compatibility ingress; historical tasks have no invented specification. See [Task contract](../../task/v1alpha1/README.md).
+
+Moss administrators can choose Custom HTTP, upload the Manifest, validate the remote source, grant users and review publication under 专属智能体 → 外部托管. Changed definitions or credentials revoke publication. SudoWork desktop/WebUI use the same directory and conversation components and the new submission envelope.
+
+The HTTP integration is tested with a local protocol fixture; no second real Agent platform is available. Canonical Principal Registry, immutable remote version/channel governance, Nexus canonical Task storage and production/deployment acceptance remain pending.
 
 ## Validation
 
