@@ -10,6 +10,8 @@ export interface BrowserPrincipal { orgId: string; userId: string }
 export interface BrowserBinding extends BrowserPrincipal { sessionId: string }
 export interface BrowserWorkerPort {
   invoke(binding: BrowserBinding, controller: string, action: Record<string, unknown>): Promise<unknown>
+  upload?(binding: BrowserBinding, controller: string, name: string, data: Uint8Array, epochs: { controlEpoch: number; targetEpoch: number }): Promise<unknown>
+  download?(binding: BrowserBinding, controller: string, fileId: string): Promise<Uint8Array>
 }
 type BrowserRequest = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -25,6 +27,7 @@ const actionFields: Record<string, string[]> = {
   reload: ['controlEpoch', 'targetEpoch'], 'new-tab': ['controlEpoch', 'targetEpoch'],
   'select-tab': ['controlEpoch', 'targetEpoch', 'targetId'],
   'close-tab': ['controlEpoch', 'targetEpoch', 'targetId'],
+  'upload-files': ['controlEpoch', 'targetEpoch', 'chooserId', 'fileIds'],
 }
 
 /** Callers cannot supply actor roles, user IDs, profile paths or raw endpoints. */
@@ -62,6 +65,14 @@ export async function invokeSessionBrowser(
   sessionId: string,
   body: unknown,
 ): Promise<unknown> {
+  const binding = await authorizeSessionBrowser(deps, principal, sessionId)
+  return deps.worker.invoke(binding, browserController(principal), browserAction(body))
+}
+
+export async function authorizeSessionBrowser(
+  deps: { getSession: (id: string) => Promise<BrowserBinding | null>; isUserActive: (principal: BrowserPrincipal) => Promise<boolean> },
+  principal: BrowserPrincipal, sessionId: string,
+): Promise<BrowserBinding> {
   const session = await deps.getSession(sessionId)
   if (!session) throw new HttpError(404, 'Session not found')
   // Browser cookies/profile remain personal even when a manager may inspect a
@@ -70,7 +81,7 @@ export async function invokeSessionBrowser(
     throw new HttpError(403, 'Forbidden')
   }
   const binding = { orgId: session.orgId, userId: session.userId, sessionId: session.sessionId }
-  return deps.worker.invoke(binding, browserController(principal), browserAction(body))
+  return binding
 }
 
 export class HttpBrowserWorker implements BrowserWorkerPort {
@@ -122,5 +133,39 @@ export class HttpBrowserWorker implements BrowserWorkerPort {
     if (response.status === 202) return null
     if (!response.ok) throw new HttpError(502, 'Managed browser MCP unavailable')
     return response.json()
+  }
+
+  private async transfer(path: string, context: Record<string, unknown>, data?: Uint8Array, name?: string): Promise<Response> {
+    let response: Response
+    try {
+      response = await this.request(new URL(path, this.endpoint.endsWith('/') ? this.endpoint : this.endpoint + '/'), {
+        method: 'POST', redirect: 'error',
+        headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/octet-stream',
+          'X-Moss-Browser-Context': encodeURIComponent(JSON.stringify(context)),
+          ...(name === undefined ? {} : { 'X-Moss-Browser-File-Name': encodeURIComponent(name) }),
+        },
+        body: data ? new Uint8Array(data).buffer : undefined,
+        signal: AbortSignal.timeout(90_000),
+      })
+    } catch { throw new HttpError(503, 'Browser file transfer unavailable; request was not replayed') }
+    if (!response.ok) {
+      const value = await response.json().catch(() => null) as { error?: unknown } | null
+      const code = typeof value?.error === 'string' && /^[a-z_]{1,80}$/.test(value.error) ? value.error : 'Browser file transfer failed'
+      throw new HttpError([400, 403, 409, 413, 503].includes(response.status) ? response.status : 502, code)
+    }
+    return response
+  }
+
+  async upload(binding: BrowserBinding, controller: string, name: string, data: Uint8Array, epochs: { controlEpoch: number; targetEpoch: number }): Promise<unknown> {
+    if (data.byteLength > 16 * 1024 * 1024) throw new HttpError(413, 'browser_files_too_large')
+    return (await this.transfer('files/receive', { binding, controller, ...epochs }, data, name)).json()
+  }
+
+  async download(binding: BrowserBinding, controller: string, fileId: string): Promise<Uint8Array> {
+    if (!/^[a-f0-9]{32}$/.test(fileId)) throw new HttpError(400, 'browser_file_not_found')
+    const response = await this.transfer('files/read', { binding, controller, fileId })
+    const data = new Uint8Array(await response.arrayBuffer())
+    if (data.byteLength > 16 * 1024 * 1024) throw new HttpError(413, 'browser_files_too_large')
+    return data
   }
 }

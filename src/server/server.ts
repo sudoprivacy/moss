@@ -37,7 +37,8 @@ import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from './runtimeService.js'
 import { HttpError, writeError, writeJson } from './httpRespond.js'
-import { invokeSessionBrowser } from './browser/browserGateway.js'
+import { authorizeSessionBrowser, browserController, invokeSessionBrowser } from './browser/browserGateway.js'
+import { browserOwnerAllowed } from './browser/browserDeploymentPolicy.js'
 import { BrowserWorkerRegistry, managedBrowserConfigured } from './browser/browserWorkerRegistry.js'
 import { notifyBrowserReturn } from './browser/browserHandoff.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
@@ -595,14 +596,21 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   })
 }
 
-function readRawBody(req: http.IncomingMessage): Promise<Buffer> {
+function readRawBody(req: http.IncomingMessage, maxBytes = Number.POSITIVE_INFINITY): Promise<Buffer> {
   return new Promise((resolveBody, reject) => {
     const chunks: Buffer[] = []
+    let size = 0
     req.on('data', chunk => {
+      size += chunk.length
+      if (size > maxBytes) {
+        reject(new HttpError(413, 'browser_files_too_large'))
+        return
+      }
       chunks.push(Buffer.from(chunk))
     })
     req.on('end', () => resolveBody(Buffer.concat(chunks)))
     req.on('error', reject)
+    req.on('aborted', () => reject(new HttpError(400, 'File transfer aborted')))
   })
 }
 
@@ -10432,6 +10440,35 @@ export function startServer(
       }
 
       const sessionBrowserMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/browser$/)
+
+      const browserFileUploadMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/browser\/files\/upload$/)
+      const browserFileDownloadMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/browser\/files\/([a-f0-9]{32})$/)
+      if ((req.method === 'POST' && browserFileUploadMatch) || (req.method === 'GET' && browserFileDownloadMatch)) {
+        if (!managedBrowserConfigured()) throw new HttpError(503, 'Managed browser is not configured')
+        const match = browserFileUploadMatch || browserFileDownloadMatch!
+        const binding = await authorizeSessionBrowser({
+          getSession: id => runtime.getSession(id),
+          isUserActive: async principal => (await authService.getUserOrNull(principal.userId, principal.orgId))?.status === 'active',
+        }, auth, match[1]!)
+        if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
+        const controller = browserController(auth)
+        if (browserFileUploadMatch) {
+          const controlEpoch = Number(req.headers['x-browser-control-epoch'])
+          const targetEpoch = Number(req.headers['x-browser-target-epoch'])
+          if (![controlEpoch, targetEpoch].every(value => Number.isSafeInteger(value) && value >= 0)) throw new HttpError(400, 'Invalid browser epoch')
+          let name: string
+          try { name = decodeURIComponent(String(req.headers['x-browser-file-name'] || '')) }
+          catch { throw new HttpError(400, 'Invalid browser file name') }
+          if (!name || name.length > 240) throw new HttpError(400, 'Invalid browser file name')
+          const data = await readRawBody(req, 16 * 1024 * 1024)
+          writeJson(res, 200, await browserWorkers.upload(binding, controller, name, data, { controlEpoch, targetEpoch }))
+        } else {
+          const data = await browserWorkers.download(binding, controller, match[2]!)
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': data.byteLength, 'Cache-Control': 'no-store' })
+          res.end(data)
+        }
+        return
+      }
       if (req.method === 'POST' && sessionBrowserMatch) {
         if (!managedBrowserConfigured()) throw new HttpError(503, 'Managed browser is not configured')
         const action = await readJsonBody(req)

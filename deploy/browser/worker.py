@@ -12,13 +12,18 @@ import os
 import pathlib
 import secrets
 import time
+from urllib.parse import unquote
 
 import aiohttp
 from ai_dev_browser.core.browser import browser_connect, browser_start, browser_stop
 from ai_dev_browser.core.connection import connect_browser, connect_extension
 from ai_dev_browser.remote.cdp import BrowserViewError
 from ai_dev_browser.remote.control import BrowserControl, ControlError, SharedViewer
-from ai_dev_browser.remote.provision import prepare_managed_extension_profile
+from ai_dev_browser.remote.files import BrowserFiles
+from ai_dev_browser.remote.provision import (
+    configure_managed_extension_file_access,
+    prepare_managed_extension_profile,
+)
 from ai_dev_browser.remote.session import BrowserSession
 from ai_dev_browser.remote.window import WindowView, XDisplay
 from aiohttp import web
@@ -33,6 +38,8 @@ class Worker:
         if not host_token or not ai_token or host_token == ai_token:
             raise ValueError("Distinct host and AI credentials required")
         self.profile_lease = ProfileLease(self.root)
+        self.files = BrowserFiles(self.root / "files")
+        self.file_permission_prepared = False
         self.chrome_path = chrome_path
         self.binding = None
         self.browser = None
@@ -161,6 +168,7 @@ class Worker:
             else "extension",
             "capabilities": {
                 "lifecycle": True,
+                "fileTransfer": True,
                 "pageView": bool(self.session),
                 "windowView": bool(self.session and self.display),
                 "persistentProfile": True,
@@ -170,6 +178,8 @@ class Worker:
             "error": live["error"],
             "handoff": self.handoff,
             "dialog": live.get("dialog"),
+            "fileChooser": live.get("fileChooser"),
+            "downloads": self.files.collect_downloads(),
         }
 
     async def open_window(self):
@@ -214,6 +224,7 @@ class Worker:
 
     async def input_window(self, controller, epoch, target_epoch, event):
         async def perform():
+            await self.session._connect_page()
             if not self.window_viewers:
                 raise ControlError("browser_viewer_not_attached")
             view = await self.window_view.attach(next(iter(self.window_viewers)))
@@ -239,7 +250,7 @@ class Worker:
         ):
             raise ControlError("explicit_browser_launch_mode_required")
         if actor == "ai" and self.control.state != "ai":
-            raise ControlError("browser_control_held_by_user")
+            raise ControlError(self.control.error or "browser_control_held_by_user")
         if actor != "ai" and self.control.controller not in (None, actor):
             raise ControlError("browser_control_not_owned")
         if self.session:
@@ -290,6 +301,15 @@ class Worker:
                         chrome_path=self.chrome_path,
                         extra_args=arguments["extra_args"],
                     )
+                    if not self.file_permission_prepared:
+                        await configure_managed_extension_file_access(
+                            str(profile),
+                            extension_id=installed_identity["id"],
+                            enabled=True,
+                            chrome_path=self.chrome_path,
+                            extra_args=arguments["extra_args"],
+                        )
+                        self.file_permission_prepared = True
                 except ControlError as error:
                     diagnostic = self.root / "launch-failure.json"
                     diagnostic.write_text(
@@ -321,6 +341,7 @@ class Worker:
                 raise ControlError("managed_browser_reconnect_required")
             launched = connected
         else:
+            self.files.configure_managed_profile(profile)
             launched = await asyncio.to_thread(browser_start, **arguments)
         if "error" in launched:
             diagnostic = self.root / "launch-failure.json"
@@ -360,7 +381,9 @@ class Worker:
             if transport == "extension"
             else connect_browser(session_id=launched["session_id"])
         )
-        self.session = BrowserSession(client, self.http, control=self.control)
+        self.session = BrowserSession(
+            client, self.http, control=self.control, files=self.files
+        )
         if not is_headless:
             page = await self.session._connect_page()
             await page.call("Page.bringToFront")
@@ -615,6 +638,7 @@ class Worker:
             "new-tab",
             "select-tab",
             "close-tab",
+            "upload-files",
         }:
             result = await self.session.action("ai", epoch, target_epoch, action)
         else:
@@ -636,6 +660,12 @@ class Worker:
     async def close(self):
         await self._stop_browser()
         self.profile_lease.close()
+
+    async def receive_file(self, controller, epoch, target_epoch, name, data):
+        async def receive():
+            return self.files.receive(name, data)
+
+        return await self.control.run(controller, epoch, target_epoch, receive)
 
 
 def application(worker):
@@ -675,6 +705,46 @@ def application(worker):
     async def binding(request):
         authorize(request, worker.host_token)
         return web.json_response({"binding": worker.binding})
+
+    def file_context(request):
+        authorize(request, worker.host_token)
+        header = request.headers.get("X-Moss-Browser-Context", "")
+        if len(header) > 4096:
+            raise ControlError("invalid_browser_request")
+        context = json.loads(unquote(header))
+        controller = context["controller"]
+        if not isinstance(controller, str) or not controller.startswith("user-"):
+            raise ControlError("invalid_browser_controller")
+        worker.bind(context["binding"])
+        return context
+
+    async def receive_file(request):
+        context = file_context(request)
+        epoch, target_epoch = worker.epochs(context)
+        name = unquote(request.headers.get("X-Moss-Browser-File-Name", ""))
+        payload = bytearray()
+        async for chunk in request.content.iter_chunked(64 * 1024):
+            payload.extend(chunk)
+            if len(payload) > worker.files.max_file_bytes:
+                raise ControlError("browser_files_too_large")
+        uploaded = await worker.receive_file(
+            context["controller"], epoch, target_epoch, name, bytes(payload)
+        )
+        return web.json_response({"file": uploaded})
+
+    async def read_file(request):
+        context = file_context(request)
+        if not isinstance(context.get("fileId"), str):
+            raise ControlError("browser_file_not_found")
+        path = worker.files.path(context["fileId"], kind="download")
+        data = path.read_bytes()
+        metadata = worker.files.metadata(context["fileId"])
+        if (
+            len(data) != metadata["bytes"]
+            or hashlib.sha256(data).hexdigest() != metadata["sha256"]
+        ):
+            raise ControlError("browser_file_changed")
+        return web.Response(body=data, content_type="application/octet-stream")
 
     async def agent(request):
         authorize(request, worker.ai_token)
@@ -741,6 +811,7 @@ def application(worker):
                     "new-tab",
                     "select-tab",
                     "close-tab",
+                    "upload-files",
                     "command",
                 }:
                     if arguments.get("kind") == "command":
@@ -805,13 +876,15 @@ def application(worker):
         await worker.close()
         await worker.http.close()
 
-    app = web.Application(middlewares=[errors], client_max_size=1024 * 1024)
+    app = web.Application(middlewares=[errors], client_max_size=16 * 1024 * 1024)
     app.add_routes(
         [
             web.get("/binding", binding),
             web.post("/invoke", invoke),
             web.post("/agent", agent),
             web.post("/mcp", mcp),
+            web.post("/files/receive", receive_file),
+            web.post("/files/read", read_file),
         ]
     )
     extension = pathlib.Path("/opt/browser/extension")
