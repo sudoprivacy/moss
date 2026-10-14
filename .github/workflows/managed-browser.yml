@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: sudoprivacy/ai-dev-browser
-          ref: 36c5282e18a8c3b6773d8ee377a1c77347a427dd
+          ref: a2610df3132c33c7bd0cb4927550ca4ef98cf4b6 # v0.55.0
           path: adb-core
       - uses: actions/checkout@v4
         with:
@@ -50,7 +50,7 @@ jobs:
           chmod 600 "$key_file"
           docker build -f adb-core/deploy/managed-chrome/Dockerfile \
             --secret "id=extension_key,src=$key_file" \
-            --build-arg SOURCE_REVISION=36c5282e18a8c3b6773d8ee377a1c77347a427dd \
+            --build-arg SOURCE_REVISION=a2610df3132c33c7bd0cb4927550ca4ef98cf4b6 \
             -t managed-browser-base:ci adb-core
           docker build --build-arg ADB_BROWSER_IMAGE=managed-browser-base:ci \
             -t managed-browser-worker:ci deploy/browser
