@@ -160,6 +160,7 @@ class Worker:
             if self.browser
             else "extension",
             "capabilities": {
+                "lifecycle": True,
                 "pageView": bool(self.session),
                 "windowView": bool(self.session and self.display),
                 "persistentProfile": True,
