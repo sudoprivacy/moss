@@ -5413,6 +5413,104 @@ export function startServer(
       }
 
 
+      // 会话存档: upload / clear the room-id list that widens the daily
+      // member snapshot beyond groups that have spoken.
+      //
+      // Scope is the SNAPSHOT only. It does not filter archiving (that is the
+      // `roomFilter` config field) and it is unioned with rooms.json by the
+      // snapshot worker, so a chatty room missing from the file is still
+      // photographed.
+      //
+      // The file is parsed here and only the extracted ids are kept (plus the
+      // original, for audit). Display metadata goes into config_json so the
+      // admin list can show it without reading disk; the roomListXxx keys are
+      // deliberately absent from the form's field list, so a normal save never
+      // sends them and the PATCH merge preserves them.
+      const corpAppRoomListMatch = pathname.match(/^\/api\/v1\/corp-apps\/([^/]+)\/room-list$/)
+      if (corpAppRoomListMatch && (req.method === 'POST' || req.method === 'DELETE')) {
+        authService.requireScope(auth, 'admin:settings')
+        const id = corpAppRoomListMatch[1] || ''
+        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        if (!row) {
+          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
+          return
+        }
+        if (String(row.type) !== 'wecommsgaudit') {
+          writeJson(res, 400, {
+            error: { code: 'unsupported_type', message: '仅企微会话存档类型支持群ID清单' },
+          })
+          return
+        }
+        const config = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
+        const { clearRoomList, extractRoomIds, writeRoomList } = await import(
+          './corpapps/msgaudit/roomList.js'
+        )
+
+        if (req.method === 'DELETE') {
+          await clearRoomList(id)
+          delete config.roomListFile
+          delete config.roomListCount
+          delete config.roomListUpdatedAt
+          runtime.store.updateCorpApp(id, auth.orgId, { config_json: JSON.stringify(config) })
+          writeJson(res, 200, { success: true })
+          return
+        }
+
+        // Same ceiling as workspace uploads; the body cap makes an oversized
+        // upload fail while streaming rather than after it is all in memory.
+        const configuredLimit = getSystemSettings().workspaceUploadLimitBytes
+        const limit =
+          Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : 20 * 1024 * 1024
+        const body = await readJsonBody(req, Math.ceil((limit * 4) / 3) + 64 * 1024)
+        const fileName = typeof body.file_name === 'string' ? body.file_name.trim() : ''
+        const contentB64 = typeof body.content_base64 === 'string' ? body.content_base64 : ''
+        if (!fileName || !contentB64) {
+          throw new HttpError(400, 'file_name and content_base64 are required')
+        }
+        if (!/\.(txt|csv|xlsx)$/i.test(fileName)) {
+          writeJson(res, 400, {
+            error: { code: 'invalid_file', message: '仅支持 .txt / .csv / .xlsx 文件' },
+          })
+          return
+        }
+        const buffer = Buffer.from(contentB64, 'base64')
+        if (buffer.byteLength === 0) {
+          writeJson(res, 400, { error: { code: 'invalid_base64', message: '文件内容为空' } })
+          return
+        }
+        if (buffer.byteLength > limit) {
+          throw new HttpError(413, `${fileName}: 文件超过 ${Math.floor(limit / 1024 / 1024)}MB 上限`)
+        }
+        let extracted: { ids: string[]; ignored: number }
+        try {
+          extracted = await extractRoomIds(buffer, fileName)
+        } catch (err) {
+          writeJson(res, 400, {
+            error: { code: 'parse_failed', message: `文件解析失败：${err instanceof Error ? err.message : String(err)}` },
+          })
+          return
+        }
+        if (extracted.ids.length === 0) {
+          writeJson(res, 400, {
+            error: { code: 'no_room_ids', message: '文件中未找到 wr_ 开头的群ID' },
+          })
+          return
+        }
+        const saved = await writeRoomList(id, fileName, buffer, extracted.ids, extracted.ignored)
+        config.roomListFile = saved.fileName
+        config.roomListCount = saved.count
+        config.roomListUpdatedAt = saved.uploadedAt
+        runtime.store.updateCorpApp(id, auth.orgId, { config_json: JSON.stringify(config) })
+        writeJson(res, 200, {
+          success: true,
+          count: saved.count,
+          ignored: saved.ignored,
+          fileName: saved.fileName,
+          uploadedAt: saved.uploadedAt,
+        })
+        return
+      }
+
       // 会话存档: relabel a stored private key under a different
       // publickey_ver, without the key ever leaving the server.
       //

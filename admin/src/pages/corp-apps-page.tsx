@@ -53,6 +53,8 @@ import {
   listCorpApps,
   generateCorpAppKeypair,
   importCorpAppKey,
+  uploadCorpAppRoomList,
+  clearCorpAppRoomList,
   testCorpApp,
   updateCorpApp,
 } from '@/lib/api/corp-apps'
@@ -382,6 +384,7 @@ export default function CorpAppsPage() {
           setCreating(false)
           refresh()
         }}
+        onChanged={refresh}
       />
 
       <CorpAppDialog
@@ -395,6 +398,7 @@ export default function CorpAppsPage() {
           setEditingId(null)
           refresh()
         }}
+        onChanged={refresh}
       />
 
       <AlertDialog open={!!deletingId} onOpenChange={(o) => !o && setDeletingId(null)}>
@@ -455,17 +459,23 @@ function CorpAppDialog({
   types,
   onOpenChange,
   onSaved,
+  onChanged,
 }: {
   open: boolean
   existing?: CorpApp | null
   types: string[]
   onOpenChange: (open: boolean) => void
   onSaved: () => void
+  /** Refresh the list without closing the dialog (room-list upload/clear). */
+  onChanged?: () => void
 }) {
   const [type, setType] = useState<string>(existing?.type ?? types[0] ?? '')
   const [name, setName] = useState(existing?.name ?? '')
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
+  // 会话存档 room-id list (snapshot scope). Metadata only; the ids stay server-side.
+  const [roomList, setRoomList] = useState<{ fileName: string; count: number; uploadedAt: number } | null>(null)
+  const [roomListBusy, setRoomListBusy] = useState(false)
 
   useEffect(() => {
     if (!open) return
@@ -480,6 +490,16 @@ function CorpAppDialog({
       }
     }
     setFieldValues(prefill)
+    const c = (existing?.config ?? {}) as Record<string, unknown>
+    setRoomList(
+      typeof c.roomListFile === 'string' && c.roomListFile
+        ? {
+            fileName: c.roomListFile,
+            count: Number(c.roomListCount) || 0,
+            uploadedAt: Number(c.roomListUpdatedAt) || 0,
+          }
+        : null,
+    )
   }, [open, existing, types])
 
   const fields = TYPE_FIELDS[type] ?? []
@@ -544,6 +564,45 @@ function CorpAppDialog({
       toast.error(`生成失败:${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setKeygenBusy(false)
+    }
+  }
+
+  const handleRoomListUpload = async (file: File) => {
+    if (!existing) return
+    setRoomListBusy(true)
+    try {
+      // FileReader gives a data: URL; the API wants bare base64.
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '')
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(file)
+      })
+      const r = await uploadCorpAppRoomList(existing.id, file.name, base64)
+      setRoomList({ fileName: r.fileName, count: r.count, uploadedAt: r.uploadedAt })
+      toast.success(
+        `已导入 ${r.count} 个群ID` + (r.ignored > 0 ? `(忽略 ${r.ignored} 个非群ID)` : ''),
+      )
+      onChanged?.()
+    } catch (err) {
+      toast.error(`上传失败:${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setRoomListBusy(false)
+    }
+  }
+
+  const handleRoomListClear = async () => {
+    if (!existing) return
+    setRoomListBusy(true)
+    try {
+      await clearCorpAppRoomList(existing.id)
+      setRoomList(null)
+      toast.success('已清除群ID清单')
+      onChanged?.()
+    } catch (err) {
+      toast.error(`清除失败:${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setRoomListBusy(false)
     }
   }
 
@@ -821,6 +880,68 @@ function CorpAppDialog({
                   )}
                 </div>
               )}
+            </div>
+          )}
+          {type === 'wecommsgaudit' && (
+            <div className="grid gap-2 rounded-md border p-3">
+              <Label className="text-sm">群成员快照范围(群ID清单)</Label>
+              {!existing ? (
+                <p className="text-xs text-muted-foreground">请先保存该应用,再上传群ID清单。</p>
+              ) : (
+                <>
+                  <p className="text-xs">
+                    {roomList ? (
+                      <>
+                        <span className="font-medium">{roomList.fileName}</span>
+                        {` · ${roomList.count} 个群`}
+                        {roomList.uploadedAt > 0 && ` · ${new Date(roomList.uploadedAt).toLocaleString()}`}
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">未上传(仅对已归档过消息的群拍快照)</span>
+                    )}
+                  </p>
+                  <input
+                    id="msgaudit-roomlist-input"
+                    type="file"
+                    accept=".txt,.csv,.xlsx"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      // Reset so picking the same (corrected) file again still fires.
+                      e.target.value = ''
+                      if (f) void handleRoomListUpload(f)
+                    }}
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={roomListBusy}
+                      onClick={() => document.getElementById('msgaudit-roomlist-input')?.click()}
+                    >
+                      {roomListBusy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
+                      {roomList ? '重新上传' : '上传清单'}
+                    </Button>
+                    {roomList && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        disabled={roomListBusy}
+                        onClick={handleRoomListClear}
+                      >
+                        清除
+                      </Button>
+                    )}
+                  </div>
+                </>
+              )}
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                用于每日群成员快照(群成员数统计、退群检测),与上方「群聊过滤」无关,不影响聊天记录归档。
+                实际快照范围 = 本清单 ∪ 已归档过消息的群。支持 txt / csv / xlsx,自动按 wr_ 前缀提取群ID,其余内容忽略。
+                上传后由后台快照任务分批完成(默认每 10 分钟一轮),两万个群约需半小时到一小时。
+              </p>
             </div>
           )}
         </div>

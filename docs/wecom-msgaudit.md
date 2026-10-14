@@ -110,6 +110,8 @@ $MOSS_HOME/msgaudit/<corpAppId>/
   members/<roomId>/<YYYY-MM-DD>.json 每日成员快照
   members/lastupdated.json           最后一次全量快照完成的日期
   members/leaves/<YYYY-MM-DD>.json   当日计算出的外部成员离群名单
+  roomlist.json                      上传的群ID清单（解析结果）{roomIds[], count, fileName, uploadedAt}
+  roomlist/<原文件名>                 上传的原文件（只保留最近一次）
 ```
 
 `MOSS_HOME` 已在 `deploy/docker-compose.yml` 中挂载到宿主机（`./.moss:/root/.moss`），**无需额外挂载**，容器内写入的记录宿主机直接可读。
@@ -154,6 +156,8 @@ jq -r '.[] | "\(.count)\t\(.roomid)"' rooms.json | sort -rn
 |---|---|---|
 | `MOSS_MSGAUDIT_INTERVAL_SEC` | `300`（5 分钟） | 轮询间隔，下限 30 秒 |
 | `MOSS_MSGAUDIT_MAX_PAGES` | `20` | 每实例每轮最多拉几页；`0` = 不限、一次拉完 |
+| `MOSS_MSGAUDIT_SNAPSHOT_INTERVAL_SEC` | `600`（10 分钟） | 成员快照任务的轮询间隔，下限 60 秒（见第十节「成员快照」） |
+| `MOSS_MSGAUDIT_SNAPSHOT_CONCURRENCY` | `4` | 成员快照的并发数，1–16；遇企微限流 45009 可调低，无需重新构建 |
 
 首轮从 seq=0 开始，即企微保留期内的全部历史。页数上限把这次回填**分摊到多轮**，
 避免一次长时间占住原生 SDK 会话；游标每页提交，下一轮自然从断点续拉。
@@ -183,6 +187,35 @@ wr_l7aCgAAoFEUD7y9cEvqAzpmL-WPWg, wr_l7aCgAAWRF4xBDPJEFfSmwIV3W3Mg
 
 修改后**下一轮拉取生效**（默认 5 分钟），不影响已归档的记录。日志会显示
 `filtered=N`。
+
+## 九之二、群成员快照范围（群ID清单，可选）
+
+`rooms.json` 是**消息流**的索引：一个群至少有过一条存档消息才会出现在里面。
+存档成员所在的群往往成千上万，大部分很少说话 —— 只靠 `rooms.json`，这些群永远
+拍不到成员快照，群成员数统计与退群检测就一直缺这部分。
+
+在会话存档实例的编辑页「群成员快照范围（群ID清单）」上传一个文件即可补全：
+
+- 支持 **.txt / .csv / .xlsx**（例如回填过群ID 的「群活跃度看板」），上限同工作区上传
+  （默认 20MB）
+- **按 `wr_` 前缀用正则提取群ID**，其余内容全部忽略；`wo_` / `wm_`（客户/成员 ID）
+  计入「忽略」数，不入清单。xlsx 不做单元格解析，直接扫工作表 XML，共享字符串与
+  内联字符串都认。csv 若不是 UTF-8 自动按 GBK 读
+- 重新上传**整体替换**旧清单；「清除」删除清单
+
+**只影响成员快照，不影响归档**：与第九节「群聊过滤」无关，不改变哪些消息落盘。
+实际快照范围 = **清单 ∪ `rooms.json`**（去掉单聊桶），清单里没有但在说话的群照样会拍。
+
+接口（`admin:settings` 权限，仅 `wecommsgaudit` 类型）：
+
+```
+POST   /api/v1/corp-apps/:id/room-list   {"file_name": "看板.xlsx", "content_base64": "..."}
+       -> {"success": true, "count": 21904, "ignored": 0, "fileName": "...", "uploadedAt": 1791...}
+DELETE /api/v1/corp-apps/:id/room-list
+```
+
+实例 `config` 里的 `roomListFile` / `roomListCount` / `roomListUpdatedAt` 只用于页面展示，
+以磁盘上的 `roomlist.json` 为准。
 
 ## 十、媒体文件、姓名与群名
 
@@ -281,15 +314,27 @@ corpapp names --app 数牍 --rooms wr_xxx,wr_yyy
 
 **分两个阶段，各自保证一天只跑一次：**
 
-**阶段 1 —— 拍快照。** 遍历 `rooms.json` 里的**所有群**（不只是当轮有消息的群 ——
-安静的群照样会掉人），为今天还没有快照的群拍一张：
+**阶段 1 —— 拍快照。** 遍历**群ID清单 ∪ `rooms.json`** 里的所有群（不只是当轮有
+消息的群 —— 安静的群照样会掉人；清单见第九之二节），为今天还没有快照的群拍一张：
 
 ```
 members/<roomId>/2026-09-18.json   {roomid, date, members[], roomName?, memberNames?, takenAt}
 ```
 
-全部拍完后写 `members/lastupdated.json`。所以**中途部署也不会漏**：17:00 上线，
-部署后第一轮拉取就会补齐当天快照。
+快照由**独立的后台任务**负责，不在拉取里做：两万个群的快照要拍几十分钟，放在
+每 5 分钟一轮、10 分钟超时的拉取子进程里既跑不完、也会拖住归档。该任务：
+
+- 启动后 30 秒首轮，之后每 `MOSS_MSGAUDIT_SNAPSHOT_INTERVAL_SEC`（默认 10 分钟）一轮，
+  并发 `MOSS_MSGAUDIT_SNAPSHOT_CONCURRENCY`（默认 4）
+- **每轮从磁盘重算还缺哪些群**，所以重启、崩溃、限流暂停都只是推迟，不会重拍或漏拍；
+  中途部署同样不漏：17:00 上线，之后几轮补齐当天快照
+- 每个实例只解析**一次**兄弟自建应用（同一个 access_token 用到底），不再每个群各取一次
+- **企微明确答复「没有花名册」**（内部群 90501、群不存在或不可见等任何 errcode）→
+  当天跳过该群；**限流 45009** → 全体暂停 60 秒后重试；**网络 / token 失败** → 重试 3 次，
+  仍失败则当天**不算完成**
+- **只有全部群都拍到或明确跳过，才写 `members/lastupdated.json`**。半截的一天不会
+  进入阶段 2，避免把没拍到的群误报成「客户全退了」
+- 日志：`[msgaudit-snapshot] <id>: photographed X/Y (todo T, skipped S, failed F) complete=<bool> leaves=N`
 
 快照顺带记下**群名与成员姓名**（`roomName` / `memberNames`）。这不是额外成本：
 拍快照调的 `groupchat/get` 本来就能在同一个响应里带回这些名字（`need_name=1`），
