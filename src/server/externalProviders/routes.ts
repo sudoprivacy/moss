@@ -51,13 +51,14 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
     else {
       const review = /^\/api\/v1\/external-agents\/([\w-]+)\/review$/.exec(path)
       const session = /^\/api\/v1\/external-sessions\/([\w-]+)\/tasks$/.exec(path)
-      const task = /^\/api\/v1\/tasks\/([\w-]+)(?:\/(events|cancel))?$/.exec(path)
+      const task = /^\/api\/v1\/tasks\/([\w-]+)(?:\/(events|cancel|external-run))?$/.exec(path)
       if (review && method === 'POST') {
         requireAdmin()
         if (!body || typeof body !== 'object' || typeof (body as { approved?: unknown }).approved !== 'boolean' || !Number.isSafeInteger((body as { revision?: unknown }).revision) || Number((body as { revision?: unknown }).revision) < 1 || Object.keys(body).some(key => !['approved', 'revision', 'review_days'].includes(key))) throw new ExternalProviderError(400, 'INVALID_REVIEW')
         data = await service.review(actor, review[1], (body as { approved: boolean }).approved, (body as { revision: number }).revision, (body as { review_days?: number }).review_days)
       } else if (session && method === 'GET') data = await service.store.history(actor, session[1])
       else if (task && method === 'GET' && !task[2]) data = await service.store.task(actor, task[1])
+      else if (task && method === 'GET' && task[2] === 'external-run') data = await service.store.runBinding(actor, task[1])
       else if (task && method === 'GET' && task[2] === 'events') {
         const cursor = Number(url.searchParams.get('cursor') ?? 0)
         if (!Number.isSafeInteger(cursor) || cursor < 0) throw new ExternalProviderError(400, 'INVALID_CURSOR')

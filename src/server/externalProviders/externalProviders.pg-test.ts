@@ -35,7 +35,7 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
       if (String(url).endsWith('/info')) return Response.json({ name: 'Synthetic' })
       if (String(url).endsWith('/parameters')) { await control.preflight(); return Response.json({ user_input_form: [], file_upload: { enabled: false } }) }
       calls.push((init?.headers as Record<string, string>).Authorization)
-      const events = [{ event: 'message', answer: '42' }, { event: 'message_end' }, { event: 'workflow_finished', data: { status: 'succeeded' } }]
+      const events = [{ event: 'workflow_started', workflow_run_id: `remote-run-${calls.length}` }, { event: 'message', answer: '42' }, { event: 'message_end' }, { event: 'workflow_finished', data: { status: 'succeeded' } }]
       return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } })
     }) as typeof fetch)
     for (const driver of drivers) {
@@ -68,6 +68,8 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     await Promise.all(services.map(service => service.waitForTask(accepted[0].id)))
     assert.equal(calls.length, 1)
     assert.equal((await second.store.task(actor, accepted[0].id)).answer, '42')
+    assert.equal((await second.store.task(actor, accepted[0].id)).status, 'succeeded')
+    assert.equal((await second.store.runBinding(actor, accepted[0].id))?.provider_run_id, 'remote-run-1')
 
     let enter!: () => void, release!: () => void
     let entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { release = resolve })
@@ -104,6 +106,14 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     assert.equal(attempt?.status, 'unknown'); assert(attempt?.document)
     assert.equal((await second.store.session(actor, pending.session_id)).active_task_id, pending.id)
     assert.equal(calls.length, 1)
+    const saveRun = first.store.saveRunBinding.bind(first.store)
+    first.store.saveRunBinding = async (currentActor, run) => { await saveRun(currentActor, run); throw new Error('Synthetic failure after run binding write') }
+    const incomplete = await first.create(actor, { ...request, idempotency_key: randomUUID() })
+    await first.waitForTask(incomplete.id)
+    first.store.saveRunBinding = saveRun
+    assert.equal((await second.store.task(actor, incomplete.id)).status, 'unknown')
+    assert.equal(await second.store.runBinding(actor, incomplete.id), null, 'Run binding and terminal task roll back together')
+    assert.equal(calls.length, 2, 'Uncertain results are never automatically replayed')
   } finally {
     await Promise.allSettled(services.map(service => service.close()))
     await Promise.all(pools.map(pool => pool.end()))

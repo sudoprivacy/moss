@@ -3,6 +3,8 @@ import type { DbDriver, SqlRow } from '../db/driver.js'
 import { sessionAgentName } from '../agentIdentity.js'
 import { EXTERNAL_PROVIDER_API, type ExternalEventsPage, type CreateExternalTask, type ExternalTask, type ExternalTaskEvent, type ExternalSession, type RegisterExternalAgent } from '../../../contracts/external-provider/v1/contract.js'
 import { ExternalProviderError } from './policy.js'
+import type { ExternalRunBinding } from '../../../contracts/agent-federation/v1alpha1/contract.js'
+import { parseExternalRunBinding } from '../agentFederation/manifest.js'
 
 export interface ExternalActor { orgId: string; userId: string }
 export interface Binding extends RegisterExternalAgent { id: string; orgId: string; connectionId: string; approved: boolean; parametersDigest: string | null; reviewedBy: string | null; revision?: number; definitionProfileVersion?: number; archived?: boolean; credentialUpdating?: boolean; credentialVersion?: number; credentialRecoveryRequired?: boolean; credentialOperationId?: string; registrationMode?: 'onboarding' | 'reference_compat' }
@@ -42,6 +44,9 @@ export class ExternalTaskStore {
       CREATE INDEX IF NOT EXISTS external_pilot_tasks_session ON external_pilot_tasks(session_id);
       CREATE TABLE IF NOT EXISTS external_pilot_attempts (
         id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, started_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS external_pilot_run_bindings (
+        task_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE, document TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS external_pilot_reconciliations (
         task_id TEXT PRIMARY KEY, attempt_id TEXT, document TEXT NOT NULL
@@ -86,6 +91,22 @@ export class ExternalTaskStore {
     const row = await this.db.get('SELECT document FROM external_pilot_bindings WHERE id = ? AND org_id = ?', [id, actor.orgId])
     if (!row) throw new ExternalProviderError(404, 'AGENT_NOT_FOUND')
     return JSON.parse(String(row.document)) as Binding
+  }
+
+  async saveRunBinding(actor: ExternalActor, binding: ExternalRunBinding): Promise<void> {
+    parseExternalRunBinding(binding)
+    const task = await this.task(actor, binding.task_id)
+    if (task.attempt_id !== binding.attempt_id || task.session_id !== binding.session_id || task.agent_id !== binding.binding_id || task.source_digest !== binding.source_digest || task.provider !== binding.provider_kind) throw new ExternalProviderError(409, 'RUN_BINDING_MISMATCH')
+    const document = JSON.stringify(binding)
+    await this.db.run('INSERT INTO external_pilot_run_bindings(task_id, attempt_id, document) VALUES (?, ?, ?) ON CONFLICT(task_id) DO NOTHING', [binding.task_id, binding.attempt_id, document])
+    const row = await this.db.get('SELECT document FROM external_pilot_run_bindings WHERE task_id = ?', [binding.task_id])
+    if (row?.document !== document) throw new ExternalProviderError(409, 'RUN_BINDING_CONFLICT')
+  }
+
+  async runBinding(actor: ExternalActor, taskId: string): Promise<ExternalRunBinding | null> {
+    await this.task(actor, taskId)
+    const row = await this.db.get('SELECT document FROM external_pilot_run_bindings WHERE task_id = ?', [taskId])
+    return row ? parseExternalRunBinding(JSON.parse(String(row.document))) : null
   }
 
   async bindings(actor: ExternalActor): Promise<Binding[]> {

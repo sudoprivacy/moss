@@ -9,6 +9,7 @@ import { ExternalTaskStore, digest, type Binding, type ExternalActor } from './s
 import { ExternalProviderError, assertPilot, parseRegistration, type PilotPolicy } from './policy.js'
 import { DifyPilotTransport } from './difyTransport.js'
 import { decodeOutput } from './decoder.js'
+import { DifyGatewayAdapter } from '../agentFederation/difyAdapter.js'
 
 export class ExternalProviderService {
   private readonly timer: ReturnType<typeof setInterval>
@@ -158,39 +159,54 @@ export class ExternalProviderService {
       const secret = await this.secret(binding)
       if (binding.credentialVersion !== secret.version) throw new ExternalProviderError(409, 'CREDENTIAL_CHANGED')
       const key = secret.value
-      const fingerprint = await this.transport.parameters(binding.endpoint, key, controller.signal)
-      if (fingerprint !== binding.parametersDigest) throw new ExternalProviderError(409, 'PROVIDER_PARAMETERS_CHANGED')
       const session = await this.store.session(actor, task.session_id)
-      // Linearization point: admin changes use the same Binding row lock. No network
-      // I/O here; the approved immutable snapshot is authorized once before dispatch.
-      await this.store.db.transaction(async () => {
-        await this.store.db.run('UPDATE external_pilot_bindings SET document = document WHERE id = ? AND org_id = ?', [binding.id, actor.orgId])
-        const current = await this.store.binding(actor, binding.id)
-        if (JSON.stringify(current) !== JSON.stringify(binding)) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
-        await this.administration.lockPolicy(actor)
-        await this.authorize(actor)
-        await this.executable(actor, current)
-        const claimed = await this.store.mutate(id, value => {
-          if (value.status !== 'dispatching' || value.deadline_at <= Date.now()) return false
-          value.dispatch_authorized_at = Date.now()
-          return 'status'
-        })
-        if (!claimed) throw new ExternalProviderError(409, 'DISPATCH_DEADLINE')
-      })
-      controller.signal.throwIfAborted()
-      submitted = true
-      const result = await this.transport.execute({ endpoint: binding.endpoint, key, query: task.query, conversationId: session.conversation_id, endUser: digest(JSON.stringify([actor.orgId, actor.userId, task.agent_name])).slice(7), signal: controller.signal }, async progress => {
+      const adapter = new DifyGatewayAdapter(binding.parametersDigest!, this.transport)
+      const result = await adapter.invoke({
+        task_id: task.id, attempt_id: task.attempt_id!, session_id: task.session_id,
+        binding_id: binding.id, external_agent_id: binding.app_id, source_digest: binding.source_digest,
+        endpoint: binding.endpoint, org_id: actor.orgId, policy: await this.administration.effectivePolicy(actor),
+        key, query: task.query, provider_session_id: session.conversation_id,
+        end_user: digest(JSON.stringify([actor.orgId, actor.userId, task.agent_name])).slice(7), signal: controller.signal,
+        authorize_dispatch: async () => {
+          // Adapter preflight precedes the same durable governance linearization point.
+          await this.store.db.transaction(async () => {
+            await this.store.db.run('UPDATE external_pilot_bindings SET document = document WHERE id = ? AND org_id = ?', [binding.id, actor.orgId])
+            const current = await this.store.binding(actor, binding.id)
+            if (JSON.stringify(current) !== JSON.stringify(binding)) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
+            await this.administration.lockPolicy(actor)
+            await this.authorize(actor)
+            await this.executable(actor, current)
+            const claimed = await this.store.mutate(id, value => {
+              if (value.status !== 'dispatching' || value.deadline_at <= Date.now()) return false
+              value.dispatch_authorized_at = Date.now()
+              return 'status'
+            })
+            if (!claimed) throw new ExternalProviderError(409, 'DISPATCH_DEADLINE')
+          })
+          controller.signal.throwIfAborted()
+          submitted = true
+        },
+      }, async observation => {
         await this.store.mutate(id, current => {
-          current.status = 'running'; current.raw_answer = progress.raw; current.provider_refs = progress.refs
-          current.answer = decodeOutput(progress.raw, binding.decoder).answer
+          current.status = 'running'; current.raw_answer = observation.text
+          current.provider_refs = {
+            ...(observation.provider_refs.session_id ? { conversation_id: observation.provider_refs.session_id } : {}),
+            ...(observation.provider_refs.message_id ? { message_id: observation.provider_refs.message_id } : {}),
+            ...(observation.provider_refs.provider_task_id ? { task_id: observation.provider_refs.provider_task_id } : {}),
+            ...(observation.provider_refs.provider_workflow_run_id ? { workflow_run_id: observation.provider_refs.provider_workflow_run_id } : {}),
+          }
+          current.answer = decodeOutput(observation.text, binding.decoder).answer
           return 'answer'
         })
       })
-      const decoded = decodeOutput(result.raw, binding.decoder, true)
-      await this.store.mutate(id, current => {
-        current.status = 'succeeded'; current.raw_answer = result.raw; current.answer = decoded.answer
-        current.output_status = decoded.valid ? 'valid' : 'invalid'; current.provider_refs = result.refs
-        return 'answer'
+      const decoded = decodeOutput(result.text, binding.decoder, true)
+      await this.store.db.transaction(async () => {
+        const completed = await this.store.mutate(id, current => {
+          current.status = result.status; current.raw_answer = result.text; current.answer = decoded.answer
+          current.output_status = decoded.valid ? 'valid' : 'invalid'
+          return 'answer'
+        })
+        if (completed) await this.store.saveRunBinding(actor, result.binding)
       })
     } catch (error) {
       const code = error instanceof ExternalProviderError ? error.code : submitted ? 'EXECUTION_UNCONFIRMED' : 'PROVIDER_PREFLIGHT_FAILED'

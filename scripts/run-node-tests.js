@@ -13,6 +13,7 @@ const nodeTestFiles = [
   'src/server/nexus/agentNamespace.node-test.ts',
   'src/server/backends/scodeProxyConfig.node-test.ts',
   'src/server/externalProviders/externalProviders.node-test.ts',
+  'src/server/agentFederation/agentFederation.node-test.ts',
   'src/server/backends/cohostWorkspace.node-test.ts',
   'src/server/backends/cohostRecovery.node-test.ts',
   'src/server/backends/liveManagedExecution.node-test.ts',
