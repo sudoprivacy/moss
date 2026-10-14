@@ -1,0 +1,66 @@
+name: Managed browser acceptance
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/browser/**'
+      - 'src/server/browser/**'
+      - 'src/server/runtime/dockerCommand.ts'
+      - 'src/server/runtimeService.ts'
+      - 'src/server/server.ts'
+      - '.github/workflows/managed-browser.yml'
+  push:
+    branches: [dev]
+    paths:
+      - 'deploy/browser/**'
+      - 'src/server/browser/**'
+      - '.github/workflows/managed-browser.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-managed-profiles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: sudoprivacy/ai-dev-browser
+          ref: 740d0471942ea43f23927c0ed498eaa2175f4c50
+          path: adb-core
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: bun install --frozen-lockfile
+      - name: Build branded Chrome and private worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/browser-extension-signing.pem"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$key_file" 2>/dev/null
+          chmod 600 "$key_file"
+          docker build -f adb-core/deploy/managed-chrome/Dockerfile \
+            --secret "id=extension_key,src=$key_file" \
+            --build-arg SOURCE_REVISION=740d0471942ea43f23927c0ed498eaa2175f4c50 \
+            -t managed-browser-base:ci adb-core
+          docker build --build-arg ADB_BROWSER_IMAGE=managed-browser-base:ci \
+            -t managed-browser-worker:ci deploy/browser
+      - name: Verify isolated persistent profiles with actual Chrome
+        shell: bash
+        run: |
+          set -euo pipefail
+          export MOSS_BROWSER_IMAGE="$(docker image inspect managed-browser-worker:ci --format '{{.Id}}')"
+          export MOSS_BROWSER_SECRET="$(openssl rand -hex 32)"
+          export MOSS_BROWSER_LIVE_HOST="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
+          node --import tsx src/server/browser/browserWorkerRegistry.live.ts 2>&1 | tee "$RUNNER_TEMP/browser-profile-acceptance.log"
+      - name: Preserve acceptance result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-profile-acceptance
+          path: ${{ runner.temp }}/browser-profile-acceptance.log
+          if-no-files-found: ignore

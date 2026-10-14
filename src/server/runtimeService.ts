@@ -84,6 +84,8 @@ import { resolveRuntimeScodePath } from './runtimeScodePath.js'
 import { McpStore } from './mcp/db.js'
 import { createMcpUserConfigApi, type McpUserConfigApi } from './api/mcpUserConfig.js'
 import { resolveScodeMcpSettings } from './mcp/scodeMcpInjector.js'
+import { BrowserAgentCapabilities } from './browser/browserAgentCapability.js'
+import { managedBrowserConfigured } from './browser/browserWorkerRegistry.js'
 import { type McpAuthSecretsApi, type ConfigItemLike } from './mcp/authResolver.js'
 
 /** Bounded wait for a protocol-shutdown collection before falling back to fencing. */
@@ -446,6 +448,7 @@ export class RuntimeService {
   private readonly upgradingOwners = new Set<string>()
   readonly store: DirectConnectStore
   readonly authService: AuthService
+  readonly browserCapabilities = new BrowserAgentCapabilities()
   private readonly mcpStore: McpStore | null
   private readonly mcpUserConfig: McpUserConfigApi | null
   private readonly pendingEnsures = new Map<string, Promise<AttemptRecord>>()
@@ -1891,6 +1894,7 @@ export class RuntimeService {
       ...process.env as Record<string, string>,
       MOSS_DEFAULT_MODEL: defaultModel,
     }
+    for (const key of ['MOSS_BROWSER_GATEWAY_URL', 'MOSS_BROWSER_GATEWAY_TOKEN', 'MOSS_BROWSER_GATEWAY_AI_TOKEN', 'MOSS_BROWSER_SECRET']) delete runnerEnv[key]
     if (providerCatalog) {
       runnerEnv.MOSS_MODEL_PROVIDER_ID = providerCatalog.selection.provider.id
       runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
@@ -2311,6 +2315,16 @@ export class RuntimeService {
           err,
         )
       }
+    }
+
+    const browserAgentBase = process.env.MOSS_BROWSER_AGENT_BASE_URL
+    if (browserAgentBase && managedBrowserConfigured()) {
+      const url = new URL(`/api/v1/agent/browser/${encodeURIComponent(session.sessionId)}/mcp`, browserAgentBase)
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid browser agent gateway URL')
+      const token = this.browserCapabilities.issue({ orgId: session.orgId, userId: session.userId, sessionId: session.sessionId }, attempt.attemptId)
+      mcpSettings = { mcpServers: { ...mcpSettings?.mcpServers, 'sudowork-browser': {
+        type: 'http', url: url.href, headers: { Authorization: `Bearer ${token}` },
+      } } }
     }
 
     // A1: every session gets its own SUDO_CODE_CONFIG_HOME under runtimeDir so

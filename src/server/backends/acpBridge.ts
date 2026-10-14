@@ -315,8 +315,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const id = customId || `m-${rpcId++}`
     if (method === 'session/prompt') pendingPromptIds.add(id)
     const msg: SessionRpcMessage = { jsonrpc: '2.0', id, method, params }
-    const raw = JSON.stringify(msg) + '\n'
-    process.stderr.write(`[AcpBridge] Sending RPC: ${raw}`)
+    process.stderr.write(`[AcpBridge] Sending RPC: ${JSON.stringify({ id, method })}\n`)
     sendMessage(msg)
   }
 
@@ -341,8 +340,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const sendRpcAndWait = (method: string, params: any, customId?: string, timeoutMs = 30000): Promise<any> => {
     const id = customId || `m-${rpcId++}`
     const msg: SessionRpcMessage = { jsonrpc: '2.0', id, method, params }
-    const raw = JSON.stringify(msg) + '\n'
-    process.stderr.write(`[AcpBridge] Sending RPC (wait): ${raw}`)
+    process.stderr.write(`[AcpBridge] Sending RPC (wait): ${JSON.stringify({ id, method })}\n`)
     sendMessage(msg)
 
     return new Promise((resolve, reject) => {

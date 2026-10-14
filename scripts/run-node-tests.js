@@ -60,6 +60,8 @@ const nodeTestFiles = [
   'src/server/auth/localExecution.node-test.ts',
   'src/server/auth/userUpdateRoutes.node-test.ts',
   'src/server/backends/acpBridge.node-test.ts',
+  'src/server/browser/browserGateway.node-test.ts',
+  'src/server/browser/browserAgentCapability.node-test.ts',
   'src/server/backends/k8sBackend.node-test.ts',
   'src/server/backends/nexusAcpTransport.node-test.ts',
   'src/server/billing/billingCoordinator.node-test.ts',
