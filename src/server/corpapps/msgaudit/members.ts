@@ -14,7 +14,8 @@
  * Two phases, each guarded so they run once per day regardless of how
  * often pulling happens:
  *
- *   1. snapshot every room in rooms.json that has no photo for today
+ *   1. snapshot every room in the uploaded room list (roomList.ts) plus
+ *      rooms.json that has no photo for today
  *   2. once every room is photographed, diff against each room's previous
  *      photo and write one leaves file for the day
  *
@@ -123,8 +124,9 @@ export async function readLastUpdated(corpAppId: string): Promise<string | null>
 }
 
 /**
- * Mark a day as fully photographed. Written only after every room in
- * rooms.json has a snapshot, so it doubles as the gate for phase 2 — a
+ * Mark a day as fully photographed. Written only after every room in the
+ * snapshot set (uploaded list plus rooms.json) has a snapshot or a
+ * definitive "no roster" answer, so it doubles as the gate for phase 2 — a
  * partial day must not produce a departure list.
  */
 export async function writeLastUpdated(corpAppId: string, date: string): Promise<void> {
@@ -257,10 +259,42 @@ export async function writeLeaves(
 }
 
 /**
+ * Phase 2: compute and write one day's departure list.
+ *
+ * Call only once the day is fully photographed (readLastUpdated === date)
+ * and no leaves file exists yet. Always writes, even when nobody left: an
+ * empty file means "computed, nothing found", a missing one "not computed".
+ * Returns the number of departures found.
+ */
+export async function computeAndWriteLeaves(
+  corpAppId: string,
+  roomIds: string[],
+  date: string,
+): Promise<number> {
+  const records: LeaveRecord[] = []
+  let leaveCount = 0
+  for (const roomId of roomIds) {
+    const current = await readSnapshot(corpAppId, roomId, date)
+    if (!current) continue
+    const prev = await previousSnapshot(corpAppId, roomId, date)
+    const gone = prev ? diffExternalLeaves(prev, current) : []
+    records.push({
+      roomid: roomId,
+      currentDate: date,
+      previousDate: prev ? prev.date : null,
+      leaves: gone,
+    })
+    leaveCount += gone.length
+  }
+  await writeLeaves(corpAppId, date, records)
+  return leaveCount
+}
+
+/**
  * Whether today's snapshot for this room has already been taken.
  *
- * Membership is photographed once a day; pulls run every few minutes, so
- * without this the roster would be fetched ~288 times a day per room.
+ * Membership is photographed once a day; the snapshot worker ticks every
+ * few minutes, so without this the roster would be fetched on every tick.
  */
 export async function snapshotExists(
   corpAppId: string,

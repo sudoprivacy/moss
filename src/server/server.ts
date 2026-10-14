@@ -184,6 +184,7 @@ import './corpapps/wecomMsgAudit.js'
 import { WeComMsgAuditConnector } from './corpapps/wecomMsgAudit.js'
 import { MsgAuditWorker } from './corpapps/msgaudit/worker.js'
 import { MediaPurgeWorker, type RetentionTarget } from './corpapps/msgaudit/purgeWorker.js'
+import { RosterSnapshotWorker, type SnapshotTarget } from './corpapps/msgaudit/snapshotWorker.js'
 import type { PullConfig as MsgAuditPullConfig } from './corpapps/msgaudit/puller.js'
 import { getUserProfile } from './api/userProfile.js'
 import { createConfigItemsApi } from './api/configItems.js'
@@ -2592,6 +2593,84 @@ export function startServer(
   )
   sourceSyncWorker.start()
 
+  // 企微会话存档 roster lookup, shared by the snapshot worker.
+  //
+  // Roster snapshots need the sibling self-built app: the 会话存档 SDK has no
+  // membership API. It is found by corpId — an archive instance and the app
+  // that can read its groups belong to the same corp by definition.
+  //
+  // The connector is built ONCE per call and reused for every room. Doing it
+  // per room (as the pull path once did) meant a fresh access_token fetch for
+  // each of 20,000 rooms, which WeCom rate-limits on its own.
+  //
+  // Returns null when no usable sibling app exists.
+  const resolveRosterLookup = async (
+    row: Record<string, unknown>,
+  ): Promise<SnapshotTarget['rosterLookup'] | null> => {
+    const { readSecret } = await import('./sources/secrets.js')
+    const archiveCfg = JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>
+    const appRow = runtime.store
+      .listAllCorpAppsByType('wecomapp')
+      .find(
+        (r) =>
+          String((r as Record<string, unknown>).org_id) === String(row.org_id) &&
+          String((r as Record<string, unknown>).app_key ?? '').split(':')[0] ===
+            String(archiveCfg.corpId ?? ''),
+      ) as Record<string, unknown> | undefined
+    if (!appRow) return null
+    const { createCorpApp } = await import('./corpapps/types.js')
+    const appCfg = JSON.parse(String(appRow.config_json ?? '{}')) as Record<string, unknown>
+    const appCreds =
+      typeof appRow.credentials_secret_key === 'string' && appRow.credentials_secret_key
+        ? await readSecret(appRow.credentials_secret_key)
+        : {}
+    const appConn = createCorpApp(String(appRow.type))
+    await appConn.init(appCfg, appCreds)
+    if (!appConn.getCustomerGroup) return null
+    return async (roomId: string) => {
+      try {
+        // `needName` on: the same response then carries the group's name and
+        // each member's display name. Nothing else can supply them cheaply —
+        // `groupchat/list` omits names, and an internal userid is not
+        // resolvable by this app through the directory (`/cgi-bin/user/get`
+        // answers 48002). Asking later would cost one detail call per room
+        // per report; asking here is free, because this call already
+        // happens once per room per day.
+        const r = await appConn.getCustomerGroup!(roomId, true)
+        const g = (r.group_chat ?? r) as Record<string, unknown>
+        const list = (g.member_list as Record<string, unknown>[] | undefined) ?? []
+        const members: string[] = []
+        const memberNames: Record<string, string> = {}
+        for (const m of list) {
+          // type 1 members carry `userid`, type 2 an opaque
+          // `external_userid`; the archive records both as `from`.
+          const id =
+            (typeof m.userid === 'string' && m.userid) ||
+            (typeof m.external_userid === 'string' && m.external_userid) ||
+            ''
+          if (!id) continue
+          members.push(id)
+          if (typeof m.name === 'string' && m.name) memberNames[id] = m.name
+        }
+        if (members.length === 0) return null
+        const roomName = typeof g.name === 'string' && g.name ? g.name : undefined
+        return { members, roomName, memberNames }
+      } catch (err) {
+        // A definitive WeCom answer (internal group 90501, unknown or
+        // invisible chat 40003/60011, any other errcode) means this room has
+        // no roster to photograph today. Only throttling (45009) and
+        // transport or token failures are worth retrying — a retry can
+        // succeed for those. Swallowing them all as "no roster" would mark
+        // the day complete with photos missing, and phase 2 would then
+        // report phantom departures.
+        const m = err instanceof Error ? err.message : String(err)
+        const code = Number(/errcode=(\d+)/.exec(m)?.[1] ?? NaN)
+        if (Number.isFinite(code) && code !== 45009) return null
+        throw err
+      }
+    }
+  }
+
   // 企微会话存档: poll enabled archive instances for chat records.
   // Each pull runs in a forked child (the WeCom finance SDK is a native
   // .so whose crash is not catchable), and instances without pull
@@ -2610,70 +2689,6 @@ export function startServer(
         await connector.init(cfg, creds)
         const pull = connector.pullConfig(String(row.id))
         if (pull) {
-          // Display names come from a sibling self-built app: the 会话存档
-          // SDK has no directory API. The app is found by corpId rather
-          // than asked for by name — an archive instance and the app that
-          // can resolve its users belong to the same corp by definition,
-          // so making the admin name it would be busywork. Resolved
-          // lazily so a missing or IP-blocked app costs names, never the
-          // transcript itself.
-          // Roster snapshots need the sibling self-built app: the 会话存档
-          // SDK has no membership API. Found by corpId, same as the name
-          // lookups — an archive instance and the app that can read its
-          // groups belong to the same corp by definition.
-          // Flag travels over IPC; the function stays here (see pullChild).
-          pull.snapshotRosters = true
-          pull.rosterLookup = async (roomId: string) => {
-            try {
-              const appRow = runtime.store
-                .listAllCorpAppsByType('wecomapp')
-                .find(
-                  (r) =>
-                    String((r as Record<string, unknown>).org_id) === String(row.org_id) &&
-                    String((r as Record<string, unknown>).app_key ?? '').split(':')[0] ===
-                      String(JSON.parse(String(row.config_json ?? '{}')).corpId ?? ''),
-                ) as Record<string, unknown> | undefined
-              if (!appRow) return null
-              const { createCorpApp } = await import('./corpapps/types.js')
-              const appCfg = JSON.parse(String(appRow.config_json ?? '{}')) as Record<string, unknown>
-              const appCreds =
-                typeof appRow.credentials_secret_key === 'string' && appRow.credentials_secret_key
-                  ? await readSecret(appRow.credentials_secret_key)
-                  : {}
-              const appConn = createCorpApp(String(appRow.type))
-              await appConn.init(appCfg, appCreds)
-              if (!appConn.getCustomerGroup) return null
-              // `needName` on: the same response then carries the group's
-              // name and each member's display name. Nothing else can supply
-              // them cheaply — `groupchat/list` omits names, and an internal
-              // userid is not resolvable by this app through the directory
-              // (`/cgi-bin/user/get` answers 48002). Asking later would cost
-              // one detail call per room per report; asking here is free,
-              // because this call already happens once per room per day.
-              const r = await appConn.getCustomerGroup(roomId, true)
-              const g = (r.group_chat ?? r) as Record<string, unknown>
-              const list = (g.member_list as Record<string, unknown>[] | undefined) ?? []
-              const members: string[] = []
-              const memberNames: Record<string, string> = {}
-              for (const m of list) {
-                // type 1 members carry `userid`, type 2 an opaque
-                // `external_userid`; the archive records both as `from`.
-                const id =
-                  (typeof m.userid === 'string' && m.userid) ||
-                  (typeof m.external_userid === 'string' && m.external_userid) ||
-                  ''
-                if (!id) continue
-                members.push(id)
-                if (typeof m.name === 'string' && m.name) memberNames[id] = m.name
-              }
-              if (members.length === 0) return null
-              const roomName = typeof g.name === 'string' && g.name ? g.name : undefined
-              return { members, roomName, memberNames }
-            } catch {
-              // Internal groups answer 90501 here; no roster, no snapshot.
-              return null
-            }
-          }
           configs.push(pull)
         }
       } catch (err) {
@@ -2709,6 +2724,25 @@ export function startServer(
     return targets
   })
   msgAuditPurgeWorker.start()
+
+  // 企微会话存档: daily member snapshots (表三 member counts, 退群 detection).
+  // Its own worker so photographing tens of thousands of groups never
+  // delays archiving; the uploaded room list widens the set beyond groups
+  // that have spoken. See corpapps/msgaudit/snapshotWorker.ts.
+  const msgAuditSnapshotWorker = new RosterSnapshotWorker(async () => {
+    const targets: SnapshotTarget[] = []
+    for (const row of runtime.store.listAllCorpAppsByType('wecommsgaudit')) {
+      try {
+        const rosterLookup = await resolveRosterLookup(row as Record<string, unknown>)
+        if (rosterLookup) targets.push({ corpAppId: String(row.id), rosterLookup })
+        else console.warn(`[msgaudit-snapshot] ${row.id}: no usable 自建应用 for this corpId; snapshots skipped`)
+      } catch (err) {
+        console.error(`[msgaudit-snapshot] skip instance ${row.id}:`, err instanceof Error ? err.message : err)
+      }
+    }
+    return targets
+  })
+  msgAuditSnapshotWorker.start()
 
   // Start cron service for scheduled task execution
   cronService.start().catch(err => {
@@ -11550,6 +11584,7 @@ export function startServer(
       wss.close()
       msgAuditWorker.stop()
       msgAuditPurgeWorker.stop()
+      msgAuditSnapshotWorker.stop()
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {
           callbackServer!.close(() => resolveClose())
