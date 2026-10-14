@@ -30,6 +30,7 @@ import { externalAgentError } from '@/lib/external-agent-errors'
 const selectClass = 'h-9 w-full rounded-md border bg-background px-3 text-sm'
 const initialDraft = (): OnboardExternalAgent => ({
   request_id: crypto.randomUUID(),
+  provider_kind: 'dify',
   endpoint: '',
   api_key: '',
   name: '',
@@ -139,7 +140,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
     setReviewDays(7)
     setDraft(
       next.kind === 'edit'
-        ? { ...initialDraft(), ...next.agent, api_key: '', source_definition: '' }
+        ? { ...initialDraft(), ...next.agent, provider_kind: next.agent.provider as 'dify' | 'custom_http', api_key: '', source_definition: '' }
         : { ...initialDraft(), endpoint: policy.endpoints[0] ?? '' },
     )
     setIsPolicyEnabled(policy.enabled)
@@ -151,19 +152,20 @@ function ScopedExternalAgents({ query }: { query: string }) {
     setDraft((current) => ({ ...current, source_definition: '' }))
     setFileName('')
     if (!file) return
-    if (file.size > 256000) {
-      setError(externalAgentError(new Error('DEFINITION_TOO_LARGE')))
+    if (file.size > (draft.provider_kind === 'custom_http' ? 65536 : 256000)) {
+      setError(externalAgentError(new Error(draft.provider_kind === 'custom_http' ? 'MANIFEST_TOO_LARGE' : 'DEFINITION_TOO_LARGE')))
       return
     }
     try {
       const source = await file.text()
       if (!isLive() || fileGeneration.current !== generation) return
-      setDraft((current) => ({ ...current, source_definition: source }))
+      const manifest = draft.provider_kind === 'custom_http' ? JSON.parse(source) as { external_agent_id?: unknown; name?: unknown } : null
+      setDraft((current) => ({ ...current, source_definition: source, ...(manifest ? { app_id: typeof manifest.external_agent_id === 'string' ? manifest.external_agent_id : '', workspace_id: 'custom-http', name: current.name || (typeof manifest.name === 'string' ? manifest.name : '') } : {}) }))
       setFileName(file.name)
       setError('')
     } catch {
       if (isLive() && fileGeneration.current === generation)
-        setError(externalAgentError(new Error('DEFINITION_READ_FAILED')))
+        setError(externalAgentError(new Error(draft.provider_kind === 'custom_http' ? 'INVALID_CUSTOM_MANIFEST' : 'DEFINITION_READ_FAILED')))
     }
   }
   const isMetadataReady = Boolean(draft.name.trim() && draft.allowed_user_ids.length && draft.review_note.trim())
@@ -173,7 +175,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
     isBusy ||
     (dialog?.kind === 'create'
       ? step === 0
-        ? !draft.endpoint || !draft.api_key.trim()
+        ? !draft.endpoint || !draft.api_key.trim() || (draft.provider_kind === 'custom_http' && !draft.source_definition)
         : !isDefinitionReady
       : dialog?.kind === 'edit'
         ? !isMetadataReady || (dialog.agent.definition_evidence === 'digest_only' && !draft.source_definition)
@@ -185,7 +187,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
     if (!dialog || isConfirmDisabled) return
     await onRun(async () => {
       if (dialog.kind === 'create' && step === 0) {
-        const inspection = await api.inspect({ endpoint: draft.endpoint, api_key: draft.api_key })
+        const inspection = await api.inspect({ endpoint: draft.endpoint, api_key: draft.api_key, provider_kind: draft.provider_kind, ...(draft.provider_kind === 'custom_http' ? { source_definition: draft.source_definition } : {}) })
         if (!isLive()) return
         setDraft((current) => ({ ...current, name: current.name || inspection.name }))
         setStep(1)
@@ -377,7 +379,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
         <Feedback error>凭据服务不可用，请检查 Moss 的 Nexus Secret 服务。</Feedback>
       ) : null}
       {access?.can_manage && !policy.enabled && !access.can_manage_policy ? (
-        <Feedback>请平台管理员为当前组织启用试点并配置允许的 Dify 服务地址。</Feedback>
+        <Feedback>请平台管理员为当前组织启用试点并配置允许的外部服务地址。</Feedback>
       ) : null}
       {access?.can_manage ? <UnknownExternalTasks api={api} /> : null}
       {error && !dialog ? <Feedback error>{error}</Feedback> : null}
@@ -390,7 +392,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
               <div className="flex items-start justify-between gap-3">
                 <h4 className="font-semibold">{agent.name}</h4>
                 <div className="flex shrink-0 gap-2">
-                  <Badge variant="outline">Dify</Badge>
+                  <Badge variant="outline">{agent.provider === 'custom_http' ? '自研 HTTP' : 'Dify'}</Badge>
                   <Badge variant={isPublished ? 'default' : 'secondary'}>
                     {isPublished ? '已发布' : agent.approved ? '审核已到期' : '未发布'}
                   </Badge>
@@ -418,10 +420,9 @@ function ScopedExternalAgents({ query }: { query: string }) {
               <details className="text-sm">
                 <summary className="cursor-pointer text-muted-foreground">接入详情</summary>
                 <dl className="mt-2 space-y-1 break-all text-xs">
-                  <dt>App ID</dt>
+                  <dt>{agent.provider === 'custom_http' ? '服务智能体标识' : 'App ID'}</dt>
                   <dd>{agent.app_id}</dd>
-                  <dt>Workspace ID</dt>
-                  <dd>{agent.workspace_id}</dd>
+                  {agent.provider !== 'custom_http' ? <><dt>Workspace ID</dt><dd>{agent.workspace_id}</dd></> : null}
                   <dt>定义摘要</dt>
                   <dd>{agent.source_digest}</dd>
                   <dt>审核说明</dt>
@@ -504,7 +505,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
               {selected?.name ||
                 (dialog?.kind === 'policy'
                   ? '网络接入范围由平台管理员维护，组织管理员负责本组织的接入和发布。'
-                  : '将已发布的 Dify 应用接入当前组织。仅用于已审核的合成数据试点。')}
+                  : '将已发布的外部智能体接入当前组织。仅用于已审核的合成数据试点。')}
             </DialogDescription>
           </DialogHeader>
           {error ? <Feedback error>{error}</Feedback> : null}
@@ -517,11 +518,22 @@ function ScopedExternalAgents({ query }: { query: string }) {
                 {step === 0 ? (
                   <>
                     <Field id="external-provider" label="执行平台">
-                      <select id="external-provider" className={selectClass} value="dify" onChange={() => {}}>
-                        <option value="dify">外部托管 / Dify</option>
+                      <select id="external-provider" className={selectClass} value={draft.provider_kind ?? 'dify'} onChange={(event) => {
+                        fileGeneration.current++
+                        setFileName('')
+                        setDraft({ ...draft, provider_kind: event.target.value as 'dify' | 'custom_http', source_definition: '', app_id: '', workspace_id: '', name: '' })
+                      }}>
+                        <option value="dify">Dify</option>
+                        <option value="custom_http">自研 HTTP（Custom Manifest）</option>
                       </select>
                     </Field>
-                    <Field id="external-endpoint" label="Dify API 地址">
+                    {draft.provider_kind === 'custom_http' ? (
+                      <Field id="external-manifest" label="接入说明文件（Manifest）" hint="上传服务提供的 JSON 接入文件，最大 64 KB。测试连接会核对服务当前说明与文件是否一致。">
+                        <Input id="external-manifest" type="file" accept=".json" onChange={(event) => void onFile(event.target.files?.[0])} />
+                        {fileName ? <p className="text-xs text-muted-foreground">已读取：{fileName}</p> : null}
+                      </Field>
+                    ) : null}
+                    <Field id="external-endpoint" label="服务 API 地址">
                       <select
                         id="external-endpoint"
                         className={selectClass}
@@ -537,8 +549,8 @@ function ScopedExternalAgents({ query }: { query: string }) {
                     </Field>
                     <Field
                       id="external-api-key"
-                      label="Dify App API Key"
-                      hint="在 Dify 应用的“访问 API”页面获取。保存后加密存储，不会回显。"
+                      label="服务 API Key"
+                      hint={draft.provider_kind === 'custom_http' ? '使用服务提供的访问密钥。保存后加密存储，不会回显。' : '在 Dify 应用的“访问 API”页面获取。保存后加密存储，不会回显。'}
                     >
                       <Input
                         id="external-api-key"
@@ -551,6 +563,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                   </>
                 ) : (
                   <>
+                    {draft.provider_kind === 'custom_http' ? <Feedback>已核对接入说明。服务智能体：{draft.app_id}。此接入仅返回最终文本结果。</Feedback> : <>
                     <div className="grid gap-4 sm:grid-cols-2">
                       <Field id="external-app-id" label="Dify App ID">
                         <Input
@@ -580,6 +593,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                       />
                       {fileName ? <p className="text-xs text-muted-foreground">已读取：{fileName}</p> : null}
                     </Field>
+                    </>}
                     {metadataFields}
                   </>
                 )}
@@ -588,7 +602,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
             {dialog?.kind === 'edit' ? (
               <>
                 <Feedback>保存会撤销发布状态，需重新审核后才能执行新任务。</Feedback>
-                <Field id="external-definition-update" label="重新上传应用定义" hint="旧定义需重新上传；已核验定义可留空保留。文件必须包含工作流功能配置，且需人工核对当前 Dify 发布内容。">
+                <Field id="external-definition-update" label="重新上传应用定义" hint={draft.provider_kind === 'custom_http' ? '上传更新的 JSON Manifest，服务智能体标识必须保持不变。留空保留当前说明；保存后需要重新审核。' : '旧定义需重新上传；已核验定义可留空保留。文件必须包含工作流功能配置，且需人工核对当前 Dify 发布内容。'}>
                   <Input id="external-definition-update" type="file" accept=".yaml,.yml,.json" onChange={(event) => void onFile(event.target.files?.[0])} />
                   {fileName ? <p className="text-xs text-muted-foreground">已读取：{fileName}</p> : null}
                 </Field>
@@ -598,7 +612,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
             {dialog?.kind === 'rotate' ? (
               <>
                 <Feedback>验证新密钥后将停用此智能体并替换凭据。完成后需重新审核发布。</Feedback>
-                <Field id="external-new-key" label="新的 Dify App API Key">
+                <Field id="external-new-key" label="新的服务 API Key">
                   <Input
                     id="external-new-key"
                     type="password"
@@ -617,7 +631,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                 </label>
                 <Field
                   id="external-policy-endpoints"
-                  label="允许的 Dify API 地址"
+                  label="允许的服务 API 地址"
                   hint="每行一个完整固定 IP 地址，以 /v1 结尾。"
                 >
                   <Textarea
@@ -631,7 +645,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
             {dialog?.kind === 'approve' ? (
               <>
                 <p className="text-sm">
-                  请核对定义与 Dify 当前发布版本一致，并确认授权用户。发布后这些用户可发起任务。
+                  请核对定义与外部平台当前发布内容一致，并确认授权用户。发布后这些用户可发起任务。
                 </p>
                 <div className="space-y-2 rounded-md bg-muted/40 p-3 text-sm">
                   <p>{selected?.review_note}</p>
@@ -661,7 +675,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
               </>
             ) : null}
             {dialog?.kind === 'disable' ? (
-              <p className="text-sm">停用将阻止新任务，已发往 Dify 的任务不会因此取消。既有会话保留。</p>
+              <p className="text-sm">停用将阻止新任务，已发往外部平台的任务不会因此取消。既有会话保留。</p>
             ) : null}
             {dialog?.kind === 'archive' ? (
               <p className="text-sm">归档后智能体将退出接入目录，无法再发起任务。既有会话和加密凭据保留。</p>
@@ -741,7 +755,7 @@ function UnknownExternalTasks({ api }: { api: ReturnType<typeof createExternalAg
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        结果未知的任务不会自动重发。请在 Dify
+        结果未知的任务不会自动重发。请在外部平台
         核对运行记录后填写结论并关闭本地会话；此操作不会取消远端任务或将其标记为成功。
       </p>
       {error ? <Feedback error>{error}</Feedback> : null}

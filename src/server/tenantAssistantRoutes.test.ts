@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile, symlink } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'
 import { getDefaultServerConfig } from './config.js'
@@ -67,6 +67,7 @@ async function startFixture(publicBaseUrl = ''): Promise<TenantFixture> {
   const configPath = join(rootDir, 'server.json')
   await writeFile(configPath, JSON.stringify(config), 'utf8')
 
+  await symlink(resolve(import.meta.dir, '../../node_modules'), join(rootDir, 'node_modules'), 'junction')
   const fixtureOutputDir = join(rootDir, 'fixture-build')
   const fixturePath = resolve(import.meta.dir, 'tenantAssistantRoutes.fixture.ts')
   const bundle = Bun.spawnSync([
@@ -75,6 +76,7 @@ async function startFixture(publicBaseUrl = ''): Promise<TenantFixture> {
     '--format=esm',
     '--outdir', fixtureOutputDir,
     '--external=better-sqlite3',
+    '--external=@sudo/contracts/common/v1/resource-ref',
     '--external=@xenova/transformers',
     '--external=onnxruntime-node',
     '--external=sharp',

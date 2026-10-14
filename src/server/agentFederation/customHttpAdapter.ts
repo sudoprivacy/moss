@@ -38,15 +38,22 @@ export class CustomHttpAdapter implements ProviderAdapter {
     this.reviewed = { manifest, digest: reviewed.digest }
   }
 
+  async inspect(endpoint: string, key: string, signal: AbortSignal) {
+    const remote = await this.request(`${endpoint}/agents/${encodeURIComponent(this.reviewed.manifest.external_agent_id)}/manifest`, {
+      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' }, redirect: 'error', signal,
+    })
+    if (!remote.ok) { await remote.body?.cancel(); throw new ExternalProviderError(502, 'PROVIDER_PREFLIGHT_FAILED') }
+    const current = parseCustomManifest(JSON.stringify(await readJson(remote, 64 * 1024)))
+    if (customManifestDigest(current) !== this.reviewed.digest) throw new ExternalProviderError(409, 'PROVIDER_SOURCE_CHANGED')
+    return { name: current.name, parameters_digest: this.reviewed.digest, checked_at: Date.now() }
+  }
+
   async invoke(input: ProviderInvocation, observe: (event: ProviderObservation) => Promise<void>) {
     const { endpoint, signal } = invocationContext(input)
     if (input.external_agent_id !== this.reviewed.manifest.external_agent_id || input.source_digest !== this.reviewed.digest) throw new ExternalProviderError(409, 'MANIFEST_BINDING_MISMATCH')
     const headers = { Authorization: `Bearer ${input.key}`, Accept: 'application/json' }
     // Fetch source metadata only. An import never follows endpoints or executes source content.
-    const remote = await this.request(`${endpoint}/agents/${encodeURIComponent(input.external_agent_id)}/manifest`, { headers, redirect: 'error', signal })
-    if (!remote.ok) { await remote.body?.cancel(); throw new ExternalProviderError(502, 'PROVIDER_PREFLIGHT_FAILED') }
-    const current = parseCustomManifest(JSON.stringify(await readJson(remote, 64 * 1024)))
-    if (customManifestDigest(current) !== this.reviewed.digest) throw new ExternalProviderError(409, 'PROVIDER_SOURCE_CHANGED')
+    await this.inspect(endpoint, input.key, signal)
     signal.throwIfAborted()
     const body: InvokeHttpAgent = {
       api_version: AGENT_HTTP_API, kind: 'InvokeAgent', invocation_id: input.attempt_id,

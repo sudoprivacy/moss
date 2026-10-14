@@ -9,7 +9,10 @@ import { ExternalTaskStore, digest, type Binding, type ExternalActor } from './s
 import { ExternalProviderError, assertPilot, parseRegistration, type PilotPolicy } from './policy.js'
 import { DifyPilotTransport } from './difyTransport.js'
 import { decodeOutput } from './decoder.js'
+import { CustomHttpAdapter } from '../agentFederation/customHttpAdapter.js'
+import { providerDefinition } from './providerDefinition.js'
 import { DifyGatewayAdapter } from '../agentFederation/difyAdapter.js'
+import { admitExternalTask } from '../agentFederation/taskIngress.js'
 
 export class ExternalProviderService {
   private readonly timer: ReturnType<typeof setInterval>
@@ -50,14 +53,15 @@ export class ExternalProviderService {
 
   async register(actor: ExternalActor, input: unknown): Promise<ExternalAgent> {
     await this.authorize(actor)
-    const body = object(input, ['request_id', 'source_definition', 'name', 'endpoint', 'app_id', 'workspace_id', 'credential_ref', 'source_digest', 'decoder', 'allowed_user_ids', 'review_expires_at', 'review_note'])
+    const body = object(input, ['provider_kind', 'request_id', 'source_definition', 'name', 'endpoint', 'app_id', 'workspace_id', 'credential_ref', 'source_digest', 'decoder', 'allowed_user_ids', 'review_expires_at', 'review_note'])
     const { request_id, source_definition, ...registration } = body
     if (typeof request_id !== 'string' || !/^[\w-]{8,128}$/.test(request_id)) throw new ExternalProviderError(400, 'INVALID_REQUEST_ID')
-    const sourceDigest = definitionDigest(source_definition)
+    const source = providerDefinition(body.provider_kind, source_definition, registration.app_id as string)
+    const sourceDigest = source.source_digest
     if (registration.source_digest !== sourceDigest) throw new ExternalProviderError(400, 'DEFINITION_DIGEST_MISMATCH')
     const definition = parseRegistration(registration, actor.orgId, await this.administration.effectivePolicy(actor))
     for (const userId of definition.allowed_user_ids) await this.authorize({ orgId: actor.orgId, userId })
-    const binding: Binding = { ...definition, id: randomUUID(), orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'reference_compat' }
+    const binding: Binding = { ...definition, ...source, id: randomUUID(), orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'reference_compat' }
     await this.store.ready
     const requestHash = digest(JSON.stringify(definition, Object.keys(definition).sort()))
     return this.store.db.transaction(async () => {
@@ -67,8 +71,8 @@ export class ExternalProviderService {
         if (existing?.request_hash !== requestHash) throw new ExternalProviderError(409, 'IDEMPOTENCY_CONFLICT')
         return this.describe(await this.store.binding(actor, JSON.parse(String(existing.document)).bindingId))
       }
-      await this.options.identities.putIntegrationConnection({ id: binding.connectionId, orgId: actor.orgId, providerType: 'dify', name: binding.name, enabled: true, secretRef: binding.credential_ref, config: { executionMode: 'external_hosted', baseUrl: binding.endpoint, tenantId: binding.workspace_id } })
-      await this.options.catalog.createAgent({ id: binding.id, orgId: actor.orgId, name: binding.name, authorId: actor.userId, providerType: 'dify', supportedModes: 'cloud', status: 'pending', visibleTo: { user_ids: binding.allowed_user_ids }, providerBinding: { executionMode: 'external_hosted', bindingId: binding.id, connectionId: binding.connectionId, appId: binding.app_id, sourceDigest: binding.source_digest } })
+      await this.options.identities.putIntegrationConnection({ id: binding.connectionId, orgId: actor.orgId, providerType: binding.provider_kind ?? 'dify', name: binding.name, enabled: true, secretRef: binding.credential_ref, config: { executionMode: 'external_hosted', baseUrl: binding.endpoint, tenantId: binding.workspace_id } })
+      await this.options.catalog.createAgent({ id: binding.id, orgId: actor.orgId, name: binding.name, authorId: actor.userId, providerType: binding.provider_kind ?? 'dify', supportedModes: 'cloud', status: 'pending', visibleTo: { user_ids: binding.allowed_user_ids }, providerBinding: { executionMode: 'external_hosted', bindingId: binding.id, connectionId: binding.connectionId, appId: binding.app_id, sourceDigest: binding.source_digest } })
       await this.store.saveBinding(binding)
       await this.administration.audit(actor, 'agent.reference_registered', binding.id)
       return this.describe(binding)
@@ -95,7 +99,7 @@ export class ExternalProviderService {
       const secret = await this.secret(binding)
       credentialVersion = secret.version
       const key = secret.value
-      parametersDigest = await this.transport.parameters(binding.endpoint, key, AbortSignal.timeout(10_000))
+      parametersDigest = await this.administration.parameters(binding, key, AbortSignal.timeout(10_000))
     }
     return this.administration.change(actor, id, revision, approved ? 'agent.approved' : 'agent.disabled', async current => {
       if (current.credentialUpdating) throw new ExternalProviderError(409, 'CREDENTIAL_UPDATE_IN_PROGRESS')
@@ -113,7 +117,7 @@ export class ExternalProviderService {
     const bindings = await this.store.bindings(actor)
     const [agents, connections] = await Promise.all([
       this.options.catalog.getOrganizationAgentsByIds(actor.orgId, bindings.map(binding => binding.id)),
-      this.options.identities.listIntegrationConnections(actor.orgId, 'dify'),
+      this.options.identities.listIntegrationConnections(actor.orgId),
     ])
     const context = { policy: effectivePolicy, agents: new Map(agents.map(agent => [agent.id, agent])), connections: new Map(connections.map(connection => [connection.id, connection])) }
     const result: ExternalAgent[] = []
@@ -125,10 +129,20 @@ export class ExternalProviderService {
 
   async create(actor: ExternalActor, input: unknown) {
     await this.authorize(actor)
-    const request = this.parseTask(input)
-    const binding = await this.store.binding(actor, request.agent_id)
-    await this.executable(actor, binding)
-    const task = await this.store.create(actor, request, binding, this.options.policy.timeoutMs)
+    let task
+    if (input && typeof input === 'object' && 'api_version' in input) {
+      task = await admitExternalTask(this.store, actor, input, {
+        lockPolicy: () => this.administration.lockPolicy(actor),
+        policy: () => this.administration.policy(actor),
+        executable: binding => this.executable(actor, binding),
+        timeoutMs: this.options.policy.timeoutMs,
+      })
+    } else {
+      const request = this.parseTask(input)
+      const binding = await this.store.binding(actor, request.agent_id)
+      await this.executable(actor, binding)
+      task = await this.store.create(actor, request, binding, this.options.policy.timeoutMs)
+    }
     if (task.status === 'accepted' && !this.executions.has(task.id)) {
       const execution = this.execute(actor, task.id).catch(() => { /* Persisted dispatch intent is expired to unknown if the DB is unavailable. */ }).finally(() => this.executions.delete(task.id))
       this.executions.set(task.id, execution)
@@ -144,7 +158,7 @@ export class ExternalProviderService {
     // A durable CAS wins dispatch once across processes; never replay a claimed attempt.
     const task = await this.store.mutate(id, current => {
       if (current.status !== 'accepted' || current.deadline_at <= Date.now()) return false
-      current.status = 'dispatching'; current.attempt_id = randomUUID(); return 'status'
+      current.status = 'dispatching'; current.attempt_id ??= randomUUID(); return 'status'
     })
     if (!task) return
     const controller = new AbortController()
@@ -160,7 +174,10 @@ export class ExternalProviderService {
       if (binding.credentialVersion !== secret.version) throw new ExternalProviderError(409, 'CREDENTIAL_CHANGED')
       const key = secret.value
       const session = await this.store.session(actor, task.session_id)
-      const adapter = new DifyGatewayAdapter(binding.parametersDigest!, this.transport)
+      if (binding.provider_kind === 'custom_http' && !binding.sourceManifest) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
+      const adapter = binding.provider_kind === 'custom_http'
+        ? new CustomHttpAdapter({ manifest: binding.sourceManifest!, digest: binding.source_digest }, this.options.httpRequest)
+        : new DifyGatewayAdapter(binding.parametersDigest!, this.transport)
       const result = await adapter.invoke({
         task_id: task.id, attempt_id: task.attempt_id!, session_id: task.session_id,
         binding_id: binding.id, external_agent_id: binding.app_id, source_digest: binding.source_digest,
@@ -190,6 +207,7 @@ export class ExternalProviderService {
         await this.store.mutate(id, current => {
           current.status = 'running'; current.raw_answer = observation.text
           current.provider_refs = {
+            ...(observation.provider_refs.run_id ? { run_id: observation.provider_refs.run_id } : {}),
             ...(observation.provider_refs.session_id ? { conversation_id: observation.provider_refs.session_id } : {}),
             ...(observation.provider_refs.message_id ? { message_id: observation.provider_refs.message_id } : {}),
             ...(observation.provider_refs.provider_task_id ? { task_id: observation.provider_refs.provider_task_id } : {}),
@@ -211,7 +229,7 @@ export class ExternalProviderService {
     } catch (error) {
       const code = error instanceof ExternalProviderError ? error.code : submitted ? 'EXECUTION_UNCONFIRMED' : 'PROVIDER_PREFLIGHT_FAILED'
       await this.store.mutate(id, current => {
-        current.status = !submitted || code === 'PROVIDER_REJECTED' ? 'rejected' : code === 'PROVIDER_WORKFLOW_FAILED' ? 'failed' : 'unknown'
+        current.status = !submitted || code === 'PROVIDER_REJECTED' ? current.task_contract_version ? 'failed' : 'rejected' : code === 'PROVIDER_WORKFLOW_FAILED' ? 'failed' : 'unknown'
         current.error_code = code
         return 'status'
       })
@@ -223,10 +241,10 @@ export class ExternalProviderService {
     assertPilot(context?.policy ?? await this.administration.effectivePolicy(actor), actor.orgId, binding.endpoint)
     if (binding.archived || binding.credentialUpdating || binding.credentialRecoveryRequired || !binding.approved || !binding.parametersDigest || binding.review_expires_at <= Date.now() || !binding.allowed_user_ids.includes(actor.userId)) throw new ExternalProviderError(403, 'AGENT_NOT_APPROVED_FOR_USER')
     const catalog = context ? context.agents.get(binding.id) : await this.options.catalog.getAgent(binding.id, actor.orgId)
-    if (!catalog?.enabled || catalog.status !== 'approved' || catalog.providerType !== 'dify' || catalog.providerBinding?.executionMode !== 'external_hosted' || catalog.providerBinding?.bindingId !== binding.id || catalog.providerBinding?.sourceDigest !== binding.source_digest || catalog.providerBinding?.appId !== binding.app_id || catalog.providerBinding?.connectionId !== binding.connectionId || Object.keys(catalog.visibleTo ?? {}).length !== 1 || JSON.stringify([...(catalog.visibleTo?.user_ids ?? [])].sort()) !== JSON.stringify([...binding.allowed_user_ids].sort())) throw new ExternalProviderError(403, 'AGENT_DISABLED_OR_CHANGED')
+    if (!catalog?.enabled || catalog.status !== 'approved' || catalog.providerType !== (binding.provider_kind ?? 'dify') || catalog.providerBinding?.executionMode !== 'external_hosted' || catalog.providerBinding?.bindingId !== binding.id || catalog.providerBinding?.sourceDigest !== binding.source_digest || catalog.providerBinding?.appId !== binding.app_id || catalog.providerBinding?.connectionId !== binding.connectionId || Object.keys(catalog.visibleTo ?? {}).length !== 1 || JSON.stringify([...(catalog.visibleTo?.user_ids ?? [])].sort()) !== JSON.stringify([...binding.allowed_user_ids].sort())) throw new ExternalProviderError(403, 'AGENT_DISABLED_OR_CHANGED')
     if (!context) return this.administration.assertCredentialUsable(actor, binding)
     const connection = context.connections.get(binding.connectionId)
-    if (!connection?.enabled || connection.orgId !== actor.orgId || connection.providerType !== 'dify' || connection.secretRef !== binding.credential_ref || connection.config.baseUrl !== binding.endpoint || connection.config.tenantId !== binding.workspace_id || connection.config.executionMode !== 'external_hosted') throw new ExternalProviderError(403, 'CONNECTION_DISABLED_OR_CHANGED')
+    if (!connection?.enabled || connection.orgId !== actor.orgId || connection.providerType !== (binding.provider_kind ?? 'dify') || connection.secretRef !== binding.credential_ref || connection.config.baseUrl !== binding.endpoint || connection.config.tenantId !== binding.workspace_id || connection.config.executionMode !== 'external_hosted') throw new ExternalProviderError(403, 'CONNECTION_DISABLED_OR_CHANGED')
   }
 
   private async secret(binding: Binding) {
@@ -237,11 +255,11 @@ export class ExternalProviderService {
   }
 
   private definition(binding: Binding) {
-    return { name: binding.name, endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, credential_ref: binding.credential_ref, source_digest: binding.source_digest, decoder: binding.decoder, allowed_user_ids: binding.allowed_user_ids, review_expires_at: binding.review_expires_at, review_note: binding.review_note }
+    return { ...(binding.provider_kind ? { provider_kind: binding.provider_kind } : {}), name: binding.name, endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, credential_ref: binding.credential_ref, source_digest: binding.source_digest, decoder: binding.decoder, allowed_user_ids: binding.allowed_user_ids, review_expires_at: binding.review_expires_at, review_note: binding.review_note }
   }
 
   private describe(binding: Binding): ExternalAgent {
-    return { id: binding.id, name: binding.name, provider: 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: { streaming: 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' } }
+    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: { streaming: binding.provider_kind === 'custom_http' ? 'unsupported' : 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' } }
   }
 
   private parseTask(value: unknown): CreateExternalTask {

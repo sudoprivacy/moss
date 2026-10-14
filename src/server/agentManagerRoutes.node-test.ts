@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
@@ -16,7 +16,8 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
     storage: { rootDir: root, dbPath: join(root, 'moss.db'), transcriptDir: join(root, 'transcripts'), runtimeDir: join(root, 'runtime') },
     wikiIndex: { enabled: false } }))
   const repo = resolve(import.meta.dirname, '../..')
-  execFileSync('bun', ['build', 'src/server/testing/agentManager.fixture.ts', '--target=node', '--format=esm',
+  await symlink(join(repo, 'node_modules'), join(root, 'node_modules'), 'junction')
+  execFileSync('bun', ['build', 'src/server/testing/agentManager.fixture.ts', '--target=node', '--format=esm', '--external=@sudo/contracts/common/v1/resource-ref',
     '--outfile', join(root, 'fixture.mjs'), '--external=sharp', '--external=@xenova/transformers', '--external=onnxruntime-node'],
   { cwd: repo, stdio: 'pipe' })
   const child = spawn(process.execPath, [join(root, 'fixture.mjs')], { cwd: repo,

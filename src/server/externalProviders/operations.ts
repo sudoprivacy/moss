@@ -56,9 +56,9 @@ export class CredentialOperations {
         binding.revision = (binding.revision ?? 1) + 1
       }
       binding = { ...binding, credential_ref: operation.targetRef, credentialVersion: secret.version, credentialUpdating: false, credentialRecoveryRequired: false, credentialOperationId: undefined, approved: false, parametersDigest: null, reviewedBy: null }
-      await this.options.identities.putIntegrationConnection({ id: binding.connectionId, orgId: binding.orgId, providerType: 'dify', name: binding.name, enabled: true, secretRef: binding.credential_ref, config: { executionMode: 'external_hosted', baseUrl: binding.endpoint, tenantId: binding.workspace_id } })
+      await this.options.identities.putIntegrationConnection({ id: binding.connectionId, orgId: binding.orgId, providerType: binding.provider_kind ?? 'dify', name: binding.name, enabled: true, secretRef: binding.credential_ref, config: { executionMode: 'external_hosted', baseUrl: binding.endpoint, tenantId: binding.workspace_id } })
       if (operation.kind === 'onboard') {
-        await this.options.catalog.createAgent({ id: binding.id, orgId: binding.orgId, name: binding.name, authorId: operation.actor.userId, providerType: 'dify', supportedModes: 'cloud', status: 'pending', visibleTo: { user_ids: binding.allowed_user_ids }, providerBinding: { executionMode: 'external_hosted', bindingId: binding.id, connectionId: binding.connectionId, appId: binding.app_id, sourceDigest: binding.source_digest } })
+        await this.options.catalog.createAgent({ id: binding.id, orgId: binding.orgId, name: binding.name, authorId: operation.actor.userId, providerType: binding.provider_kind ?? 'dify', supportedModes: 'cloud', status: 'pending', visibleTo: { user_ids: binding.allowed_user_ids }, providerBinding: { executionMode: 'external_hosted', bindingId: binding.id, connectionId: binding.connectionId, appId: binding.app_id, sourceDigest: binding.source_digest } })
       }
       await this.store.saveBinding(binding)
       await this.store.db.run("UPDATE external_pilot_operations SET status = 'complete' WHERE id = ?", [operation.id])

@@ -23,7 +23,7 @@ function addMissingColumns(
 export function ensureCatalogSchema(db: DatabaseSync): void {
   ensureOrganizationResourceSchema(db)
   addMissingColumns(db, 'tenant_assistants', [
-    ['provider_type', "provider_type TEXT NOT NULL DEFAULT 'moss_runtime' CHECK (provider_type IN ('local', 'moss_runtime', 'dify'))"],
+    ['provider_type', "provider_type TEXT NOT NULL DEFAULT 'moss_runtime' CHECK (provider_type IN ('local', 'moss_runtime', 'dify', 'custom_http'))"],
     ['provider_binding', 'provider_binding TEXT CHECK (provider_binding IS NULL OR json_valid(provider_binding))'],
     ['supported_modes', "supported_modes TEXT NOT NULL DEFAULT 'both' CHECK (supported_modes IN ('local', 'cloud', 'both'))"],
     ['availability', "availability TEXT NOT NULL DEFAULT 'organization' CHECK (availability IN ('organization', 'all', 'assigned'))"],
@@ -47,6 +47,23 @@ export function ensureCatalogSchema(db: DatabaseSync): void {
     ['core_features', 'core_features TEXT'],
     ['sort_order', 'sort_order INTEGER NOT NULL DEFAULT 0'],
   ])
+
+  const definition = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tenant_assistants'").get() as { sql: string }
+  if (!definition.sql.includes("'custom_http'")) {
+    // Replace the column-level CHECK atomically, retaining every catalog row.
+    db.exec('SAVEPOINT catalog_provider_upgrade')
+    try {
+      db.exec(`DROP INDEX IF EXISTS idx_tenant_assistants_provider;
+        ALTER TABLE tenant_assistants RENAME COLUMN provider_type TO provider_type_legacy;
+        ALTER TABLE tenant_assistants ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'moss_runtime' CHECK (provider_type IN ('local', 'moss_runtime', 'dify', 'custom_http'));
+        UPDATE tenant_assistants SET provider_type = provider_type_legacy;
+        ALTER TABLE tenant_assistants DROP COLUMN provider_type_legacy;`)
+      db.exec('RELEASE catalog_provider_upgrade')
+    } catch (error) {
+      db.exec('ROLLBACK TO catalog_provider_upgrade; RELEASE catalog_provider_upgrade')
+      throw error
+    }
+  }
 
   db.exec(`
     UPDATE tenant_assistants SET source_resource_id = id WHERE source_resource_id IS NULL;

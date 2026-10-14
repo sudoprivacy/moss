@@ -1,3 +1,6 @@
+import { TASK_API } from '../../../contracts/task/v1alpha1/contract.js'
+import { AGENT_FEDERATION_API, AGENT_HTTP_API } from '../../../contracts/agent-federation/v1alpha1/contract.js'
+import { HTTP_CAPABILITIES } from '../agentFederation/manifest.js'
 import { definitionDigest } from './definition.js'
 import { queryOnlyDefinition } from '../testing/externalProviderDefinitionFixture.js'
 import assert from 'node:assert/strict'
@@ -114,6 +117,35 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     assert.equal((await second.store.task(actor, incomplete.id)).status, 'unknown')
     assert.equal(await second.store.runBinding(actor, incomplete.id), null, 'Run binding and terminal task roll back together')
     assert.equal(calls.length, 2, 'Uncertain results are never automatically replayed')
+    // Exercise the new admission ledger through independent PG pools.
+    const manifest = { api_version: AGENT_FEDERATION_API, kind: 'CustomAgentManifest', provider_kind: 'custom_http', external_agent_id: 'http-helper', name: 'HTTP helper', source_revision: 'revision-1', execution_mode: 'external_hosted', protocol: AGENT_HTTP_API, input_profile: 'query_only_v1', output_profile: 'text_v1', capabilities: { ...HTTP_CAPABILITIES } }
+    let httpCalls = 0
+    for (const service of services) service.administration.options.httpRequest = async (url, init) => {
+      if (String(url).endsWith('/manifest')) return Response.json(manifest)
+      httpCalls++
+      const body = JSON.parse(String(init?.body))
+      return Response.json({ api_version: AGENT_HTTP_API, kind: 'AgentResult', invocation_id: body.invocation_id, provider_run_id: 'pg-http-run', status: 'succeeded', output: { text: '42' } })
+    }
+    const custom = await first.administration.onboard(actor, { ...input, request_id: randomUUID(), provider_kind: 'custom_http', app_id: manifest.external_agent_id, workspace_id: 'custom-http', source_definition: JSON.stringify(manifest) })
+    await second.review(actor, custom.id, true, custom.revision)
+    const submission = { api_version: TASK_API, kind: 'SubmitTask', agent: { catalog_id: custom.id }, request_source: 'api', input: { instruction: '6 * 7', resource_refs: [] }, workspace_refs: [], requested_mode: 'auto', data_classification: 'synthetic', required_capabilities: [], constraints: { idempotency_key: randomUUID() } }
+    const admitted = await Promise.all(Array.from({ length: 12 }, (_, i) => services[i % 2].create(actor, submission)))
+    assert.equal(new Set(admitted.map(task => task.id)).size, 1)
+    await Promise.all(services.map(service => service.waitForTask(admitted[0].id)))
+    assert.equal(httpCalls, 1)
+    assert.equal((await second.store.taskRecord(actor, admitted[0].id))?.resolution.status, 'accepted')
+    assert.equal((await second.store.task(actor, admitted[0].id)).answer, '42')
+    const rejected = await second.create(actor, { ...submission, data_classification: 'confidential', constraints: { idempotency_key: randomUUID() } })
+    assert.equal(rejected.status, 'rejected'); assert.equal(rejected.attempt_id, null)
+    assert.equal((await first.store.taskRecord(actor, rejected.id))?.resolution.status, 'rejected')
+    assert.equal(httpCalls, 1)
+    const ledgerCounts = async () => Promise.all(['product_task_records', 'external_pilot_tasks', 'external_pilot_sessions', 'external_pilot_attempts'].map(async table => Number((await drivers[1].get(`SELECT COUNT(*) AS count FROM ${table}`))!.count)))
+    const ledgerBefore = await ledgerCounts(), originalRun = drivers[0].run.bind(drivers[0])
+    drivers[0].run = async (sql, params) => { if (sql.startsWith('INSERT INTO product_task_records')) throw new Error('Synthetic admission write failure'); return originalRun(sql, params) }
+    try { await assert.rejects(first.create(actor, { ...submission, constraints: { idempotency_key: randomUUID() } }), /Synthetic admission write failure/) }
+    finally { drivers[0].run = originalRun }
+    assert.deepEqual(await ledgerCounts(), ledgerBefore)
+
   } finally {
     await Promise.allSettled(services.map(service => service.close()))
     await Promise.all(pools.map(pool => pool.end()))

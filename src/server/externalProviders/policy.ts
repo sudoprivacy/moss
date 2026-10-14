@@ -44,7 +44,7 @@ export function assertPilot(policy: PilotPolicy, orgId: string, endpoint?: strin
 export function parseRegistration(value: unknown, orgId: string, policy: PilotPolicy, now = Date.now()): RegisterExternalAgent {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ExternalProviderError(400, 'INVALID_BINDING')
   const input = value as Record<string, unknown>
-  const keys = ['name', 'endpoint', 'app_id', 'workspace_id', 'credential_ref', 'source_digest', 'decoder', 'allowed_user_ids', 'review_expires_at', 'review_note']
+  const keys = ['provider_kind', 'name', 'endpoint', 'app_id', 'workspace_id', 'credential_ref', 'source_digest', 'decoder', 'allowed_user_ids', 'review_expires_at', 'review_note']
   if (Object.keys(input).some(key => !keys.includes(key))) throw new ExternalProviderError(400, 'UNKNOWN_BINDING_FIELD')
   for (const key of ['name', 'endpoint', 'app_id', 'workspace_id', 'credential_ref', 'source_digest', 'review_note']) {
     if (typeof input[key] !== 'string' || !input[key].trim() || input[key].length > 1024) throw new ExternalProviderError(400, 'INVALID_BINDING')
@@ -57,6 +57,7 @@ export function parseRegistration(value: unknown, orgId: string, policy: PilotPo
     || input.review_expires_at <= now || input.review_expires_at > now + 7 * 86400_000) {
     throw new ExternalProviderError(400, 'INVALID_PILOT_REVIEW')
   }
+  if (input.provider_kind !== undefined && !['dify', 'custom_http'].includes(String(input.provider_kind))) throw new ExternalProviderError(400, 'PROVIDER_NOT_IMPLEMENTED')
   const endpoint = canonicalEndpoint(String(input.endpoint))
   assertPilot(policy, orgId, endpoint)
   // This is a reference, never an App key. Confine it to this organization's vault namespace.

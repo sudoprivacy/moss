@@ -138,3 +138,17 @@ void describe('统一 Agent/Skill 目录数据库结构', () => {
     db.close()
   })
 })
+
+void test('upgrades the prior Provider CHECK without losing rows, indexes or catalog triggers', () => {
+  const db = legacyDatabase()
+  db.exec("ALTER TABLE tenant_assistants ADD COLUMN provider_type TEXT NOT NULL DEFAULT 'moss_runtime' CHECK (provider_type IN ('local', 'moss_runtime', 'dify')); UPDATE tenant_assistants SET provider_type = 'dify'; CREATE INDEX idx_tenant_assistants_provider ON tenant_assistants(provider_type)")
+  ensureCatalogSchema(db)
+  ensureCatalogSchema(db)
+  const before = db.prepare("SELECT id, name, provider_type, source_resource_id FROM tenant_assistants").get()
+  assert.deepEqual({ ...before }, { id: 'agent-old', name: '旧智能体', provider_type: 'dify', source_resource_id: 'agent-old' })
+  db.exec("UPDATE tenant_assistants SET provider_type = 'custom_http'")
+  assert.throws(() => db.exec("UPDATE tenant_assistants SET provider_type = 'invalid'"), /CHECK/)
+  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_tenant_assistants_provider'").get()?.name, 'idx_tenant_assistants_provider')
+  assert.throws(() => db.exec("UPDATE tenant_assistants SET availability = 'invalid'"), /catalog availability invalid/)
+  db.close()
+})

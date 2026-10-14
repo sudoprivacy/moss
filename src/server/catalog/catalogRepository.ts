@@ -2,7 +2,7 @@ import type { DbDriver, SqlRow } from '../db/driver.js'
 import type { VisibilityFilter, VisibleTo } from '../visibilityFilter.js'
 import { isVisibleTo } from '../visibilityFilter.js'
 
-export type CatalogProviderType = 'local' | 'moss_runtime' | 'dify'
+export type CatalogProviderType = 'local' | 'moss_runtime' | 'dify' | 'custom_http'
 export type CatalogSupportedModes = 'local' | 'cloud' | 'both'
 export type CatalogResourceType = 'agent' | 'skill'
 export type CatalogAvailability = 'organization' | 'all' | 'assigned'

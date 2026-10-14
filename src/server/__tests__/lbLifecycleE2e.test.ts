@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 // Every case passes 60_000 as bun:test's per-case timeout (third argument):
 // each spawns a real server process (DB migrations + service init take 3-8s on
 // Windows), far beyond the 5s default.
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdtemp, rm, writeFile, symlink } from 'fs/promises'
 import { createServer } from 'net'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'
@@ -45,6 +45,7 @@ const bundle = Bun.spawnSync(
     '--format=esm',
     '--outdir', bundleDir,
     '--external=better-sqlite3',
+    '--external=@sudo/contracts/common/v1/resource-ref',
     '--external=@xenova/transformers',
     '--external=onnxruntime-node',
     '--external=sharp',
@@ -54,6 +55,8 @@ const bundle = Bun.spawnSync(
 if (bundle.exitCode !== 0) {
   throw new Error(`Fixture bundle failed: ${bundle.stderr.toString()}`)
 }
+// Match production: the owner validator and its schema files remain an installed dependency.
+await symlink(resolve(import.meta.dir, '../../..', 'node_modules'), join(bundleDir, 'node_modules'), 'junction')
 const bundleEntry = join(bundleDir, 'lbLifecycleE2e.fixture.js')
 
 async function startFixture(extraEnv: Record<string, string> = {}): Promise<LbFixture> {

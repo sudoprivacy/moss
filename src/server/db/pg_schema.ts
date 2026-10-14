@@ -2026,6 +2026,10 @@ const MIGRATIONS: PgMigration[] = [
       ON user_agents (org_id, user_id, created_at);
   ` },
   { version: 11, name: 'cohost-session-bindings', sql: COHOST_SESSION_SCHEMA },
+  { version: 12, name: 'custom-http-catalog-provider', sql: `
+    ALTER TABLE tenant_assistants DROP CONSTRAINT IF EXISTS tenant_assistants_provider_type_check;
+    ALTER TABLE tenant_assistants ADD CONSTRAINT tenant_assistants_provider_type_check CHECK (provider_type IN ('local', 'moss_runtime', 'dify', 'custom_http'));
+  ` },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

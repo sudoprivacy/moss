@@ -128,6 +128,8 @@ build('admin/dist', [
 ])
 
 const external = [
+  // The owner validator loads packaged JSON schemas relative to its module.
+  '--external=@sudo/contracts/common/v1/resource-ref',
   '--external=better-sqlite3',
   // @xenova/transformers (and its onnxruntime-node native dep) ships its
   // own ONNX runtime + tokenizer assets. Bundling them produces a broken

@@ -5,9 +5,18 @@ import { EXTERNAL_PROVIDER_API, type ExternalEventsPage, type CreateExternalTask
 import { ExternalProviderError } from './policy.js'
 import type { ExternalRunBinding } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { parseExternalRunBinding } from '../agentFederation/manifest.js'
+import { canonicalTaskJson, parseTaskRecord } from '../agentFederation/taskContract.js'
+import type { TaskRecord } from '../../../contracts/task/v1alpha1/contract.js'
+
+export interface TaskAdmission {
+  requestHash: string
+  reason: ExternalTask['policy_decision'] & {}
+  record: (task: ExternalTask) => TaskRecord
+  policySnapshot: unknown
+}
 
 export interface ExternalActor { orgId: string; userId: string }
-export interface Binding extends RegisterExternalAgent { id: string; orgId: string; connectionId: string; approved: boolean; parametersDigest: string | null; reviewedBy: string | null; revision?: number; definitionProfileVersion?: number; archived?: boolean; credentialUpdating?: boolean; credentialVersion?: number; credentialRecoveryRequired?: boolean; credentialOperationId?: string; registrationMode?: 'onboarding' | 'reference_compat' }
+export interface Binding extends RegisterExternalAgent { sourceManifest?: import('../../../contracts/agent-federation/v1alpha1/contract.js').CustomAgentManifest; id: string; orgId: string; connectionId: string; approved: boolean; parametersDigest: string | null; reviewedBy: string | null; revision?: number; definitionProfileVersion?: number; archived?: boolean; credentialUpdating?: boolean; credentialVersion?: number; credentialRecoveryRequired?: boolean; credentialOperationId?: string; registrationMode?: 'onboarding' | 'reference_compat' }
 type Checkpoint = ExternalTask & { _checkpoint_sequence?: number }
 type TaskRow = SqlRow & { document: string; sequence: number; request_hash: string }
 type SessionRow = SqlRow & { id: string; agent_id: string; agent_name: string; title: string; active_task_id: string | null; conversation_id: string | null; created_at: number; updated_at: number }
@@ -47,6 +56,10 @@ export class ExternalTaskStore {
       );
       CREATE TABLE IF NOT EXISTS external_pilot_run_bindings (
         task_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE, document TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS product_task_records (
+        task_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL,
+        document TEXT NOT NULL, policy_snapshot TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS external_pilot_reconciliations (
         task_id TEXT PRIMARY KEY, attempt_id TEXT, document TEXT NOT NULL
@@ -119,9 +132,29 @@ export class ExternalTaskStore {
     await this.db.run('INSERT INTO external_pilot_bindings(id, org_id, document) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document', [binding.id, binding.orgId, JSON.stringify(binding)])
   }
 
-  async create(actor: ExternalActor, input: CreateExternalTask, binding: Binding, timeoutMs: number): Promise<ExternalTask> {
+  async existingRequest(actor: ExternalActor, key: string, requestHash: string): Promise<ExternalTask | null> {
     await this.ready
-    const hash = digest(JSON.stringify([input.agent_id, input.session_id ?? null, input.query]))
+    const row = await this.db.get<TaskRow>('SELECT * FROM external_pilot_tasks WHERE org_id = ? AND user_id = ? AND idempotency_key = ?', [actor.orgId, actor.userId, key])
+    if (!row) return null
+    if (row.request_hash !== requestHash) throw new ExternalProviderError(409, 'IDEMPOTENCY_CONFLICT')
+    return this.project(row)
+  }
+
+  async taskRecord(actor: ExternalActor, taskId: string): Promise<TaskRecord | null> {
+    const task = await this.task(actor, taskId)
+    const row = await this.db.get('SELECT document, policy_snapshot FROM product_task_records WHERE task_id = ? AND org_id = ? AND user_id = ?', [taskId, actor.orgId, actor.userId])
+    if (!row) return null
+    const record = parseTaskRecord(JSON.parse(String(row.document))), resolution = record.resolution
+    if (record.spec.task_id !== task.id || record.spec.session_id !== task.session_id || record.spec.requested_by.subject_id !== actor.userId
+      || resolution.policy_snapshot_digest !== digest(canonicalTaskJson(JSON.parse(String(row.policy_snapshot))))
+      || (resolution.status === 'accepted' && (resolution.attempt_id !== task.attempt_id || resolution.governance_org_id !== actor.orgId
+        || resolution.binding_id !== task.agent_id || resolution.agent.source_digest !== task.source_digest))) throw new ExternalProviderError(500, 'TASK_RECORD_MISMATCH')
+    return record
+  }
+
+  async create(actor: ExternalActor, input: CreateExternalTask, binding: Binding, timeoutMs: number, admission?: TaskAdmission): Promise<ExternalTask> {
+    await this.ready
+    const hash = admission?.requestHash ?? digest(JSON.stringify([input.agent_id, input.session_id ?? null, input.query]))
     return this.db.transaction(async () => {
       // Reserve the idempotency key before touching a session. ON CONFLICT also serializes concurrent retries on PG.
       const id = randomUUID(), sessionId = input.session_id ?? randomUUID(), now = Date.now()
@@ -129,9 +162,16 @@ export class ExternalTaskStore {
         api_version: EXTERNAL_PROVIDER_API, id, session_id: sessionId, agent_id: binding.id,
         agent_name: sessionAgentName(actor.userId, binding.id), attempt_id: null, status: 'accepted',
         configuration_revision: binding.revision ?? 1, query: input.query, answer: '', raw_answer: '', raw_answer_freshness: 'current', output_status: 'pending', error_code: null,
-        source_digest: binding.source_digest, provider: 'dify', provider_refs: {},
+        source_digest: binding.source_digest, provider: binding.source_digest === 'unresolved' ? 'unresolved' : binding.provider_kind ?? 'dify', provider_refs: {},
         cancellation: { status: 'unsupported', reason: 'Provider termination cannot be confirmed in this pilot' },
         created_at: now, updated_at: now, deadline_at: now + timeoutMs,
+      }
+      if (admission) {
+        task.task_contract_version = 'task.sudo.dev/v1alpha1'
+        task.policy_decision = admission.reason
+        task.status = admission.reason.status
+        task.attempt_id = task.status === 'accepted' ? randomUUID() : null
+        task.error_code = task.status === 'rejected' ? admission.reason.reason_code : null
       }
       const inserted = await this.db.run(`INSERT INTO external_pilot_tasks
         (id, org_id, user_id, session_id, idempotency_key, request_hash, status, deadline_at, sequence, document)
@@ -147,7 +187,9 @@ export class ExternalTaskStore {
           (id, org_id, user_id, agent_id, agent_name, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [sessionId, actor.orgId, actor.userId, binding.id, task.agent_name, input.query.slice(0, 100), now, now])
       }
-      const locked = await this.db.run(`UPDATE external_pilot_sessions SET active_task_id = ?, updated_at = ?
+      const locked = task.status === 'rejected'
+        ? await this.db.run('UPDATE external_pilot_sessions SET updated_at = ? WHERE id = ? AND org_id = ? AND user_id = ? AND agent_id = ?', [now, sessionId, actor.orgId, actor.userId, binding.id])
+        : await this.db.run(`UPDATE external_pilot_sessions SET active_task_id = ?, updated_at = ?
         WHERE id = ? AND org_id = ? AND user_id = ? AND agent_id = ? AND active_task_id IS NULL`,
       [id, now, sessionId, actor.orgId, actor.userId, binding.id])
       if (!locked) {
@@ -156,6 +198,11 @@ export class ExternalTaskStore {
       }
       const count = await this.db.get('SELECT COUNT(*) AS total FROM external_pilot_tasks WHERE session_id = ?', [sessionId])
       if (Number(count?.total) > 200) throw new ExternalProviderError(409, 'SESSION_TASK_LIMIT')
+      if (admission) {
+        const record = parseTaskRecord(admission.record(task))
+        await this.db.run('INSERT INTO product_task_records(task_id, org_id, user_id, document, policy_snapshot) VALUES (?, ?, ?, ?, ?)', [id, actor.orgId, actor.userId, JSON.stringify(record), JSON.stringify(admission.policySnapshot)])
+        if (task.attempt_id) await this.db.run('INSERT INTO external_pilot_attempts(id, task_id, status, started_at, updated_at) VALUES (?, ?, ?, ?, ?)', [task.attempt_id, id, 'accepted', now, now])
+      }
       await this.db.run('INSERT INTO external_pilot_events(task_id, sequence, document) VALUES (?, 1, ?)', [id, JSON.stringify(this.event(task, 1, 'status'))])
       return task
     })
@@ -296,8 +343,8 @@ export class ExternalTaskStore {
     await this.ready
     const rows = await this.db.all('SELECT id FROM external_pilot_tasks WHERE status IN (?, ?, ?) AND deadline_at <= ? LIMIT 100', ['accepted', 'dispatching', 'running', now])
     for (const row of rows) await this.mutate(String(row.id), task => {
-      task.status = task.status === 'accepted' ? 'rejected' : 'unknown'
-      task.error_code = task.status === 'rejected' ? 'DISPATCH_DEADLINE' : 'EXECUTION_UNCONFIRMED'
+      task.status = task.status === 'accepted' ? task.task_contract_version ? 'failed' : 'rejected' : 'unknown'
+      task.error_code = ['rejected', 'failed'].includes(task.status) ? 'DISPATCH_DEADLINE' : 'EXECUTION_UNCONFIRMED'
       return 'status'
     })
   }
