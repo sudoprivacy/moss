@@ -72,7 +72,12 @@ export type SnapshotRunResult = {
   leaves?: number
 }
 
-const DEFAULT_INTERVAL_SEC = 10 * 60
+/**
+ * Gap between passes. A pass runs until its todo list is done (however long
+ * that takes), then waits this long. Hourly is enough: the snapshot is a daily
+ * photo, and the next tick only has to retry stragglers and catch the new day.
+ */
+const DEFAULT_INTERVAL_SEC = 60 * 60
 const DEFAULT_CONCURRENCY = 4
 const INITIAL_DELAY_MS = 30_000
 const ROOM_ATTEMPTS = 3
@@ -120,7 +125,7 @@ export class RosterSnapshotWorker {
   private readonly concurrency: number
   /**
    * Rooms that answered "no roster" today, per instance. Without this a
-   * 10-minute tick would re-ask every internal or dissolved group in a
+   * tick would re-ask every internal or dissolved group in a
    * 20,000-room list forever. Lost on restart: one extra pass, acceptable.
    */
   private skipped = new Map<string, { day: string; ids: Set<string> }>()

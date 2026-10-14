@@ -156,7 +156,7 @@ jq -r '.[] | "\(.count)\t\(.roomid)"' rooms.json | sort -rn
 |---|---|---|
 | `MOSS_MSGAUDIT_INTERVAL_SEC` | `300`（5 分钟） | 轮询间隔，下限 30 秒 |
 | `MOSS_MSGAUDIT_MAX_PAGES` | `20` | 每实例每轮最多拉几页；`0` = 不限、一次拉完 |
-| `MOSS_MSGAUDIT_SNAPSHOT_INTERVAL_SEC` | `600`（10 分钟） | 成员快照任务的轮询间隔，下限 60 秒（见第十节「成员快照」） |
+| `MOSS_MSGAUDIT_SNAPSHOT_INTERVAL_SEC` | `3600`（1 小时） | 成员快照任务两轮之间的间隔，下限 60 秒（见第十节「成员快照」） |
 | `MOSS_MSGAUDIT_SNAPSHOT_CONCURRENCY` | `4` | 成员快照的并发数，1–16；遇企微限流 45009 可调低，无需重新构建 |
 
 首轮从 seq=0 开始，即企微保留期内的全部历史。页数上限把这次回填**分摊到多轮**，
@@ -324,7 +324,8 @@ members/<roomId>/2026-09-18.json   {roomid, date, members[], roomName?, memberNa
 快照由**独立的后台任务**负责，不在拉取里做：两万个群的快照要拍几十分钟，放在
 每 5 分钟一轮、10 分钟超时的拉取子进程里既跑不完、也会拖住归档。该任务：
 
-- 启动后 30 秒首轮，之后每 `MOSS_MSGAUDIT_SNAPSHOT_INTERVAL_SEC`（默认 10 分钟）一轮，
+- 启动后 30 秒首轮；每轮把当天缺的群一次拍完，结束后隔 `MOSS_MSGAUDIT_SNAPSHOT_INTERVAL_SEC`
+  （默认 1 小时）再跑下一轮补漏、跨天，
   并发 `MOSS_MSGAUDIT_SNAPSHOT_CONCURRENCY`（默认 4）
 - **每轮从磁盘重算还缺哪些群**，所以重启、崩溃、限流暂停都只是推迟，不会重拍或漏拍；
   中途部署同样不漏：17:00 上线，之后几轮补齐当天快照
