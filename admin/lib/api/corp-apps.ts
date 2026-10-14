@@ -121,3 +121,33 @@ export function importCorpAppKey(
     privateKey,
   })
 }
+
+export type RoomListUploadResult = {
+  success: boolean
+  /** Distinct wr_ ids extracted from the file. */
+  count: number
+  /** wo_/wm_ ids seen in the file and dropped. */
+  ignored: number
+  fileName: string
+  uploadedAt: number
+}
+
+/**
+ * Upload a txt / csv / xlsx whose `wr_` ids widen the 会话存档 daily member
+ * snapshot beyond groups that have spoken. The server extracts the ids; this
+ * only ships the bytes (bare base64, no data: prefix).
+ */
+export function uploadCorpAppRoomList(
+  id: string,
+  fileName: string,
+  contentBase64: string,
+): Promise<RoomListUploadResult> {
+  return authClient.post<RoomListUploadResult>(`/api/v1/corp-apps/${id}/room-list`, {
+    file_name: fileName,
+    content_base64: contentBase64,
+  })
+}
+
+export function clearCorpAppRoomList(id: string): Promise<{ success: boolean }> {
+  return authClient.delete<{ success: boolean }>(`/api/v1/corp-apps/${id}/room-list`)
+}

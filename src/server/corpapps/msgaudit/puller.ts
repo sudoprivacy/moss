@@ -10,6 +10,11 @@
  * reverse order would silently lose messages, which is unrecoverable
  * (the archive has a retention window; a gap noticed late cannot be
  * back-filled).
+ *
+ * Membership snapshots are NOT taken here. They used to run at the end of
+ * every pull, which cannot work at tens of thousands of groups (the pull
+ * child has a 10-minute budget) and only ever saw rooms that had spoken.
+ * See snapshotWorker.ts.
  */
 
 import { decryptRandomKey, parsePrivateKeys } from './crypto.js'
@@ -17,30 +22,13 @@ import { normalizeRecord } from './normalize.js'
 import { openSdk, type RawChatRecord, type SdkHandle } from './sdk.js'
 import {
   appendRecords,
-  dayKey,
-  listRooms,
-  DIRECT_BUCKET,
   readCursor,
   updateRooms,
-  updateRoomNames,
   writeCursor,
   writeMedia,
   type ChatRecord,
 } from './store.js'
 import { mediaBox, mediaExt, mediaSize, parseMediaTypes } from './media.js'
-import {
-  diffExternalLeaves,
-  leavesExist,
-  previousSnapshot,
-  readLastUpdated,
-  readSnapshot,
-  snapshotExists,
-  writeLastUpdated,
-  writeLeaves,
-  writeSnapshot,
-  type LeaveRecord,
-  type RosterInfo,
-} from './members.js'
 import { appendMediaIndex, type MediaIndexEntry } from './mediaIndex.js'
 
 /** WeCom caps a single GetChatData page at 1000. */
@@ -105,22 +93,6 @@ export type PullConfig = {
   /** Stop after this many pages in one run; 0 = drain fully. */
   maxPages?: number
   /**
-   * Fetches a room's current roster. Supplied by the caller because the
-   * 会话存档 SDK has no roster API — it comes from a sibling self-built
-   * app. Absent = skip membership snapshots entirely.
-   *
-   * A bare `string[]` is still accepted (that was the original contract);
-   * returning `RosterInfo` additionally records the group and member names
-   * the lookup happened to see.
-   */
-  rosterLookup?: (roomId: string) => Promise<string[] | RosterInfo | null>
-  /**
-   * Whether to take membership snapshots. A plain boolean because
-   * `rosterLookup` is a function and cannot cross the IPC boundary to the
-   * pull child — the child sees this flag and asks the parent instead.
-   */
-  snapshotRosters?: boolean
-  /**
    * Raw room filter as typed by the admin: room ids separated by commas
    * and/or whitespace. Empty (or absent) archives every conversation.
    */
@@ -140,10 +112,6 @@ export type PullResult = {
   media: number
   /** Media downloads that were skipped or failed. */
   mediaFailed: number
-  /** Rooms whose daily membership snapshot was taken this run. */
-  snapshots: number
-  /** External members observed to have left, across all rooms. */
-  leaves: number
   failed: number
   cursor: number
   /** Pages consumed this run; equals maxPages when the cap stopped it. */
@@ -197,8 +165,6 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   let filtered = 0
   let media = 0
   let mediaFailed = 0
-  let snapshots = 0
-  let leaveCount = 0
   let pages = 0
   const roomFilter = parseRoomFilter(cfg.roomFilterRaw)
   const mediaTypes = parseMediaTypes(cfg.mediaTypesRaw)
@@ -305,95 +271,5 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     })
   }
 
-  // Membership snapshots run AFTER the transcript is durable. WeCom never
-  // reports departures, so the only way to see a customer leave is to
-  // photograph every known roster daily and diff consecutive photos.
-  //
-  // Driven by rooms.json rather than the rooms in this batch: a quiet
-  // group still loses members, and tying snapshots to traffic would miss
-  // exactly the departures worth noticing. It also means a mid-day deploy
-  // still captures the day — the first pull after startup photographs
-  // whatever has no photo yet.
-  if (cfg.rosterLookup) {
-    const today = dayKey(Date.now())
-    // Direct chats have no roster to fetch.
-    const rooms = listRooms(cfg.corpAppId)
-      .map((r) => r.roomid)
-      .filter((id) => id && id !== DIRECT_BUCKET)
-
-    // Phase 1: photograph anything missing today's snapshot.
-    let complete = true
-    // Names seen along the way, folded into rooms.json once at the end:
-    // the index is one file for the whole corp app, so writing it per room
-    // would mean rewriting it thousands of times for no benefit.
-    const roomNames: Record<string, string> = {}
-    for (const roomId of rooms) {
-      try {
-        if (await snapshotExists(cfg.corpAppId, roomId, today)) continue
-        const roster = await cfg.rosterLookup(roomId)
-        if (!roster) {
-          // No roster available (internal group answers 90501). Not a
-          // failure of the day — just a room that cannot be photographed.
-          continue
-        }
-        // Accept both shapes: the original bare id list, and the richer
-        // RosterInfo that also carries the names seen in the same call.
-        const info: RosterInfo = Array.isArray(roster) ? { members: roster } : roster
-        if (info.members.length === 0) continue
-        await writeSnapshot(cfg.corpAppId, roomId, info.members, Date.now(), {
-          roomName: info.roomName,
-          memberNames: info.memberNames,
-        })
-        if (info.roomName) roomNames[roomId] = info.roomName
-        snapshots += 1
-      } catch (err) {
-        // A room that failed today leaves the day incomplete, so phase 2
-        // holds off rather than diffing against a half-built picture.
-        complete = false
-        console.error(
-          `[msgaudit] roster snapshot failed for ${roomId}:`,
-          err instanceof Error ? err.message : err,
-        )
-      }
-    }
-    if (Object.keys(roomNames).length > 0) {
-      await updateRoomNames(cfg.corpAppId, roomNames).catch((err) => {
-        // Cosmetic: the snapshots already hold the names, and the next
-        // run retries. Never fail a pull over the convenience index.
-        console.error(
-          '[msgaudit] annotating rooms.json with group names failed:',
-          err instanceof Error ? err.message : err,
-        )
-      })
-    }
-    if (complete && rooms.length > 0) {
-      await writeLastUpdated(cfg.corpAppId, today).catch(() => {})
-    }
-
-    // Phase 2: once the day is fully photographed, compute departures —
-    // exactly once, because the file's existence is the guard.
-    if ((await readLastUpdated(cfg.corpAppId)) === today && !(await leavesExist(cfg.corpAppId, today))) {
-      const records: LeaveRecord[] = []
-      for (const roomId of rooms) {
-        const current = await readSnapshot(cfg.corpAppId, roomId, today)
-        if (!current) continue
-        const prev = await previousSnapshot(cfg.corpAppId, roomId, today)
-        const gone = prev ? diffExternalLeaves(prev, current) : []
-        records.push({
-          roomid: roomId,
-          currentDate: today,
-          previousDate: prev ? prev.date : null,
-          leaves: gone,
-        })
-        leaveCount += gone.length
-      }
-      // Written even when nobody left: an empty file means "computed,
-      // nothing found", a missing one means "not computed yet".
-      await writeLeaves(cfg.corpAppId, today, records).catch((err) => {
-        console.error('[msgaudit] writing leaves failed:', err instanceof Error ? err.message : err)
-      })
-    }
-  }
-
-  return { fetched, written, failed, filtered, media, mediaFailed, snapshots, leaves: leaveCount, cursor, pages }
+  return { fetched, written, failed, filtered, media, mediaFailed, cursor, pages }
 }

@@ -18,14 +18,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PullConfig, PullResult } from './puller.js'
-import type { RosterInfo } from './members.js'
 
-/** A roster fetch the child needs us to perform (see pullChild.ts). */
-type RosterRequest = { kind: 'roster'; id: number; roomId: string }
-/** What the parent sends back; `RosterInfo` also carries the names it saw. */
-type RosterAnswer = string[] | RosterInfo | null
 type ResultMessage = { ok: boolean; result?: PullResult; error?: string }
-type ChildMessage = RosterRequest | ResultMessage
 
 /**
  * Locate the forked child's entrypoint.
@@ -109,31 +103,7 @@ export function pullInChild(cfg: PullConfig): Promise<PullResult> {
     }, CHILD_TIMEOUT_MS)
     timer.unref()
 
-    child.on('message', (msg: ChildMessage) => {
-      // The child cannot be handed cfg.rosterLookup directly — IPC is
-      // JSON, so a function arrives as undefined. It asks us instead, and
-      // we answer here where the connector and its credentials live.
-      if (msg && (msg as RosterRequest).kind === 'roster') {
-        const req = msg as RosterRequest
-        const answer = (members: RosterAnswer) => {
-          try {
-            child.send({ kind: 'rosterResult', id: req.id, members })
-          } catch {
-            // child already gone; its own timeout will unblock it
-          }
-        }
-        if (!cfg.rosterLookup) {
-          answer(null)
-          return
-        }
-        cfg
-          .rosterLookup(req.roomId)
-          .then(answer)
-          .catch(() => answer(null))
-        return
-      }
-
-      const done = msg as ResultMessage
+    child.on('message', (done: ResultMessage) => {
       finish(() => {
         child.kill()
         if (done.ok && done.result) resolve(done.result)
@@ -211,7 +181,7 @@ export class MsgAuditWorker {
       this.inflight.add(cfg.corpAppId)
       try {
         const r = await pullInChild({ ...cfg, maxPages: this.maxPagesPerTick })
-        if (r.written > 0 || r.failed > 0 || r.filtered > 0 || r.mediaFailed > 0 || r.leaves > 0) {
+        if (r.written > 0 || r.failed > 0 || r.filtered > 0 || r.mediaFailed > 0) {
           const capped = this.maxPagesPerTick > 0 && r.pages >= this.maxPagesPerTick
           console.log(
             `[msgaudit] ${cfg.corpAppId}: fetched=${r.fetched} written=${r.written} ` +
@@ -219,8 +189,6 @@ export class MsgAuditWorker {
               (r.filtered > 0 ? ` filtered=${r.filtered}` : '') +
               (r.media > 0 ? ` media=${r.media}` : '') +
               (r.mediaFailed > 0 ? ` mediaFailed=${r.mediaFailed}` : '') +
-              (r.snapshots > 0 ? ` snapshots=${r.snapshots}` : '') +
-              (r.leaves > 0 ? ` leaves=${r.leaves}` : '') +
               ` cursor=${r.cursor}` +
               (capped ? ` (page cap reached; resuming next tick)` : ''),
           )
