@@ -2501,11 +2501,13 @@ export function startServer(
       // Park prospect-enterprise registration (plan 2.3). Mounted above the
       // bearer-JWT wall for the same reason as eventTriggerIngest above: the
       // caller is an unauthenticated signup. The park module owns SMS-code
-      // verification; request-rate limiting is layered at the BFF plus the
-      // phone_login_codes attempt counter.
+      // verification plus a fixed-window rate limit keyed by client IP; the
+      // BFF adds its own express-rate-limit layer (same defaults).
       if (req.method === 'POST' && pathname === '/api/v1/park/register-enterprise') {
+        const clientIp = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim()
+          || req.socket?.remoteAddress || undefined
         const result = await handleParkEnterpriseRegister(
-          { driver: runtime.store.driver, authService },
+          { driver: runtime.store.driver, authService, clientIp },
           await readJsonBody(req),
         )
         if (result) {

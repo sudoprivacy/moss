@@ -1,5 +1,6 @@
 import type { DbDriver } from '../db/driver.js'
 import { ParkApiError } from './parkAuthorization.js'
+import { ParkAuditService } from './parkAuditService.js'
 import { ParkRepository, type Lead, type LeadStatus } from './parkRepository.js'
 
 /**
@@ -59,9 +60,11 @@ export function computeLeadScore(input: {
 
 export class LeadService {
   private readonly repo: ParkRepository
+  private readonly audit: ParkAuditService
 
-  constructor(driver: DbDriver) {
+  constructor(private readonly driver: DbDriver) {
     this.repo = new ParkRepository(driver)
+    this.audit = new ParkAuditService(driver)
   }
 
   /** Idempotent proposal from the consultation assistant (lead.propose tool). */
@@ -73,28 +76,39 @@ export class LeadService {
     policyMatches: Array<{ file: string; line_no: number; line: string }>
     industryTags: string[]
     suggestedAction?: string | null
+    actorUserId?: string
   }): Promise<Lead> {
-    const idempotencyKey = `inquiry:${input.sourceInquiryId}`
-    const existing = await this.repo.getLeadByIdempotencyKey(input.parkOrgId, idempotencyKey)
-    if (existing) return existing
-    const { score, explanation } = computeLeadScore({
-      inquiryConfidence: input.inquiryConfidence,
-      policyMatchCount: input.policyMatches.length,
-      industryTagCount: input.industryTags.length,
-    })
-    return this.repo.insertLead({
-      parkOrgId: input.parkOrgId,
-      enterpriseOrgId: input.enterpriseOrgId,
-      source: 'inquiry',
-      sourceInquiryId: input.sourceInquiryId,
-      score,
-      scoreExplanation: explanation,
-      industryTagsJson: input.industryTags.length > 0 ? JSON.stringify(input.industryTags) : null,
-      policyMatchesJson: input.policyMatches.length > 0 ? JSON.stringify(input.policyMatches) : null,
-      suggestedAction: input.suggestedAction ?? null,
-      ownerId: null,
-      status: 'proposed',
-      idempotencyKey,
+    return this.driver.transaction(async () => {
+      const idempotencyKey = `inquiry:${input.sourceInquiryId}`
+      const existing = await this.repo.getLeadByIdempotencyKey(input.parkOrgId, idempotencyKey)
+      if (existing) return existing
+      const { score, explanation } = computeLeadScore({
+        inquiryConfidence: input.inquiryConfidence,
+        policyMatchCount: input.policyMatches.length,
+        industryTagCount: input.industryTags.length,
+      })
+      const lead = await this.repo.insertLead({
+        parkOrgId: input.parkOrgId,
+        enterpriseOrgId: input.enterpriseOrgId,
+        source: 'inquiry',
+        sourceInquiryId: input.sourceInquiryId,
+        score,
+        scoreExplanation: explanation,
+        industryTagsJson: input.industryTags.length > 0 ? JSON.stringify(input.industryTags) : null,
+        policyMatchesJson: input.policyMatches.length > 0 ? JSON.stringify(input.policyMatches) : null,
+        suggestedAction: input.suggestedAction ?? null,
+        ownerId: null,
+        status: 'proposed',
+        idempotencyKey,
+      })
+      if (input.actorUserId) {
+        await this.audit.record({
+          parkOrgId: input.parkOrgId, actorUserId: input.actorUserId, actorOrgId: input.enterpriseOrgId,
+          action: 'park.lead_propose', targetType: 'lead', targetId: lead.leadId,
+          after: { status: lead.status, source_inquiry_id: input.sourceInquiryId, score },
+        })
+      }
+      return lead
     })
   }
 
@@ -124,20 +138,28 @@ export class LeadService {
   }
 
   async claim(parkOrgId: string, leadId: string, ownerId: string): Promise<Lead> {
-    const lead = await this.requireLead(parkOrgId, leadId)
-    // Claiming takes over ownership; a proposed lead is also confirmed by the
-    // act (confirm+claim in one step, §11.3), a confirmed-but-unowned lead
-    // just gains its owner.
-    if (lead.status !== 'proposed' && lead.status !== 'confirmed') {
-      throw new ParkApiError(400, 'lead_not_claimable', '仅 proposed/confirmed 状态的线索可认领')
-    }
-    await this.repo.updateLead(leadId, { status: 'confirmed', ownerId })
-    return (await this.repo.getLead(leadId))!
+    // Claiming a proposed lead also confirms it (confirm+claim in one step,
+    // §11.3); a confirmed-but-unowned lead just gains its owner. Taking over
+    // an ALREADY-OWNED lead is rejected — after a claim only the owner (or a
+    // leader dispatch) may change the lead (plan 2.3 口径②).
+    return this.driver.transaction(async () => {
+      const lead = await this.requireLead(parkOrgId, leadId)
+      if (lead.status !== 'proposed' && lead.status !== 'confirmed') {
+        throw new ParkApiError(400, 'lead_not_claimable', '仅 proposed/confirmed 状态的线索可认领')
+      }
+      const changes = await this.repo.claimLead(leadId, ownerId)
+      if (changes === 0) {
+        throw new ParkApiError(409, 'lead_already_owned', '线索已有负责人，不可认领')
+      }
+      return (await this.repo.getLead(leadId))!
+    })
   }
 
   /**
    * State transition / follow-up update / leader dispatch.
    * Returns { before, after } for audit; throws on illegal transitions.
+   * A follow-up-only update (suggested_action without status) persists too —
+   * the API contract "跟进（owner 本人）" must work standalone (plan 2.3).
    */
   async transition(input: {
     parkOrgId: string
@@ -161,14 +183,20 @@ export class LeadService {
       return { before, after: (await this.repo.getLead(input.leadId))! }
     }
 
-    if (input.nextStatus !== undefined) {
-      // The proposed stage (confirm / reject) happens BEFORE anyone claims the
-      // lead, so any park-ops caller may act; later stages are owner-only.
-      const proposedStage = before.status === 'proposed'
-        && (input.nextStatus === 'confirmed' || input.nextStatus === 'rejected')
-      if (!isOwner && !proposedStage) {
-        throw new ParkApiError(403, 'lead_not_owner', '仅线索负责人可更新状态')
-      }
+    const wantsStatus = input.nextStatus !== undefined
+    const wantsFollowUp = input.suggestedAction !== undefined
+    if (!wantsStatus && !wantsFollowUp) {
+      return { before, after: before }
+    }
+    // The proposed stage (confirm / reject) happens BEFORE anyone claims the
+    // lead, so any park-ops caller may act; later stages — including a
+    // follow-up-only update — are owner-only.
+    const proposedStage = before.status === 'proposed'
+      && (input.nextStatus === 'confirmed' || input.nextStatus === 'rejected')
+    if (!isOwner && !proposedStage) {
+      throw new ParkApiError(403, 'lead_not_owner', '仅线索负责人可更新状态')
+    }
+    if (wantsStatus) {
       if (input.nextStatus === 'rejected' && !(input.reason && input.reason.trim())) {
         throw new ParkApiError(400, 'lead_rejection_reason_required', '驳回必须填写理由')
       }
@@ -176,11 +204,11 @@ export class LeadService {
       if (allowed === null || !allowed.includes(input.nextStatus)) {
         throw new ParkApiError(400, 'lead_transition_invalid', `不允许从 ${before.status} 转换到 ${input.nextStatus}`)
       }
-      await this.repo.updateLead(input.leadId, {
-        status: input.nextStatus,
-        ...(input.suggestedAction !== undefined ? { suggestedAction: input.suggestedAction } : {}),
-      })
     }
+    await this.repo.updateLead(input.leadId, {
+      ...(wantsStatus ? { status: input.nextStatus } : {}),
+      ...(wantsFollowUp ? { suggestedAction: input.suggestedAction } : {}),
+    })
     return { before, after: (await this.repo.getLead(input.leadId))! }
   }
 

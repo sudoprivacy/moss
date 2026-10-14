@@ -81,8 +81,12 @@ export class InquiryService {
     })
   }
 
-  async listForPark(parkOrgId: string): Promise<Array<ParkInquiryView & { hasLead: boolean }>> {
-    const inquiries = await this.repo.listInquiriesByPark(parkOrgId)
+  async listForPark(parkOrgId: string, filter: {
+    enterpriseOrgId?: string
+    beforeCreatedAt?: number
+    afterCreatedAt?: number
+  } = {}): Promise<Array<ParkInquiryView & { hasLead: boolean }>> {
+    const inquiries = await this.repo.listInquiriesByPark(parkOrgId, filter)
     return Promise.all(inquiries.map(async inquiry => ({
       ...projectForPark(inquiry),
       hasLead: await this.hasLead(inquiry.inquiryId),

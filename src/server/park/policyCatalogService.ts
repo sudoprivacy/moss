@@ -54,8 +54,8 @@ export class PolicyCatalogService {
     for (const assignment of assignments) {
       const row = await this.driver.get<SqlRow>(`
         SELECT id, name, display_name, description, avatar, emoji, enabled_wikis
-        FROM tenant_assistants WHERE id = ? AND status = 'approved'
-      `, [assignment.assistantId])
+        FROM tenant_assistants WHERE id = ? AND org_id = ? AND status = 'approved'
+      `, [assignment.assistantId, assignment.parkOrgId])
       if (!row) continue
       out.push({
         assistant_id: String(row.id),

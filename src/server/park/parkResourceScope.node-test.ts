@@ -198,4 +198,27 @@ void describe('parkResourceScope（会话资源解析墙修复根因层）', () 
       await ctx.teardown()
     }
   })
+
+  void test('grant 生成后资源被置 pending：消费侧 SQL 复查拒绝（组织资源 OR 分支）', async () => {
+    const ctx = await setup()
+    try {
+      const { db, driver, root } = ctx
+      await insertTenantAssistant(db, root, { id: 'as-9', name: 'park-consultation', orgId: 'park-org' })
+      const repo = new ParkRepository(driver)
+      await repo.insertAssignment({ parkOrgId: 'park-org', assistantId: 'as-9', enterpriseOrgId: 'ent-org' })
+      // Grant resolved while the resource was approved (session scope persists).
+      const grant = await resolveParkScopedResources(driver, 'ent-org', 'as-9')
+      assert.ok(grant, 'approved 资源应进入 grant')
+
+      // The resource is re-reviewed to pending while the grant is still live.
+      db.prepare("UPDATE tenant_assistants SET status = 'pending' WHERE id = 'as-9'").run()
+      const enterpriseScope: OrganizationResourceScope = {
+        orgId: 'ent-org', userId: 'ent-user', driver, grantedResources: grant,
+      }
+      const agent = await withOrganizationResources(enterpriseScope, () => findOrganizationResource('agent', 'as-9'))
+      assert.equal(agent, null, '消费侧 granted OR 分支复查 status，pending 不再放行')
+    } finally {
+      await ctx.teardown()
+    }
+  })
 })

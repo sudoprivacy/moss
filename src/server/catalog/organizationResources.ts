@@ -101,7 +101,7 @@ export async function listOrganizationResources(kind: ResourceKind): Promise<Org
       : []
     const tenantSql = granted.length > 0
       ? `SELECT * FROM ${tableFor(kind)} WHERE (org_id = ? AND status = 'approved' AND source_type IN ('tenant', 'custom'))
-          OR (org_id = ? AND id IN (${granted.map(() => '?').join(', ')}))`
+          OR (org_id = ? AND id IN (${granted.map(() => '?').join(', ')}) AND status = 'approved' AND source_type IN ('tenant', 'custom'))`
       : `SELECT * FROM ${tableFor(kind)} WHERE org_id = ? AND status = 'approved' AND source_type IN ('tenant', 'custom')`
     const tenantParams = granted.length > 0
       ? [scope.orgId, scope.grantedResources!.parkOrgId, ...granted]

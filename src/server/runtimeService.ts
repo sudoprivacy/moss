@@ -638,7 +638,10 @@ export class RuntimeService {
       const { resolveParkScopedResources } = await import('./park/parkAuthorization.js')
       const granted = await resolveParkScopedResources(this.store.driver, session.orgId, session.assistantName)
       return granted ? { ...base, grantedResources: granted } : base
-    } catch {
+    } catch (err) {
+      // Fail-closed (no grant), but never silently — a broken park resolution
+      // would otherwise surface only as an unrelated 404 downstream.
+      console.warn('[RuntimeService] park resourceScope grant resolution failed:', err)
       return base
     }
   }
@@ -1886,6 +1889,7 @@ export class RuntimeService {
         role: session.role,
         scopes: session.scopes,
         assistantName: effectiveAssistantName ?? null,
+        sessionId: session.sessionId,
       })
       sessionToken = signed.token
     } catch (err) {

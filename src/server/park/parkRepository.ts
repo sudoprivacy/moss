@@ -312,10 +312,30 @@ export class ParkRepository {
     return row ? mapInquiry(row) : null
   }
 
-  async listInquiriesByPark(parkOrgId: string, limit = 100, beforeCreatedAt?: number): Promise<Inquiry[]> {
-    const rows = beforeCreatedAt == null
-      ? await this.driver.all<SqlRow>(`SELECT * FROM inquiries WHERE park_org_id = ? ORDER BY created_at DESC LIMIT ?`, [parkOrgId, limit])
-      : await this.driver.all<SqlRow>(`SELECT * FROM inquiries WHERE park_org_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`, [parkOrgId, beforeCreatedAt, limit])
+  /** Park-side inquiry listing (plan 2.3 咨询摘要列表: 按企业/时间筛选). */
+  async listInquiriesByPark(parkOrgId: string, filter: {
+    enterpriseOrgId?: string
+    beforeCreatedAt?: number
+    afterCreatedAt?: number
+  } = {}, limit = 100): Promise<Inquiry[]> {
+    const conditions = ['park_org_id = ?']
+    const params: Array<string | number> = [parkOrgId]
+    if (filter.enterpriseOrgId) {
+      conditions.push('enterprise_org_id = ?')
+      params.push(filter.enterpriseOrgId)
+    }
+    if (filter.beforeCreatedAt !== undefined) {
+      conditions.push('created_at < ?')
+      params.push(filter.beforeCreatedAt)
+    }
+    if (filter.afterCreatedAt !== undefined) {
+      conditions.push('created_at >= ?')
+      params.push(filter.afterCreatedAt)
+    }
+    params.push(limit)
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT * FROM inquiries WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT ?`, params,
+    )
     return rows.map(mapInquiry)
   }
 
@@ -410,6 +430,21 @@ export class ParkRepository {
       input.suggestedAction ?? null, input.industryTagsJson ?? null, now, leadId])
   }
 
+  /**
+   * Atomic claim (plan 2.3: 认领后仅 owner 可改 — another ops must not take
+   * over an owned lead, and concurrent claims must not both win). The guard
+   * `owner_id IS NULL OR owner_id = ?` makes the read-modify-write race-free:
+   * 0 affected rows = the lead is owned by someone else (consume-style update,
+   * same changes>0 pattern as authCenter consumePhoneLoginCode).
+   */
+  async claimLead(leadId: string, ownerId: string): Promise<number> {
+    const now = Date.now()
+    return this.driver.run(`
+      UPDATE leads SET status = 'confirmed', owner_id = ?, updated_at = ?
+      WHERE lead_id = ? AND (owner_id IS NULL OR owner_id = ?)
+    `, [ownerId, now, leadId, ownerId])
+  }
+
   async countLeadsByStatus(parkOrgId: string): Promise<Record<string, number>> {
     const rows = await this.driver.all<SqlRow>(
       `SELECT status, COUNT(*) AS n FROM leads WHERE park_org_id = ? GROUP BY status`, [parkOrgId],
@@ -417,6 +452,14 @@ export class ParkRepository {
     const out: Record<string, number> = {}
     for (const row of rows) out[String(row.status)] = Number(row.n)
     return out
+  }
+
+  async countLeadsByEnterprise(parkOrgId: string): Promise<Record<string, number>> {
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT enterprise_org_id, COUNT(*) AS n FROM leads WHERE park_org_id = ? GROUP BY enterprise_org_id`,
+      [parkOrgId],
+    )
+    return Object.fromEntries(rows.map(row => [String(row.enterprise_org_id), Number(row.n)]))
   }
 
   async listHighScoreLeads(parkOrgId: string, minScore: number, limit = 20): Promise<Lead[]> {

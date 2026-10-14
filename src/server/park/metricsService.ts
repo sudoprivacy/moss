@@ -1,16 +1,13 @@
 import type { DbDriver } from '../db/driver.js'
-import { HIGH_SCORE_THRESHOLD, LeadService } from './leadService.js'
+import { HIGH_SCORE_THRESHOLD } from './leadService.js'
 import { ParkRepository } from './parkRepository.js'
 
 /** Leader dashboard aggregation (plan 2.3): pure SQL, model-free. Numbers come
  *  from the business tables only — the model never rewrites them (§12.10). */
 export class MetricsService {
   private readonly repo: ParkRepository
-  private readonly leadService: LeadService
-
-  constructor(driver: DbDriver) {
+  constructor(private readonly driver: DbDriver) {
     this.repo = new ParkRepository(driver)
-    this.leadService = new LeadService(driver)
   }
 
   async getMetrics(parkOrgId: string): Promise<{
@@ -19,17 +16,22 @@ export class MetricsService {
     high_score_leads: Array<{ lead_id: string; enterprise_org_id: string; score: number; status: string }>
     totals: { enterprises: number; inquiries: number; leads: number }
   }> {
-    const [bindings, leadStatus, highScore, profiles, inquiries, leads] = await Promise.all([
-      this.repo.listBindingsByPark(parkOrgId),
+    const [funnelRows, leadStatus, highScore, totals] = await Promise.all([
+      this.driver.all<{ lifecycle: string; n: number }>(
+        `SELECT lifecycle, COUNT(*) AS n FROM park_enterprise_bindings WHERE park_org_id = ? GROUP BY lifecycle`, [parkOrgId],
+      ),
       this.repo.countLeadsByStatus(parkOrgId),
       this.repo.listHighScoreLeads(parkOrgId, HIGH_SCORE_THRESHOLD),
-      this.repo.listEnterpriseProfiles(parkOrgId),
-      this.repo.listInquiriesByPark(parkOrgId, 10_000),
-      this.repo.listLeads(parkOrgId, {}, 10_000),
+      this.driver.get<{ enterprises: number; inquiries: number; leads: number }>(`
+        SELECT
+          (SELECT COUNT(*) FROM enterprise_profiles WHERE park_org_id = ?) AS enterprises,
+          (SELECT COUNT(*) FROM inquiries WHERE park_org_id = ?) AS inquiries,
+          (SELECT COUNT(*) FROM leads WHERE park_org_id = ?) AS leads
+      `, [parkOrgId, parkOrgId, parkOrgId]),
     ])
 
     const funnel: Record<string, number> = { prospect: 0, active: 0, exiting: 0, exited: 0 }
-    for (const binding of bindings) funnel[binding.lifecycle] = (funnel[binding.lifecycle] ?? 0) + 1
+    for (const row of funnelRows) funnel[String(row.lifecycle)] = Number(row.n)
 
     return {
       funnel,
@@ -41,9 +43,9 @@ export class MetricsService {
         status: lead.status,
       })),
       totals: {
-        enterprises: profiles.length,
-        inquiries: inquiries.length,
-        leads: leads.length,
+        enterprises: Number(totals?.enterprises ?? 0),
+        inquiries: Number(totals?.inquiries ?? 0),
+        leads: Number(totals?.leads ?? 0),
       },
     }
   }

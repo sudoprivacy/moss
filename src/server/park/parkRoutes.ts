@@ -11,6 +11,7 @@ import { ParkRegistrationService } from './parkRegistrationService.js'
 import { ParkRepository, type LeadStatus } from './parkRepository.js'
 import { PolicyCatalogService } from './policyCatalogService.js'
 import { PolicySearchService } from './policySearchService.js'
+import { defaultParkRegisterLimiter, type ParkRateLimiter } from './parkRateLimit.js'
 import { parkErrorToResponse, type ParkApiDeps, type ParkRouteResult } from './parkRoutesShared.js'
 
 /**
@@ -105,8 +106,7 @@ export async function dispatchParkApi(
       const profiles = await repo.listEnterpriseProfiles(parkOrgId)
       const bindings = await repo.listBindingsByPark(parkOrgId)
       const bindingByEnterprise = new Map(bindings.map(b => [b.enterpriseOrgId, b]))
-      const leadsByStatus = await repo.countLeadsByStatus(parkOrgId)
-      const totalLeads = Object.values(leadsByStatus).reduce((a, b) => a + b, 0)
+      const leadCounts = await repo.countLeadsByEnterprise(parkOrgId)
       const isLeader = role === PARK_ROLE.LEADER
       const items = profiles.map(profile => {
         const binding = bindingByEnterprise.get(profile.enterpriseOrgId)
@@ -120,7 +120,7 @@ export async function dispatchParkApi(
         }
         // Leader gets the aggregate view (§4.2): counts, no contact details.
         return isLeader
-          ? { ...base, lead_count: totalLeads }
+          ? { ...base, lead_count: leadCounts[profile.enterpriseOrgId] ?? 0 }
           : {
               ...base,
               industry: profile.industry,
@@ -163,6 +163,8 @@ export async function dispatchParkApi(
       await requireParkMember(driver, auth, parkOrgId, [PARK_ROLE.SYSTEM])
       const enterpriseOrgId = typeof body.enterprise_org_id === 'string' ? body.enterprise_org_id : ''
       if (!enterpriseOrgId) throw new ParkApiError(400, 'invalid_payload', 'enterprise_org_id 必填')
+      const enterprise = await repo.getOrgProfile(enterpriseOrgId)
+      if (enterprise?.orgType !== 'enterprise') throw new ParkApiError(400, 'enterprise_invalid', '企业组织不存在或类型不正确')
       const existing = await repo.getBinding(parkOrgId, enterpriseOrgId)
       if (existing) throw new ParkApiError(409, 'binding_exists', '该企业已绑定本园区')
       const binding = await repo.insertBinding({
@@ -178,11 +180,20 @@ export async function dispatchParkApi(
       return { status: 200, body: { binding_id: binding.bindingId } }
     }
 
-    // ---- consultations (咨询摘要列表, §5.4) ----
+    // ---- consultations (咨询摘要列表, §5.4: 按企业/时间筛选) ----
     if (rest === '/consultations' && method === 'GET') {
       await requireParkMember(driver, auth, parkOrgId)
       const inquiryService = new InquiryService(driver)
-      const items = await inquiryService.listForPark(parkOrgId)
+      const readDateParam = (name: string): number | undefined => {
+        const raw = url.searchParams.get(name)
+        const value = raw === null ? NaN : Number(raw)
+        return Number.isFinite(value) ? value : undefined
+      }
+      const items = await inquiryService.listForPark(parkOrgId, {
+        enterpriseOrgId: url.searchParams.get('enterprise_org_id') ?? undefined,
+        beforeCreatedAt: readDateParam('before_created_at'),
+        afterCreatedAt: readDateParam('after_created_at'),
+      })
       const profiles = new Map((await repo.listEnterpriseProfiles(parkOrgId))
         .map(p => [p.enterpriseOrgId, p.enterpriseName]))
       return {
@@ -209,7 +220,8 @@ export async function dispatchParkApi(
           statuses: statusFilter && statusFilter.length > 0 ? statusFilter : undefined,
           watchedBy: watchedOnly ? auth.userId : undefined,
         })
-        return { status: 200, body: { items: leads.map(projectLead) } }
+        const names = await enterpriseNameMap(repo, parkOrgId)
+        return { status: 200, body: { items: leads.map(l => projectLead(l, names.get(l.enterpriseOrgId))) } }
       }
       if (method === 'POST') {
         const role = await requireParkMember(driver, auth, parkOrgId, [PARK_ROLE.OPS])
@@ -248,10 +260,11 @@ export async function dispatchParkApi(
       if (leadRest === '' && method === 'GET') {
         const lead = await leadService.requireLead(parkOrgId, leadId)
         const inquiry = lead.sourceInquiryId ? await repo.getInquiry(lead.sourceInquiryId) : null
+        const leadName = (await enterpriseNameMap(repo, parkOrgId)).get(lead.enterpriseOrgId)
         return {
           status: 200,
           body: {
-            ...projectLead(lead),
+            ...projectLead(lead, leadName),
             inquiry_summary: inquiry
               ? {
                   inquiry_id: inquiry.inquiryId,
@@ -267,20 +280,33 @@ export async function dispatchParkApi(
       }
 
       if (leadRest === '/claim' && method === 'POST') {
+        if (role !== PARK_ROLE.OPS) throw new ParkApiError(403, 'park_role_denied', '仅招商运营可认领线索')
         const before = await leadService.requireLead(parkOrgId, leadId)
         const after = await leadService.claim(parkOrgId, leadId, auth.userId)
+        const claimName = (await enterpriseNameMap(repo, parkOrgId)).get(after.enterpriseOrgId)
         await audit.record({
           parkOrgId, actorUserId: auth.userId, actorOrgId: auth.orgId,
           action: 'park.lead_claim', targetType: 'lead', targetId: leadId,
           before: { status: before.status, owner_id: before.ownerId },
           after: { status: after.status, owner_id: after.ownerId },
         })
-        return { status: 200, body: projectLead(after) }
+        return { status: 200, body: projectLead(after, claimName) }
       }
 
       if (leadRest === '' && method === 'PATCH') {
         const nextStatus = typeof body.status === 'string' ? body.status as LeadStatus : undefined
+        if (nextStatus !== undefined && role !== PARK_ROLE.OPS) {
+          throw new ParkApiError(403, 'park_role_denied', '仅招商运营可更新线索状态')
+        }
         const ownerId = typeof body.owner_id === 'string' ? body.owner_id : undefined
+        if (ownerId !== undefined) {
+          if (role !== PARK_ROLE.LEADER) {
+            throw new ParkApiError(403, 'park_role_denied', '仅园区领导可分派线索')
+          }
+          if (await getParkRole(driver, parkOrgId, ownerId) !== PARK_ROLE.OPS) {
+            throw new ParkApiError(400, 'lead_owner_invalid', '线索只能分派给本园区招商运营')
+          }
+        }
         const isLeader = role === PARK_ROLE.LEADER
         const { before, after } = await leadService.transition({
           parkOrgId, leadId, actorUserId: auth.userId, actorIsLeader: isLeader,
@@ -408,6 +434,14 @@ export async function dispatchParkApi(
         const assistantId = typeof body.assistant_id === 'string' ? body.assistant_id : ''
         const enterpriseOrgId = typeof body.enterprise_org_id === 'string' ? body.enterprise_org_id : ''
         if (!assistantId || !enterpriseOrgId) throw new ParkApiError(400, 'invalid_payload', 'assistant_id 与 enterprise_org_id 必填')
+        const assistant = await driver.get<{ id: string }>(
+          `SELECT id FROM tenant_assistants WHERE id = ? AND org_id = ? AND status = 'approved'`,
+          [assistantId, parkOrgId],
+        )
+        if (!assistant) throw new ParkApiError(400, 'assistant_invalid', '智能体不属于当前园区或尚未发布')
+        if (!(await repo.getBinding(parkOrgId, enterpriseOrgId))) {
+          throw new ParkApiError(400, 'enterprise_not_bound', '企业尚未绑定当前园区')
+        }
         const assignment = await repo.insertAssignment({ parkOrgId, assistantId, enterpriseOrgId })
         await audit.record({
           parkOrgId, actorUserId: auth.userId, actorOrgId: auth.orgId,
@@ -440,14 +474,26 @@ export async function dispatchParkApi(
 /**
  * Registration endpoint handler — mounted ABOVE the bearer-JWT wall by
  * server.ts (eventTriggerIngest precedent, server.ts:2492). Rate limiting is
- * layered at the BFF (webui express-rate-limit) plus the SMS code attempt
- * counter on phone_login_codes.
+ * layered twice: here in the park module (fixed window per client IP,
+ * plan 2.6 #1) and at the BFF (webui express-rate-limit), plus the SMS code
+ * attempt counter on phone_login_codes.
  */
 export async function handleParkEnterpriseRegister(
-  deps: ParkApiDeps & { authService: AuthService },
+  deps: ParkApiDeps & {
+    authService: AuthService
+    /** Client IP as seen by moss (XFF first entry via BFF/proxy, else socket address). */
+    clientIp?: string
+    /** Injectable for tests; defaults to the module-level limiter. */
+    rateLimiter?: ParkRateLimiter
+  },
   body: Record<string, unknown>,
 ): Promise<ParkRouteResult> {
   try {
+    const limiter = deps.rateLimiter ?? defaultParkRegisterLimiter
+    const clientIp = deps.clientIp ?? 'unknown'
+    if (!limiter.check(clientIp)) {
+      return { status: 429, body: { error: { code: 'rate_limited', message: '注册请求过于频繁，请稍后再试' } } }
+    }
     const registration = new ParkRegistrationService(deps.driver, deps.authService)
     const result = await registration.registerEnterprise({
       phone: typeof body.phone === 'string' ? body.phone : '',
@@ -528,13 +574,20 @@ async function dispatchEnterpriseSide(
   return { status: 404, body: { error: { code: 'not_found', message: 'Not found' } } }
 }
 
+/** org_id -> enterprise_name 映射（leads 列表展示用） */
+async function enterpriseNameMap(repo: import('./parkRepository.js').ParkRepository, parkOrgId: string): Promise<Map<string, string>> {
+  const profiles = await repo.listEnterpriseProfiles(parkOrgId)
+  return new Map(profiles.map(p => [p.enterpriseOrgId, p.enterpriseName]))
+}
+
 // ---- projections ----
 
-function projectLead(lead: import('./parkRepository.js').Lead) {
+function projectLead(lead: import('./parkRepository.js').Lead, enterpriseName?: string | null) {
   return {
     lead_id: lead.leadId,
     park_org_id: lead.parkOrgId,
     enterprise_org_id: lead.enterpriseOrgId,
+    enterprise_name: enterpriseName ?? null,
     source: lead.source,
     source_inquiry_id: lead.sourceInquiryId,
     score: lead.score,
