@@ -67,7 +67,7 @@ try {
   for (const binding of [a, next, b]) {
     await registry.mcp(binding, { jsonrpc: '2.0', id: ++rpc, method: 'initialize', params: {} })
     const listed = await registry.mcp(binding, { jsonrpc: '2.0', id: ++rpc, method: 'tools/list' }) as { result: { tools: unknown[] } }
-    assert.equal(listed.result.tools.length, 3)
+    assert.equal(listed.result.tools.length, 5)
     assert.notEqual((await runDocker(['inspect', `moss-browser-${key(binding)}`])).code, 0)
   }
   console.log(JSON.stringify({ phase: 'discovery', profilesNotClaimed: true, containersNotCreated: true }))

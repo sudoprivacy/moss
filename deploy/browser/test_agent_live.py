@@ -211,6 +211,20 @@ async def test_real_agent_observes_human_input_before_submitting(remote_site, tm
             assert any(
                 tab["url"].rstrip("/") == remote_site[0] for tab in original["tabs"]
             ), "Real model did not navigate through MCP"
+            is_lifecycle = os.environ.get("MOSS_BROWSER_LIFECYCLE_AGENT_LIVE") == "1"
+            if is_lifecycle:
+                previous_browser = original["browserSessionId"]
+                previous_profile = original["profileId"]
+                await acp.prompt(
+                    session_id,
+                    f"This explicit restart is intended; I accept loss of unsubmitted page state. Observe current epochs and use browser_restart with acknowledgeStateLoss=true, isHeadless=true and transport=cdp. Reuse the same persistent profile. Then navigate to {remote_site[0]} and observe the form. Do not fill or submit it, use shell or start a second browser.",
+                )
+                original = await worker.state()
+                assert original["browserSessionId"] != previous_browser, (
+                    "The real model did not restart Chrome"
+                )
+                assert original["profileId"] == previous_profile
+                assert worker.session is not None and worker.browser["headless"] is True
             async with aiohttp.ClientSession() as http:
 
                 async def human(action):
@@ -280,6 +294,14 @@ async def test_real_agent_observes_human_input_before_submitting(remote_site, tm
                     "browser_control_held_by_user" in text
                     or "stale_browser_operation" in text
                 )
+                if is_lifecycle:
+                    await acp.prompt(
+                        session_id,
+                        "The review is complete. Observe the current control epochs and use browser_stop to close this owned Chrome while preserving its profile. Do not restart it or use shell. Report that the browser is stopped.",
+                    )
+                    assert worker.session is None and worker.browser is None
+                    assert worker.display is None
+                    assert (worker.root / "chrome").is_dir()
                 (tmp_path / "agent-browser-live-evidence.json").write_text(
                     json.dumps(
                         {
@@ -289,6 +311,8 @@ async def test_real_agent_observes_human_input_before_submitting(remote_site, tm
                             "trustedReceipts": remote_site[1],
                             "actualAgentNotifications": len(acp.notifications),
                             "humanControlRefusal": True,
+                            "explicitAgentRestart": is_lifecycle,
+                            "agentStoppedOwnedBrowser": is_lifecycle,
                         },
                         indent=2,
                     )

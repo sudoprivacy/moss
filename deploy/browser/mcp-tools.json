@@ -1,7 +1,7 @@
 [
   {
     "name": "browser_launch",
-    "description": "Start the browser shared with the user's BrowserPanel. Choose headless/headful from the task; headless runs no display service. Cloud extension is preferred for compatibility and persistent login. CDP fallback requires explicit selection. Existing browsers preserve their launch mode. Never start another browser to bypass human control.",
+    "description": "Start the browser shared with the user. Choose headless/headful from the task; headless runs no display service. Cloud extension is preferred for compatibility and persistent login. Existing browsers retain their launch mode; a different mode returns browser_restart_required. Use browser_restart to explicitly change it. Never bypass human control.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -118,6 +118,67 @@
         "kind",
         "controlEpoch",
         "targetEpoch"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "browser_stop",
+    "description": "Explicitly close this owned Chrome and its display while preserving the persistent profile and cookies. Observe current epochs first. Every agent shares the same lease; human control rejects this operation. Stale requests are never replayed. A later browser_launch can reopen the same profile.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "controlEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "targetEpoch": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "controlEpoch",
+        "targetEpoch"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "browser_restart",
+    "description": "Explicitly restart the same profile in the requested headless/headful and extension/CDP mode. Unsubmitted page state can be lost; set acknowledgeStateLoss=true only when this restart is intended. Cookies and profile identity persist. Fresh observation and new epochs are returned. Human control rejects AI restart; never start a second browser or retry an uncertain restart.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "controlEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "targetEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "isHeadless": {
+          "type": "boolean"
+        },
+        "transport": {
+          "type": "string",
+          "enum": [
+            "extension",
+            "cdp"
+          ]
+        },
+        "acknowledgeStateLoss": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "controlEpoch",
+        "targetEpoch",
+        "isHeadless",
+        "transport",
+        "acknowledgeStateLoss"
       ],
       "additionalProperties": false
     }

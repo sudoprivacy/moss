@@ -154,6 +154,7 @@ class Worker:
             "controlEpoch": live["controlEpoch"],
             "targetEpoch": live["targetEpoch"],
             "isController": bool(controller and live["controller"] == controller),
+            "isHumanControlHeld": live["controller"] is not None,
             "isHeadless": self.browser.get("headless", True) if self.browser else True,
             "transport": self.browser.get("transport", "extension")
             if self.browser
@@ -224,134 +225,239 @@ class Worker:
 
     async def start(self, action, actor):
         async with self.lifecycle:
-            if self.session:
-                return
-            is_headless, transport = (
-                action.get("isHeadless"),
-                action.get("transport", "extension"),
-            )
-            if not isinstance(is_headless, bool) or transport not in (
-                "cdp",
-                "extension",
+            await self._start_browser(action, actor)
+
+    async def _start_browser(self, action, actor):
+        is_headless, transport = (
+            action.get("isHeadless"),
+            action.get("transport", "extension"),
+        )
+        if not isinstance(is_headless, bool) or transport not in (
+            "cdp",
+            "extension",
+        ):
+            raise ControlError("explicit_browser_launch_mode_required")
+        if actor == "ai" and self.control.state != "ai":
+            raise ControlError("browser_control_held_by_user")
+        if actor != "ai" and self.control.controller not in (None, actor):
+            raise ControlError("browser_control_not_owned")
+        if self.session:
+            if (
+                self.browser["headless"] != is_headless
+                or self.browser["transport"] != transport
             ):
-                raise ControlError("explicit_browser_launch_mode_required")
-            if actor == "ai" and self.control.state != "ai":
-                raise ControlError("browser_control_held_by_user")
-            if actor != "ai" and self.control.controller not in (None, actor):
-                raise ControlError("browser_control_not_owned")
-            if not is_headless:
-                if os.name == "nt":
-                    raise ControlError("managed_window_view_requires_linux")
+                raise ControlError("browser_restart_required")
+            return
+        if not is_headless:
+            if os.name == "nt":
+                raise ControlError("managed_window_view_requires_linux")
+            if self.display is None:
                 self.display = XDisplay()
                 os.environ["DISPLAY"] = await self.display.start()
-            profile = self.root / "chrome"
-            profile.mkdir(exist_ok=True)
-            if not self.pending_launch:
+        profile = self.root / "chrome"
+        profile.mkdir(exist_ok=True)
+        if not self.pending_launch:
+            try:
+                self.profile_lease.prepare(profile)
+            except RuntimeError as error:
+                raise ControlError(str(error)) from None
+        arguments = {
+            "headless": is_headless,
+            "transport": transport,
+            "chrome_path": self.chrome_path,
+            "silent_stderr": True,
+            "stealth": False,
+            "extra_args": ["--no-sandbox"] if os.name != "nt" else [],
+        }
+        if not is_headless:
+            arguments["extra_args"] += [
+                "--window-size=1280,900",
+                "--start-maximized",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+            ]
+        if transport == "extension":
+            arguments["user_data_dir"] = str(profile)
+            identity = pathlib.Path("/opt/browser/extension/identity.json")
+            if identity.exists():
+                installed_identity = json.loads(identity.read_text())
                 try:
-                    self.profile_lease.prepare(profile)
-                except RuntimeError as error:
-                    raise ControlError(str(error)) from None
-            arguments = {
-                "headless": is_headless,
-                "transport": transport,
-                "chrome_path": self.chrome_path,
-                "silent_stderr": True,
-                "stealth": False,
-                "extra_args": ["--no-sandbox"] if os.name != "nt" else [],
-            }
-            if not is_headless:
-                arguments["extra_args"] += [
-                    "--window-size=1280,900",
-                    "--start-maximized",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                ]
-            if transport == "extension":
-                arguments["user_data_dir"] = str(profile)
-                identity = pathlib.Path("/opt/browser/extension/identity.json")
-                if identity.exists():
-                    installed_identity = json.loads(identity.read_text())
-                    try:
-                        await prepare_managed_extension_profile(
-                            str(profile),
-                            extension_id=installed_identity["id"],
-                            minimum_version=installed_identity["version"],
-                            chrome_path=self.chrome_path,
-                            extra_args=arguments["extra_args"],
-                        )
-                    except ControlError as error:
-                        diagnostic = self.root / "launch-failure.json"
-                        diagnostic.write_text(
-                            json.dumps(error.details or {"error_code": error.code})
-                        )
-                        diagnostic.chmod(0o600)
-                        raise
-            else:
-                arguments["profile"] = str(profile)
-                arguments["override_default_args"] = {"--remote-allow-origins": None}
-            if self.pending_launch:
-                # Explicitly reconnect an owned late launch. Never start a
-                # second Chrome or replay an uncertain browser input.
-                connected = await browser_connect(transport=transport)
-                if (
-                    not connected.get("connected")
-                    or connected.get("owner") != "adb"
-                    or connected.get("pid") != self.pending_launch.get("pid")
-                    or pathlib.Path(connected.get("user_data_dir", "")).resolve()
-                    != profile.resolve()
-                    or bool(connected.get("headless")) != is_headless
-                ):
-                    raise ControlError("managed_browser_reconnect_required")
-                launched = connected
-            else:
-                launched = await asyncio.to_thread(browser_start, **arguments)
-            if "error" in launched:
-                diagnostic = self.root / "launch-failure.json"
-                diagnostic.write_text(
-                    json.dumps(
-                        {
-                            key: launched.get(key)
-                            for key in (
-                                "error",
-                                "error_code",
-                                "pid",
-                                "launch_token",
-                                "started",
-                            )
-                        }
+                    await prepare_managed_extension_profile(
+                        str(profile),
+                        extension_id=installed_identity["id"],
+                        minimum_version=installed_identity["version"],
+                        chrome_path=self.chrome_path,
+                        extra_args=arguments["extra_args"],
                     )
+                except ControlError as error:
+                    diagnostic = self.root / "launch-failure.json"
+                    diagnostic.write_text(
+                        json.dumps(error.details or {"error_code": error.code})
+                    )
+                    diagnostic.chmod(0o600)
+                    raise
+        else:
+            arguments["profile"] = str(profile)
+            arguments["override_default_args"] = {"--remote-allow-origins": None}
+        if self.pending_launch:
+            # Explicitly reconnect an owned late launch. Never start a
+            # second Chrome or replay an uncertain browser input.
+            connected = await browser_connect(transport=transport)
+            if (
+                not connected.get("connected")
+                or connected.get("owner") != "adb"
+                or connected.get("pid") != self.pending_launch.get("pid")
+                or pathlib.Path(connected.get("user_data_dir", "")).resolve()
+                != profile.resolve()
+                or bool(connected.get("headless")) != is_headless
+            ):
+                raise ControlError("managed_browser_reconnect_required")
+            launched = connected
+        else:
+            launched = await asyncio.to_thread(browser_start, **arguments)
+        if "error" in launched:
+            diagnostic = self.root / "launch-failure.json"
+            diagnostic.write_text(
+                json.dumps(
+                    {
+                        key: launched.get(key)
+                        for key in (
+                            "error",
+                            "error_code",
+                            "pid",
+                            "launch_token",
+                            "started",
+                        )
+                    }
                 )
-                diagnostic.chmod(0o600)
-                if (
-                    launched.get("started")
-                    and launched.get("launch_token")
-                    and launched.get("pid")
-                ):
-                    self.pending_launch = launched
-                if self.display:
-                    await self.display.close()
-                    self.display = None
-                raise ControlError(
-                    "browser_extension_not_ready"
-                    if transport == "extension"
-                    else "browser_start_failed"
-                )
-            self.browser = {**launched, "headless": is_headless, "transport": transport}
-            self.pending_launch = None
-            client = await (
-                connect_extension(launched["session_id"])
-                if transport == "extension"
-                else connect_browser(session_id=launched["session_id"])
             )
-            self.session = BrowserSession(client, self.http, control=self.control)
-            if not is_headless:
-                page = await self.session._connect_page()
-                await page.call("Page.bringToFront")
-            if self.control.state == "error" and actor != "ai":
-                self.control.state = "human"
-                self.control.controller = actor
-            self.control.epoch += 1
-            self.save()
+            diagnostic.chmod(0o600)
+            if (
+                launched.get("started")
+                and launched.get("launch_token")
+                and launched.get("pid")
+            ):
+                self.pending_launch = launched
+            if self.display:
+                await self.display.close()
+                self.display = None
+            raise ControlError(
+                "browser_extension_not_ready"
+                if transport == "extension"
+                else "browser_start_failed"
+            )
+        self.browser = {**launched, "headless": is_headless, "transport": transport}
+        self.pending_launch = None
+        client = await (
+            connect_extension(launched["session_id"])
+            if transport == "extension"
+            else connect_browser(session_id=launched["session_id"])
+        )
+        self.session = BrowserSession(client, self.http, control=self.control)
+        if not is_headless:
+            page = await self.session._connect_page()
+            await page.call("Page.bringToFront")
+        if self.control.state == "error" and actor != "ai":
+            self.control.state = "human"
+            self.control.controller = actor
+        self.control.epoch += 1
+        self.save()
+
+    async def _stop_browser(self):
+        for viewer in list(self.window_viewers):
+            await self.window_view.detach(viewer)
+        if self.session:
+            await self.session.close()
+            await self.session.browser.close()
+        self.session = None
+        self.viewers.clear()
+        self.window_viewers.clear()
+        self.window_frame = None
+        record = self.browser or self.pending_launch
+        if record:
+            session_id = record.get("session_id")
+            if not session_id:
+                raise ControlError("managed_browser_reconnect_required")
+            result = await asyncio.to_thread(browser_stop, session_id=session_id)
+            if result.get("stopped") is not True:
+                self.pending_launch = record
+                raise ControlError("browser_stop_uncertain")
+        self.browser = None
+        self.pending_launch = None
+        if self.display:
+            await self.display.close()
+            self.display = None
+
+    async def lifecycle_action(self, actor, action):
+        kind = action.get("kind")
+        if kind == "restart":
+            if action.get("acknowledgeStateLoss") is not True:
+                raise ControlError("browser_restart_acknowledgement_required")
+            if type(action.get("isHeadless")) is not bool or action.get(
+                "transport"
+            ) not in ("extension", "cdp"):
+                raise ControlError("explicit_browser_launch_mode_required")
+        epoch, target_epoch = self.epochs(action)
+        async with self.lifecycle:
+
+            async def perform():
+                # Fence queued coordinates before closing any browser resource.
+                # Recovery never resumes plans from before this transition.
+                self.control.epoch += 1
+                self.control.target_epoch += 1
+                self.handoff = None
+                self.save(state="error")
+                try:
+                    await self._stop_browser()
+                    if kind == "restart":
+                        await self._start_browser(action, actor)
+                except BaseException:
+                    if self.control.state == "ai":
+                        self.control.state = "error"
+                    self.control.error = "browser_restart_requires_observation"
+                    self.save()
+                    raise
+                self.save()
+
+            await self.control.run(actor, epoch, target_epoch, perform)
+        reply = {"session": await self.state(actor if actor != "ai" else None)}
+        if kind == "restart" and self.session:
+            reply["observation"] = await self.session.observe(
+                self.control.epoch, self.control.target_epoch
+            )
+        return reply
+
+    async def give_back(self, controller, action):
+        epoch, target_epoch = self.epochs(action)
+        note = action.get("note")
+        if note is not None and (not isinstance(note, str) or len(note) > 2000):
+            raise ControlError("invalid_browser_handoff_note")
+        if self.session:
+            _, observation = await self.session.give_back(
+                controller, epoch, target_epoch
+            )
+        else:
+            if self.browser or self.pending_launch or self.display:
+                raise ControlError("managed_browser_reconnect_required")
+            if epoch != self.control.epoch or target_epoch != self.control.target_epoch:
+                raise ControlError("stale_browser_operation")
+
+            async def observe_stopped():
+                return {
+                    "stopped": True,
+                    "profileId": self.profile_id(),
+                    "activeTargetId": None,
+                    "tabs": [],
+                }
+
+            _, observation = await self.control.give_back(controller, observe_stopped)
+        self.handoff = {
+            "controlEpoch": self.control.epoch,
+            "note": note or "",
+            "returnedAt": time.time(),
+        }
+        self.save()
+        return {"session": await self.state(controller), "observation": observation}
 
     @staticmethod
     def epochs(action):
@@ -367,6 +473,10 @@ class Worker:
             pass
         elif kind == "start":
             await self.start(action, controller)
+        elif kind in ("stop", "restart"):
+            return await self.lifecycle_action(controller, action)
+        elif kind == "return":
+            return await self.give_back(controller, action)
         elif kind in ("attach", "detach"):
             viewer = action.get("viewerId")
             if not isinstance(viewer, str) or len(viewer) > 128:
@@ -406,18 +516,6 @@ class Worker:
                     raise ControlError("browser_control_transfer_in_progress")
                 self.save(controller=controller, state="pausing")
                 await self.session.take(controller, epoch, target_epoch)
-            elif kind == "return":
-                note = action.get("note")
-                if note is not None and (not isinstance(note, str) or len(note) > 2000):
-                    raise ControlError("invalid_browser_handoff_note")
-                _, extra["observation"] = await self.session.give_back(
-                    controller, epoch, target_epoch
-                )
-                self.handoff = {
-                    "controlEpoch": self.control.epoch,
-                    "note": note or "",
-                    "returnedAt": time.time(),
-                }
             elif kind == "frame":
                 owned = controller + ":" + str(action.get("viewerId"))
                 if owned not in self.viewers:
@@ -443,6 +541,8 @@ class Worker:
 
     async def agent(self, action):
         kind = action.get("kind")
+        if kind in ("stop", "restart"):
+            return await self.lifecycle_action("ai", action)
         if kind == "start":
             await self.start(action, "ai")
             return {"session": await self.state()}
@@ -453,7 +553,13 @@ class Worker:
         epoch, target_epoch = self.epochs(action)
         if kind == "observe":
             observation = await self.session.observe(epoch, target_epoch)
-            return {"session": await self.state(), "observation": observation}
+            current = await self.state()
+            if (
+                current["controlEpoch"] != epoch
+                or current["targetEpoch"] != target_epoch
+            ):
+                raise ControlError("stale_browser_operation")
+            return {"session": current, "observation": observation}
         if kind == "command":
             method, params = action.get("method"), action.get("params", {})
             # Page commands stay on the selected target. Browser/Target/remote
@@ -521,15 +627,7 @@ class Worker:
                         await self.session.detach(viewer)
 
     async def close(self):
-        for viewer in list(self.window_viewers):
-            await self.window_view.detach(viewer)
-        if self.session:
-            await self.session.close()
-            await self.session.browser.close()
-        if self.browser:
-            await asyncio.to_thread(browser_stop, session_id=self.browser["session_id"])
-        if self.display:
-            await self.display.close()
+        await self._stop_browser()
         self.profile_lease.close()
 
 
@@ -610,6 +708,10 @@ def application(worker):
             try:
                 if name == "browser_launch":
                     value = await worker.agent({**arguments, "kind": "start"})
+                elif name == "browser_stop":
+                    value = await worker.agent({**arguments, "kind": "stop"})
+                elif name == "browser_restart":
+                    value = await worker.agent({**arguments, "kind": "restart"})
                 elif name == "browser_observe":
                     current = await worker.state()
                     value = (
