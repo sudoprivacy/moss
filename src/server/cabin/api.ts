@@ -483,9 +483,6 @@ async function fetchSeatContext(
   } catch {
     throw new CabinHttpError(500, 'SEAT_CONTEXT_NOT_CONFIGURED', 'cabin.passengerInfoUrl is invalid')
   }
-  url.searchParams.set('aircraftNo', seat.aircraftNo)
-  url.searchParams.set('seatNo', seat.seatNo)
-
   let response: Response | null = null
   let lastError: unknown
   const start = Date.now()
@@ -494,9 +491,16 @@ async function fetchSeatContext(
     const timeout = setTimeout(() => controller.abort(), 10_000)
     try {
       response = await fetch(url, {
-        method: 'GET',
+        method: 'POST',
         signal: controller.signal,
-        headers: config.passengerInfoAuth ? { authorization: config.passengerInfoAuth } : undefined,
+        headers: {
+          'content-type': 'application/json',
+          ...(config.passengerInfoAuth ? { authorization: config.passengerInfoAuth } : {}),
+        },
+        body: JSON.stringify({
+          aircraftNo: seat.aircraftNo,
+          seatNo: seat.seatNo,
+        }),
       })
       break
     } catch (error) {
@@ -514,7 +518,7 @@ async function fetchSeatContext(
       type: 'outbound',
       ...summarizeContext({ ...logContext, seatNo: seat.seatNo }),
       upstream: 'seat-context',
-      method: 'GET',
+      method: 'POST',
       url: logUrl,
       ok: false,
       elapsedMs: Date.now() - start,
@@ -529,7 +533,7 @@ async function fetchSeatContext(
       type: 'outbound',
       ...summarizeContext({ ...logContext, seatNo: seat.seatNo }),
       upstream: 'seat-context',
-      method: 'GET',
+      method: 'POST',
       url: logUrl,
       status: response.status,
       ok: false,
@@ -545,7 +549,7 @@ async function fetchSeatContext(
       type: 'outbound',
       ...summarizeContext({ ...logContext, seatNo: seat.seatNo }),
       upstream: 'seat-context',
-      method: 'GET',
+      method: 'POST',
       url: logUrl,
       status: response.status,
       ok: false,
@@ -619,7 +623,7 @@ async function fetchSeatContext(
       flightId: context.flightId,
     }),
     upstream: 'seat-context',
-    method: 'GET',
+    method: 'POST',
     url: logUrl,
     status: response.status,
     ok: true,

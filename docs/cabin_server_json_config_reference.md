@@ -11,7 +11,7 @@
   "cabin": {
     "enabled": true,
     "contextMode": "seat",
-    "passengerInfoUrl": "http://对方服务地址/admin-api/cabin/public/current-seat-context/get",
+    "passengerInfoUrl": "http://对方服务地址/admin-api/cabin/tablet-login/get-seat-context",
     "passengerInfoAuth": "对方提供的服务端 Authorization",
     "aircraftNo": "现场飞机编号",
 
@@ -66,7 +66,7 @@ MOSS_HOST_PATH_MAP={"/data/yin/moss-cabin-gateway/moss/data":"/app/data","/data/
 | `contextMode` | `tablet-token` | 是 | 新接入使用 `seat` | `tablet-token` 保留原 Moss token + 平板 token 流程；`seat` 使用 UE 请求头中的 aircraftNo + seatNo 查询上下文，并禁用 `/v1/auth/token`。 | `CABIN_CONTEXT_MODE` |
 | `tokenSecret` | `dev-cabin-token-secret` | `tablet-token` 模式生产必须改 | 随机长密钥 | 旧模式 Pad cabin access token 签名密钥；seat 模式不签发该 token。 | `CABIN_TOKEN_SECRET` |
 | `tokenTtlSeconds` | `7200` | 否 | `7200` | Pad cabin access token 有效期，单位秒。 | `CABIN_TOKEN_TTL_SECONDS` |
-| `passengerInfoUrl` | 无 | cabin 对接真实乘客信息时必须 | 对方乘客/座位上下文接口 | 两种模式复用该字段：`tablet-token` 模式按原逻辑 POST；`seat` 模式将 UE 的 aircraftNo、seatNo 作为 Query 发起 GET。 | `CABIN_PASSENGER_INFO_URL` |
+| `passengerInfoUrl` | 无 | cabin 对接真实乘客信息时必须 | 对方乘客/座位上下文接口 | 两种模式复用该字段：`tablet-token` 模式按原逻辑 POST；`seat` 模式将 UE 的 aircraftNo、seatNo 放入 JSON Body 发起 POST。 | `CABIN_PASSENGER_INFO_URL` |
 | `passengerInfoAuth` | 无 | 视对方接口而定 | 对方要求鉴权时配置 | 两种模式调用 `passengerInfoUrl` 时携带的 `Authorization`。 | `CABIN_PASSENGER_INFO_AUTH` |
 | `passengerInfoPrivacyLevel` | `2` | 否 | `2` | 仅旧 `tablet-token` 模式使用，请求乘客信息时传给对方接口的隐私级别。 | `CABIN_PASSENGER_INFO_PRIVACY_LEVEL` |
 | `aircraftNo` | 无 | 自动化/广播建议配置 | 现场飞机编号 | 用于广播、告警、健康报告、托管座位的飞机编号。 | `CABIN_AIRCRAFT_NO` |

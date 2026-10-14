@@ -1,6 +1,6 @@
 # Moss Cabin 对外接口文档（飞机编号 + 座位号模式）
 
-开发验证版 1.0 · 2026-10-13
+开发验证版 1.1 · 2026-10-14
 
 适用代码分支：`codex/cabin-status-mode-tools`。
 
@@ -20,8 +20,14 @@ X-Cabin-Seat-No: A
 Moss 使用这两个值调用客户新乘客上下文接口：
 
 ```http
-GET /admin-api/cabin/public/current-seat-context/get?aircraftNo=B-WITHFLIGHT-01&seatNo=A
+POST /admin-api/cabin/tablet-login/get-seat-context
+Content-Type: application/json
 Authorization: <服务端配置值，当前联调环境为 test1>
+
+{
+  "aircraftNo": "B-WITHFLIGHT-01",
+  "seatNo": "A"
+}
 ```
 
 取得航班和乘客信息后，Moss 使用 UE 请求头中的飞机号、座位号继续执行 ASR、AI、硬件控制、TTS、历史或健康报告处理。
@@ -579,8 +585,14 @@ curl --get "$MOSS_BASE/v1/health-reports/$REPORT_ID" \
 Moss 在处理 UE 业务接口前调用：
 
 ```http
-GET http://<客户后台>/admin-api/cabin/public/current-seat-context/get?aircraftNo=B-WITHFLIGHT-01&seatNo=A
+POST http://<客户后台>/admin-api/cabin/tablet-login/get-seat-context
+Content-Type: application/json
 Authorization: <服务端配置值，当前联调环境为 test1>
+
+{
+  "aircraftNo": "B-WITHFLIGHT-01",
+  "seatNo": "A"
+}
 ```
 
 | 字段 | 类型 | 必填 | 来源 |
@@ -634,7 +646,7 @@ Moss 继续处理所需的最低字段：
 Moss 以 UE 请求头为准：
 
 - 原样保存 `X-Cabin-Aircraft-No` 和 `X-Cabin-Seat-No`。
-- 将两个值作为客户 GET 接口 Query。
+- 将两个值放入客户 POST 接口的 JSON Body。
 - 会话、托管座位、硬件、广播、健康报告和 WebSocket 匹配均使用请求头值。
 - 响应中的 `data.aircraftNo`、`data.seatNo` 和 `contextStatus` 不覆盖请求头，也不参与成功判断。
 
@@ -643,12 +655,12 @@ Moss 以 UE 请求头为准：
 ### 13.4 直接联调 curl
 
 ```bash
-SEAT_CONTEXT_URL='http://192.168.20.2:48081/admin-api/cabin/public/current-seat-context/get'
+SEAT_CONTEXT_URL='http://192.168.20.2:48081/admin-api/cabin/tablet-login/get-seat-context'
 
-curl --verbose --get "$SEAT_CONTEXT_URL" \
+curl --verbose --request POST "$SEAT_CONTEXT_URL" \
   --header 'Authorization: test1' \
-  --data-urlencode 'aircraftNo=B-WITHFLIGHT-01' \
-  --data-urlencode 'seatNo=A'
+  --header 'Content-Type: application/json' \
+  --data-raw '{"aircraftNo":"B-WITHFLIGHT-01","seatNo":"A"}'
 ```
 
 如果客户确认还需要后台固定鉴权，再增加对应请求头；该值属于 Moss 服务端配置，不由 UE 传入。

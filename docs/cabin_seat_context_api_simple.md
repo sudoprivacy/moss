@@ -1,6 +1,6 @@
 # 客舱 AI 语音与聊天接口文档（飞机编号 + 座位号版）
 
-文档版本：开发验证版 1.0 · 2026-10-13
+文档版本：开发验证版 1.1 · 2026-10-14
 
 > 本文描述的接口已实现并通过本地模拟测试，尚未部署上线。现场需配置 `contextMode=seat` 后才启用新流程。
 
@@ -37,11 +37,17 @@ Moss 需要完成以下调整：
 Moss 调用客户新接口：
 
 ```http
-GET /admin-api/cabin/public/current-seat-context/get?aircraftNo=B-WITHFLIGHT-01&seatNo=A
+POST /admin-api/cabin/tablet-login/get-seat-context
+Content-Type: application/json
 Authorization: <服务端配置值，当前联调环境为 test1>
+
+{
+  "aircraftNo": "B-WITHFLIGHT-01",
+  "seatNo": "A"
+}
 ```
 
-`aircraftNo` 和 `seatNo` 分别取 UE 的两个公共请求头，并按 URL Query 编码。Authorization 由 Moss 服务端配置，UE 不传。
+`aircraftNo` 和 `seatNo` 分别取 UE 的两个公共请求头，并放入 JSON Body。Authorization 由 Moss 服务端配置，UE 不传。
 
 最低需要返回：
 

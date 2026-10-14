@@ -1,6 +1,6 @@
 # Cabin 按飞机与座位获取乘客上下文改造方案
 
-方案版本：1.0 · 2026-10-12
+方案版本：1.1 · 2026-10-14
 
 适用代码分支：`codex/cabin-status-mode-tools`。
 
@@ -11,8 +11,14 @@
 取消 UE 调用 `/v1/auth/token` 和使用 Moss access token 的流程。UE 调用 Moss 业务接口时直接提供 `aircraftNo` 和 `seatNo`，Moss 使用这两个字段调用客户新乘客上下文接口：
 
 ```http
-GET /admin-api/cabin/public/current-seat-context/get?aircraftNo=B-WITHFLIGHT-01&seatNo=A
+POST /admin-api/cabin/tablet-login/get-seat-context
+Content-Type: application/json
 Authorization: <服务端配置值>
+
+{
+  "aircraftNo": "B-WITHFLIGHT-01",
+  "seatNo": "A"
+}
 ```
 
 Moss 获得航班、座位、乘客和设备上下文后，继续执行现有 ASR、AI、TTS、硬件控制、历史和健康报告逻辑。
@@ -88,7 +94,7 @@ UE 不再调用 /v1/auth/token
 {
   "cabin": {
     "contextMode": "seat",
-    "passengerInfoUrl": "http://192.168.20.2:48081/admin-api/cabin/public/current-seat-context/get",
+    "passengerInfoUrl": "http://192.168.20.2:48081/admin-api/cabin/tablet-login/get-seat-context",
     "passengerInfoAuth": "test1"
   }
 }
@@ -98,7 +104,7 @@ UE 不再调用 /v1/auth/token
 
 ```text
 CABIN_CONTEXT_MODE=seat
-CABIN_PASSENGER_INFO_URL=http://192.168.20.2:48081/admin-api/cabin/public/current-seat-context/get
+CABIN_PASSENGER_INFO_URL=http://192.168.20.2:48081/admin-api/cabin/tablet-login/get-seat-context
 CABIN_PASSENGER_INFO_AUTH=test1
 ```
 
@@ -112,11 +118,17 @@ CABIN_PASSENGER_INFO_AUTH=test1
 ### 4.2 请求
 
 ```http
-GET <passengerInfoUrl>?aircraftNo=<URL编码值>&seatNo=<URL编码值>
+POST <passengerInfoUrl>
+Content-Type: application/json
 Authorization: <passengerInfoAuth，仅配置时发送>
+
+{
+  "aircraftNo": "<X-Cabin-Aircraft-No>",
+  "seatNo": "<X-Cabin-Seat-No>"
+}
 ```
 
-请求不带 JSON body。aircraftNo 和 seatNo 分别取 UE 的 `X-Cabin-Aircraft-No` 和 `X-Cabin-Seat-No`，使用 `URLSearchParams` 编码。
+aircraftNo 和 seatNo 分别取 UE 的 `X-Cabin-Aircraft-No` 和 `X-Cabin-Seat-No`，放入 JSON Body。
 
 网络异常或超时可沿用当前 passenger-info 策略：10秒超时，第一次网络异常后等待300毫秒再重试一次；已经取得 HTTP 响应时不重试。
 
@@ -288,8 +300,8 @@ ASR、AI、TTS、硬件控制、广播和健康报告服务无需改变接口协
 
 ### 8.2 联调顺序
 
-1. 从 Moss 同一容器直接调用 get-seat-context。
-2. 核对请求头 seatNo 能被客户 GET 接口、硬件接口和健康 WebSocket 使用。
+1. 从 Moss 同一容器直接 POST 调用 get-seat-context。
+2. 核对请求头 seatNo 能通过 JSON Body 传给客户接口，并被硬件接口和健康 WebSocket 使用。
 3. 测试文本 AI，不触发硬件。
 4. 测试语音 ASR + AI。
 5. 测试状态查询、灯光、桌板和座椅控制。

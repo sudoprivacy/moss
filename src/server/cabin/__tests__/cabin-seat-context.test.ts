@@ -28,6 +28,14 @@ function listen(server: http.Server): Promise<string> {
   })
 }
 
+async function readJsonRequest(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = []
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+}
+
 function createConfig(baseUrl: string): ServerConfig {
   return {
     rootDir: '/tmp/moss-cabin-seat-context-test',
@@ -39,7 +47,7 @@ function createConfig(baseUrl: string): ServerConfig {
       tokenSecret: 'unused-in-seat-mode',
       tokenTtlSeconds: 7200,
       passengerInfoPrivacyLevel: 2,
-      passengerInfoUrl: `${baseUrl}/admin-api/cabin/public/current-seat-context/get`,
+      passengerInfoUrl: `${baseUrl}/admin-api/cabin/tablet-login/get-seat-context`,
       passengerInfoAuth: 'test1',
       asrUrl: `${baseUrl}/asr`,
       asrModel: 'asr',
@@ -99,18 +107,23 @@ describe('cabin seat context mode', () => {
       method: string
       aircraftNo: string | null
       seatNo: string | null
+      query: string
       authorization: string | undefined
+      contentType: string | undefined
       tabletToken: string | undefined
     }> = []
     const controlTargets: string[] = []
-    const upstream = http.createServer((req, res) => {
+    const upstream = http.createServer(async (req, res) => {
       const url = new URL(req.url || '/', 'http://localhost')
-      if (url.pathname === '/admin-api/cabin/public/current-seat-context/get') {
+      if (url.pathname === '/admin-api/cabin/tablet-login/get-seat-context') {
+        const body = await readJsonRequest(req)
         contextRequests.push({
           method: req.method || '',
-          aircraftNo: url.searchParams.get('aircraftNo'),
-          seatNo: url.searchParams.get('seatNo'),
+          aircraftNo: typeof body.aircraftNo === 'string' ? body.aircraftNo : null,
+          seatNo: typeof body.seatNo === 'string' ? body.seatNo : null,
+          query: url.search,
           authorization: typeof req.headers.authorization === 'string' ? req.headers.authorization : undefined,
+          contentType: typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : undefined,
           tabletToken: typeof req.headers['x-cabin-tablet-token'] === 'string'
             ? req.headers['x-cabin-tablet-token']
             : undefined,
@@ -241,10 +254,12 @@ describe('cabin seat context mode', () => {
 
     expect(contextRequests.length).toBeGreaterThanOrEqual(7)
     expect(contextRequests).toEqual(contextRequests.map(() => ({
-      method: 'GET',
+      method: 'POST',
       aircraftNo: 'B-WITHFLIGHT-01',
       seatNo: '01A',
+      query: '',
       authorization: 'test1',
+      contentType: 'application/json',
       tabletToken: undefined,
     })))
 
@@ -260,14 +275,15 @@ describe('cabin seat context mode', () => {
   })
 
   it('returns explicit seat header and upstream response errors', async () => {
-    const upstream = http.createServer((req, res) => {
+    const upstream = http.createServer(async (req, res) => {
       const url = new URL(req.url || '/', 'http://localhost')
-      if (url.pathname !== '/admin-api/cabin/public/current-seat-context/get') {
+      if (url.pathname !== '/admin-api/cabin/tablet-login/get-seat-context') {
         res.writeHead(404)
         res.end()
         return
       }
-      const seatNo = url.searchParams.get('seatNo')
+      const body = await readJsonRequest(req)
+      const seatNo = typeof body.seatNo === 'string' ? body.seatNo : undefined
       res.writeHead(200, { 'content-type': 'application/json' })
       if (seatNo === 'REJECT') {
         res.end(JSON.stringify({ code: 41001, msg: 'seat is not bound', data: null }))
@@ -312,14 +328,15 @@ describe('cabin seat context mode', () => {
 
   it('keeps 16 concurrent tablet seats and conversations isolated', async () => {
     const seenSeats: string[] = []
-    const upstream = http.createServer((req, res) => {
+    const upstream = http.createServer(async (req, res) => {
       const url = new URL(req.url || '/', 'http://localhost')
-      if (url.pathname !== '/admin-api/cabin/public/current-seat-context/get') {
+      if (url.pathname !== '/admin-api/cabin/tablet-login/get-seat-context') {
         res.writeHead(404)
         res.end()
         return
       }
-      const seatNo = url.searchParams.get('seatNo') || ''
+      const body = await readJsonRequest(req)
+      const seatNo = typeof body.seatNo === 'string' ? body.seatNo : ''
       seenSeats.push(seatNo)
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({
