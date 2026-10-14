@@ -468,7 +468,9 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: moss-server-e2e-${{ steps.release.outputs.version }}-${{ matrix.arch }}
-          path: ${{ runner.temp }}/moss-server-e2e/
+          path: |
+            ${{ runner.temp }}/moss-server-e2e/
+            ${{ runner.temp }}/moss-server-pg-ha/instance-*.log
           retention-days: 14
           if-no-files-found: warn
 

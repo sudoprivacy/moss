@@ -134,6 +134,7 @@ RUN chmod +x ./bin/scode
 # the wiki embedder can import('@xenova/transformers') instead of degrading to
 # grep-only. Lands at /app/node_modules (cwd=/app), the default resolution root.
 COPY --from=runtime-deps /deps/node_modules ./node_modules
+RUN node --input-type=module -e "await import('@sudo/contracts/common/v1/resource-ref')"
 
 # Embedding model baked into the image at /app/models (NOT /root/.moss/models:
 # docker-compose mounts the host ./.moss over /root/.moss and would shadow it).
