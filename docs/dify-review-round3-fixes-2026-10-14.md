@@ -9,7 +9,7 @@
 |---|---|---|
 | P0-1 已归档／恢复凭据仍能测试 | testSaved 和执行路径共用凭据状态门禁，检查归档、换钥、恢复及 Connection 的组织、启用状态、引用和端点；异步读 Secret 后重新锁定并核对 Binding | 草稿测试可用；归档、换钥、恢复、禁用连接在读取 Secret 前拒绝；读取期间归档则不调用 Provider |
 | P0-2 SSE 累计输入无限制 | 原始 UTF-8 字节在解码前累计，最多 2 MiB；超过时取消 reader 并记录 PROVIDER_RESPONSE_LIMIT | 大量中文 metadata、不增长 answer 的流也触发限制；派发后无法确认远端结果仍为 unknown，不伪装取消 |
-| P0-3 定义隐藏能力 | 新的 query-only profile v1 检查完整 workflow.features、节点及连接、LLM 模型参数、prompt、context、vision、memory；拒绝未知执行字段、工具、知识库、HTTP、附件、变量、Jinja 和 YAML alias | 只允许唯一 Start → LLM → Answer；graph-only 不再接受；无法证明远端实际执行版本，管理员必须核对发布内容 |
+| P0-3 定义隐藏能力 | 新的 query-only profile v1 检查完整 workflow.features、节点及连接、LLM 模型参数、prompt、context、vision、memory；拒绝未知执行字段、工具、知识库、HTTP、附件、变量、Jinja 和 YAML alias | 只允许唯一 Start → LLM → Answer；允许 Dify 的引用展示布尔开关，但检索节点、LLM context 和 dataset 配置仍拒绝；graph-only 不再接受；无法证明远端实际执行版本，管理员必须核对发布内容 |
 | P1-1 兼容引用注册幂等 | 强制 request_id 和 source_definition；持久唯一约束与目录、Connection、Binding、审计同事务；同请求返回原 ID、内容冲突返回 409 | SQLite 重开服务、字段重排重试；PostgreSQL 两实例 12 路并发；提交前故障的完整回滚 |
 | P1-4 请求生命周期不一致 | 桌面、浏览器和 WebUI 代理共用 15 秒总期限，涵盖 token 获取／刷新与响应读取；代理透传剩余预算；迟到刷新不能发起任务 | 身份变更拒绝、401 最多一次且保留原任务幂等 key；超时不自动重发 |
 | P1-2 / P1-3 / P2 | 保留 Pilot 持久层、人工核对、非生产压测、非完整 envelope 的边界 | 不将本次修复宣称为标准 HA、生产治理或正式通用契约 |
@@ -29,7 +29,7 @@
 
 当前已完成：Moss 全量服务端测试（Bun 279 项和边界检查 50 项通过；Node 924 项，921 通过、3 按配置跳过）；Moss 类型门槛维持 104，无新增错误；管理员 API 4 项；PostgreSQL 16 跨实例专项；WebUI 超时与身份专项 9 项。Moss lint、服务端构建、管理端类型检查及构建已通过。SudoWork 全量结果、固定提交及 CI 以本轮最终交接证据为准。
 
-真实 Dify 联调等待用户启动服务器。截至本次本地验证，不能复用上一轮运行记录冒充 alpha4 已真实通过，也不能据此宣布当前三个 PR 已可合并。
+真实 Dify 联调与当前三仓提交的最终结果见本轮交接证据。上一轮运行记录不作为 alpha4 真实通过的证据；CI 与真实联调均完成后再评估合并。
 
 ## 后续阶段
 

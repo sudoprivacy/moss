@@ -52,7 +52,12 @@ export function definitionDigest(source: unknown): string {
   disabled(features.suggested_questions_after_answer)
   disabled(features.speech_to_text)
   disabled(features.text_to_speech, ['language', 'voice', 'autoPlay'])
-  disabled(features.retriever_resource)
+  // Dify's retrieval_resource manager maps this solely to show_retrieve_source.
+  // Retrieval nodes and LLM context remain forbidden independently.
+  if (features.retriever_resource !== undefined) {
+    const display = record(features.retriever_resource, ['enabled'])
+    if (typeof display.enabled !== 'boolean') reject()
+  }
   disabled(features.sensitive_word_avoidance, ['type', 'configs'])
   if (features.file_upload !== undefined) {
     const files = record(features.file_upload, ['enabled', 'image', 'allowed_file_extensions', 'allowed_file_types', 'allowed_file_upload_methods', 'number_limits', 'fileUploadConfig'])

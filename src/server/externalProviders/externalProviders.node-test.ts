@@ -78,9 +78,11 @@ void test('stream byte budget counts UTF-8 metadata without answer growth and ca
 void test('full definition rejects hidden tools, sources, non-query inputs and incomplete snapshots', () => {
   const valid = queryOnlyDefinition()
   assert.match(definitionDigest(JSON.stringify(valid)), /^sha256:/)
+  assert.match(definitionDigest(JSON.stringify({ ...valid, workflow: { ...valid.workflow, features: { ...valid.workflow.features, retriever_resource: { enabled: true } } } })), /^sha256:/)
   const withLlm = (patch: Record<string, unknown>) => ({ ...valid, workflow: { ...valid.workflow, graph: { ...valid.workflow.graph, nodes: valid.workflow.graph.nodes.map(node => node.id === 'llm' ? { ...node, data: { ...node.data, ...patch } } : node) } } })
   const invalid = [
     { workflow: { graph: valid.workflow.graph } },
+    { ...valid, workflow: { ...valid.workflow, features: { ...valid.workflow.features, retriever_resource: { enabled: true, dataset_ids: ['unreviewed'] } } } },
     withLlm({ tools: [{ provider_id: 'http', tool_name: 'send' }] }),
     withLlm({ context: { enabled: true, variable_selector: ['dataset', 'result'] } }),
     withLlm({ vision: { enabled: true } }),

@@ -68,8 +68,9 @@ async function main() {
   await new Promise<void>(done => reservation.listen(0, '127.0.0.1', done))
   const grpcPort = (reservation.address() as { port: number }).port
   await new Promise<void>(done => reservation.close(() => done()))
-  const manager = new NexusManager({ nexusDir: resolve(runtimeDir, 'data'), config: { mode: 'embedded', grpcPort } })
-  await manager.start()
+  // This source-level Node ESM harness loads the same lock implementation explicitly.
+  const manager = new NexusManager({ nexusDir: resolve(runtimeDir, 'data'), config: { mode: 'embedded', grpcPort }, startupLock: createRequire(import.meta.url)('proper-lockfile').lock })
+  try { await manager.start() } catch (error) { await manager.stop(); await rm(runtimeDir, { recursive: true, force: true }); throw error }
   const secrets = new NexusClient(manager.grpcUrl)
   if (!input.ui) await secrets.putSecret(`org:${orgId}:system:dify`, 'app-key', key)
   const service = auth.createExternalProviderService(secrets)
