@@ -89,6 +89,36 @@ initial rollout: this registry does not yet implement global admission limits
 or automatic idle eviction. A worker image change requires a drained profile
 and explicit replacement of its owned container while preserving its volume.
 
+## Files in the shared browser
+
+Public SDK v0.56.0 supplies the native file-chooser and completed-download
+primitives. The worker stores bytes inside its isolated persistent volume.
+Viewer upload/download routes recheck the current owner and active account;
+the agent credential cannot call the host byte-transfer endpoints.
+
+A user stages a file through the authenticated host, then attaches its opaque
+ID to the current chooser using `upload-files`. Both operations use the same
+human control and target epochs. A handoff, replaced chooser or target change
+rejects the old request without replay. Agents can attach IDs supplied by the
+host after control returns; they cannot provide arbitrary filesystem paths.
+The existing page-command allowlist excludes raw `DOM.setFileInputFiles`.
+
+Uploads are limited to 16 MiB per file and 20 files per chooser. Metadata
+contains only the opaque ID, filename, size, SHA-256 and kind. Downloads appear
+after completion and stability checks; the authenticated read verifies their
+size and hash again. Profile restart retains the files and their IDs.
+
+The managed extension needs Chrome's file-access permission for native upload.
+Only the worker's provisioned isolated profile receives this setting, while
+Chrome is stopped. Ordinary attached user profiles keep their existing
+permissions. The public provisioning helper verifies the exact extension ID
+and Chrome's actual setting before starting the shared session.
+
+`test_files_live.py` performs real trusted file selection and download in both
+CDP and extension modes, including Unicode filenames, stale control, owner
+isolation, agent/host credentials, exact bytes and restart persistence. The
+managed-browser workflow runs it with the lifecycle suite.
+
 ## Acceptance
 
 `browserWorkerRegistry.live.ts` exercises the actual Docker registry, signed

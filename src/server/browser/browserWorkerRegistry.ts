@@ -168,4 +168,16 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
     try { return await worker.mcp(binding, message) }
     catch (error) { this.workers.delete(key); throw error }
   }
+
+  async upload(binding: BrowserBinding, controller: string, name: string, data: Uint8Array, epochs: { controlEpoch: number; targetEpoch: number }): Promise<unknown> {
+    if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
+    const worker = await this.mutex.run(this.ownerKey(binding), () => this.resolve(binding))
+    return worker.upload(binding, controller, name, data, epochs)
+  }
+
+  async download(binding: BrowserBinding, controller: string, fileId: string): Promise<Uint8Array> {
+    if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
+    const worker = await this.mutex.run(this.ownerKey(binding), () => this.resolve(binding))
+    return worker.download(binding, controller, fileId)
+  }
 }
