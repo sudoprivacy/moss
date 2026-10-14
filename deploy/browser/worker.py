@@ -299,7 +299,13 @@ class Worker:
                     raise
         else:
             arguments["profile"] = str(profile)
-            arguments["override_default_args"] = {"--remote-allow-origins": None}
+            # Both transports own the same Chrome profile. CDP must retain the
+            # managed extension and its policy updates for a later mode change.
+            arguments["override_default_args"] = {
+                "--remote-allow-origins": None,
+                "--disable-extensions": None,
+                "--disable-background-networking": None,
+            }
         if self.pending_launch:
             # Explicitly reconnect an owned late launch. Never start a
             # second Chrome or replay an uncertain browser input.

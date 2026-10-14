@@ -225,5 +225,25 @@ async def test_real_browser_restart_preserves_login_and_human_stop(
             stopped = json.loads(tool["content"][0]["text"])
             assert stopped["session"]["state"] == "stopped"
             assert (tmp_path / "chrome").is_dir()
+            if transport == "extension":
+                # A later conversation must be able to return to extension
+                # after CDP has opened and closed this exact profile.
+                status, cdp = await agent(
+                    {"kind": "start", "transport": "cdp", "isHeadless": True}
+                )
+                assert status == 200, cdp
+                await read_cookie(cdp)
+                tool = await mcp("browser_stop", epochs(cdp))
+                assert not tool.get("isError"), tool
+                status, restored = await agent(
+                    {"kind": "start", "transport": "extension", "isHeadless": True}
+                )
+                assert status == 200, restored
+                assert (
+                    restored["session"]["profileId"] == original["session"]["profileId"]
+                )
+                await read_cookie(restored)
+                tool = await mcp("browser_stop", epochs(restored))
+                assert not tool.get("isError"), tool
         finally:
             await runner.cleanup()

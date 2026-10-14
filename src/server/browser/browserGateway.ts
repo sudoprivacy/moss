@@ -94,7 +94,7 @@ export class HttpBrowserWorker implements BrowserWorkerPort {
         method: 'POST', redirect: 'error',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` },
         body: JSON.stringify({ binding, controller, action }),
-        signal: AbortSignal.timeout(action.kind === 'restart' ? 90_000 : 25_000),
+        signal: AbortSignal.timeout(action.kind === 'start' || action.kind === 'restart' ? 90_000 : 25_000),
       })
     } catch {
       // An uncertain input outcome must be observed, never retried here.
