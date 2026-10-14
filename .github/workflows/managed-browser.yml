@@ -62,6 +62,16 @@ jobs:
           export MOSS_BROWSER_SECRET="$(openssl rand -hex 32)"
           export MOSS_BROWSER_LIVE_HOST="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
           node --import tsx src/server/browser/browserWorkerRegistry.live.ts 2>&1 | tee "$RUNNER_TEMP/browser-profile-acceptance.log"
+      - name: Verify explicit browser lifecycle with actual Chrome
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -f deploy/browser/fixtures/lifecycle-test.Dockerfile \
+            --build-arg BROWSER_WORKER_IMAGE=managed-browser-worker:ci \
+            -t managed-browser-lifecycle:ci deploy/browser
+          docker run --rm --init --pids-limit 256 --memory 1536m --cpus 1.5 \
+            --cap-drop ALL --security-opt no-new-privileges --shm-size 256m \
+            managed-browser-lifecycle:ci 2>&1 | tee "$RUNNER_TEMP/browser-lifecycle.log"
       - name: Verify signed extension upgrade and profile crash recovery
         shell: bash
         run: |
@@ -82,6 +92,7 @@ jobs:
           name: browser-profile-acceptance
           path: |
             ${{ runner.temp }}/browser-profile-acceptance.log
+            ${{ runner.temp }}/browser-lifecycle.log
             ${{ runner.temp }}/browser-profile-upgrade.log
             ${{ runner.temp }}/browser-profile-upgrade.json
           if-no-files-found: ignore

@@ -16,6 +16,8 @@ type BrowserRequest = (input: string | URL | Request, init?: RequestInit) => Pro
 const actionFields: Record<string, string[]> = {
   state: [], attach: ['viewerId', 'surface'], detach: ['viewerId'],
   start: ['isHeadless', 'transport'],
+  stop: ['controlEpoch', 'targetEpoch'],
+  restart: ['controlEpoch', 'targetEpoch', 'isHeadless', 'transport', 'acknowledgeStateLoss'],
   frame: ['viewerId', 'controlEpoch', 'targetEpoch', 'surface'],
   take: ['controlEpoch', 'targetEpoch'], return: ['controlEpoch', 'targetEpoch', 'note'],
   input: ['controlEpoch', 'targetEpoch', 'input', 'surface'], navigate: ['controlEpoch', 'targetEpoch', 'url'],
@@ -92,7 +94,7 @@ export class HttpBrowserWorker implements BrowserWorkerPort {
         method: 'POST', redirect: 'error',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` },
         body: JSON.stringify({ binding, controller, action }),
-        signal: AbortSignal.timeout(25_000),
+        signal: AbortSignal.timeout(action.kind === 'start' || action.kind === 'restart' ? 90_000 : 25_000),
       })
     } catch {
       // An uncertain input outcome must be observed, never retried here.

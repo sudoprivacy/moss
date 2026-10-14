@@ -61,6 +61,28 @@ Other agent tools have their own execution policy. Automatic return sends one
 handoff note through the normal authenticated conversation channel. A lost
 acknowledgement is reported and never retried.
 
+## Explicit lifecycle
+
+`browser_launch` requires a launch mode and keeps an existing browser in that
+mode. A different mode returns `browser_restart_required`.
+`browser_restart` requires current control/target epochs, explicit transport
+and headless choice, and `acknowledgeStateLoss: true`: unsubmitted page state
+can be lost. It closes the owned Chrome, preserves its profile and login
+cookies, starts the chosen mode and returns a fresh observation. Old input
+coordinates and frames are fenced before closing any resource.
+
+`browser_stop` releases Chrome and its display while keeping the profile.
+Every main/child call shares the same control lease. AI cannot stop, restart
+or relaunch a browser held by the human. After a human stop, Return to AI can
+release control while Chrome stays stopped; a subsequent task decides whether
+to launch it. Failed or uncertain shutdown keeps automation fenced and requires
+explicit recovery instead of replaying the request.
+
+`test_lifecycle_live.py` runs the actual HTTP/MCP journey. Native runs use CDP;
+the managed-browser CI image verifies CDP and signed extension mode, including
+headless-to-headful restart, persistent login, stale requests, human stop and
+return without relaunching Chrome.
+
 Workers run as UID 10001 with a 1.5 GiB memory limit, 1.5 CPUs, a PID limit,
 dropped capabilities and no new privileges. Limit enabled accounts during
 initial rollout: this registry does not yet implement global admission limits
