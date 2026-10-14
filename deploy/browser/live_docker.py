@@ -17,7 +17,7 @@ import urllib.request
 
 def docker(*args, check=True):
     result = subprocess.run(
-        ["docker", *args], capture_output=True, text=True, timeout=40
+        ["docker", *args], capture_output=True, text=True, timeout=40, check=False
     )
     if check and result.returncode:
         # Docker commands may contain fixture capabilities; never dump argv.
@@ -36,7 +36,7 @@ HTTPServer(('127.0.0.1',8813),Page).serve_forever()
 """
 
 
-def run(image, output):
+def run(image, output, prior_image=None):
     prefix = "moss-browser-live-" + secrets.token_hex(6)
     volume = prefix + "-profile"
     names = [prefix + "-first", prefix + "-flushed", prefix + "-recovered"]
@@ -47,6 +47,9 @@ def run(image, output):
     docker("volume", "create", "--label", label, volume)
     owned = []
     evidence = {"workflow": "managed-extension-crash-recovery", "image": image}
+    if prior_image:
+        evidence["previousImage"] = prior_image
+    installed_versions = []
 
     def request(port, route, body, *, ai=False, expected=200):
         req = urllib.request.Request(
@@ -79,7 +82,7 @@ def run(image, output):
     def epochs(reply):
         return {key: reply["session"][key] for key in ("controlEpoch", "targetEpoch")}
 
-    def start_container(name):
+    def start_container(name, runtime_image=None):
         docker(
             "run",
             "-d",
@@ -105,7 +108,7 @@ def run(image, output):
             "MOSS_BROWSER_HOST_TOKEN=" + credentials["host"],
             "-e",
             "MOSS_BROWSER_AI_TOKEN=" + credentials["ai"],
-            image,
+            runtime_image or image,
         )
         owned.append(name)
         address = docker("port", name, "8080").stdout.strip()
@@ -122,6 +125,31 @@ def run(image, output):
         docker("exec", "-d", name, "/opt/browser/venv/bin/python", "-c", FIXTURE)
         return port, state
 
+    def record_installed_version(name):
+        # Inspect Chrome's persisted installation, rather than inferring an
+        # upgrade from the container's bundled extension manifest alone.
+        script = """import json,pathlib
+identity=json.loads(pathlib.Path('/opt/browser/extension/identity.json').read_text())
+profile=pathlib.Path('/profile/chrome/Default')
+for filename in ('Preferences','Secure Preferences'):
+    file=profile/filename
+    if not file.exists():continue
+    setting=json.loads(file.read_text()).get('extensions',{}).get('settings',{}).get(identity['id'])
+    if not setting:continue
+    version=setting.get('manifest',{}).get('version')
+    if not version:
+        for manifest in (profile/'Extensions'/identity['id']).glob('*/manifest.json'):
+            version=json.loads(manifest.read_text()).get('version')
+    assert version==identity['version'], (version,identity['version'])
+    assert setting.get('location')!=8, 'Command-line extension is not a persistent installation'
+    print(json.dumps({'id':identity['id'],'version':version}));break
+else:raise AssertionError('Installed signed extension not found')
+"""
+        version = json.loads(
+            docker("exec", name, "/opt/browser/venv/bin/python", "-c", script).stdout
+        )
+        installed_versions.append(version)
+
     def assert_no_display(name):
         processes = [
             line.split(maxsplit=1)[-1]
@@ -132,7 +160,8 @@ def run(image, output):
         ), processes
 
     try:
-        port, state = start_container(names[0])
+        port, state = start_container(names[0], prior_image)
+        assert state["session"]["state"] == "stopped"
         first = agent(
             port, {"kind": "start", "isHeadless": True, "transport": "extension"}
         )
@@ -140,6 +169,7 @@ def run(image, output):
         assert first["session"]["isHeadless"]
         assert first["session"]["capabilities"]["persistentProfile"]
         assert_no_display(names[0])
+        record_installed_version(names[0])
         navigated = agent(
             port, {"kind": "navigate", "url": "http://127.0.0.1:8813/", **epochs(first)}
         )
@@ -213,6 +243,7 @@ def run(image, output):
                 and recovered["session"]["isController"]
             )
             assert recovered["session"]["profileId"] == first["session"]["profileId"]
+            record_installed_version(names[index])
             resumed = host(new_port, {"kind": "return", **epochs(recovered)})
             assert (
                 resumed["observation"]["frame"]["data"]
@@ -249,7 +280,13 @@ def run(image, output):
             exclusiveProfileOwnership=True,
             noDisplayServices=True,
             freshObservationBeforeReturn=True,
+            installedExtensionVersions=installed_versions,
         )
+        if prior_image:
+            assert installed_versions[0]["id"] == installed_versions[1]["id"]
+            assert installed_versions[0]["version"] != installed_versions[1]["version"]
+            assert installed_versions[1] == installed_versions[2]
+            evidence["extensionUpgradePreservedProfile"] = True
     except BaseException:
         for name in owned:
             logs = docker("logs", "--tail", "20", name, check=False)
@@ -259,13 +296,15 @@ def run(image, output):
                 name,
                 "/opt/browser/venv/bin/python",
                 "-c",
-                "import asyncio,json,pathlib;from ai_dev_browser.core.ext_bridge import bridge_status;print(json.dumps({'bridge':asyncio.run(bridge_status()),'memory':pathlib.Path('/sys/fs/cgroup/memory.events').read_text()}))",
+                "import asyncio,json,pathlib;from ai_dev_browser.core.ext_bridge import bridge_status;p=pathlib.Path('/profile/launch-failure.json');print(json.dumps({'bridge':asyncio.run(bridge_status()),'memory':pathlib.Path('/sys/fs/cgroup/memory.events').read_text(),'launchFailure':json.loads(p.read_text()) if p.exists() else None}))",
                 check=False,
             )
             print(
                 json.dumps(
                     {
-                        "containerStatus": status.stdout[-1600:],
+                        "containerStatus": json.loads(status.stdout)
+                        if status.stdout.strip()
+                        else None,
                         "diagnosticError": status.stderr[-600:],
                     }
                 )
@@ -294,5 +333,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--prior-image",
+        help="Earlier signed worker image with the same signing identity, to verify a real persistent profile upgrade.",
+    )
     args = parser.parse_args()
-    run(args.image, args.output)
+    run(args.image, args.output, args.prior_image)

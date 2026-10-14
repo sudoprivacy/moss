@@ -29,8 +29,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: sudoprivacy/ai-dev-browser
-          ref: 740d0471942ea43f23927c0ed498eaa2175f4c50
+          ref: 36c5282e18a8c3b6773d8ee377a1c77347a427dd
           path: adb-core
+      - uses: actions/checkout@v4
+        with:
+          repository: sudoprivacy/ai-dev-browser
+          ref: v0.54.0
+          path: adb-previous-extension
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
@@ -45,7 +50,7 @@ jobs:
           chmod 600 "$key_file"
           docker build -f adb-core/deploy/managed-chrome/Dockerfile \
             --secret "id=extension_key,src=$key_file" \
-            --build-arg SOURCE_REVISION=740d0471942ea43f23927c0ed498eaa2175f4c50 \
+            --build-arg SOURCE_REVISION=36c5282e18a8c3b6773d8ee377a1c77347a427dd \
             -t managed-browser-base:ci adb-core
           docker build --build-arg ADB_BROWSER_IMAGE=managed-browser-base:ci \
             -t managed-browser-worker:ci deploy/browser
@@ -57,10 +62,26 @@ jobs:
           export MOSS_BROWSER_SECRET="$(openssl rand -hex 32)"
           export MOSS_BROWSER_LIVE_HOST="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
           node --import tsx src/server/browser/browserWorkerRegistry.live.ts 2>&1 | tee "$RUNNER_TEMP/browser-profile-acceptance.log"
+      - name: Verify signed extension upgrade and profile crash recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -f deploy/browser/fixtures/legacy-extension.Dockerfile \
+            --secret "id=extension_key,src=$RUNNER_TEMP/browser-extension-signing.pem" \
+            --build-arg BROWSER_WORKER_IMAGE=managed-browser-worker:ci \
+            -t managed-browser-worker:legacy-extension-ci adb-previous-extension
+          python3 deploy/browser/live_docker.py \
+            --image managed-browser-worker:ci \
+            --prior-image managed-browser-worker:legacy-extension-ci \
+            --output "$RUNNER_TEMP/browser-profile-upgrade.json" \
+            2>&1 | tee "$RUNNER_TEMP/browser-profile-upgrade.log"
       - name: Preserve acceptance result
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: browser-profile-acceptance
-          path: ${{ runner.temp }}/browser-profile-acceptance.log
+          path: |
+            ${{ runner.temp }}/browser-profile-acceptance.log
+            ${{ runner.temp }}/browser-profile-upgrade.log
+            ${{ runner.temp }}/browser-profile-upgrade.json
           if-no-files-found: ignore

@@ -16,10 +16,10 @@ import time
 import aiohttp
 from ai_dev_browser.core.browser import browser_connect, browser_start, browser_stop
 from ai_dev_browser.core.connection import connect_browser, connect_extension
-from ai_dev_browser.remote.control import BrowserControl, ControlError, SharedViewer
 from ai_dev_browser.remote.cdp import BrowserViewError
-from ai_dev_browser.remote.session import BrowserSession
+from ai_dev_browser.remote.control import BrowserControl, ControlError, SharedViewer
 from ai_dev_browser.remote.provision import prepare_managed_extension_profile
+from ai_dev_browser.remote.session import BrowserSession
 from ai_dev_browser.remote.window import WindowView, XDisplay
 from aiohttp import web
 from profile_lease import ProfileLease
@@ -271,13 +271,21 @@ class Worker:
                 identity = pathlib.Path("/opt/browser/extension/identity.json")
                 if identity.exists():
                     installed_identity = json.loads(identity.read_text())
-                    await prepare_managed_extension_profile(
-                        str(profile),
-                        extension_id=installed_identity["id"],
-                        minimum_version=installed_identity["version"],
-                        chrome_path=self.chrome_path,
-                        extra_args=arguments["extra_args"],
-                    )
+                    try:
+                        await prepare_managed_extension_profile(
+                            str(profile),
+                            extension_id=installed_identity["id"],
+                            minimum_version=installed_identity["version"],
+                            chrome_path=self.chrome_path,
+                            extra_args=arguments["extra_args"],
+                        )
+                    except ControlError as error:
+                        diagnostic = self.root / "launch-failure.json"
+                        diagnostic.write_text(
+                            json.dumps(error.details or {"error_code": error.code})
+                        )
+                        diagnostic.chmod(0o600)
+                        raise
             else:
                 arguments["profile"] = str(profile)
                 arguments["override_default_args"] = {"--remote-allow-origins": None}

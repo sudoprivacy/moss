@@ -67,6 +67,13 @@ and explicit replacement of its owned container while preserving its volume.
 extension, separate user cookies, conversation transfer, stale attempts and
 restart recovery. `.github/workflows/managed-browser.yml` runs it in CI.
 
+`live_docker.py --prior-image OLD --image CURRENT --output evidence.json`
+also verifies a real signed extension upgrade in the same persistent profile,
+then graceful and crash recovery. The fixture image uses the public v0.54.0
+extension and its earlier bootstrap contract. Installed versions, signing
+identity, original cookie and human lease are checked against Chrome's actual
+state; containers and volumes carry unique ownership labels and are removed.
+
 `test_worker_live.py` validates the actual Chrome/HTTP control boundary.
 `test_agent_live.py` and SudoWork's `live_browser_handoff.py` cover configured
 real model journeys. Run those locally with vault-backed test accounts before
