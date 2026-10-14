@@ -5,6 +5,7 @@ import { PerKeyMutex } from '../runtime/perKeyMutex.js'
 import { runDocker } from '../runtime/dockerCommand.js'
 import { HttpBrowserWorker, browserController, type BrowserBinding, type BrowserWorkerPort } from './browserGateway.js'
 import browserTools from '../../../deploy/browser/mcp-tools.json' with { type: 'json' }
+import { browserAllowedOwners, browserOwnerAllowed } from './browserDeploymentPolicy.js'
 
 type SessionLookup = (id: string) => Promise<(BrowserBinding & { desiredState: string }) | null>
 
@@ -22,6 +23,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
   private readonly workers = new Map<string, { worker: HttpBrowserWorker; sessionId: string; checkedAt: number }>()
 
   constructor(private readonly getSession: SessionLookup) {
+    browserAllowedOwners()
     if (this.image && (!/^(?:[a-zA-Z0-9._/:\-]+@)?sha256:[a-f0-9]{64}$/.test(this.image) || !this.secret || this.secret.length < 32)) {
       throw new Error('Managed browser requires a digest-pinned image and a persistent secret of at least 32 characters')
     }
@@ -127,6 +129,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
   }
 
   async invoke(binding: BrowserBinding, controller: string, action: Record<string, unknown>): Promise<unknown> {
+    if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
     const key = this.ownerKey(binding)
     const worker = await this.mutex.run(key, () => this.resolve(binding))
     try {
@@ -146,6 +149,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
   }
 
   async mcp(binding: BrowserBinding, message: unknown): Promise<unknown | null> {
+    if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
     // Every agent discovers MCP tools at startup. Discovery must not create a
     // worker or claim an owner's profile before any browser task is requested.
     if (message && typeof message === 'object' && !Array.isArray(message)) {

@@ -18,6 +18,12 @@ Set these on the Moss server:
   from its agent runtimes. Attempts receive a narrowly scoped HTTP MCP grant.
 - `MOSS_BROWSER_NETWORK` (optional): a Docker network shared with Moss.
   Without it, worker APIs publish on host loopback with ephemeral ports.
+- `MOSS_BROWSER_ALLOWED_OWNERS` (optional): a JSON array of exact
+  `{"orgId":"...","userId":"..."}` pairs. Set it for the initial restricted
+  rollout. Other owners receive no built-in browser MCP grant and cannot use
+  either the viewer gateway or MCP entry. `[]` disables every owner; leaving
+  the setting unset enables every otherwise authorized owner. Malformed
+  settings refuse server startup.
 
 All server instances serving this registry must use the same Docker host and
 deployment secret. A distributed browser owner service is required before

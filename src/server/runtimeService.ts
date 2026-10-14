@@ -86,6 +86,7 @@ import { createMcpUserConfigApi, type McpUserConfigApi } from './api/mcpUserConf
 import { resolveScodeMcpSettings } from './mcp/scodeMcpInjector.js'
 import { BrowserAgentCapabilities } from './browser/browserAgentCapability.js'
 import { managedBrowserConfigured } from './browser/browserWorkerRegistry.js'
+import { browserOwnerAllowed } from './browser/browserDeploymentPolicy.js'
 import { type McpAuthSecretsApi, type ConfigItemLike } from './mcp/authResolver.js'
 
 /** Bounded wait for a protocol-shutdown collection before falling back to fencing. */
@@ -1894,7 +1895,7 @@ export class RuntimeService {
       ...process.env as Record<string, string>,
       MOSS_DEFAULT_MODEL: defaultModel,
     }
-    for (const key of ['MOSS_BROWSER_GATEWAY_URL', 'MOSS_BROWSER_GATEWAY_TOKEN', 'MOSS_BROWSER_GATEWAY_AI_TOKEN', 'MOSS_BROWSER_SECRET']) delete runnerEnv[key]
+    for (const key of ['MOSS_BROWSER_GATEWAY_URL', 'MOSS_BROWSER_GATEWAY_TOKEN', 'MOSS_BROWSER_GATEWAY_AI_TOKEN', 'MOSS_BROWSER_SECRET', 'MOSS_BROWSER_ALLOWED_OWNERS']) delete runnerEnv[key]
     if (providerCatalog) {
       runnerEnv.MOSS_MODEL_PROVIDER_ID = providerCatalog.selection.provider.id
       runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
@@ -2318,7 +2319,7 @@ export class RuntimeService {
     }
 
     const browserAgentBase = process.env.MOSS_BROWSER_AGENT_BASE_URL
-    if (browserAgentBase && managedBrowserConfigured()) {
+    if (browserAgentBase && managedBrowserConfigured() && browserOwnerAllowed(session)) {
       const url = new URL(`/api/v1/agent/browser/${encodeURIComponent(session.sessionId)}/mcp`, browserAgentBase)
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid browser agent gateway URL')
       const token = this.browserCapabilities.issue({ orgId: session.orgId, userId: session.userId, sessionId: session.sessionId }, attempt.attemptId)

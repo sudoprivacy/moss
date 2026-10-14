@@ -52,6 +52,18 @@ async function waitCookie(binding: BrowserBinding, expected: string): Promise<st
   throw new Error(`Browser did not load the isolated fixture: ${last}`)
 }
 try {
+  const savedOwners = process.env.MOSS_BROWSER_ALLOWED_OWNERS
+  try {
+    process.env.MOSS_BROWSER_ALLOWED_OWNERS = JSON.stringify([{ orgId: a.orgId, userId: a.userId }])
+    await registry.mcp(a, { jsonrpc: '2.0', id: ++rpc, method: 'tools/list' })
+    await assert.rejects(invoke(b, { kind: 'state' }), /browser_not_enabled_for_owner/)
+    await assert.rejects(registry.mcp(b, { jsonrpc: '2.0', id: ++rpc, method: 'tools/list' }), /browser_not_enabled_for_owner/)
+    for (const binding of [a, b]) assert.notEqual((await runDocker(['inspect', `moss-browser-${key(binding)}`])).code, 0)
+    console.log(JSON.stringify({ phase: 'restricted-rollout', outsideOwnerDenied: true, containersNotCreated: true }))
+  } finally {
+    if (savedOwners === undefined) delete process.env.MOSS_BROWSER_ALLOWED_OWNERS
+    else process.env.MOSS_BROWSER_ALLOWED_OWNERS = savedOwners
+  }
   for (const binding of [a, next, b]) {
     await registry.mcp(binding, { jsonrpc: '2.0', id: ++rpc, method: 'initialize', params: {} })
     const listed = await registry.mcp(binding, { jsonrpc: '2.0', id: ++rpc, method: 'tools/list' }) as { result: { tools: unknown[] } }
@@ -104,7 +116,7 @@ try {
   const navigation = await tool(next, 'browser_action', { kind: 'navigate', controlEpoch: current.controlEpoch, targetEpoch: current.targetEpoch, url: `http://${fixtureHost}:${port}/owner-a?restore=1` })
   assert.notEqual(navigation.isError, true)
   await waitCookie(next, 'profile_login=owner-a')
-  receipts.push({ ownersIsolated: true, concurrentConversationRejected: true, sameProfileAcrossConversations: true, humanLeasePreserved: true, staleSessionRejected: true, restartRequiresExplicitReturn: true })
+  receipts.push({ restrictedRolloutVerified: true, ownersIsolated: true, concurrentConversationRejected: true, sameProfileAcrossConversations: true, humanLeasePreserved: true, staleSessionRejected: true, restartRequiresExplicitReturn: true })
   console.log(JSON.stringify({ status: 'passed', receipts }))
 } finally {
   server.close()
