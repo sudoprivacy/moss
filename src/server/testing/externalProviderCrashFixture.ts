@@ -1,3 +1,4 @@
+import { queryOnlyDefinition } from './externalProviderDefinitionFixture.js'
 import { DatabaseSync } from 'node:sqlite'
 import { readFile, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -35,7 +36,7 @@ export async function crashFixture(directory: string) {
     isActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: ['http://127.0.0.1:8089/v1'], timeoutMs: 1000 },
     transport: new DifyPilotTransport((async (url: string | URL | Request) => Response.json(String(url).endsWith('/info') ? { name: 'Synthetic' } : { user_input_form: [], file_upload: { enabled: false } })) as typeof fetch),
   })
-  const body = { request_id: randomUUID(), name: 'Crash fixture', endpoint: 'http://127.0.0.1:8089/v1', api_key: 'synthetic-secret', app_id: 'app', workspace_id: 'workspace', source_definition: JSON.stringify({ graph: { nodes: ['start', 'llm', 'answer'].map(type => ({ data: { type } })), edges: [] } }), decoder: 'text', allowed_user_ids: [actor.userId], review_days: 1, review_note: 'Synthetic crash fixture' }
+  const body = { request_id: randomUUID(), name: 'Crash fixture', endpoint: 'http://127.0.0.1:8089/v1', api_key: 'synthetic-secret', app_id: 'app', workspace_id: 'workspace', source_definition: JSON.stringify(queryOnlyDefinition()), decoder: 'text', allowed_user_ids: [actor.userId], review_days: 1, review_note: 'Synthetic crash fixture' }
   return { actor, driver, store, service, control, body }
 }
 

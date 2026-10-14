@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { parseDocument } from 'yaml'
+import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
+export { definitionDigest } from './definition.js'
 import type { ExternalAgentAdmin, ExternalPilotPolicy, ExternalProviderMember } from '../../../contracts/external-provider/v1/contract.js'
 import type { DifySecretPort } from '../dify/difyConnectionService.js'
 import { parseNexusSecretRef } from '../dify/difyConnectionService.js'
@@ -28,20 +29,6 @@ export function object(value: unknown, keys: string[]): Record<string, unknown> 
 function string(value: unknown, max = 200): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max) return fail('INVALID_ADMIN_INPUT')
   return value.trim()
-}
-export function definitionDigest(source: unknown): string {
-  const document = parseDocument(string(source, 256_000), { uniqueKeys: true })
-  if (document.errors.length) return fail('INVALID_DIFY_DEFINITION')
-  let value: unknown
-  try { value = document.toJS({ maxAliasCount: 10 }) } catch { return fail('INVALID_DIFY_DEFINITION') }
-  const asRecord = (input: unknown): Record<string, unknown> => input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {}
-  const root = asRecord(value)
-  const graph = asRecord(asRecord(root.workflow).graph ?? root.graph)
-  if (!graph || !Array.isArray(graph.nodes) || graph.nodes.length < 3 || graph.nodes.length > 20 || !Array.isArray(graph.edges)) return fail('INVALID_DIFY_DEFINITION')
-  const types = graph.nodes.map(node => asRecord(asRecord(node).data).type)
-  if (types.some(type => typeof type !== 'string' || !['start', 'llm', 'answer'].includes(type)) || types.filter(type => type === 'start').length !== 1 || !types.includes('llm') || !types.includes('answer')) return fail('UNSUPPORTED_DIFY_DEFINITION')
-  // Keep a digest only: the uploaded DSL can contain prompts and provider secrets.
-  return digest(JSON.stringify(graph))
 }
 
 export class ExternalProviderAdministration {
@@ -104,7 +91,7 @@ export class ExternalProviderAdministration {
     const { review_expires_at: _expiry, credential_ref: _ref, ...stableDefinition } = definition
     const credentialFingerprint = digest(JSON.stringify([actor.orgId, requestId, apiKey]))
     const hash = digest(JSON.stringify({ ...stableDefinition, review_days: body.review_days, credentialFingerprint }))
-    const binding: Binding = { ...definition, id, orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, registrationMode: 'onboarding' }
+    const binding: Binding = { ...definition, id, orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'onboarding' }
     const operation: CredentialOperation = { id: operationId, actor, kind: 'onboard', binding, targetRef: credential_ref }
     if (!await this.operations.reserve(operation, requestId, hash)) {
       const existing = await this.store.db.get('SELECT * FROM external_pilot_operations WHERE org_id = ? AND kind = ? AND request_id = ?', [actor.orgId, 'onboard', requestId])
@@ -132,12 +119,15 @@ export class ExternalProviderAdministration {
   }
 
   async update(actor: ExternalActor, id: string, input: unknown): Promise<ExternalAgentAdmin> {
-    const body = object(input, ['revision', 'name', 'decoder', 'allowed_user_ids', 'review_days', 'review_note'])
+    const body = object(input, ['revision', 'name', 'decoder', 'allowed_user_ids', 'review_days', 'review_note', 'source_definition'])
     const binding = await this.store.binding(actor, id)
-    const definition = await this.definition(actor, { ...binding, ...body })
+    const source_digest = body.source_definition === undefined ? binding.source_digest : definitionDigest(body.source_definition)
+    if (body.source_definition === undefined && binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) return fail('DEFINITION_REVIEW_REQUIRED', 409)
+    const definition = await this.definition(actor, { ...binding, ...body, source_digest })
     return this.change(actor, id, Number(body.revision), 'agent.updated', async current => {
-      Object.assign(current, definition, { approved: false, parametersDigest: null, reviewedBy: null })
-      await this.options.catalog.updateAgentConfiguration(id, actor.orgId, { name: current.name, visibleTo: { user_ids: current.allowed_user_ids }, status: 'pending', enabled: false })
+      Object.assign(current, definition, { approved: false, parametersDigest: null, reviewedBy: null, definitionProfileVersion: DEFINITION_PROFILE_VERSION })
+      const catalog = await this.options.catalog.getAgent(id, actor.orgId)
+      await this.options.catalog.updateAgentConfiguration(id, actor.orgId, { name: current.name, visibleTo: { user_ids: current.allowed_user_ids }, status: 'pending', enabled: false, providerBinding: { ...catalog?.providerBinding, sourceDigest: current.source_digest } })
     })
   }
 
@@ -166,10 +156,27 @@ export class ExternalProviderAdministration {
   }
 
   async testSaved(actor: ExternalActor, id: string) {
-    const binding = await this.store.binding(actor, id), ref = parseNexusSecretRef(binding.credential_ref)
+    const binding = await this.store.binding(actor, id)
+    await this.assertCredentialUsable(actor, binding)
+    const ref = parseNexusSecretRef(binding.credential_ref)
     const secret = await this.options.secrets.getSecret(ref.namespace, ref.key, `org:${actor.orgId}`)
     if (!secret?.value || secret.status !== 'enabled') return fail('CREDENTIAL_UNAVAILABLE', 503)
+    // Recheck after the asynchronous vault read. A revoke/rotation wins before dispatch.
+    await this.store.db.transaction(async () => {
+      await this.store.db.run('UPDATE external_pilot_bindings SET document = document WHERE id = ? AND org_id = ?', [id, actor.orgId])
+      const current = await this.store.binding(actor, id)
+      if (JSON.stringify(current) !== JSON.stringify(binding)) return fail('CONFIGURATION_CHANGED', 409)
+      await this.assertCredentialUsable(actor, current)
+    })
     return this.inspect(actor, { endpoint: binding.endpoint, api_key: secret.value })
+  }
+
+  async assertCredentialUsable(actor: ExternalActor, binding: Binding): Promise<void> {
+    if (binding.archived) return fail('AGENT_ARCHIVED', 409)
+    if (binding.credentialUpdating) return fail('CREDENTIAL_UPDATE_IN_PROGRESS', 409)
+    if (binding.credentialRecoveryRequired) return fail('CREDENTIAL_ROTATION_REQUIRED', 409)
+    const connection = await this.options.identities.getIntegrationConnection(binding.connectionId)
+    if (!connection?.enabled || connection.orgId !== actor.orgId || connection.providerType !== 'dify' || connection.secretRef !== binding.credential_ref || connection.config.baseUrl !== binding.endpoint || connection.config.tenantId !== binding.workspace_id || connection.config.executionMode !== 'external_hosted') return fail('CONNECTION_DISABLED_OR_CHANGED', 403)
   }
 
   async archive(actor: ExternalActor, id: string, input: unknown) {
@@ -202,7 +209,7 @@ export class ExternalProviderAdministration {
     await this.store.db.run('INSERT INTO external_pilot_admin_audit(id, org_id, user_id, action, resource_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), actor.orgId, actor.userId, action, id, Date.now()])
   }
   describe(binding: Binding): ExternalAgentAdmin {
-    return { id: binding.id, name: binding.name, provider: 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: { streaming: 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' }, endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, allowed_user_ids: binding.allowed_user_ids, review_note: binding.review_note, revision: binding.revision ?? 1, archived: binding.archived ?? false, credential_configured: Boolean(binding.credential_ref), credential_state: binding.credentialUpdating ? 'updating' : binding.credentialRecoveryRequired ? 'rotation_required' : 'ready', registration_mode: binding.registrationMode ?? 'reference_compat', definition_evidence: binding.registrationMode === 'onboarding' ? 'validated_dsl' : 'digest_only' }
+    return { id: binding.id, name: binding.name, provider: 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: { streaming: 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' }, endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, allowed_user_ids: binding.allowed_user_ids, review_note: binding.review_note, revision: binding.revision ?? 1, archived: binding.archived ?? false, credential_configured: Boolean(binding.credential_ref), credential_state: binding.credentialUpdating ? 'updating' : binding.credentialRecoveryRequired ? 'rotation_required' : 'ready', registration_mode: binding.registrationMode ?? 'reference_compat', definition_evidence: binding.definitionProfileVersion === DEFINITION_PROFILE_VERSION ? 'validated_dsl' : 'digest_only' }
   }
   private async definition(actor: ExternalActor, body: Record<string, unknown>) {
     if (![1, 3, 7].includes(Number(body.review_days))) return fail('INVALID_REVIEW_DAYS')

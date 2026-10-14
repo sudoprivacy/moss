@@ -1,3 +1,4 @@
+import { definitionDigest } from '../src/server/externalProviders/definition.js'
 import { parseNexusSecretRef } from '../src/server/dify/difyConnectionService.js'
 /** Opt-in live verification; credentials arrive on stdin and stay in memory. Never run against customer data. */
 import assert from 'node:assert/strict'
@@ -18,7 +19,6 @@ import { AuthCenterDb } from '../src/server/authCenter/db.js'
 import { AuthService } from '../src/server/auth/service.js'
 import { createCatalogTestRepository, createIdentityTestRepository } from '../src/server/testing/compatibilityRepositories.js'
 import { dispatchExternalProvider } from '../src/server/externalProviders/routes.js'
-import { digest } from '../src/server/externalProviders/store.js'
 import { ExternalProviderError } from '../src/server/externalProviders/policy.js'
 
 async function main() {
@@ -40,6 +40,8 @@ async function main() {
   const app = await consoleRead(`/apps/${appId}`)
   assert.equal(app.mode, 'advanced-chat', 'Pilot requires Chatflow')
   const workflow = await consoleRead(`/apps/${appId}/workflows/publish`)
+  const sourceDefinition = JSON.stringify({ workflow: { graph: workflow.graph, features: workflow.features, environment_variables: workflow.environment_variables ?? [], conversation_variables: workflow.conversation_variables ?? [] } })
+  const sourceDigest = definitionDigest(sourceDefinition)
   const nodes = workflow.graph?.nodes as Array<{ data?: { type?: string } }>
   assert(nodes?.length && nodes.every(node => ['start', 'llm', 'answer'].includes(node.data?.type ?? '')), 'Live check refuses tool/HTTP/action workflows')
   const keys = await consoleRead(`/apps/${appId}/api-keys`)
@@ -49,7 +51,7 @@ async function main() {
   const workspaceId = app.tenant_id ?? workspaces.current_workspace?.id ?? workspaces.current_workspace ?? workspaces.workspaces?.find((w: { current?: boolean; is_current?: boolean }) => w.current || w.is_current)?.id ?? (workspaces.workspaces?.length === 1 ? workspaces.workspaces[0].id : undefined)
   if (typeof workspaceId !== 'string') console.log(JSON.stringify({ phase: 'workspace-shape', appFields: Object.keys(app), fields: Object.keys(workspaces), workspaces: workspaces.workspaces }))
   assert(typeof workspaceId === 'string')
-  console.log(JSON.stringify({ phase: 'provider-review', name: app.name, appId, mode: app.mode, nodeTypes: nodes.map(node => node.data?.type), sourceDigest: digest(JSON.stringify(workflow.graph)) }))
+  console.log(JSON.stringify({ phase: 'provider-review', name: app.name, appId, mode: app.mode, nodeTypes: nodes.map(node => node.data?.type), sourceDigest: sourceDigest }))
 
   const db = new DatabaseSync(':memory:'), authDb = new AuthCenterDb(db)
   const orgId = `pilot-${randomUUID()}`, userId = 'synthetic-admin'
@@ -100,7 +102,7 @@ async function main() {
       return data
     }
     if (input.ui) {
-      await preview(input.sudoworkPath, origin, accessToken, { endpoint: `${base}/v1`, apiKey: key, appId, workspaceId, definition: JSON.stringify({ workflow: { graph: workflow.graph } }), userToken })
+      await preview(input.sudoworkPath, origin, accessToken, { endpoint: `${base}/v1`, apiKey: key, appId, workspaceId, definition: sourceDefinition, userToken })
       const binding = (await service.store.bindings({ orgId, userId }))[0]
       assert(binding, 'UI did not register a binding')
       await manager.stop(); await manager.start()
@@ -113,7 +115,7 @@ async function main() {
       console.log(JSON.stringify(persistenceEvidence))
       return
     }
-    const registered = await request({ method: 'POST', path: '/api/v1/external-agents', body: { name: app.name, endpoint: `${base}/v1`, app_id: appId, workspace_id: workspaceId, credential_ref: `nexus://org:${orgId}:system:dify/app-key`, source_digest: digest(JSON.stringify(workflow.graph)), decoder: 'reply_actions_v1', allowed_user_ids: [userId], review_expires_at: Date.now() + 3600000, review_note: 'Synthetic live check; published Start/LLM/Answer only; no provider-side actions' } })
+    const registered = await request({ method: 'POST', path: '/api/v1/external-agents', body: { request_id: randomUUID(), source_definition: sourceDefinition, name: app.name, endpoint: `${base}/v1`, app_id: appId, workspace_id: workspaceId, credential_ref: `nexus://org:${orgId}:system:dify/app-key`, source_digest: sourceDigest, decoder: 'reply_actions_v1', allowed_user_ids: [userId], review_expires_at: Date.now() + 3600000, review_note: 'Synthetic live check; published Start/LLM/Answer only; no provider-side actions' } })
     await request({ method: 'POST', path: `/api/v1/external-agents/${registered.data.id}/review`, body: { approved: true, revision: 1 } })
     const client = createMossExternalProviderPort(request)
     const agents = await client.agents(); assert.equal(agents.length, 1)

@@ -1,4 +1,5 @@
-import { ExternalProviderAdministration, type AdministrationOptions } from './administration.js'
+import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
+import { ExternalProviderAdministration, object, type AdministrationOptions } from './administration.js'
 import { randomUUID } from 'node:crypto'
 import type { CatalogAgent } from '../catalog/catalogRepository.js'
 import type { IntegrationConnection } from '../identity/identityRepository.js'
@@ -48,16 +49,29 @@ export class ExternalProviderService {
 
   async register(actor: ExternalActor, input: unknown): Promise<ExternalAgent> {
     await this.authorize(actor)
-    const definition = parseRegistration(input, actor.orgId, await this.administration.effectivePolicy(actor))
+    const body = object(input, ['request_id', 'source_definition', 'name', 'endpoint', 'app_id', 'workspace_id', 'credential_ref', 'source_digest', 'decoder', 'allowed_user_ids', 'review_expires_at', 'review_note'])
+    const { request_id, source_definition, ...registration } = body
+    if (typeof request_id !== 'string' || !/^[\w-]{8,128}$/.test(request_id)) throw new ExternalProviderError(400, 'INVALID_REQUEST_ID')
+    const sourceDigest = definitionDigest(source_definition)
+    if (registration.source_digest !== sourceDigest) throw new ExternalProviderError(400, 'DEFINITION_DIGEST_MISMATCH')
+    const definition = parseRegistration(registration, actor.orgId, await this.administration.effectivePolicy(actor))
     for (const userId of definition.allowed_user_ids) await this.authorize({ orgId: actor.orgId, userId })
-    const binding: Binding = { ...definition, id: randomUUID(), orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, registrationMode: 'reference_compat' }
+    const binding: Binding = { ...definition, id: randomUUID(), orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'reference_compat' }
     await this.store.ready
-    await this.store.db.transaction(async () => {
+    const requestHash = digest(JSON.stringify(definition, Object.keys(definition).sort()))
+    return this.store.db.transaction(async () => {
+      const reserved = await this.store.db.run(`INSERT INTO external_pilot_operations (id, org_id, kind, request_id, request_hash, status, lease_until, document) VALUES (?, ?, 'reference_register', ?, ?, 'complete', 0, ?) ON CONFLICT(org_id, kind, request_id) DO NOTHING`, [randomUUID(), actor.orgId, request_id, requestHash, JSON.stringify({ bindingId: binding.id })])
+      if (!reserved) {
+        const existing = await this.store.db.get("SELECT request_hash, document FROM external_pilot_operations WHERE org_id = ? AND kind = 'reference_register' AND request_id = ?", [actor.orgId, request_id])
+        if (existing?.request_hash !== requestHash) throw new ExternalProviderError(409, 'IDEMPOTENCY_CONFLICT')
+        return this.describe(await this.store.binding(actor, JSON.parse(String(existing.document)).bindingId))
+      }
       await this.options.identities.putIntegrationConnection({ id: binding.connectionId, orgId: actor.orgId, providerType: 'dify', name: binding.name, enabled: true, secretRef: binding.credential_ref, config: { executionMode: 'external_hosted', baseUrl: binding.endpoint, tenantId: binding.workspace_id } })
       await this.options.catalog.createAgent({ id: binding.id, orgId: actor.orgId, name: binding.name, authorId: actor.userId, providerType: 'dify', supportedModes: 'cloud', status: 'pending', visibleTo: { user_ids: binding.allowed_user_ids }, providerBinding: { executionMode: 'external_hosted', bindingId: binding.id, connectionId: binding.connectionId, appId: binding.app_id, sourceDigest: binding.source_digest } })
       await this.store.saveBinding(binding)
+      await this.administration.audit(actor, 'agent.reference_registered', binding.id)
+      return this.describe(binding)
     })
-    return this.describe(binding)
   }
 
   async review(actor: ExternalActor, id: string, approved: boolean, revision: number, reviewDays?: number): Promise<ExternalAgent> {
@@ -73,8 +87,10 @@ export class ExternalProviderService {
     let parametersDigest: string | null = null
     let credentialVersion: number | undefined
     if (approved) {
+      if (binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
       parseRegistration(this.definition(binding), actor.orgId, await this.administration.effectivePolicy(actor))
       if (binding.credentialRecoveryRequired) throw new ExternalProviderError(409, 'CREDENTIAL_ROTATION_REQUIRED')
+      await this.administration.assertCredentialUsable(actor, binding)
       const secret = await this.secret(binding)
       credentialVersion = secret.version
       const key = secret.value
@@ -187,11 +203,13 @@ export class ExternalProviderService {
   }
 
   private async executable(actor: ExternalActor, binding: Binding, context?: { policy: PilotPolicy; agents: Map<string, CatalogAgent>; connections: Map<string, IntegrationConnection> }): Promise<void> {
+    if (binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
     assertPilot(context?.policy ?? await this.administration.effectivePolicy(actor), actor.orgId, binding.endpoint)
     if (binding.archived || binding.credentialUpdating || binding.credentialRecoveryRequired || !binding.approved || !binding.parametersDigest || binding.review_expires_at <= Date.now() || !binding.allowed_user_ids.includes(actor.userId)) throw new ExternalProviderError(403, 'AGENT_NOT_APPROVED_FOR_USER')
     const catalog = context ? context.agents.get(binding.id) : await this.options.catalog.getAgent(binding.id, actor.orgId)
     if (!catalog?.enabled || catalog.status !== 'approved' || catalog.providerType !== 'dify' || catalog.providerBinding?.executionMode !== 'external_hosted' || catalog.providerBinding?.bindingId !== binding.id || catalog.providerBinding?.sourceDigest !== binding.source_digest || catalog.providerBinding?.appId !== binding.app_id || catalog.providerBinding?.connectionId !== binding.connectionId || Object.keys(catalog.visibleTo ?? {}).length !== 1 || JSON.stringify([...(catalog.visibleTo?.user_ids ?? [])].sort()) !== JSON.stringify([...binding.allowed_user_ids].sort())) throw new ExternalProviderError(403, 'AGENT_DISABLED_OR_CHANGED')
-    const connection = context ? context.connections.get(binding.connectionId) : await this.options.identities.getIntegrationConnection(binding.connectionId)
+    if (!context) return this.administration.assertCredentialUsable(actor, binding)
+    const connection = context.connections.get(binding.connectionId)
     if (!connection?.enabled || connection.orgId !== actor.orgId || connection.providerType !== 'dify' || connection.secretRef !== binding.credential_ref || connection.config.baseUrl !== binding.endpoint || connection.config.tenantId !== binding.workspace_id || connection.config.executionMode !== 'external_hosted') throw new ExternalProviderError(403, 'CONNECTION_DISABLED_OR_CHANGED')
   }
 

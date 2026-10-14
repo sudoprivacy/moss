@@ -5,7 +5,7 @@ import { EXTERNAL_PROVIDER_API, type ExternalEventsPage, type CreateExternalTask
 import { ExternalProviderError } from './policy.js'
 
 export interface ExternalActor { orgId: string; userId: string }
-export interface Binding extends RegisterExternalAgent { id: string; orgId: string; connectionId: string; approved: boolean; parametersDigest: string | null; reviewedBy: string | null; revision?: number; archived?: boolean; credentialUpdating?: boolean; credentialVersion?: number; credentialRecoveryRequired?: boolean; credentialOperationId?: string; registrationMode?: 'onboarding' | 'reference_compat' }
+export interface Binding extends RegisterExternalAgent { id: string; orgId: string; connectionId: string; approved: boolean; parametersDigest: string | null; reviewedBy: string | null; revision?: number; definitionProfileVersion?: number; archived?: boolean; credentialUpdating?: boolean; credentialVersion?: number; credentialRecoveryRequired?: boolean; credentialOperationId?: string; registrationMode?: 'onboarding' | 'reference_compat' }
 type Checkpoint = ExternalTask & { _checkpoint_sequence?: number }
 type TaskRow = SqlRow & { document: string; sequence: number; request_hash: string }
 type SessionRow = SqlRow & { id: string; agent_id: string; agent_name: string; title: string; active_task_id: string | null; conversation_id: string | null; created_at: number; updated_at: number }
@@ -72,7 +72,7 @@ export class ExternalTaskStore {
         const bindings = await db.all('SELECT document FROM external_pilot_bindings')
         for (const row of bindings) {
           const binding = JSON.parse(String(row.document)) as Binding
-          if (binding.approved && binding.credentialVersion === undefined) {
+          if (binding.approved && (binding.credentialVersion === undefined || binding.definitionProfileVersion !== 1)) {
             binding.approved = false; binding.parametersDigest = null; binding.revision = (binding.revision ?? 1) + 1
             await db.run('UPDATE external_pilot_bindings SET document = ? WHERE id = ?', [JSON.stringify(binding), binding.id])
           }
@@ -201,7 +201,7 @@ export class ExternalTaskStore {
 
   private async project(row: TaskRow, loaded?: SqlRow[]): Promise<ExternalTask> {
     const { _checkpoint_sequence: checkpoint = Number(row.sequence), ...task } = JSON.parse(row.document) as Checkpoint
-    if (task.api_version !== EXTERNAL_PROVIDER_API) task.raw_answer_freshness = 'legacy_checkpoint'
+    if (![EXTERNAL_PROVIDER_API, 'external-provider.sudo.dev/v1alpha3'].includes(task.api_version)) task.raw_answer_freshness = 'legacy_checkpoint'
     task.api_version = EXTERNAL_PROVIDER_API
     if (checkpoint >= Number(row.sequence)) return task
     const events = loaded ?? await this.db.all('SELECT document FROM external_pilot_events WHERE task_id = ? AND sequence > ? AND sequence <= ? ORDER BY sequence', [task.id, checkpoint, Number(row.sequence)])

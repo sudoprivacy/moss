@@ -1,3 +1,5 @@
+import { definitionDigest } from './definition.js'
+import { queryOnlyDefinition } from '../testing/externalProviderDefinitionFixture.js'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { randomUUID } from 'node:crypto'
@@ -41,10 +43,24 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
       services.push(new ExternalProviderService(store, { catalog: new CatalogRepository(driver), identities: new IdentityRepository(driver), secrets, transport, isActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: ['http://127.0.0.1:8089/v1'], timeoutMs: 30000 } }))
     }
     const [first, second] = services
-    const input = { request_id: randomUUID(), name: 'Concurrent pilot', endpoint: 'http://127.0.0.1:8089/v1', api_key: 'synthetic-original', app_id: 'app', workspace_id: 'workspace', source_definition: JSON.stringify({ graph: { nodes: ['start', 'llm', 'answer'].map(type => ({ data: { type } })), edges: [] } }), decoder: 'text', allowed_user_ids: [actor.userId], review_days: 1, review_note: 'Synthetic concurrency fixture' }
+    const input = { request_id: randomUUID(), name: 'Concurrent pilot', endpoint: 'http://127.0.0.1:8089/v1', api_key: 'synthetic-original', app_id: 'app', workspace_id: 'workspace', source_definition: JSON.stringify(queryOnlyDefinition()), decoder: 'text', allowed_user_ids: [actor.userId], review_days: 1, review_note: 'Synthetic concurrency fixture' }
     const agent = await first.administration.onboard(actor, input)
     assert.equal((await second.administration.onboard(actor, input)).id, agent.id)
     await assert.rejects(second.administration.onboard(actor, { ...input, api_key: 'different-synthetic-key' }), { code: 'IDEMPOTENCY_CONFLICT' })
+    const source = JSON.stringify(queryOnlyDefinition())
+    const reference = { request_id: randomUUID(), name: 'Referenced pilot', endpoint: input.endpoint, app_id: input.app_id, workspace_id: input.workspace_id, credential_ref: 'nexus://org:review-org:system:dify/app-key', source_definition: source, source_digest: definitionDigest(source), decoder: 'text', allowed_user_ids: [actor.userId], review_expires_at: Date.now() + 86400_000, review_note: 'Synthetic reference concurrency fixture' }
+    const registrations = await Promise.all(Array.from({ length: 12 }, (_, i) => services[i % 2].register(actor, reference)))
+    assert.equal(new Set(registrations.map(value => value.id)).size, 1)
+    assert.equal((await second.register(actor, reference)).id, registrations[0].id)
+    await assert.rejects(second.register(actor, { ...reference, name: 'Changed reference' }), { code: 'IDEMPOTENCY_CONFLICT' })
+    const counts = async () => Promise.all(['external_pilot_bindings', 'integration_connections', 'tenant_assistants', 'external_pilot_operations', 'external_pilot_admin_audit'].map(async table => Number((await drivers[1].get(`SELECT COUNT(*) AS count FROM ${table}`))!.count)))
+    const before = await counts(), audit = first.administration.audit.bind(first.administration)
+    const retry = { ...reference, request_id: randomUUID() }
+    first.administration.audit = async () => { throw new Error('Synthetic failure after all registration writes') }
+    try { await assert.rejects(first.register(actor, retry), /Synthetic failure/) }
+    finally { first.administration.audit = audit }
+    assert.deepEqual(await counts(), before, 'Reservation, binding, catalog, connection and audit roll back together')
+    assert((await second.register(actor, retry)).id, 'Same request can succeed after rollback')
     await first.review(actor, agent.id, true, 1)
     const request = { agent_id: agent.id, query: 'synthetic', idempotency_key: randomUUID() }
     const accepted = await Promise.all(Array.from({ length: 12 }, (_, i) => services[i % 2].create(actor, request)))

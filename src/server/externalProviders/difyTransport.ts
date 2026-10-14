@@ -4,6 +4,7 @@ import { digest } from './store.js'
 
 export type ProviderProgress = { raw: string; refs: ExternalTask['provider_refs'] }
 export type ProviderFetch = typeof fetch
+export const MAX_PROVIDER_STREAM_BYTES = 2 * 1024 * 1024
 
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
@@ -108,6 +109,7 @@ export class DifyPilotTransport {
     const reader = response.body.getReader(), decoder = new TextDecoder()
     let buffer = '', raw = '', isMessageEnded = false, isWorkflowSucceeded = false, count = 0
     let publishedRaw = '', publishedCharacters = 0
+    let receivedBytes = 0
     const refs: ExternalTask['provider_refs'] = {}
     const progress = new ProgressCoalescer(onProgress)
     let lastRefs = ''
@@ -115,6 +117,8 @@ export class DifyPilotTransport {
       while (true) {
         const next = await reader.read()
         if (next.done) throw new ExternalProviderError(502, 'EXECUTION_UNCONFIRMED')
+        receivedBytes += next.value.byteLength
+        if (receivedBytes > MAX_PROVIDER_STREAM_BYTES) throw new ExternalProviderError(502, 'PROVIDER_RESPONSE_LIMIT')
         buffer += decoder.decode(next.value, { stream: true })
         let match: RegExpExecArray | null
         while ((match = /\r?\n\r?\n/.exec(buffer))) {

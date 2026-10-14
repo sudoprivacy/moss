@@ -1,3 +1,5 @@
+import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
+import { queryOnlyDefinition } from '../testing/externalProviderDefinitionFixture.js'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { crashFixture } from '../testing/externalProviderCrashFixture.js'
@@ -14,7 +16,7 @@ import { createCatalogTestRepository, createIdentityTestRepository } from '../te
 import { onlineCommandContext } from '../application/commandContext.js'
 import { ExternalTaskStore } from './store.js'
 import { ExternalProviderService } from './service.js'
-import { DifyPilotTransport, ProgressCoalescer } from './difyTransport.js'
+import { DifyPilotTransport, ProgressCoalescer, MAX_PROVIDER_STREAM_BYTES } from './difyTransport.js'
 import { decodeOutput } from './decoder.js'
 import { canonicalEndpoint, parseRegistration, ExternalProviderError } from './policy.js'
 import { dispatchExternalProvider } from './routes.js'
@@ -26,6 +28,106 @@ const policy = { orgIds: ['org-a'], endpoints: ['http://127.0.0.1:8089/v1'], tim
 const definition = () => ({ name: 'Pilot', endpoint: policy.endpoints[0], app_id: 'app-1', workspace_id: 'workspace-1', credential_ref: 'nexus://org:org-a:system:dify/app-key', source_digest: `sha256:${'1'.repeat(64)}`, decoder: 'reply_actions_v1' as const, allowed_user_ids: ['u', 'v'], review_expires_at: Date.now() + 86400_000, review_note: 'Synthetic inputs, reviewed read-only Chatflow' })
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
+
+void test('saved credential tests allow drafts but block revoked, updating, recovery and disabled connections before vault access', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body()), original = await f.store.binding(actor, agent.id)
+  let reads = 0, requests = 0
+  f.control.beforeRead = async () => { reads++ }
+  f.control.beforeParameters = async () => { requests++ }
+  await f.admin.testSaved(actor, agent.id)
+  assert.equal(requests, 1); assert.equal(reads, 1)
+  reads = 0; requests = 0
+  for (const patch of [{ archived: true }, { credentialUpdating: true }, { credentialRecoveryRequired: true }]) {
+    await f.store.saveBinding({ ...original, ...patch })
+    await assert.rejects(f.admin.testSaved(actor, agent.id), ExternalProviderError)
+  }
+  await f.store.saveBinding(original)
+  const connection = (await f.identities.getIntegrationConnection(original.connectionId))!
+  await f.identities.putIntegrationConnection({ ...connection, enabled: false })
+  await assert.rejects(f.admin.testSaved(actor, agent.id), { code: 'CONNECTION_DISABLED_OR_CHANGED' })
+  assert.equal(reads, 0); assert.equal(requests, 0)
+})
+
+void test('archive during a saved vault read prevents the subsequent provider test', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body())
+  let enter!: () => void, release!: () => void, requests = 0
+  const entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { release = resolve })
+  f.control.beforeRead = async () => { enter(); await barrier }
+  f.control.beforeParameters = async () => { requests++ }
+  const checking = f.admin.testSaved(actor, agent.id)
+  const rejected = assert.rejects(checking, { code: 'CONFIGURATION_CHANGED' })
+  await entered
+  try { await f.admin.archive(actor, agent.id, { revision: agent.revision }) } finally { release() }
+  await rejected; assert.equal(requests, 0)
+})
+
+void test('stream byte budget counts UTF-8 metadata without answer growth and cancels input immediately', async () => {
+  const chunk = new TextEncoder().encode(frames([{ event: 'metadata', padding: '汉'.repeat(60000) }]))
+  let chunks = 0, cancelled = false, progress = 0
+  const transport = new DifyPilotTransport((async () => new Response(new ReadableStream({
+    pull(controller) { chunks++; controller.enqueue(chunk) },
+    cancel() { cancelled = true },
+  }, { highWaterMark: 0 }), { headers: { 'content-type': 'text/event-stream' } })) as unknown as typeof fetch)
+  await assert.rejects(transport.execute({ endpoint: policy.endpoints[0], key: 'synthetic', query: 'test', conversationId: null, endUser: 'u', signal: AbortSignal.timeout(5000) }, async () => { progress++ }), { code: 'PROVIDER_RESPONSE_LIMIT' })
+  assert.equal(chunks, Math.floor(MAX_PROVIDER_STREAM_BYTES / chunk.byteLength) + 1)
+  assert.equal(cancelled, true); assert.equal(progress, 1) // Initial empty provider-ref snapshot only.
+})
+
+void test('full definition rejects hidden tools, sources, non-query inputs and incomplete snapshots', () => {
+  const valid = queryOnlyDefinition()
+  assert.match(definitionDigest(JSON.stringify(valid)), /^sha256:/)
+  const withLlm = (patch: Record<string, unknown>) => ({ ...valid, workflow: { ...valid.workflow, graph: { ...valid.workflow.graph, nodes: valid.workflow.graph.nodes.map(node => node.id === 'llm' ? { ...node, data: { ...node.data, ...patch } } : node) } } })
+  const invalid = [
+    { workflow: { graph: valid.workflow.graph } },
+    withLlm({ tools: [{ provider_id: 'http', tool_name: 'send' }] }),
+    withLlm({ context: { enabled: true, variable_selector: ['dataset', 'result'] } }),
+    withLlm({ vision: { enabled: true } }),
+    withLlm({ model: { ...valid.workflow.graph.nodes[1].data.model, completion_params: { tools: [] } } }),
+    withLlm({ prompt_template: [{ role: 'system', text: 'test', edition_type: 'jinja2', jinja2_variables: [] }] }),
+    { ...valid, workflow: { ...valid.workflow, environment_variables: [{ name: 'secret_source', value: 'synthetic' }] } },
+    { ...valid, workflow: { ...valid.workflow, features: { external_data_tools: [{ enabled: true }] } } },
+    { ...valid, workflow: { ...valid.workflow, features: { file_upload: { enabled: false, image: { enabled: true } } } } },
+    { ...valid, workflow: { ...valid.workflow, graph: { ...valid.workflow.graph, edges: [] } } },
+  ]
+  for (const source of invalid) assert.throws(() => definitionDigest(JSON.stringify(source)), { code: 'UNSUPPORTED_DIFY_DEFINITION' })
+  assert.throws(() => definitionDigest('kind: app\nworkflow: &cycle {graph: *cycle}'), { code: 'UNSUPPORTED_DIFY_DEFINITION' })
+  const changed = withLlm({ prompt_template: [{ role: 'system', text: 'Changed synthetic prompt.' }] })
+  assert.notEqual(definitionDigest(JSON.stringify(changed)), definitionDigest(JSON.stringify(valid)))
+})
+
+void test('old definition evidence cannot execute or publish; re-upload revokes approval and updates catalog digest', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const agent = await f.admin.onboard(actor, f.body())
+  await f.service.review(actor, agent.id, true, agent.revision)
+  const original = await f.store.binding(actor, agent.id)
+  await f.store.saveBinding({ ...original, definitionProfileVersion: undefined })
+  assert.deepEqual(await f.service.list(actor), [])
+  await assert.rejects(f.service.review(actor, agent.id, true, original.revision!), { code: 'DEFINITION_REVIEW_REQUIRED' })
+  const updated = await f.admin.update(actor, agent.id, { revision: original.revision, name: original.name, decoder: original.decoder, allowed_user_ids: original.allowed_user_ids, review_days: 1, review_note: 'Rechecked actual published configuration.', source_definition: JSON.stringify(queryOnlyDefinition()) })
+  assert.equal(updated.approved, false); assert.equal(updated.definition_evidence, 'validated_dsl')
+  assert.equal((await f.store.binding(actor, agent.id)).definitionProfileVersion, DEFINITION_PROFILE_VERSION)
+  assert.equal((await f.catalog.getAgent(agent.id, actor.orgId))?.providerBinding?.sourceDigest, updated.source_digest)
+  await f.service.review(actor, agent.id, true, updated.revision)
+  assert.equal((await f.service.list(actor)).length, 1)
+})
+
+void test('reference registration is durable, atomic, scoped and requires full definition and request identity', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const input = { ...definition(), request_id: randomUUID(), source_definition: JSON.stringify(queryOnlyDefinition()), source_digest: definitionDigest(JSON.stringify(queryOnlyDefinition())) }
+  const results = await Promise.all(Array.from({ length: 4 }, () => f.service.register(actor, input)))
+  assert.equal(new Set(results.map(value => value.id)).size, 1)
+  const reopened = new ExternalProviderService(new ExternalTaskStore(f.driver), f.admin.options)
+  try {
+    const reordered = Object.fromEntries(Object.entries(input).reverse())
+    assert.equal((await reopened.register(actor, reordered)).id, results[0].id)
+    await assert.rejects(reopened.register(actor, { ...input, name: 'Changed' }), { code: 'IDEMPOTENCY_CONFLICT' })
+    await assert.rejects(reopened.register(actor, { ...input, request_id: undefined }), { code: 'INVALID_REQUEST_ID' })
+    await assert.rejects(reopened.register(actor, { ...input, source_definition: undefined }), { code: 'UNSUPPORTED_DIFY_DEFINITION' })
+    assert.equal((await f.driver.all('SELECT id FROM external_pilot_bindings')).length, 1)
+  } finally { await reopened.close() }
+})
 function frames(events: unknown[]) { return events.map(event => `data: ${JSON.stringify(event)}\r\n\r\n`).join('') }
 function successful(answer = '{"reply":"42","actions":[]}') {
   return [
@@ -56,7 +158,7 @@ async function setup(options: { events?: unknown[]; status?: number; parameters?
     return { value: 'private-app-key', status: 'enabled', version: 1 }
   } } })
   cleanups.push(async () => { await service.close(); await driver.close() })
-  const registered = await service.register(actor, definition())
+  const registered = await service.register(actor, { ...definition(), request_id: randomUUID(), source_definition: JSON.stringify(queryOnlyDefinition()), source_digest: definitionDigest(JSON.stringify(queryOnlyDefinition())) })
   if (!options.failBeforeSend) await service.review(actor, registered.id, true, 1)
   const request = (session_id?: string, query = '6 * 7') => ({ agent_id: registered.id, session_id, query, idempotency_key: randomUUID() })
   const run = async (input = request()) => { const task = await service.create(actor, input); await service.waitForTask(task.id); return store.task(actor, task.id) }
@@ -231,10 +333,10 @@ async function administrationSetup() {
   await authDb.createOrganization(actor.orgId, 'Pilot', Date.now())
   const catalog = createCatalogTestRepository(db, driver), identities = createIdentityTestRepository(db, {}, driver)
   const values = new Map<string, string>(), writes: string[] = []
-  const control = { failWrite: false, beforeWrite: async () => {}, beforeParameters: async () => {} }
+  const control = { failWrite: false, beforeWrite: async () => {}, beforeParameters: async () => {}, beforeRead: async () => {} }
   const requestKeys: string[] = []
   const secrets = {
-    getSecret: async (namespace: string, key: string) => ({ value: values.get(`${namespace}/${key}`) ?? null, status: 'enabled', version: 1 }),
+    getSecret: async (namespace: string, key: string) => { await control.beforeRead(); return { value: values.get(`${namespace}/${key}`) ?? null, status: 'enabled', version: 1 } },
     putSecret: async (namespace: string, key: string, value: string) => { await control.beforeWrite(); if (control.failWrite) throw new Error('private-secret-detail'); writes.push(namespace); values.set(`${namespace}/${key}`, value) },
     deleteSecret: async (namespace: string, key: string) => { values.delete(`${namespace}/${key}`) },
   }
@@ -249,7 +351,7 @@ async function administrationSetup() {
   const service = new ExternalProviderService(store, { catalog, identities, secrets, transport, policy: { ...policy, orgIds: [], endpoints: [] }, isActive: async member => member.orgId === actor.orgId && ['u', 'v'].includes(member.userId), members: async () => [{ id: 'u', name: 'User' }, { id: 'v', name: 'Other' }] })
   cleanups.push(async () => { await service.close(); await driver.close() })
   const admin = service.administration
-  const body = () => ({ request_id: randomUUID(), name: 'Pilot', endpoint: policy.endpoints[0], api_key: 'private-ui-key', app_id: 'app-1', workspace_id: 'workspace-1', source_definition: JSON.stringify({ workflow: { graph: { nodes: ['start', 'llm', 'answer'].map(type => ({ data: { type } })), edges: [] } } }), decoder: 'reply_actions_v1', allowed_user_ids: ['u'], review_days: 7, review_note: 'Synthetic reviewed definition' })
+  const body = () => ({ request_id: randomUUID(), name: 'Pilot', endpoint: policy.endpoints[0], api_key: 'private-ui-key', app_id: 'app-1', workspace_id: 'workspace-1', source_definition: JSON.stringify(queryOnlyDefinition()), decoder: 'reply_actions_v1', allowed_user_ids: ['u'], review_days: 7, review_note: 'Synthetic reviewed definition' })
   const enable = () => admin.setPolicy(actor, { enabled: true, endpoints: policy.endpoints, revision: 0 })
   return { db, driver, store, service, admin, body, enable, values, writes, control, catalog, identities, secrets, transport, requestKeys }
 }
@@ -595,7 +697,21 @@ void test('raw deltas survive checkpoint gaps, restart, replacement and unknown 
   }
   await f.store.mutate(task.id, current => { current.status = 'unknown'; return 'status' })
   assert.equal((await f.store.task(actor, task.id)).raw_answer, '{"reply":"replacement')
-  assert.equal((await f.store.events(actor, task.id, 0)).api_version, 'external-provider.sudo.dev/v1alpha3')
+  assert.equal((await f.store.events(actor, task.id, 0)).api_version, 'external-provider.sudo.dev/v1alpha4')
+})
+
+void test('alpha3 checkpoints retain complete raw answers when resynced to alpha4', async () => {
+  const f = await setup(), task = await f.run()
+  const row = await f.driver.get('SELECT document FROM external_pilot_tasks WHERE id = ?', [task.id])
+  const legacy = JSON.parse(String(row!.document)); legacy.api_version = 'external-provider.sudo.dev/v1alpha3'
+  await f.driver.run('UPDATE external_pilot_tasks SET document = ? WHERE id = ?', [JSON.stringify(legacy), task.id])
+  const eventRow = await f.driver.get('SELECT document FROM external_pilot_events WHERE task_id = ? AND sequence = 2', [task.id])
+  const event = JSON.parse(String(eventRow!.document)); event.api_version = 'external-provider.sudo.dev/v1alpha3'
+  await f.driver.run('UPDATE external_pilot_events SET document = ? WHERE task_id = ? AND sequence = 2', [JSON.stringify(event), task.id])
+  const page = await f.store.events(actor, task.id, 1)
+  assert.equal(page.api_version, 'external-provider.sudo.dev/v1alpha4')
+  assert.equal(page.task?.raw_answer, task.raw_answer)
+  assert.equal(page.task?.raw_answer_freshness, 'current')
 })
 
 void test('legacy alpha2 streams resync to a labelled snapshot and unknown versions are not replayed', async () => {

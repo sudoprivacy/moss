@@ -176,7 +176,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
         ? !draft.endpoint || !draft.api_key.trim()
         : !isDefinitionReady
       : dialog?.kind === 'edit'
-        ? !isMetadataReady
+        ? !isMetadataReady || (dialog.agent.definition_evidence === 'digest_only' && !draft.source_definition)
         : dialog?.kind === 'rotate'
           ? !newKey.trim()
           : false)
@@ -203,6 +203,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
           allowed_user_ids: draft.allowed_user_ids,
           review_days: draft.review_days,
           review_note: draft.review_note,
+          ...(draft.source_definition ? { source_definition: draft.source_definition } : {}),
         })
         message = '配置已保存，发布状态已撤销，请重新审核。'
       } else if (dialog.kind === 'rotate') {
@@ -402,7 +403,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                 <Feedback error>上次凭据更新未能确认，请更换密钥后重新审核。</Feedback>
               ) : null}
               {agent.definition_evidence === 'digest_only' ? (
-                <Feedback>兼容引用接入：仅保留定义摘要，尚未验证上传的应用定义。发布前请核对实际 Dify 配置。</Feedback>
+                <Feedback>应用定义需要重新核验。请编辑并上传包含工作流功能配置的完整定义，再审核发布。</Feedback>
               ) : null}
               <p className="break-all text-sm text-muted-foreground">{agent.endpoint}</p>
               <p className="text-sm">
@@ -569,7 +570,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                     <Field
                       id="external-definition"
                       label="应用定义文件"
-                      hint="上传 Dify 导出的 YAML / JSON，最大 256 KB；当前支持 Start、LLM、Answer 节点。请核对与已发布版本一致。"
+                      hint="上传完整 Dify YAML / JSON，最大 256 KB，需包含 workflow.features。仅支持 Start → LLM → Answer，不支持附件、工具或知识库。请在 Dify 核对实际发布内容；上传文件不构成远端版本锁定。"
                     >
                       <Input
                         id="external-definition"
@@ -587,6 +588,10 @@ function ScopedExternalAgents({ query }: { query: string }) {
             {dialog?.kind === 'edit' ? (
               <>
                 <Feedback>保存会撤销发布状态，需重新审核后才能执行新任务。</Feedback>
+                <Field id="external-definition-update" label="重新上传应用定义" hint="旧定义需重新上传；已核验定义可留空保留。文件必须包含工作流功能配置，且需人工核对当前 Dify 发布内容。">
+                  <Input id="external-definition-update" type="file" accept=".yaml,.yml,.json" onChange={(event) => void onFile(event.target.files?.[0])} />
+                  {fileName ? <p className="text-xs text-muted-foreground">已读取：{fileName}</p> : null}
+                </Field>
                 {metadataFields}
               </>
             ) : null}
