@@ -7,6 +7,6 @@ USER root
 COPY ai_dev_browser/extension /opt/browser/sdk/ai_dev_browser/extension
 RUN --mount=type=secret,id=extension_key,required=true python3 -c 'import pathlib; p=pathlib.Path("/opt/browser/configure_extension.py"); text=p.read_text(); assert text.count("output.mkdir()")==1; p.write_text(text.replace("output.mkdir()","output.mkdir(exist_ok=True)"))' \
     && python3 /opt/browser/configure_extension.py /run/secrets/extension_key \
-    && python3 -c 'import pathlib; p=pathlib.Path("/opt/browser/worker.py"); text=p.read_text(); needle="minimum_version=installed_identity[\"version\"],"; assert text.count(needle)==1; p.write_text(text.replace(needle,"minimum_version=None,",1))' \
+    && /opt/browser/venv/bin/python -c 'import inspect,pathlib; from ai_dev_browser.remote.worker import Worker; p=pathlib.Path(inspect.getfile(Worker)); text=p.read_text(); needle="minimum_version=installed_identity[\"version\"],"; assert text.count(needle)==1; p.write_text(text.replace(needle,"minimum_version=None,",1))' \
     && chown -R browser:browser /opt/browser/extension
 USER browser
