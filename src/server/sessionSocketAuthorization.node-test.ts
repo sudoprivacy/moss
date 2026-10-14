@@ -59,3 +59,36 @@ void test('a failed authorization lookup refuses the frame and closes the connec
   client.send('unchecked')
   assert.equal((await closed)[0], 1008)
 })
+
+void test('a quiet authenticated turn stays subscribed and can continue after human input', { timeout: 55_000 }, async t => {
+  let isAllowed = true
+  const received: string[] = []
+  let resolveContinuation!: () => void
+  const continuation = new Promise<void>(resolve => { resolveContinuation = resolve })
+  const client = await connect(t, { isManagement: false,
+    verify: async () => isAllowed,
+    onMessage: data => { received.push(data.toString()); if (received.length === 2) resolveContinuation() } })
+  // A real transport deadline reproduces an idle intermediary. With no
+  // protocol traffic this connection closes before the second heartbeat.
+  let deadline: ReturnType<typeof setTimeout>
+  const refreshDeadline = () => {
+    clearTimeout(deadline)
+    deadline = setTimeout(() => client.terminate(), 25_000)
+  }
+  t.after(() => clearTimeout(deadline))
+  refreshDeadline()
+  const pings: number[] = []
+  client.on('ping', () => { pings.push(Date.now()); refreshDeadline() })
+  client.send('begin quiet turn')
+  await delay(42_000)
+  assert.equal(client.readyState, WebSocket.OPEN)
+  assert(pings.length >= 2)
+  const closed = once(client, 'close')
+  client.send('continue after human input')
+  await continuation
+  assert.deepEqual(received, ['begin quiet turn', 'continue after human input'])
+  isAllowed = false
+  client.send('revoked continuation')
+  assert.equal((await closed)[0], 1008)
+  assert.deepEqual(received, ['begin quiet turn', 'continue after human input'])
+})

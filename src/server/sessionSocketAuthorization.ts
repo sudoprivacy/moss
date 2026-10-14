@@ -31,7 +31,14 @@ export function attachSessionSocketAuthorization(ws: WebSocket, access: SessionS
     }).catch(refuse).finally(() => { isChecking = false })
   }, 5000) : undefined
   timer?.unref()
-  const cleanup = (): void => { clearInterval(timer) }
+  // A quiet model turn can exceed the public proxy's idle budget. Protocol
+  // frames keep both Desktop and WebUI subscriptions alive without changing
+  // the application stream or replaying a user message.
+  const heartbeat = setInterval(() => {
+    if (ws.readyState === ws.OPEN) ws.ping()
+  }, 20_000)
+  heartbeat.unref()
+  const cleanup = (): void => { clearInterval(timer); clearInterval(heartbeat) }
   ws.once('close', cleanup)
   ws.once('error', cleanup)
 }
