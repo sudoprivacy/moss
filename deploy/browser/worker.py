@@ -250,7 +250,11 @@ class Worker:
         ):
             raise ControlError("explicit_browser_launch_mode_required")
         if actor == "ai" and self.control.state != "ai":
-            raise ControlError(self.control.error or "browser_control_held_by_user")
+            raise ControlError(
+                "browser_control_held_by_user"
+                if self.control.controller is not None
+                else self.control.error or "browser_control_held_by_user"
+            )
         if actor != "ai" and self.control.controller not in (None, actor):
             raise ControlError("browser_control_not_owned")
         if self.session:
