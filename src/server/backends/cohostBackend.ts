@@ -79,7 +79,7 @@ export class CohostBackend implements SessionBackend {
       options.signal?.throwIfAborted()
     } catch (error) {
       let failure = error
-      try { if (session) await agent.cancel(session.sessionId) }
+      try { if (session) await agent.cancel(session.sessionId, session.sessionEndpoint) }
       catch (cleanupError) {
         if (!session || !isUnknownManagedSession(cleanupError, session.sessionId)) {
           failure = new AggregateError([error, cleanupError], 'Failed cohost startup could not clean up its execution')
