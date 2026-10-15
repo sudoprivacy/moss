@@ -67,19 +67,33 @@ PY
 node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" --base-url "http://127.0.0.1:$PORT" \
   --username e2e-admin --password fixture-password --runtimes k8s --keep-sessions --output-dir "$EVIDENCE/session-before-restart"
 session_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runtimes"][0]["sessionId"])' "$EVIDENCE/session-before-restart/e2e-summary.json")"
-session_pod_before="$(sudo k3s kubectl -n moss-sessions-fixture get pods -l "moss.sudo.dev/session-id=$session_id" -o jsonpath='{.items[0].metadata.uid}')"
-[ -n "$session_pod_before" ]
 control_before="$(sudo k3s kubectl -n moss-control-fixture get pods -l app=moss-server -o jsonpath='{.items[0].metadata.uid}')"
 sudo k3s kubectl -n moss-sessions-fixture get pods -l "moss.sudo.dev/session-id=$session_id" -o json > "$EVIDENCE/session-pod-before-restart.json"
+workspace_claim="$(python3 - "$EVIDENCE/session-pod-before-restart.json" "$session_id" <<'PY'
+import json, sys
+pods = json.load(open(sys.argv[1]))['items']
+assert len(pods) == 1, 'The retained session must have exactly one execution Pod before restart'
+assert pods[0]['metadata']['labels']['moss.sudo.dev/session-id'] == sys.argv[2]
+volume, = [item for item in pods[0]['spec']['volumes'] if item['name'] == 'workspace']
+print(volume['persistentVolumeClaim']['claimName'])
+PY
+)"
+sudo k3s kubectl -n moss-sessions-fixture get pvc "$workspace_claim" -o json > "$EVIDENCE/workspace-pvc-before-restart.json"
 master_before="$(sudo sha256sum "$INSTALL_DIR/.moss/nexus/data/vault/master.key" | awk '{print $1}')"
 sudo "$INSTALL_DIR/restart.sh" > "$EVIDENCE/restart.log" 2>&1
 master_after="$(sudo sha256sum "$INSTALL_DIR/.moss/nexus/data/vault/master.key" | awk '{print $1}')"
 [ "$master_before" = "$master_after" ]
 control_after="$(sudo k3s kubectl -n moss-control-fixture get pods -l app=moss-server -o jsonpath='{.items[0].metadata.uid}')"
 [ -n "$control_after" ] && [ "$control_before" != "$control_after" ]
-session_pod_after="$(sudo k3s kubectl -n moss-sessions-fixture get pods -l "moss.sudo.dev/session-id=$session_id" -o jsonpath='{.items[0].metadata.uid}')"
-[ "$session_pod_before" = "$session_pod_after" ]
 sudo k3s kubectl -n moss-sessions-fixture get pods -l "moss.sudo.dev/session-id=$session_id" -o json > "$EVIDENCE/session-pod-after-restart.json"
+sudo k3s kubectl -n moss-sessions-fixture get pvc "$workspace_claim" -o json > "$EVIDENCE/workspace-pvc-after-restart.json"
+python3 - "$EVIDENCE/workspace-pvc-before-restart.json" "$EVIDENCE/workspace-pvc-after-restart.json" "$session_id" <<'PY'
+import json, sys
+before, after = [json.load(open(path)) for path in sys.argv[1:3]]
+assert before['metadata']['uid'] == after['metadata']['uid'], 'Restart replaced the durable workspace claim'
+assert after['metadata']['labels']['moss.sudo.dev/session-id'] == sys.argv[3]
+assert not after['metadata'].get('deletionTimestamp'), 'Restart is deleting the durable workspace'
+PY
 node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" --base-url "http://127.0.0.1:$PORT" \
   --username e2e-admin --password fixture-password --runtimes k8s --output-dir "$EVIDENCE/session-after-restart" \
   --resume-from "$EVIDENCE/session-before-restart/e2e-summary.json"
@@ -95,4 +109,4 @@ sudo env MOSS_NON_INTERACTIVE=1 MOSS_INSTALL_DIR="$INSTALL_DIR" MOSS_K8S_RUNTIME
   bash "$DIST_DIR/install.sh" --offline > "$EVIDENCE/offline-reinstall.log" 2>&1
 [ "$master_before" = "$(sudo sha256sum "$INSTALL_DIR/.moss/nexus/data/vault/master.key" | awk '{print $1}')" ]
 curl -fsS "http://127.0.0.1:$PORT/readyz" > "$EVIDENCE/readiness.json"
-printf '%s\n' '{"status":"passed","separate_images":true,"real_k8s_session":true,"restart":true,"same_session_resumed":true,"session_pod_retained_during_restart":true,"offline_reinstall":true,"vault_key_preserved":true,"systemd_business_service":false}' > "$EVIDENCE/acceptance.json"
+printf '%s\n' '{"status":"passed","separate_images":true,"real_k8s_session":true,"restart":true,"same_session_resumed":true,"workspace_pvc_retained_during_restart":true,"workspace_file_recovered":true,"offline_reinstall":true,"vault_key_preserved":true,"systemd_business_service":false}' > "$EVIDENCE/acceptance.json"

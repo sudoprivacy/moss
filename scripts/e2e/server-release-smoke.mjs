@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import tls from "node:tls";
+import { verifyWorkspaceProof } from './workspace-proof.mjs';
 
 // The `runtime` block each session is created with. `k8s` drives the gvisor
 // pod path, which is what production runs; it needs a cluster reachable through
@@ -510,6 +511,11 @@ async function main() {
         "detached",
       ]);
       await waitForSessionContext(sessionId, token, [previous?.nonce, conversation.nonce].filter(Boolean));
+      let workspaceProof;
+      if (options.keepSessions || previous) {
+        if (previous) assert(previous.workspaceProof, 'Retained session has no durable workspace proof');
+        workspaceProof = await verifyWorkspaceProof(request, sessionId, authorization(token), previous?.workspaceProof);
+      }
       summaries.push({
         runtime,
         sessionId,
@@ -519,6 +525,7 @@ async function main() {
         previousNonce: previous?.nonce,
         resumed: Boolean(previous),
         resumeElapsedMs,
+        ...(workspaceProof ? { workspaceProof } : {}),
       });
       preserve = options.keepSessions;
       if (preserve) retainedSessions.set(sessionId, token);
