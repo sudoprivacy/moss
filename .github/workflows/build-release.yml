@@ -522,6 +522,16 @@ jobs:
       - name: Checkout moss
         uses: actions/checkout@v5
 
+      - name: Select release channel
+        id: channel
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_NAME#server-v}" == *-* ]]; then
+            echo 'prerelease=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'prerelease=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download build assets
         uses: actions/download-artifact@v5
         with:
@@ -573,7 +583,8 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           generate_release_notes: true
-          make_latest: true
+          prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.channel.outputs.prerelease != 'true' }}
           files: |
             release-assets/*.tar.gz
             release-assets/install.sh
@@ -585,6 +596,7 @@ jobs:
             release-assets/moss-server-e2e-report-*.zip
 
       - name: Publish Tencent COS Latest entrypoint
+        if: steps.channel.outputs.prerelease != 'true'
         env:
           COS_BUCKET: sudowork-release-1309794936
           COS_ROOT_PATH: moss/server
