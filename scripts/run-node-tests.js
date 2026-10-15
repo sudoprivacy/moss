@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
+  'scripts/e2e/workspace-proof.test.mjs',
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',
   'src/server/runnerReadiness.node-test.ts',
   'src/server/sessionResume.node-test.ts',
@@ -189,12 +190,15 @@ function collectNodeTests(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const absolute = join(directory, entry.name)
     if (entry.isDirectory()) found.push(...collectNodeTests(absolute))
-    else if (entry.name.endsWith('.node-test.ts')) found.push(relative(repoRoot, absolute).replaceAll('\\', '/'))
+    else if (entry.name.endsWith('.node-test.ts') || entry.name.endsWith('.test.mjs')) found.push(relative(repoRoot, absolute).replaceAll('\\', '/'))
   }
   return found
 }
 
-const discovered = collectNodeTests(join(repoRoot, 'src', 'server')).sort()
+const discovered = [
+  ...collectNodeTests(join(repoRoot, 'src', 'server')),
+  ...collectNodeTests(join(repoRoot, 'scripts', 'e2e')),
+].sort()
 const listed = [...nodeTestFiles].sort()
 const unlisted = discovered.filter(file => !listed.includes(file))
 const missing = listed.filter(file => !discovered.includes(file) || !existsSync(join(repoRoot, file)))
@@ -208,7 +212,7 @@ const selectors = process.argv.slice(2).map(value => value.replaceAll('\\', '/')
 const selected = selectors.length === 0
   ? nodeTestFiles
   : nodeTestFiles.filter(file => selectors.some((selector) => {
-      const prefix = selector.startsWith('src/server/') ? selector : `src/server/${selector}`
+      const prefix = selector.startsWith('src/server/') || selector.startsWith('scripts/e2e/') ? selector : `src/server/${selector}`
       return file === prefix || file.startsWith(`${prefix}/`) || file.split('/').includes(selector)
     }))
 
