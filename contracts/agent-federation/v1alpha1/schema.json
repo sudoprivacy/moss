@@ -83,7 +83,10 @@
           "const": "external_hosted"
         },
         "protocol": {
-          "const": "agent-http.sudo.dev/v1alpha1"
+          "enum": [
+            "agent-http.sudo.dev/v1alpha1",
+            "agent-http.sudo.dev/v1alpha2"
+          ]
         },
         "input_profile": {
           "const": "query_only_v1"
@@ -92,23 +95,11 @@
           "const": "text_v1"
         },
         "capabilities": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/ProviderCapabilities"
-            },
-            {
-              "const": {
-                "supports_streaming": false,
-                "supports_cancel": false,
-                "supports_resume": false,
-                "supports_idempotency": false,
-                "supports_tool_events": false,
-                "supports_trace_export": false,
-                "supports_version_pin": false,
-                "supports_human_approval": false
-              }
-            }
-          ]
+          "$ref": "#/$defs/ProviderCapabilities"
+        },
+        "execution_revision": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
         }
       },
       "required": [
@@ -123,6 +114,57 @@
         "input_profile",
         "output_profile",
         "capabilities"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "protocol": {
+                "const": "agent-http.sudo.dev/v1alpha2"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "execution_revision"
+            ],
+            "properties": {
+              "capabilities": {
+                "const": {
+                  "supports_streaming": false,
+                  "supports_cancel": false,
+                  "supports_resume": true,
+                  "supports_idempotency": true,
+                  "supports_tool_events": false,
+                  "supports_trace_export": false,
+                  "supports_version_pin": true,
+                  "supports_human_approval": false
+                }
+              },
+              "execution_revision": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "capabilities": {
+                "const": {
+                  "supports_streaming": false,
+                  "supports_cancel": false,
+                  "supports_resume": false,
+                  "supports_idempotency": false,
+                  "supports_tool_events": false,
+                  "supports_trace_export": false,
+                  "supports_version_pin": false,
+                  "supports_human_approval": false
+                }
+              },
+              "execution_revision": false
+            }
+          }
+        }
       ]
     },
     "TaskCorrelation": {
@@ -229,10 +271,16 @@
           "const": "unsupported"
         },
         "resume": {
-          "const": "unsupported"
+          "enum": [
+            "unsupported",
+            "query_only"
+          ]
         },
         "version_evidence": {
-          "const": "source_snapshot_only"
+          "enum": [
+            "source_snapshot_only",
+            "provider_revision_fenced"
+          ]
         },
         "started_at": {
           "type": "string",
@@ -248,6 +296,10 @@
         },
         "source_identity_evidence": {
           "const": "unverified"
+        },
+        "execution_revision": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
         }
       },
       "required": [
@@ -267,6 +319,42 @@
         "resume",
         "version_evidence",
         "started_at"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "version_evidence": {
+                "const": "provider_revision_fenced"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "execution_revision"
+            ],
+            "properties": {
+              "provider_kind": {
+                "const": "custom_http"
+              },
+              "resume": {
+                "const": "query_only"
+              },
+              "execution_revision": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "resume": {
+                "const": "unsupported"
+              },
+              "execution_revision": false
+            }
+          }
+        }
       ]
     },
     "ProviderObservation": {
@@ -502,6 +590,408 @@
         "provider_run_id",
         "status",
         "output"
+      ]
+    },
+    "AgentPrincipal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "trust_domain": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "agent_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      },
+      "required": [
+        "trust_domain",
+        "agent_name"
+      ]
+    },
+    "AgentExecutionSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider_kind": {
+          "enum": [
+            "dify",
+            "custom_http"
+          ]
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "app_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "sourceManifest": {
+          "$ref": "#/$defs/CustomAgentManifest"
+        },
+        "parametersDigest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decoder": {
+          "enum": [
+            "text",
+            "reply_actions_v1"
+          ]
+        },
+        "definitionProfileVersion": {
+          "const": 1
+        }
+      },
+      "required": [
+        "endpoint",
+        "app_id",
+        "workspace_id",
+        "source_digest",
+        "parametersDigest",
+        "decoder"
+      ]
+    },
+    "AgentVersionManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-federation.sudo.dev/v1alpha1"
+        },
+        "kind": {
+          "const": "AgentVersionManifest"
+        },
+        "principal": {
+          "$ref": "#/$defs/AgentPrincipal"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "spec_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/AgentExecutionSnapshot"
+        },
+        "created_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "api_version",
+        "kind",
+        "principal",
+        "version",
+        "spec_digest",
+        "snapshot",
+        "created_by",
+        "created_at"
+      ]
+    },
+    "AgentVersionDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "decision": {
+          "enum": [
+            "approved",
+            "revoked"
+          ]
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "id",
+        "decision",
+        "actor_id",
+        "note",
+        "expires_at",
+        "created_at"
+      ]
+    },
+    "AgentChannel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "stable",
+            "canary"
+          ]
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "revision",
+        "updated_at",
+        "enabled"
+      ]
+    },
+    "AgentVersionsPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-federation.sudo.dev/v1alpha1"
+        },
+        "kind": {
+          "const": "AgentVersionsPage"
+        },
+        "principal": {
+          "$ref": "#/$defs/AgentPrincipal"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "api_version": {
+                "const": "agent-federation.sudo.dev/v1alpha1"
+              },
+              "kind": {
+                "const": "AgentVersionManifest"
+              },
+              "principal": {
+                "$ref": "#/$defs/AgentPrincipal"
+              },
+              "version": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+              },
+              "spec_digest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "snapshot": {
+                "$ref": "#/$defs/AgentExecutionSnapshot"
+              },
+              "created_by": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "created_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "decisions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/AgentVersionDecision"
+                },
+                "maxItems": 100
+              }
+            },
+            "required": [
+              "api_version",
+              "kind",
+              "principal",
+              "version",
+              "spec_digest",
+              "snapshot",
+              "created_by",
+              "created_at",
+              "decisions"
+            ]
+          },
+          "maxItems": 50
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentChannel"
+          },
+          "maxItems": 2
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "api_version",
+        "kind",
+        "principal",
+        "items",
+        "channels",
+        "next_cursor"
+      ]
+    },
+    "AgentReleaseOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-federation.sudo.dev/v1alpha1"
+        },
+        "kind": {
+          "const": "AgentReleaseOptions"
+        },
+        "principal": {
+          "$ref": "#/$defs/AgentPrincipal"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "version": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+              },
+              "source_digest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "spec_digest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "execution_revision": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "approval_expires_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "version",
+              "source_digest",
+              "spec_digest",
+              "approval_expires_at"
+            ]
+          },
+          "maxItems": 50
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentChannel"
+          },
+          "maxItems": 2
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "catalog_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      },
+      "required": [
+        "api_version",
+        "kind",
+        "principal",
+        "items",
+        "channels",
+        "next_cursor",
+        "catalog_id"
       ]
     }
   }

@@ -26,6 +26,7 @@ import {
   type OnboardExternalAgent,
 } from '@/lib/api/external-agents'
 import { externalAgentError } from '@/lib/external-agent-errors'
+import { ExternalAgentVersions } from './external-agent-versions'
 
 const selectClass = 'h-9 w-full rounded-md border bg-background px-3 text-sm'
 const initialDraft = (): OnboardExternalAgent => ({
@@ -71,6 +72,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [dialog, setDialog] = useState<DialogState>(null)
+  const [versionAgent, setVersionAgent] = useState<ExternalAgentAdmin | null>(null)
   const [draft, setDraft] = useState<OnboardExternalAgent>(initialDraft)
   const [step, setStep] = useState(0)
   const [fileName, setFileName] = useState('')
@@ -516,6 +518,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                 >
                   更换密钥
                 </Button>
+                <Button size="sm" variant="outline" disabled={isBusy} onClick={() => setVersionAgent(agent)}>版本与频道</Button>
                 <Button size="sm" variant="ghost" disabled={isBusy} onClick={() => onOpen({ kind: 'archive', agent })}>
                   归档
                 </Button>
@@ -529,6 +532,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
           {query.trim() ? '没有匹配的外部智能体' : '尚未接入外部智能体，接入并审核后可供授权成员使用。'}
         </p>
       ) : null}
+      {versionAgent && <ExternalAgentVersions key={versionAgent.id} agent={versionAgent} onClose={() => setVersionAgent(null)} />}
       <Dialog
         open={Boolean(dialog)}
         onOpenChange={(open) => {

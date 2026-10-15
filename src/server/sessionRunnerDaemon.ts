@@ -131,6 +131,7 @@ export class SessionRunnerDaemon {
   }
 
   constructor(private readonly manifest: RunnerManifest, store: DirectConnectStore) {
+    if (manifest.session.runtime.type === 'external' || manifest.session.runtime.engine === 'external_provider') throw new Error('External sessions cannot launch a native session runner')
     this.#store = store
     this.#applicationHello = new ApplicationHelloReplayBuffer(
       manifest.session.sessionId,
@@ -138,7 +139,7 @@ export class SessionRunnerDaemon {
     this.#backend = new RuntimeBackend({
       engine: manifest.session.runtime.engine,
       scodePath: manifest.session.runtime.scodePath,
-      defaultRuntime: manifest.session.runtime,
+      defaultRuntime: { ...manifest.session.runtime, engine: 'scode' },
       docker: {
         image: manifest.session.runtime.dockerImage,
         mode: manifest.session.runtime.dockerMode,
@@ -212,7 +213,7 @@ export class SessionRunnerDaemon {
         orgId: this.manifest.session.orgId,
         role: this.manifest.session.role,
         scopes: this.manifest.session.scopes,
-        runtime: this.manifest.session.runtime,
+        runtime: { ...this.manifest.session.runtime, engine: 'scode' },
         assistantName: this.manifest.session.assistantName,
         assistantDisplayName: this.manifest.session.assistantDisplayName,
         sessionToken: this.manifest.session.sessionToken,
@@ -512,6 +513,7 @@ export class SessionRunnerDaemon {
   }
 
   #runnerHello(): Extract<RunnerServerMessage, { type: 'hello' }> {
+    if (this.manifest.session.runtime.type === 'external') throw new Error('External sessions cannot attach to a native session runner')
     return {
       type: 'hello',
       attemptId: this.manifest.attempt.attemptId,

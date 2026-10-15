@@ -8,16 +8,16 @@ export async function maintainRetention(store: ExternalTaskStore, now = Date.now
   const db = store.db
   await store.ready
   await store.scheduled('retention', 60_000, async () => {
-    const compact = await db.all(`SELECT id, sequence FROM external_pilot_tasks t
+    const compact = await db.all(`SELECT id, sequence FROM tasks t
       WHERE status IN ('succeeded', 'failed', 'rejected') AND deadline_at < ?
       AND NOT EXISTS (SELECT 1 FROM external_pilot_retention r WHERE r.task_id = t.id)
       ORDER BY deadline_at, id LIMIT ?`, [now - PILOT_RETENTION.eventDays * DAY, PILOT_RETENTION.batchSize])
     for (const row of compact) {
       // Terminal tasks already contain a complete checkpoint. Old cursors resync to it.
       await db.run('INSERT INTO external_pilot_retention(task_id, compacted_at) VALUES (?, ?) ON CONFLICT(task_id) DO NOTHING', [String(row.id), now])
-      await db.run('DELETE FROM external_pilot_events WHERE task_id = ? AND sequence < ?', [String(row.id), Number(row.sequence)])
+      await db.run('DELETE FROM session_events WHERE task_id = ? AND sequence < ?', [String(row.id), Number(row.sequence)])
     }
-    const retired = await db.all(`SELECT t.* FROM external_pilot_tasks t
+    const retired = await db.all(`SELECT t.* FROM tasks t
       JOIN external_pilot_retention r ON r.task_id = t.id
       WHERE t.status IN ('succeeded', 'failed', 'rejected') AND t.deadline_at < ? AND r.retired_at IS NULL
       ORDER BY t.deadline_at, t.id LIMIT ?`, [now - PILOT_RETENTION.historyDays * DAY, PILOT_RETENTION.batchSize])
@@ -30,12 +30,12 @@ export async function maintainRetention(store: ExternalTaskStore, now = Date.now
         created_at: task.created_at, updated_at: task.updated_at, retired_at: now }
       await db.run('UPDATE external_pilot_retention SET retired_at = ?, audit_document = ? WHERE task_id = ?', [now, JSON.stringify(audit), String(row.id)])
       // The compact row is an indefinite, capacity-bounded tombstone. It cannot be dispatched.
-      await db.run('UPDATE external_pilot_tasks SET document = ? WHERE id = ?', [JSON.stringify({ _retired: true }), String(row.id)])
-      for (const table of ['external_pilot_events', 'product_task_records', 'external_pilot_run_bindings', 'external_pilot_attempts']) {
+      await db.run('UPDATE tasks SET document = ? WHERE id = ?', [JSON.stringify({ _retired: true }), String(row.id)])
+      for (const table of ['session_events', 'product_task_records', 'external_pilot_run_bindings']) {
         await db.run(`DELETE FROM ${table} WHERE task_id = ?`, [String(row.id)])
       }
-      await db.run(`UPDATE external_pilot_sessions SET title = '', conversation_id = NULL WHERE id = ? AND active_task_id IS NULL
-        AND NOT EXISTS (SELECT 1 FROM external_pilot_tasks t WHERE t.session_id = ?
+      await db.run(`UPDATE sessions SET title = '' WHERE session_id = ? AND EXISTS (SELECT 1 FROM external_session_bindings x WHERE x.id = sessions.session_id AND x.active_task_id IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.session_id = ?
         AND NOT EXISTS (SELECT 1 FROM external_pilot_retention r WHERE r.task_id = t.id AND r.retired_at IS NOT NULL))`, [String(row.session_id), String(row.session_id)])
     }
     await db.run(`UPDATE external_pilot_retention SET audit_document = NULL WHERE task_id IN (

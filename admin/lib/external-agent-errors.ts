@@ -1,6 +1,19 @@
 import { ApiRequestError } from './api/client'
 
 const messages: Record<string, string> = {
+  CANDIDATE_APPROVAL_REQUIRED: '当前配置尚未获批，请先完成审核发布。',
+  INVALID_RELEASE_INPUT: '请填写有效版本号和发布或撤销说明。',
+  IMMUTABLE_VERSION_CONFLICT: '此版本号已绑定另一份配置，请使用新的版本号。',
+  AGENT_VERSION_REVOKED: '此版本已撤销，不能再执行或发布到频道。',
+  AGENT_VERSION_NOT_FOUND: '未找到请求的版本，请刷新版本列表。',
+  AGENT_PRINCIPAL_NOT_FOUND: '该智能体还没有发布版本，请先完成审核发布。',
+  AGENT_VERSION_APPROVAL_EXPIRED: '此版本审批已过期，需要重新核验并批准。',
+  AGENT_CHANNEL_DISABLED: '此频道引用的版本已撤销，请重新选择已批准版本。',
+  AGENT_CHANNEL_UNAVAILABLE: '请求的频道尚未发布。',
+  CHANNEL_REVISION_CONFLICT: '频道已被其他管理员更新，请刷新后重试。',
+  INVALID_CHANNEL_INPUT: '频道参数无效，请刷新后重试。',
+  AMBIGUOUS_AGENT_SELECTOR: '版本和频道只能指定其中一个。',
+  EXECUTION_REVISION_MISMATCH: '接入说明中的来源与执行版本不一致。',
   INVALID_REVIEW: '审核必须携带当前配置版本，请刷新后重试。',
   INVALID_RECONCILIATION: '请填写至少 10 个字符的核对依据和结论。',
   CREDENTIAL_ROTATION_REQUIRED: '凭据状态无法确认，请更换密钥后重新审核。',

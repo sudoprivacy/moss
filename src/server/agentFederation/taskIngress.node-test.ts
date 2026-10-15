@@ -25,7 +25,7 @@ async function setup() {
   options.httpRequest = async (url, init) => {
     if (String(url).endsWith('/manifest')) { await control.beforeManifest(); return Response.json(manifest) }
     const request = JSON.parse(String(init?.body))
-    const attempt = await f.driver.get('SELECT task_id FROM external_pilot_attempts WHERE id = ?', [request.invocation_id])
+    const attempt = await f.driver.get('SELECT task_id FROM task_attempts WHERE id = ?', [request.invocation_id])
     assert(attempt)
     const record = await f.store.taskRecord(f.actor, String(attempt.task_id))
     assert.equal(record?.resolution.status, 'accepted', 'Admission is durable before invoking the provider')
@@ -60,6 +60,13 @@ void test('Custom Manifest onboarding, catalog, formal TaskSpec and two-turn exe
   assert.equal((await f.store.taskRecord(f.actor, first.id))?.spec.input.instruction, '6 * 7')
   const route = await dispatchExternalProvider(f.service, f.actor, 'GET', new URL(`http://test/api/v1/tasks/${first.id}/specification`), null, () => {})
   assert.equal(route.status, 200)
+  const evidence = await f.service.evidence(f.actor, first.id)
+  assert.equal(evidence.kind, 'ExternalTaskEvidence')
+  assert.equal(evidence.selection?.version, record.resolution.agent.version)
+  assert.equal(evidence.execution?.provider_run_id, first.provider_refs.run_id)
+  assert.equal(evidence.execution?.version_evidence, 'source_snapshot_only')
+  assert.equal(evidence.execution?.execution_revision, undefined)
+  await assert.rejects(f.service.evidence({ ...f.actor, userId: 'another' }, first.id), { code: 'TASK_NOT_FOUND' })
   await assert.rejects(f.store.taskRecord({ ...f.actor, userId: 'another' }, first.id), { code: 'TASK_NOT_FOUND' })
 })
 
@@ -76,11 +83,55 @@ void test('valid policy rejections persist original request and reason without A
     const task = await f.run(input), record = await f.store.taskRecord(f.actor, task.id)
     assert.equal(task.status, 'rejected'); assert.equal(task.attempt_id, null); assert.equal(task.answer, '')
     assert.equal(record?.resolution.status, 'rejected'); assert.equal('attempt_id' in record!.resolution, false)
-    assert.equal((await f.driver.get('SELECT COUNT(*) AS count FROM external_pilot_attempts WHERE task_id = ?', [task.id]))?.count, 0)
+    assert.equal((await f.driver.get('SELECT COUNT(*) AS count FROM task_attempts WHERE task_id = ?', [task.id]))?.count, 0)
     assert.equal((await f.store.session(f.actor, task.session_id)).active_task_id, null)
     assert.equal((await f.run(input)).id, task.id, 'Rejected requests are also idempotent')
   }
   assert.equal(f.calls.length, 0)
+})
+
+void test('user release options enforce authorization and never expose administration snapshots', async () => {
+  const f = await setup()
+  const path = new URL(`http://test/api/v1/external-agents/${f.agent.id}/versions`)
+  const result = await dispatchExternalProvider(f.service, f.actor, 'GET', path, null, () => { throw new Error('Member has no administration permission') })
+  assert.equal(result.status, 200)
+  const options = await f.service.releaseOptions(f.actor, f.agent.id)
+  assert.equal(options.kind, 'AgentReleaseOptions'); assert.equal(options.items.length, 1)
+  for (const key of ['endpoint', 'snapshot', 'review_note', 'credential', 'workspace_id']) assert.equal(JSON.stringify(options).includes(`"${key}"`), false)
+  await assert.rejects(f.service.releaseOptions({ ...f.actor, userId: 'not-allowed' }, f.agent.id), { code: 'AGENT_NOT_APPROVED_FOR_USER' })
+  await assert.rejects(f.service.releaseOptions({ ...f.actor, orgId: 'other-org' }, f.agent.id), { code: 'AGENT_NOT_FOUND' })
+  await f.service.releases.revoke(f.actor, f.agent.id, options.items[0].version, 'Withdraw reviewed version')
+  const revoked = await f.service.releaseOptions(f.actor, f.agent.id)
+  assert.deepEqual(revoked.items, []); assert.deepEqual(revoked.channels, [])
+  const rejected = await f.run({ ...f.input(), agent: { catalog_id: f.agent.id, requested_version: options.items[0].version } })
+  assert.equal(rejected.status, 'rejected'); assert.equal(f.calls.length, 0)
+})
+
+void test('channel changes between admission and dispatch preserve exact accepted release', async () => {
+  const f = await setup()
+  const binding = await f.store.binding(f.actor, f.agent.id)
+  await f.service.releases.publish(f.actor, binding, '1.0.0', 'Initial alias')
+  await f.service.releases.publish(f.actor, binding, '1.1.0', 'Canary alias')
+  await f.service.releases.moveChannel(f.actor, binding.id, 'canary', '1.0.0', 0)
+  f.control.beforeManifest = async () => {
+    await f.service.releases.moveChannel(f.actor, binding.id, 'canary', '1.1.0', 1)
+  }
+  const task = await f.run({ ...f.input(), agent: { catalog_id: binding.id, requested_channel: 'canary' } })
+  assert.equal(task.status, 'succeeded')
+  const record = await f.store.taskRecord(f.actor, task.id)
+  assert.equal(record?.resolution.status, 'accepted')
+  if (record?.resolution.status !== 'accepted') assert.fail('Expected accepted task')
+  assert.equal(record.resolution.agent.version, '1.0.0')
+  assert.equal(record.resolution.agent.channel_revision, 1)
+  assert.equal((await f.service.releases.resolve(f.actor, binding.id, undefined, 'canary')).manifest.version, '1.1.0')
+  f.control.beforeManifest = async () => {}
+  const followup = await f.run({ ...f.input(), session_id: task.session_id })
+  assert.equal(followup.status, 'succeeded')
+  const followupRecord = await f.store.taskRecord(f.actor, followup.id)
+  assert.equal(followupRecord?.resolution.status === 'accepted' && followupRecord.resolution.agent.version, '1.0.0')
+  const conflict = await f.run({ ...f.input(), session_id: task.session_id, agent: { catalog_id: binding.id, requested_channel: 'canary' } })
+  assert.equal(conflict.status, 'rejected'); assert.equal(conflict.policy_decision?.reason_code, 'VERSION_CHANGE_REQUIRES_NEW_SESSION')
+  assert.equal(f.calls.length, 2)
 })
 
 void test('forged identity, invalid envelopes and changed idempotency bodies cannot create or replace TaskSpec', async () => {
@@ -100,7 +151,7 @@ void test('ledger insertion failure rolls back task, session, attempt and key re
   f.driver.run = async (sql, params) => { if (sql.startsWith('INSERT INTO product_task_records')) throw new Error('Synthetic ledger failure'); return original(sql, params) }
   try { await assert.rejects(f.service.create(f.actor, request), /Synthetic ledger failure/) }
   finally { f.driver.run = original }
-  for (const table of ['product_task_records', 'external_pilot_tasks', 'external_pilot_sessions', 'external_pilot_attempts']) assert.equal((await f.driver.get(`SELECT COUNT(*) AS count FROM ${table}`))?.count, 0)
+  for (const table of ['product_task_records', 'tasks', 'external_sessions', 'task_attempts']) assert.equal((await f.driver.get(`SELECT COUNT(*) AS count FROM ${table}`))?.count, 0)
   assert.equal(f.calls.length, 0)
   assert.equal((await f.run(request)).status, 'succeeded')
 })
@@ -152,7 +203,7 @@ void test('legacy HTTP submissions cannot bypass classification or create any ta
     assert.equal(response.status, 409)
     assert.match(JSON.stringify(response.body), /TASK_CLIENT_UPGRADE_REQUIRED/)
   }
-  for (const table of ['product_task_records', 'external_pilot_tasks', 'external_pilot_sessions', 'external_pilot_attempts', 'external_pilot_events']) {
+  for (const table of ['product_task_records', 'tasks', 'external_sessions', 'task_attempts', 'task_events']) {
     assert.equal((await f.driver.get(`SELECT COUNT(*) AS count FROM ${table}`))?.count, 0)
   }
   assert.equal(f.calls.length, 0)
@@ -190,10 +241,10 @@ void test('history follows durable session creation order despite deadlines and 
   const third = await f.run({ ...f.input(), session_id: first.session_id })
   // Simulate equal timestamps and a clock rollback without changing the durable ordinal.
   for (const task of [second, third]) {
-    const row = await f.driver.get('SELECT document FROM external_pilot_tasks WHERE id = ?', [task.id])
+    const row = await f.driver.get('SELECT document FROM tasks WHERE id = ?', [task.id])
     const document = JSON.parse(String(row?.document))
     document.created_at = task.id === second.id ? first.created_at : first.created_at - 60_000
-    await f.driver.run('UPDATE external_pilot_tasks SET document = ? WHERE id = ?', [JSON.stringify(document), task.id])
+    await f.driver.run('UPDATE tasks SET document = ? WHERE id = ?', [JSON.stringify(document), task.id])
   }
   const { ExternalTaskStore } = await import('../externalProviders/store.js')
   const reopened = new ExternalTaskStore(f.driver)
@@ -221,18 +272,20 @@ void test('short budgets reject durably without credentials, Attempt or provider
 
 void test('expiry during admission storage terminalizes before dispatch without waiting for maintenance', async () => {
   const f = await setup()
-  await f.service.close() // Disable background scanning to prove the dispatch path closes the task.
+  await f.service.maintain()
+  // Disable only expiry scanning; a closed service must not accept new work.
+  f.store.expire = async () => {}
   let reads = 0
   f.service.administration.options.secrets.getSecret = async () => { reads++; throw new Error('No vault I/O allowed') }
   const run = f.driver.run.bind(f.driver)
   f.driver.run = async (sql, params) => {
-    if (sql.startsWith('INSERT INTO external_pilot_tasks')) await new Promise(resolve => setTimeout(resolve, 150))
+    if (sql.startsWith('INSERT INTO tasks')) await new Promise(resolve => setTimeout(resolve, 150))
     return run(sql, params)
   }
   const task = await f.run({ ...f.input(), constraints: { idempotency_key: randomUUID(), timeout_ms: 100 } })
   assert.equal(task.status, 'failed'); assert.equal(task.error_code, 'DISPATCH_DEADLINE')
   assert.equal((await f.store.session(f.actor, task.session_id)).active_task_id, null)
-  assert.equal((await f.driver.get('SELECT status FROM external_pilot_attempts WHERE task_id = ?', [task.id]))?.status, 'failed')
+  assert.equal((await f.driver.get('SELECT status FROM task_attempts WHERE task_id = ?', [task.id]))?.status, 'failed')
   assert.equal(reads, 0); assert.equal(f.calls.length, 0)
 })
 
@@ -248,7 +301,7 @@ void test('an unregistered stored provider is rejected before vault or adapter d
 
 void test('retention compacts terminal events, retires payloads and preserves idempotency and unknown work', async () => {
   const f = await setup(), input = f.input(), task = await f.run(input)
-  await f.service.close()
+  await f.service.maintain()
   const uncertain = await f.store.create(f.actor, { agent_id: f.agent.id, query: 'retain uncertain', idempotency_key: randomUUID() }, await f.store.binding(f.actor, f.agent.id), 1000)
   await f.store.mutate(uncertain.id, value => { value.status = 'unknown'; return 'status' })
   const day = 86400_000, base = Date.now()
@@ -282,18 +335,17 @@ void test('scheduled maintenance claims coalesce instances and a failed batch ca
 
 void test('Pilot capacity counts tombstones, preserves retries and rejects new work without partial state', async () => {
   const f = await setup(), input = f.input(), task = await f.run(input)
-  await f.service.close()
   await f.driver.run(`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < 9999)
-    INSERT INTO external_pilot_tasks(id, org_id, user_id, session_id, idempotency_key, request_hash, status, deadline_at, sequence, document)
+    INSERT INTO tasks(id, org_id, user_id, session_id, idempotency_key, request_hash, status, deadline_at, sequence, document)
     SELECT 'retired-' || n, ?, ?, ?, 'old-key-' || n, 'old-hash', 'succeeded', 1, 1, '{"_retired":true}' FROM ids`,
   [f.actor.orgId, f.actor.userId, task.session_id])
   assert.equal((await f.run(input)).id, task.id)
   await assert.rejects(f.service.create(f.actor, f.input()), { code: 'PILOT_TASK_CAPACITY_REACHED' })
   assert.equal(f.calls.length, 1)
-  for (const table of ['external_pilot_sessions', 'external_pilot_attempts', 'product_task_records']) {
+  for (const table of ['external_sessions', 'task_attempts', 'product_task_records']) {
     assert.equal((await f.driver.get(`SELECT COUNT(*) AS count FROM ${table}`))?.count, 1)
   }
-  assert.equal((await f.driver.get('SELECT COUNT(*) AS count FROM external_pilot_tasks'))?.count, 10000)
+  assert.equal((await f.driver.get('SELECT COUNT(*) AS count FROM tasks'))?.count, 10000)
 })
 
 void test('directory pages advance past archived bindings and member search is paged', async () => {

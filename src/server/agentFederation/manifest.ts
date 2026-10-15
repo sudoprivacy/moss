@@ -1,15 +1,34 @@
 import { createHash } from 'node:crypto'
 import Ajv2020 from 'ajv/dist/2020.js'
 import schema from '../../../contracts/agent-federation/v1alpha1/schema.json' with { type: 'json' }
-import type { CustomAgentManifest, ExternalRunBinding, HttpAgentResult, ProviderCapabilities, ProviderObservation } from '../../../contracts/agent-federation/v1alpha1/contract.js'
+import type { AgentVersionManifest, AgentVersionsPage, AgentReleaseOptions, CustomAgentManifest, ExternalRunBinding, HttpAgentResult, ProviderCapabilities, ProviderObservation } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
+import { DURABLE_AGENT_HTTP_API } from '../../../contracts/agent-http/v1alpha2/contract.js'
 
 const ajv = new Ajv2020({ strict: true, allErrors: false })
 ajv.addSchema(schema)
 const manifestValidator = ajv.compile<CustomAgentManifest>({ $ref: `${schema.$id}#/$defs/CustomAgentManifest` })
+const capabilitiesValidator = ajv.compile({ $ref: `${schema.$id}#/$defs/ProviderCapabilities` })
 const resultValidator = ajv.compile<HttpAgentResult>({ $ref: `${schema.$id}#/$defs/HttpAgentResult` })
 const runValidator = ajv.compile<ExternalRunBinding>({ $ref: `${schema.$id}#/$defs/ExternalRunBinding` })
 const observationValidator = ajv.compile<ProviderObservation>({ $ref: `${schema.$id}#/$defs/ProviderObservation` })
+const versionValidator = ajv.compile<AgentVersionManifest>({ $ref: `${schema.$id}#/$defs/AgentVersionManifest` })
+const versionsValidator = ajv.compile<AgentVersionsPage>({ $ref: `${schema.$id}#/$defs/AgentVersionsPage` })
+const optionsValidator = ajv.compile<AgentReleaseOptions>({ $ref: `${schema.$id}#/$defs/AgentReleaseOptions` })
+
+export function parseAgentVersion(value: unknown): AgentVersionManifest {
+  if (!versionValidator(value)) throw new ExternalProviderError(500, 'INVALID_AGENT_VERSION')
+  if (value.snapshot.sourceManifest) parseCustomManifest(JSON.stringify(value.snapshot.sourceManifest))
+  return value
+}
+export function parseAgentVersionsPage(value: unknown): AgentVersionsPage {
+  if (!versionsValidator(value)) throw new ExternalProviderError(500, 'INVALID_AGENT_VERSIONS_PAGE')
+  return value
+}
+export function parseAgentReleaseOptions(value: unknown): AgentReleaseOptions {
+  if (!optionsValidator(value)) throw new ExternalProviderError(500, 'INVALID_AGENT_RELEASE_OPTIONS')
+  return value
+}
 
 export const HTTP_CAPABILITIES: Readonly<ProviderCapabilities> = Object.freeze({
   supports_streaming: false, supports_cancel: false, supports_resume: false,
@@ -28,10 +47,12 @@ export function parseCustomManifest(input: unknown): CustomAgentManifest {
   if (typeof input !== 'string' || Buffer.byteLength(input) > 64 * 1024) throw new ExternalProviderError(400, 'INVALID_CUSTOM_MANIFEST')
   let value: unknown
   try { value = JSON.parse(input) } catch { throw new ExternalProviderError(400, 'INVALID_CUSTOM_MANIFEST') }
+  if (!value || typeof value !== 'object' || !capabilitiesValidator((value as { capabilities?: unknown }).capabilities)) throw new ExternalProviderError(400, 'INVALID_CUSTOM_MANIFEST')
   if (!manifestValidator(value)) {
     if (manifestValidator.errors?.some(error => error.instancePath === '/capabilities' && error.keyword === 'const')) throw new ExternalProviderError(409, 'UNSUPPORTED_PROVIDER_CAPABILITY')
     throw new ExternalProviderError(400, 'INVALID_CUSTOM_MANIFEST')
   }
+  if (value.protocol === DURABLE_AGENT_HTTP_API && value.source_revision !== value.execution_revision) throw new ExternalProviderError(400, 'EXECUTION_REVISION_MISMATCH')
   return value
 }
 

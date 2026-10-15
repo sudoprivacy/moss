@@ -1,4 +1,6 @@
 import { dcClient } from './client'
+import type { AgentVersionsPage, AgentVersionManifest, AgentChannel } from '../../../contracts/agent-federation/v1alpha1/contract'
+export type { AgentVersionsPage, AgentVersionManifest, AgentChannel } from '../../../contracts/agent-federation/v1alpha1/contract'
 import type {
   ExternalAgentAdmin,
   ExternalTask,
@@ -64,6 +66,10 @@ export function createExternalAgentsApi(
     rotate: (id: string, body: { revision: number; api_key: string }) =>
       post<ExternalAgentAdmin>(agentPath(id, 'rotate'), body),
     archive: (id: string, revision: number) => post<ExternalAgentAdmin>(agentPath(id, 'archive'), { revision }),
+    versions: (id: string, after = '') => get<AgentVersionsPage>(`${agentPath(id, 'versions')}?after=${encodeURIComponent(after)}`),
+    publishVersion: (id: string, body: { revision: number; version: string; note: string }) => post<AgentVersionManifest>(agentPath(id, 'versions'), body),
+    moveChannel: (id: string, body: { name: 'stable' | 'canary'; version: string; revision: number }) => post<AgentChannel>(agentPath(id, 'channels'), body),
+    revokeVersion: (id: string, body: { version: string; note: string }) => post<{ revoked: boolean }>(agentPath(id, 'revoke-version'), body),
     review: (id: string, body: { approved: boolean; revision: number; review_days?: number }) =>
       post<ExternalAgentAdmin>(`${base}/${encodeURIComponent(id)}/review`, body),
   }

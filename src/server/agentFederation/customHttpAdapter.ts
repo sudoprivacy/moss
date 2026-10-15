@@ -39,7 +39,8 @@ export class CustomHttpAdapter implements ProviderAdapter {
   }
 
   async inspect(endpoint: string, key: string, signal: AbortSignal) {
-    const remote = await this.request(`${endpoint}/agents/${encodeURIComponent(this.reviewed.manifest.external_agent_id)}/manifest`, {
+    const revision = this.reviewed.manifest.execution_revision
+    const remote = await this.request(`${endpoint}/agents/${encodeURIComponent(this.reviewed.manifest.external_agent_id)}/manifest${revision ? `?revision=${encodeURIComponent(revision)}` : ''}`, {
       headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' }, redirect: 'error', signal,
     })
     if (!remote.ok) { await remote.body?.cancel(); throw new ExternalProviderError(502, 'PROVIDER_PREFLIGHT_FAILED') }

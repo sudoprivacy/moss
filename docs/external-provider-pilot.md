@@ -1,3 +1,5 @@
+> Current implementation: [Durable external Agent execution (2026-10-15)](agent-federation-durable-provider.md). The sections below retain historical Pilot behavior and evidence; use the linked document for current storage, versions, capabilities and deployment.
+
 > 2026-10-14 合并阻断修复更新：当前响应契约为 alpha5，旧 CreateExternalTask HTTP 请求返回 409 TASK_CLIENT_UPGRADE_REQUIRED。新任务必须提交 SubmitTask；旧版本示例仅作历史说明。应用/工作区 ID 是管理员声明，source_identity_evidence=unverified；verified_source_identity 能力请求拒绝执行。详见 [本轮修复说明](dify-merge-blocker-fixes-2026-10-14.md)。
 
 # Dify 外部智能体试点

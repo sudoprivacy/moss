@@ -4,14 +4,17 @@ import { randomUUID } from 'node:crypto'
 import type { CatalogAgent } from '../catalog/catalogRepository.js'
 import type { IntegrationConnection } from '../identity/identityRepository.js'
 import { parseNexusSecretRef, type DifySecretPort } from '../dify/difyConnectionService.js'
-import type { ExternalAgent } from '../../../contracts/external-provider/v1/contract.js'
+import { EXTERNAL_PROVIDER_API, type ExternalAgent, type ExternalTaskEvidence } from '../../../contracts/external-provider/v1/contract.js'
 import { ExternalTaskStore, digest, type Binding, type ExternalActor } from './store.js'
 import { ExternalProviderError, assertPilot, parseRegistration, type PilotPolicy } from './policy.js'
 import { decodeOutput } from './decoder.js'
 import { providerDefinition } from './providerDefinition.js'
-import { createRuntimeRegistry } from '../agentFederation/runtimeRegistry.js'
+import { createRuntimeRegistry, describeCapabilities } from '../agentFederation/runtimeRegistry.js'
 import { maintainRetention } from './retention.js'
 import { admitExternalTask } from '../agentFederation/taskIngress.js'
+import { AgentReleaseStore } from '../agentFederation/releases.js'
+import { ExternalExecutionOwnership } from '../agentFederation/executionOwnership.js'
+import { DURABLE_AGENT_HTTP_API } from '../../../contracts/agent-http/v1alpha2/contract.js'
 
 export class ExternalProviderService {
   private readonly timer: ReturnType<typeof setInterval>
@@ -20,8 +23,13 @@ export class ExternalProviderService {
   private maintenance: Promise<void> | null = null
   private nextCredentialMaintenance = 0
   readonly administration: ExternalProviderAdministration
+  readonly releases: AgentReleaseStore
+  readonly ownership: ExternalExecutionOwnership
+  private closing = false
   private readonly adapters: ReturnType<typeof createRuntimeRegistry>
   constructor(readonly store: ExternalTaskStore, private readonly options: AdministrationOptions) {
+    this.releases = store.releases
+    this.ownership = new ExternalExecutionOwnership(store)
     this.administration = new ExternalProviderAdministration(store, options)
     this.adapters = createRuntimeRegistry(options)
     this.timer = setInterval(() => { void this.maintain().catch(() => {}) }, 1000)
@@ -30,20 +38,28 @@ export class ExternalProviderService {
   }
 
   async close(): Promise<void> {
+    this.closing = true
     clearInterval(this.timer)
+    await this.maintenance
     for (const controller of this.controllers) controller.abort()
     await Promise.allSettled(this.executions.values())
-    await this.maintenance
+    await this.ownership.stop()
   }
 
   maintain(): Promise<void> {
     if (this.maintenance) return this.maintenance
     this.maintenance = (async () => {
+      await this.releases.ready
+      await this.ownership.heartbeat()
       await this.store.scheduled('expiry', 1000, () => this.store.expire())
       if (Date.now() >= this.nextCredentialMaintenance) {
         this.nextCredentialMaintenance = Date.now() + 60_000
         await this.administration.operations.reconcile()
         await maintainRetention(this.store)
+      }
+      if (!this.closing) for (const id of await this.ownership.candidates()) {
+        if (this.closing || this.executions.size >= 32) break
+        this.startTask(id)
       }
     })().finally(() => { this.maintenance = null })
     return this.maintenance
@@ -110,6 +126,26 @@ export class ExternalProviderService {
       current.approved = approved; current.parametersDigest = parametersDigest; current.reviewedBy = actor.userId
       current.review_expires_at = binding.review_expires_at
       await this.options.catalog.updateAgentConfiguration(id, actor.orgId, { status: approved ? 'approved' : 'pending', enabled: approved })
+      if (approved) {
+        const version = await this.releases.publish(actor, current, this.releases.defaultVersion(current), current.review_note)
+        const page = await this.releases.list(actor, id)
+        await this.releases.moveChannel(actor, id, 'stable', version.version, page.channels.find(c => c.name === 'stable')?.revision ?? 0)
+      }
+    })
+  }
+
+  async publishVersion(actor: ExternalActor, id: string, input: unknown) {
+    const body = object(input, ['revision', 'version', 'note'])
+    if (typeof body.version !== 'string' || typeof body.note !== 'string' || !Number.isSafeInteger(body.revision)) throw new ExternalProviderError(400, 'INVALID_RELEASE_INPUT')
+    await this.authorize(actor)
+    return this.store.db.transaction(async () => {
+      await this.store.db.run('UPDATE external_pilot_bindings SET document = document WHERE id = ? AND org_id = ?', [id, actor.orgId])
+      const binding = await this.store.binding(actor, id)
+      if ((binding.revision ?? 1) !== body.revision) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
+      await this.administration.assertCredentialUsable(actor, binding)
+      const version = await this.releases.publish(actor, binding, body.version as string, body.note as string)
+      await this.administration.audit(actor, 'agent.version_published', id)
+      return version
     })
   }
 
@@ -143,6 +179,7 @@ export class ExternalProviderService {
   }
 
   async create(actor: ExternalActor, input: unknown) {
+    if (this.closing) throw new ExternalProviderError(503, 'EXTERNAL_PROVIDER_STOPPING')
     await this.authorize(actor)
     if (!input || typeof input !== 'object' || !('api_version' in input)) throw new ExternalProviderError(409, 'TASK_CLIENT_UPGRADE_REQUIRED')
     const task = await admitExternalTask(this.store, actor, input, {
@@ -150,63 +187,107 @@ export class ExternalProviderService {
       policy: () => this.administration.policy(actor),
       executable: binding => this.executable(actor, binding),
       timeoutMs: this.options.policy.timeoutMs,
-      capabilities: binding => this.adapters.get(binding.provider_kind ?? 'dify').capabilities,
+      capabilities: binding => this.adapters.get(binding.provider_kind ?? 'dify').create(binding).capabilities,
+      resolveRelease: async (binding, version, channel) => {
+        await this.releases.ensurePublished(actor, binding)
+        return this.releases.resolve(actor, binding.id, version, channel)
+      },
     })
-    if (task.status === 'accepted' && !this.executions.has(task.id)) {
-      const execution = this.execute(actor, task.id).catch(() => { /* Persisted dispatch intent is expired to unknown if the DB is unavailable. */ }).finally(() => this.executions.delete(task.id))
-      this.executions.set(task.id, execution)
-    }
+    if (task.status === 'accepted') this.startTask(task.id)
     return task
+  }
+
+  async releaseOptions(actor: ExternalActor, id: string, after = '') {
+    await this.authorize(actor)
+    const binding = await this.store.binding(actor, id)
+    await this.executable(actor, binding)
+    await this.releases.ensurePublished(actor, binding)
+    return this.releases.options(actor, id, after)
+  }
+
+  async evidence(actor: ExternalActor, id: string): Promise<ExternalTaskEvidence> {
+    await this.authorize(actor)
+    const task = await this.store.task(actor, id)
+    const record = await this.store.taskRecord(actor, id), run = await this.store.runBinding(actor, id)
+    const selected = record?.resolution.status === 'accepted' ? record.resolution.agent : undefined
+    return { api_version: EXTERNAL_PROVIDER_API, kind: 'ExternalTaskEvidence', task_id: task.id, session_id: task.session_id, attempt_id: task.attempt_id, status: task.status,
+      ...(selected ? { selection: { version: selected.version, source_digest: selected.source_digest, release_digest: selected.release_digest,
+        resolved_from_channel: selected.resolved_from_channel, channel_revision: selected.channel_revision,
+        execution_revision: selected.execution_revision, version_evidence: selected.version_evidence } } : {}),
+      ...(run ? { execution: { provider_run_id: run.provider_run_id, execution_revision: run.execution_revision, version_evidence: run.version_evidence, resume: run.resume } } : {}),
+    }
   }
 
   async waitForTask(id: string): Promise<void> { await this.executions.get(id) }
 
-  private async execute(actor: ExternalActor, id: string): Promise<void> {
-    // A durable CAS wins dispatch once across processes; never replay a claimed attempt.
-    const task = await this.store.mutate(id, current => {
-      if (current.status !== 'accepted') return false
-      if (current.deadline_at <= Date.now()) {
-        current.status = current.task_contract_version ? 'failed' : 'rejected'
-        current.error_code = 'DISPATCH_DEADLINE'
-        return 'status'
-      }
-      current.status = 'dispatching'; current.attempt_id ??= randomUUID(); return 'status'
-    })
-    if (!task || task.status !== 'dispatching') return
+  private startTask(id: string) {
+    if (this.closing || this.executions.has(id)) return
+    const execution = this.execute(id).catch(() => { /* Lease recovery retries observation if storage is temporarily unavailable. */ }).finally(() => this.executions.delete(id))
+    this.executions.set(id, execution)
+  }
+
+  private async execute(id: string): Promise<void> {
+    const owned = await this.ownership.claim(id)
+    if (!owned) return
+    const { task, actor, fence, recovery } = owned
     const controller = new AbortController()
     this.controllers.add(controller)
     const timeout = setTimeout(() => controller.abort(), Math.max(1, task.deadline_at - Date.now()))
-    let submitted = false
+    let renewing: Promise<void> | undefined
+    const heartbeat = setInterval(() => {
+      if (renewing) return
+      renewing = this.ownership.renew(fence).then(ok => { if (!ok) controller.abort() }, () => controller.abort()).finally(() => { renewing = undefined })
+    }, 5000)
+    heartbeat.unref()
+    let submitted = Boolean(task.dispatch_authorized_at) || recovery, durable = false
     try {
-      const binding = await this.store.binding(actor, task.agent_id)
+      const governedBinding = await this.store.binding(actor, task.agent_id)
       await this.authorize(actor)
-      await this.executable(actor, binding)
-      if (task.configuration_revision !== undefined && task.configuration_revision !== (binding.revision ?? 1)) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
+      await this.executable(actor, governedBinding)
+      if (task.configuration_revision !== undefined && task.configuration_revision !== (governedBinding.revision ?? 1)) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
+      let binding = governedBinding
+      const record = await this.store.taskRecord(actor, task.id)
+      const resolution = record?.resolution
+      if (resolution?.status === 'accepted' && resolution.agent.release_digest) {
+        const version = await this.releases.version(actor, task.agent_id, resolution.agent.version)
+        if (version.spec_digest !== resolution.agent.release_digest || version.snapshot.source_digest !== task.source_digest) throw new ExternalProviderError(409, 'AGENT_VERSION_DIGEST_MISMATCH')
+        binding = { ...governedBinding, ...version.snapshot }
+      }
+      durable = binding.sourceManifest?.protocol === DURABLE_AGENT_HTTP_API
+      if (recovery && !durable) {
+        await this.store.mutate(id, current => { current.status = 'unknown'; current.error_code = 'RECOVERY_UNSUPPORTED'; return 'status' }, fence)
+        return
+      }
       const adapter = this.adapters.get(binding.provider_kind ?? 'dify').create(binding)
       const secret = await this.secret(binding)
       if (binding.credentialVersion !== secret.version) throw new ExternalProviderError(409, 'CREDENTIAL_CHANGED')
       const key = secret.value
       const session = await this.store.session(actor, task.session_id)
+      const invocation = await this.store.invocationContext(task, fence, {
+        provider_session_id: session.conversation_id,
+        end_user: digest(JSON.stringify([actor.orgId, actor.userId, task.agent_name])).slice(7),
+      })
       const result = await adapter.invoke({
         task_id: task.id, attempt_id: task.attempt_id!, session_id: task.session_id,
         binding_id: binding.id, external_agent_id: binding.app_id, source_digest: binding.source_digest,
         endpoint: binding.endpoint, org_id: actor.orgId, policy: await this.administration.effectivePolicy(actor),
-        key, query: task.query, provider_session_id: session.conversation_id,
-        end_user: digest(JSON.stringify([actor.orgId, actor.userId, task.agent_name])).slice(7), signal: controller.signal,
+        key, query: task.query, provider_session_id: invocation.provider_session_id, deadline_at: task.deadline_at,
+        end_user: invocation.end_user, signal: controller.signal, recovery, known_provider_run_id: task.provider_refs.run_id,
         authorize_dispatch: async () => {
           // Adapter preflight precedes the same durable governance linearization point.
           await this.store.db.transaction(async () => {
             await this.store.db.run('UPDATE external_pilot_bindings SET document = document WHERE id = ? AND org_id = ?', [binding.id, actor.orgId])
             const current = await this.store.binding(actor, binding.id)
-            if (JSON.stringify(current) !== JSON.stringify(binding)) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
+            if (JSON.stringify(current) !== JSON.stringify(governedBinding)) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
+            if (resolution?.status === 'accepted' && resolution.agent.release_digest) await this.releases.resolve(actor, task.agent_id, resolution.agent.version)
             await this.administration.lockPolicy(actor)
             await this.authorize(actor)
             await this.executable(actor, current)
             const claimed = await this.store.mutate(id, value => {
-              if (value.status !== 'dispatching' || value.deadline_at <= Date.now()) return false
+              if (!['dispatching', 'running'].includes(value.status) || value.deadline_at <= Date.now()) return false
               value.dispatch_authorized_at = Date.now()
               return 'status'
-            })
+            }, fence)
             if (!claimed) throw new ExternalProviderError(409, 'DISPATCH_DEADLINE')
           })
           controller.signal.throwIfAborted()
@@ -224,7 +305,7 @@ export class ExternalProviderService {
           }
           current.answer = decodeOutput(observation.text, binding.decoder).answer
           return 'answer'
-        })
+        }, fence)
       })
       const decoded = decodeOutput(result.text, binding.decoder, true)
       await this.store.db.transaction(async () => {
@@ -232,17 +313,18 @@ export class ExternalProviderService {
           current.status = result.status; current.raw_answer = result.text; current.answer = decoded.answer
           current.output_status = decoded.valid ? 'valid' : 'invalid'
           return 'answer'
-        })
+        }, fence)
         if (completed) await this.store.saveRunBinding(actor, result.binding)
       })
     } catch (error) {
+      if (this.closing && durable) return // Another controller resumes observation using the saved request.
       const code = error instanceof ExternalProviderError ? error.code : submitted ? 'EXECUTION_UNCONFIRMED' : 'PROVIDER_PREFLIGHT_FAILED'
       await this.store.mutate(id, current => {
         current.status = !submitted || code === 'PROVIDER_REJECTED' ? current.task_contract_version ? 'failed' : 'rejected' : code === 'PROVIDER_WORKFLOW_FAILED' ? 'failed' : 'unknown'
         current.error_code = code
         return 'status'
-      })
-    } finally { clearTimeout(timeout); this.controllers.delete(controller) }
+      }, fence)
+    } finally { clearTimeout(timeout); clearInterval(heartbeat); await renewing; this.controllers.delete(controller) }
   }
 
   private async executable(actor: ExternalActor, binding: Binding, context?: { policy: PilotPolicy; agents: Map<string, CatalogAgent>; connections: Map<string, IntegrationConnection> }): Promise<void> {
@@ -269,7 +351,7 @@ export class ExternalProviderService {
   }
 
   private describe(binding: Binding): ExternalAgent {
-    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_identity_evidence: 'unverified', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: { streaming: binding.provider_kind === 'custom_http' ? 'unsupported' : 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' } }
+    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_identity_evidence: 'unverified', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: describeCapabilities(binding) }
   }
 
 

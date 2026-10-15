@@ -14,6 +14,10 @@ export interface ProviderInvocation extends TaskCorrelation {
   query: string
   end_user: string
   provider_session_id: string | null
+  deadline_at?: number
+  /** Resume observation of the same invocation; never create a replacement Attempt. */
+  recovery?: boolean
+  known_provider_run_id?: string
   signal: AbortSignal
   /** Persist the dispatch intent and recheck governance under the caller's lock. */
   authorize_dispatch: () => Promise<void>

@@ -30,7 +30,9 @@ export function parseTaskRecord(value: unknown): TaskRecord {
     spec.required_capabilities.includes('verified_source_identity')
     || spec.agent.principal.trust_domain !== resolution.agent.principal.trust_domain
     || spec.agent.principal.agent_name !== resolution.agent.principal.agent_name
-    || resolution.agent.version !== snapshotVersion(resolution.agent.source_digest)
+    || (!resolution.agent.release_digest && resolution.agent.version !== snapshotVersion(resolution.agent.source_digest))
+    || (resolution.agent.version_evidence === 'provider_revision_fenced' && !resolution.agent.execution_revision)
+    || (spec.agent.requested_channel !== undefined && spec.agent.requested_channel !== resolution.agent.resolved_from_channel)
     || (spec.agent.requested_version !== undefined && spec.agent.requested_version !== resolution.agent.version)
   ))) throw new ExternalProviderError(500, 'TASK_RECORD_MISMATCH')
   return value

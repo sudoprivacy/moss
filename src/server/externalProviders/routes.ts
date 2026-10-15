@@ -18,7 +18,7 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
     await service.authorize(actor)
     const path = url.pathname, base = '/api/v1'
     const after = url.searchParams.get('after') ?? ''
-    if (after.length > 200 || (after && !/^[\w-]+$/.test(after))) throw new ExternalProviderError(400, 'INVALID_CURSOR')
+    if (after.length > 200 || (after && !/^[\w.-]+$/.test(after))) throw new ExternalProviderError(400, 'INVALID_CURSOR')
     let data: unknown, status = 200
     if (path.startsWith(`${base}/external-agents/admin/`)) {
       requireAdmin()
@@ -38,6 +38,23 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
       else if (action === 'inspect' && method === 'POST') data = await admin.inspect(actor, body)
       else if (action === 'onboard' && method === 'POST') { data = await admin.onboard(actor, body); status = 201 }
       else {
+        const release = /^([\w-]+)\/(versions|channels|revoke-version)$/.exec(action)
+        if (release) {
+          const binding = await service.store.binding(actor, release[1])
+          if (binding.approved) await service.releases.ensurePublished(actor, binding)
+          if (release[2] === 'versions' && method === 'GET') data = await service.releases.list(actor, release[1], after)
+          else if (release[2] === 'versions' && method === 'POST') { data = await service.publishVersion(actor, release[1], body); status = 201 }
+          else if (release[2] === 'channels' && method === 'POST') {
+            const input = body as { name?: unknown; version?: unknown; revision?: unknown }
+            if (!input || !['stable', 'canary'].includes(String(input.name)) || typeof input.version !== 'string' || !Number.isSafeInteger(input.revision) || Object.keys(input).some(key => !['name', 'version', 'revision'].includes(key))) throw new ExternalProviderError(400, 'INVALID_CHANNEL_INPUT')
+            data = await service.releases.moveChannel(actor, release[1], input.name as 'stable' | 'canary', input.version, Number(input.revision))
+          } else if (release[2] === 'revoke-version' && method === 'POST') {
+            const input = body as { version?: unknown; note?: unknown }
+            if (!input || typeof input.version !== 'string' || typeof input.note !== 'string' || Object.keys(input).some(key => !['version', 'note'].includes(key))) throw new ExternalProviderError(400, 'INVALID_RELEASE_INPUT')
+            await service.releases.revoke(actor, release[1], input.version, input.note); data = { revoked: true }
+          } else throw new ExternalProviderError(404, 'NOT_FOUND')
+          return { status, body: { success: true, data } }
+        }
         const match = /^([\w-]+)\/(update|test|rotate|archive)$/.exec(action)
         if (!match || method !== 'POST') throw new ExternalProviderError(404, 'NOT_FOUND')
         if (match[2] === 'test') data = await admin.testSaved(actor, match[1])
@@ -53,15 +70,18 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
     } else if (path === `${base}/external-sessions` && method === 'GET') data = await service.store.sessions(actor)
     else {
       const review = /^\/api\/v1\/external-agents\/([\w-]+)\/review$/.exec(path)
+      const versions = /^\/api\/v1\/external-agents\/([\w-]+)\/versions$/.exec(path)
       const session = /^\/api\/v1\/external-sessions\/([\w-]+)\/tasks$/.exec(path)
-      const task = /^\/api\/v1\/tasks\/([\w-]+)(?:\/(events|cancel|external-run|specification))?$/.exec(path)
+      const task = /^\/api\/v1\/tasks\/([\w-]+)(?:\/(events|cancel|external-run|specification|evidence))?$/.exec(path)
       if (review && method === 'POST') {
         requireAdmin()
         if (!body || typeof body !== 'object' || typeof (body as { approved?: unknown }).approved !== 'boolean' || !Number.isSafeInteger((body as { revision?: unknown }).revision) || Number((body as { revision?: unknown }).revision) < 1 || Object.keys(body).some(key => !['approved', 'revision', 'review_days'].includes(key))) throw new ExternalProviderError(400, 'INVALID_REVIEW')
         data = await service.review(actor, review[1], (body as { approved: boolean }).approved, (body as { revision: number }).revision, (body as { review_days?: number }).review_days)
-      } else if (session && method === 'GET') data = await service.store.history(actor, session[1])
+      } else if (versions && method === 'GET') data = await service.releaseOptions(actor, versions[1], after)
+      else if (session && method === 'GET') data = await service.store.history(actor, session[1])
       else if (task && method === 'GET' && !task[2]) data = await service.store.task(actor, task[1])
       else if (task && method === 'GET' && task[2] === 'specification') data = await service.store.taskRecord(actor, task[1])
+      else if (task && method === 'GET' && task[2] === 'evidence') data = await service.evidence(actor, task[1])
       else if (task && method === 'GET' && task[2] === 'external-run') data = await service.store.runBinding(actor, task[1])
       else if (task && method === 'GET' && task[2] === 'events') {
         const cursor = Number(url.searchParams.get('cursor') ?? 0)

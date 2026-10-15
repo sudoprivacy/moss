@@ -185,7 +185,7 @@ void test('success persists answer, attempt, ordered events and a provider conve
   await f.run(f.request(task.session_id, 'plus 8'))
   assert.equal(f.calls[1].conversation_id, 'conv-1'); assert.equal(f.calls[0].user, f.calls[1].user)
   assert.equal((await f.store.history(actor, task.session_id)).length, 2)
-  assert.equal((await f.driver.get('SELECT status FROM external_pilot_attempts WHERE id = ?', [task.attempt_id]))?.status, 'succeeded')
+  assert.equal((await f.driver.get('SELECT status FROM task_attempts WHERE id = ?', [task.attempt_id]))?.status, 'succeeded')
 })
 
 void test('concurrent idempotent retries dispatch once and mismatching body conflicts', async () => {
@@ -377,6 +377,7 @@ void test('administration policy persists per organization, CAS prevents stale u
   assert.equal((await f.admin.policy({ ...actor, orgId: 'other' })).enabled, false)
   await assert.rejects(f.admin.setPolicy(actor, input), { code: 'CONFIGURATION_CHANGED' })
   const reopened = new ExternalTaskStore(f.driver)
+  await reopened.ready
   assert((await reopened.db.get('SELECT document FROM external_pilot_policy WHERE org_id = ?', [actor.orgId]))?.document)
 })
 
@@ -606,7 +607,7 @@ void test('incremental events bound storage, support replacements, page cursors 
     answer += 'x'.repeat(1000)
     await f.store.mutate(task.id, current => { current.status = 'running'; current.answer = answer; current.raw_answer = answer; return 'answer' })
   }
-  const size = await f.driver.get('SELECT SUM(LENGTH(document)) AS size FROM external_pilot_events WHERE task_id = ?', [task.id])
+  const size = await f.driver.get('SELECT SUM(LENGTH(document)) AS size FROM task_events WHERE task_id = ?', [task.id])
   t.diagnostic(`128000 answer characters: ${size?.size} event document characters`)
   assert(Number(size?.size) < 250000, `Event size ${size?.size} must grow approximately linearly`)
   const first = await f.store.events(actor, task.id, initial.next_cursor)
@@ -713,12 +714,12 @@ void test('raw deltas survive checkpoint gaps, restart, replacement and unknown 
 
 for (const oldApi of ['external-provider.sudo.dev/v1alpha3', 'external-provider.sudo.dev/v1alpha4']) void test(`${oldApi} checkpoints retain complete raw answers when resynced to alpha5`, async () => {
   const f = await setup(), task = await f.run()
-  const row = await f.driver.get('SELECT document FROM external_pilot_tasks WHERE id = ?', [task.id])
+  const row = await f.driver.get('SELECT document FROM tasks WHERE id = ?', [task.id])
   const legacy = JSON.parse(String(row!.document)); legacy.api_version = oldApi
-  await f.driver.run('UPDATE external_pilot_tasks SET document = ? WHERE id = ?', [JSON.stringify(legacy), task.id])
-  const eventRow = await f.driver.get('SELECT document FROM external_pilot_events WHERE task_id = ? AND sequence = 2', [task.id])
+  await f.driver.run('UPDATE tasks SET document = ? WHERE id = ?', [JSON.stringify(legacy), task.id])
+  const eventRow = await f.driver.get('SELECT document FROM task_events WHERE task_id = ? AND sequence = 2', [task.id])
   const event = JSON.parse(String(eventRow!.document)); event.api_version = oldApi
-  await f.driver.run('UPDATE external_pilot_events SET document = ? WHERE task_id = ? AND sequence = 2', [JSON.stringify(event), task.id])
+  await f.driver.run('UPDATE session_events SET payload_json = ? WHERE task_id = ? AND sequence = 2', [JSON.stringify(event), task.id])
   const page = await f.store.events(actor, task.id, 1)
   assert.equal(page.api_version, 'external-provider.sudo.dev/v1alpha5')
   assert.equal(page.task?.raw_answer, task.raw_answer)
@@ -727,14 +728,14 @@ for (const oldApi of ['external-provider.sudo.dev/v1alpha3', 'external-provider.
 
 void test('legacy alpha2 streams resync to a labelled snapshot and unknown versions are not replayed', async () => {
   const f = await setup(), task = await f.run()
-  const row = await f.driver.get('SELECT document FROM external_pilot_tasks WHERE id = ?', [task.id])
+  const row = await f.driver.get('SELECT document FROM tasks WHERE id = ?', [task.id])
   const legacy = JSON.parse(String(row!.document)); legacy.api_version = 'external-provider.sudo.dev/v1alpha2'; delete legacy.raw_answer_freshness
-  await f.driver.run('UPDATE external_pilot_tasks SET document = ? WHERE id = ?', [JSON.stringify(legacy), task.id])
+  await f.driver.run('UPDATE tasks SET document = ? WHERE id = ?', [JSON.stringify(legacy), task.id])
   const page = await f.store.events(actor, task.id, 0)
   assert.equal(page.task?.raw_answer_freshness, 'legacy_checkpoint')
-  const eventRow = await f.driver.get('SELECT sequence, document FROM external_pilot_events WHERE task_id = ? AND sequence = 2', [task.id])
+  const eventRow = await f.driver.get('SELECT sequence, document FROM task_events WHERE task_id = ? AND sequence = 2', [task.id])
   const event = JSON.parse(String(eventRow!.document)); delete event.api_version; delete event.kind
-  await f.driver.run('UPDATE external_pilot_events SET document = ? WHERE task_id = ? AND sequence = 2', [JSON.stringify(event), task.id])
+  await f.driver.run('UPDATE session_events SET payload_json = ? WHERE task_id = ? AND sequence = 2', [JSON.stringify(event), task.id])
   assert((await f.store.events(actor, task.id, 1)).task)
 })
 
@@ -742,7 +743,7 @@ void test('history batches pending projections and skips event queries for compl
   const f = await setup(), first = await f.run()
   for (let i = 0; i < 5; i++) await f.run(f.request(first.session_id, `synthetic ${i}`))
   const all = f.driver.all.bind(f.driver); let eventQueries = 0
-  f.driver.all = async (sql, params) => { if (sql.includes('FROM external_pilot_events')) eventQueries++; return all(sql, params) }
+  f.driver.all = async (sql, params) => { if (sql.includes('FROM task_events')) eventQueries++; return all(sql, params) }
   assert.equal((await f.store.history(actor, first.session_id)).length, 6)
   assert.equal(eventQueries, 0)
   const binding = await f.store.binding(actor, first.agent_id)
@@ -757,7 +758,7 @@ void test('reconciliation records attempt closure while preserving unknown outco
   const f = await setup({ events: successful().slice(0, 2) }), task = await f.run()
   await f.store.reconcileUnknown(actor, task.id, 'checked')
   await f.store.reconcileUnknown(actor, task.id, 'duplicate')
-  const row = await f.driver.get('SELECT a.status, r.document FROM external_pilot_attempts a JOIN external_pilot_reconciliations r ON r.task_id = a.task_id WHERE a.task_id = ?', [task.id])
+  const row = await f.driver.get('SELECT a.status, r.document FROM task_attempts a JOIN external_pilot_reconciliations r ON r.task_id = a.task_id WHERE a.task_id = ?', [task.id])
   assert.equal(row?.status, 'unknown'); assert.equal(JSON.parse(String(row?.document)).note, 'checked')
   assert.equal((await f.store.unresolved(actor.orgId)).length, 0)
 })

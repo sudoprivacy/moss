@@ -78,7 +78,7 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
 
     let enter!: () => void, release!: () => void
     let entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { release = resolve })
-    const locked = drivers[0].transaction(async () => { await drivers[0].run('UPDATE external_pilot_tasks SET sequence = sequence WHERE id = ?', [accepted[0].id]); enter(); await barrier })
+    const locked = drivers[0].transaction(async () => { await drivers[0].run('UPDATE tasks SET sequence = sequence WHERE id = ?', [accepted[0].id]); enter(); await barrier })
     await entered
     try {
       const timeout = AbortSignal.timeout(3000)
@@ -107,7 +107,7 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     assert.equal((await second.store.task(actor, pending.id)).status, 'unknown')
     await first.store.reconcileUnknown(actor, pending.id, 'Checked synthetic provider run; close without replay.')
     assert((await second.store.task(actor, pending.id)).reconciliation)
-    const attempt = await drivers[1].get('SELECT a.status, r.document FROM external_pilot_attempts a JOIN external_pilot_reconciliations r ON r.task_id = a.task_id WHERE a.task_id = ?', [pending.id])
+    const attempt = await drivers[1].get('SELECT a.status, r.document FROM task_attempts a JOIN external_pilot_reconciliations r ON r.task_id = a.task_id WHERE a.task_id = ?', [pending.id])
     assert.equal(attempt?.status, 'unknown'); assert(attempt?.document)
     assert.equal((await second.store.session(actor, pending.session_id)).active_task_id, pending.id)
     assert.equal(calls.length, 1)
@@ -141,7 +141,7 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     assert.equal(rejected.status, 'rejected'); assert.equal(rejected.attempt_id, null)
     assert.equal((await first.store.taskRecord(actor, rejected.id))?.resolution.status, 'rejected')
     assert.equal(httpCalls, 1)
-    const ledgerCounts = async () => Promise.all(['product_task_records', 'external_pilot_tasks', 'external_pilot_sessions', 'external_pilot_attempts'].map(async table => Number((await drivers[1].get(`SELECT COUNT(*) AS count FROM ${table}`))!.count)))
+    const ledgerCounts = async () => Promise.all(['product_task_records', 'tasks', 'external_sessions', 'task_attempts'].map(async table => Number((await drivers[1].get(`SELECT COUNT(*) AS count FROM ${table}`))!.count)))
     const ledgerBefore = await ledgerCounts(), originalRun = drivers[0].run.bind(drivers[0])
     drivers[0].run = async (sql, params) => { if (sql.startsWith('INSERT INTO product_task_records')) throw new Error('Synthetic admission write failure'); return originalRun(sql, params) }
     try { await assert.rejects(first.create(actor, { ...submission, constraints: { idempotency_key: randomUUID() } }), /Synthetic admission write failure/) }
@@ -180,7 +180,7 @@ void test('PostgreSQL: maintenance claims, retirement and idempotency survive in
     await assert.rejects(second.task(actor, task.id), { code: 'TASK_HISTORY_EXPIRED' })
     await assert.rejects(second.create(actor, input, binding, 1000), { code: 'TASK_HISTORY_EXPIRED' })
     assert.equal((await second.history(actor, task.session_id)).length, 0)
-    assert.equal(Number((await drivers[1].get('SELECT COUNT(*) AS total FROM external_pilot_tasks'))?.total), 1)
+    assert.equal(Number((await drivers[1].get('SELECT COUNT(*) AS total FROM tasks'))?.total), 1)
   } finally {
     await Promise.all(pools.map(pool => pool.end()))
     await admin.query(`DROP SCHEMA ${schema} CASCADE`); await admin.end()

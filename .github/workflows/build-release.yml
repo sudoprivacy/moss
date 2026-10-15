@@ -73,7 +73,7 @@ jobs:
         run: bun run test
 
       - name: Verify external provider concurrency on real PostgreSQL
-        run: node --import tsx --test src/server/externalProviders/externalProviders.pg-test.ts
+        run: node --import tsx --test src/server/externalProviders/externalProviders.pg-test.ts src/server/agentFederation/*.pg-test.ts src/server/agentFederation/provider/*.pg-test.ts
 
       # `scripts/e2e/session-owner-live.ts` needs a live auth-on daemon and an
       # operator's node certificate, so CI cannot run it. Keeping it compiling

@@ -23,6 +23,13 @@ import { readLiveManagedExecution } from '../backends/liveManagedExecution.js';
 import type { InternalSessionChannel } from '../internalSessionChannel.js';
 import { cohostSessionStatePath } from '../backends/cohostSessionState.js';
 
+it('external sessions cannot launch a native runner', () => {
+  assert.throws(() => new SessionRunnerDaemon(
+    { session: { runtime: { type: 'external', engine: 'external_provider' } } } as RunnerManifest,
+    {} as DirectConnectStore,
+  ), /External sessions cannot launch/);
+});
+
 describe('Runner cancellation during recovery', () => {
   for (const isTermination of [false, true]) {
     it(`cancels a pending spawn and preserves ${isTermination ? 'termination' : 'restart'} intent`, { timeout: 30_000 }, async () => {
