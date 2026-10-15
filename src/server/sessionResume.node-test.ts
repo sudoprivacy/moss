@@ -7,7 +7,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { test } from 'node:test'
+import { test, type TestContext } from 'node:test'
 import { DirectConnectStore } from './db.js'
 import { HttpError } from './httpError.js'
 import { RuntimeService, AttemptTakeoverPendingError, ServerDrainingError } from './runtimeService.js'
@@ -166,6 +166,162 @@ void test('resume waits for native recovery when its local bridge still accepts 
   assert.equal(result.session.sessionId, 'native')
   assert.equal(result.attempt.generation, 2)
   assert(probes >= 2)
+})
+
+async function fencingFixture(t: TestContext) {
+  const root = await mkdtemp(join(tmpdir(), 'moss-fencing-generation-'))
+  const store = new DirectConnectStore(':memory:')
+  const attachPath = process.platform === 'win32' ? `\\\\.\\pipe\\moss-fence-${randomUUID()}` : join(root, 'bridge.sock')
+  let isNativeReady = false
+  const server = createServer(client => {
+    client.on('data', () => client.end(`${JSON.stringify({ type: 'pong', ts: Date.now(), isReady: isNativeReady })}\n`))
+  })
+  server.listen(attachPath)
+  await once(server, 'listening')
+  t.after(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await store.close()
+    await rm(root, { recursive: true, force: true })
+  })
+  const instance = await store.registerServerInstance('moss', process.pid)
+  await store.createSession({ sessionId: 'native', transcriptSessionId: 'transcript',
+    transcriptPath: join(root, 'transcript.jsonl'), userId: 'user', orgId: 'org', role: 'user', scopes: [],
+    cwd: root, runtime: { type: 'cohost', engine: 'scode' } as never, status: 'active', desiredState: 'active' })
+  const createAttempt = async (generation: number) => {
+    const attempt = await store.createAttempt({ sessionId: 'native', generation, backendType: 'cohost',
+      resumeTranscriptSessionId: 'transcript', serverInstanceId: instance.instanceId, attachPath })
+    await store.setCurrentAttempt('native', attempt.attemptId)
+    await store.touchAttemptHeartbeat(attempt.attemptId, 'running', instance.instanceId)
+    return attempt
+  }
+  const old = await createAttempt(1)
+  const runtime = new RuntimeService({ config: { runtimeDir: root, defaultRuntime: 'cohost',
+    heartbeatTimeoutMs: 30_000, reattachProbeTimeoutMs: 20, resumeOnMissingRuntime: true } as ServerConfig,
+  store, authService: {} as never, serverInstanceId: instance.instanceId })
+  const mutable = runtime as unknown as { spawnAttempt(session: SessionRecord): Promise<AttemptRecord> }
+  mutable.spawnAttempt = async () => { throw new Error('Unexpected external runner launch') }
+  const flush = async () => {
+    for (let i = 0; i < 20; i++) await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  return { runtime, store, instance, old, createAttempt, flush,
+    setReady: () => { isNativeReady = true } }
+}
+
+void test('a fencing deadline cannot retire the healthy replacement of its original attempt', async t => {
+  const f = await fencingFixture(t)
+  const started = Date.now()
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: started })
+  try {
+    await assert.rejects(f.runtime.ensureSessionReady('native'), AttemptTakeoverPendingError)
+    t.mock.timers.setTime(started + 100_000)
+    const next = await f.createAttempt(2)
+    t.mock.timers.tick(5000)
+    await f.flush()
+    assert.equal((await f.store.getAttempt(next.attemptId))?.runtimeState, 'running')
+    assert.equal((await f.store.getSession('native'))?.currentAttemptId, next.attemptId)
+  } finally { t.mock.timers.reset() }
+})
+
+for (const isNonBlocking of [false, true]) {
+  void test(`${isNonBlocking ? 'background' : 'foreground'} native readiness cancels its obsolete fencing deadline`, async t => {
+    const f = await fencingFixture(t)
+    const started = Date.now()
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: started })
+    try {
+      await assert.rejects(f.runtime.ensureSessionReady('native'), AttemptTakeoverPendingError)
+      f.setReady()
+      if (isNonBlocking) await f.runtime.ensureSessionReadyNonBlocking('native')
+      else await f.runtime.ensureSessionReady('native')
+      t.mock.timers.setTime(started + 100_000)
+      await f.store.touchAttemptHeartbeat(f.old.attemptId, 'running', f.instance.instanceId)
+      t.mock.timers.tick(5000)
+      await f.flush()
+      assert.equal((await f.store.getAttempt(f.old.attemptId))?.runtimeState, 'running')
+      assert.equal((await f.store.getSession('native'))?.currentAttemptId, f.old.attemptId)
+    } finally { t.mock.timers.reset() }
+  })
+}
+
+void test('a fencing deadline yields when another controller has claimed the same attempt', async t => {
+  const f = await fencingFixture(t)
+  const started = Date.now()
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: started })
+  try {
+    await assert.rejects(f.runtime.ensureSessionReady('native'), AttemptTakeoverPendingError)
+    await f.store.stopServerInstance(f.instance.instanceId)
+    const other = await f.store.registerServerInstance('other-moss', process.pid)
+    assert.equal(await f.store.claimAttempt(f.old.attemptId, other.instanceId, 30_000), true)
+    t.mock.timers.setTime(started + 100_000)
+    await f.store.touchAttemptHeartbeat(f.old.attemptId, 'running', other.instanceId)
+    t.mock.timers.tick(5000)
+    await f.flush()
+    assert.equal((await f.store.getAttempt(f.old.attemptId))?.runtimeState, 'running')
+    assert.equal((await f.store.getAttempt(f.old.attemptId))?.serverInstanceId, other.instanceId)
+    assert.equal(await f.store.latestEvent('native', 'attempt_lost'), null)
+  } finally { t.mock.timers.reset() }
+})
+
+void test('termination cancels a pending fencing deadline without restarting the session', async t => {
+  const f = await fencingFixture(t)
+  const started = Date.now()
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: started })
+  try {
+    await assert.rejects(f.runtime.ensureSessionReady('native'), AttemptTakeoverPendingError)
+    await f.store.markSessionEnded('native', 'terminated', 'terminated')
+    t.mock.timers.setTime(started + 100_000)
+    await f.store.touchAttemptHeartbeat(f.old.attemptId, 'running', f.instance.instanceId)
+    t.mock.timers.tick(5000)
+    await f.flush()
+    assert.equal((await f.store.getSession('native'))?.desiredState, 'terminated')
+    assert.equal((await f.store.getSession('native'))?.currentAttemptId, f.old.attemptId)
+    assert.equal((await f.store.getAttempt(f.old.attemptId))?.runtimeState, 'running')
+  } finally { t.mock.timers.reset() }
+})
+
+void test('a still unreachable original attempt is fenced and resumed at its own deadline', async t => {
+  const f = await fencingFixture(t)
+  const started = Date.now()
+  let spawns = 0
+  const mutable = f.runtime as unknown as { spawnAttempt(session: SessionRecord): Promise<AttemptRecord> }
+  mutable.spawnAttempt = async () => { spawns++; return f.createAttempt(2) }
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: started })
+  try {
+    await assert.rejects(f.runtime.ensureSessionReady('native'), AttemptTakeoverPendingError)
+    t.mock.timers.setTime(started + 100_000)
+    await f.store.touchAttemptHeartbeat(f.old.attemptId, 'running', f.instance.instanceId)
+    t.mock.timers.tick(5000)
+    await f.flush()
+    assert.equal((await f.store.getAttempt(f.old.attemptId))?.runtimeState, 'lost')
+    assert.equal(spawns, 1)
+    assert.notEqual((await f.store.getSession('native'))?.currentAttemptId, f.old.attemptId)
+  } finally { t.mock.timers.reset() }
+})
+
+void test('a superseded poll cannot remove or shorten the replacement attempt fencing wait', async t => {
+  const f = await fencingFixture(t)
+  const started = Date.now()
+  let spawns = 0
+  const mutable = f.runtime as unknown as { spawnAttempt(session: SessionRecord): Promise<AttemptRecord> }
+  mutable.spawnAttempt = async () => { spawns++; return f.createAttempt(3) }
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: started })
+  try {
+    await assert.rejects(f.runtime.ensureSessionReady('native'), AttemptTakeoverPendingError)
+    t.mock.timers.setTime(started + 50_000)
+    const next = await f.createAttempt(2)
+    await assert.rejects(f.runtime.ensureSessionReady('native'), AttemptTakeoverPendingError)
+    t.mock.timers.setTime(started + 100_000)
+    await f.store.touchAttemptHeartbeat(next.attemptId, 'running', f.instance.instanceId)
+    t.mock.timers.tick(5000)
+    await f.flush()
+    assert.equal((await f.store.getAttempt(next.attemptId))?.runtimeState, 'running')
+    assert.equal(spawns, 0, 'the old deadline cannot fence the replacement early')
+    t.mock.timers.setTime(started + 150_000)
+    await f.store.touchAttemptHeartbeat(next.attemptId, 'running', f.instance.instanceId)
+    t.mock.timers.tick(5000)
+    await f.flush()
+    assert.equal((await f.store.getAttempt(next.attemptId))?.runtimeState, 'lost')
+    assert.equal(spawns, 1, 'the replacement keeps its own deadline')
+  } finally { t.mock.timers.reset() }
 })
 
 void test('resume only retries takeover; resource, startup and draining errors remain immediate', async () => {
