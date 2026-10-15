@@ -357,7 +357,7 @@ members/<roomId>/2026-09-18.json   {roomid, date, members[], roomName?, memberNa
   "date": "2026-09-21",
   "computedAt": 1789...,
   "rooms": [
-    {"roomid":"wr_x","currentDate":"2026-09-21","previousDate":"2026-09-18","leaves":["wo_cust2"]}
+    {"roomid":"wr_x","currentDate":"2026-09-21","previousDate":"2026-09-18","leaves":["张三"]}
   ]
 }
 ```
@@ -366,6 +366,8 @@ members/<roomId>/2026-09-18.json   {roomid, date, members[], roomName?, memberNa
   正常是昨天，停机后可能是几天前 —— 窗口跨度因此始终可见
 - **无人离群也会生成文件**（`leaves` 为空数组）。空文件表示"算过、没有"，
   文件缺失表示"还没算" —— 阶段 2 正是靠这个区分决定要不要跑
+- **`leaves` 是离群成员的显示名**，取自上一张快照的 `memberNames`（人已不在今天的快照里）；
+  上一张快照没有该成员名字时退回 userid
 - **只报外部成员**（`wo_`/`wm_` 前缀）—— 员工退群是日常，客户退群才是信号
 - **首日只有快照、没有对比基准**，`previousDate` 为 `null`、`leaves` 为空
 - 按日切分，避免单文件无限增长

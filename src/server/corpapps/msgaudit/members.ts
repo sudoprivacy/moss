@@ -89,7 +89,12 @@ export type LeaveRecord = {
    * Null when this room has no earlier photo (first day seen).
    */
   previousDate: string | null
-  /** External userids present in the previous photo, absent in the current. */
+  /**
+   * Display names of the external members present in the previous photo
+   * and absent from the current one. Taken from the previous photo's
+   * `memberNames`, since a departed member is by definition not in the
+   * current one; falls back to the userid when that photo has no name.
+   */
   leaves: string[]
 }
 
@@ -282,7 +287,7 @@ export async function computeAndWriteLeaves(
       roomid: roomId,
       currentDate: date,
       previousDate: prev ? prev.date : null,
-      leaves: gone,
+      leaves: gone.map((id) => prev?.memberNames?.[id] ?? id),
     })
     leaveCount += gone.length
   }

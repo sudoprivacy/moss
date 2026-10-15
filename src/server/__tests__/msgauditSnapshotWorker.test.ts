@@ -129,4 +129,16 @@ describe('RosterSnapshotWorker.snapshotInstance', () => {
     )
     expect(file.rooms[0].leaves).toEqual([CUST])
   })
+
+  it('reports a departed customer by the name the previous photo recorded', async () => {
+    const id = 'appD'
+    await seedRoomsJson(id, [R1])
+    await writeSnapshot(id, R1, ['staff1', CUST], Date.now() - 24 * 3600 * 1000, {
+      memberNames: { staff1: '员工', [CUST]: '张三' },
+    })
+
+    const w = new RosterSnapshotWorker(async () => [], { intervalSec: 60, concurrency: 1 })
+    await w.snapshotInstance({ corpAppId: id, rosterLookup: async () => ({ members: ['staff1'] }) })
+    expect((await readLeaves(id, dayKey(Date.now())))?.rooms[0].leaves).toEqual(['张三'])
+  })
 })
