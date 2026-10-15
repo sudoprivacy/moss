@@ -41,6 +41,7 @@ void describe('parkMetrics', () => {
       assert.equal(metrics.lead_status.confirmed, 1)
       assert.equal(metrics.lead_status.converted ?? 0, 0)
       assert.deepEqual(metrics.high_score_leads.map(lead => lead.lead_id), ['lead-0'])
+      assert.equal(metrics.high_score_leads[0]?.enterprise_name, '企业', '高意向线索带企业名称')
       const perEnterprise = await new ParkRepository(driver).countLeadsByEnterprise('park-1')
       assert.equal(perEnterprise['ent-1'], 10_001)
     } finally {

@@ -8,7 +8,7 @@ import { LeadService } from './leadService.js'
 import { MetricsService } from './metricsService.js'
 import { ParkAuditService } from './parkAuditService.js'
 import { ParkRegistrationService } from './parkRegistrationService.js'
-import { ParkRepository, type LeadStatus } from './parkRepository.js'
+import { ParkRepository, type LeadStatus, type ParkAuditEvent } from './parkRepository.js'
 import { PolicyCatalogService } from './policyCatalogService.js'
 import { PolicySearchService } from './policySearchService.js'
 import { defaultParkRegisterLimiter, type ParkRateLimiter } from './parkRateLimit.js'
@@ -221,7 +221,17 @@ export async function dispatchParkApi(
           watchedBy: watchedOnly ? auth.userId : undefined,
         })
         const names = await enterpriseNameMap(repo, parkOrgId)
-        return { status: 200, body: { items: leads.map(l => projectLead(l, names.get(l.enterpriseOrgId))) } }
+        const ownerNames = await repo.userNamesByIds(
+          leads.map(l => l.ownerId).filter((id): id is string => id != null),
+        )
+        return {
+          status: 200,
+          body: {
+            items: leads.map(l =>
+              projectLead(l, names.get(l.enterpriseOrgId), l.ownerId ? ownerNames.get(l.ownerId) : undefined),
+            ),
+          },
+        }
       }
       if (method === 'POST') {
         const role = await requireParkMember(driver, auth, parkOrgId, [PARK_ROLE.OPS])
@@ -261,10 +271,11 @@ export async function dispatchParkApi(
         const lead = await leadService.requireLead(parkOrgId, leadId)
         const inquiry = lead.sourceInquiryId ? await repo.getInquiry(lead.sourceInquiryId) : null
         const leadName = (await enterpriseNameMap(repo, parkOrgId)).get(lead.enterpriseOrgId)
+        const ownerName = lead.ownerId ? (await repo.userNamesByIds([lead.ownerId])).get(lead.ownerId) : undefined
         return {
           status: 200,
           body: {
-            ...projectLead(lead, leadName),
+            ...projectLead(lead, leadName, ownerName),
             inquiry_summary: inquiry
               ? {
                   inquiry_id: inquiry.inquiryId,
@@ -362,23 +373,7 @@ export async function dispatchParkApi(
       const role = await requireParkMember(driver, auth, parkOrgId)
       const actorUserId = role === PARK_ROLE.OPS ? auth.userId : undefined
       const events = await repo.listAuditEvents({ parkOrgId, actorUserId })
-      return {
-        status: 200,
-        body: {
-          items: events.map(event => ({
-            audit_id: event.auditId,
-            action: event.action,
-            target_type: event.targetType,
-            target_id: event.targetId,
-            actor_user_id: event.actorUserId,
-            reason: event.reason,
-            before: parseJsonOrRaw(event.beforeSummaryJson),
-            after: parseJsonOrRaw(event.afterSummaryJson),
-            result: event.result,
-            created_at: event.createdAt,
-          })),
-        },
-      }
+      return { status: 200, body: { items: await projectAuditEvents(repo, parkOrgId, events) } }
     }
 
     // ---- members ----
@@ -386,7 +381,11 @@ export async function dispatchParkApi(
       if (method === 'GET') {
         await requireParkMember(driver, auth, parkOrgId)
         const members = await repo.listMembers(parkOrgId)
-        return { status: 200, body: { items: members.map(projectMember) } }
+        const userNames = await repo.userNamesByIds(members.map(member => member.userId))
+        return {
+          status: 200,
+          body: { items: members.map(member => projectMember(member, userNames.get(member.userId))) },
+        }
       }
       if (method === 'POST') {
         await requireParkMember(driver, auth, parkOrgId, [PARK_ROLE.SYSTEM])
@@ -419,12 +418,17 @@ export async function dispatchParkApi(
       if (method === 'GET') {
         await requireParkMember(driver, auth, parkOrgId)
         const assignments = await repo.listAssignmentsByPark(parkOrgId)
+        const assistantNames = await repo.assistantNamesByIds(assignments.map(a => a.assistantId))
+        const enterpriseNames = await enterpriseNameMap(repo, parkOrgId)
         return {
           status: 200,
           body: {
             items: assignments.map(a => ({
               id: a.id, park_org_id: a.parkOrgId, assistant_id: a.assistantId,
-              enterprise_org_id: a.enterpriseOrgId, created_at: a.createdAt,
+              assistant_name: assistantNames.get(a.assistantId) ?? null,
+              enterprise_org_id: a.enterpriseOrgId,
+              enterprise_name: enterpriseNames.get(a.enterpriseOrgId) ?? null,
+              created_at: a.createdAt,
             })),
           },
         }
@@ -462,6 +466,45 @@ export async function dispatchParkApi(
           after: { enterprise_org_id: enterpriseOrgId },
         })
         return { status: 200, body: { removed: true } }
+      }
+    }
+
+    // ---- candidate lists（admin Modal 下拉候选；权限与对应写操作一致）----
+    if (rest === '/assistant-candidates' && method === 'GET') {
+      await requireParkMember(driver, auth, parkOrgId, [PARK_ROLE.SYSTEM])
+      const candidates = await repo.listApprovedAssistants(parkOrgId)
+      return {
+        status: 200,
+        body: {
+          items: candidates.map(candidate => ({
+            assistant_id: candidate.assistantId,
+            name: candidate.name,
+            display_name: candidate.displayName,
+          })),
+        },
+      }
+    }
+
+    if (rest === '/bindable-enterprises' && method === 'GET') {
+      await requireParkMember(driver, auth, parkOrgId, [PARK_ROLE.SYSTEM])
+      const candidates = await repo.listBindableEnterpriseOrgs()
+      return {
+        status: 200,
+        body: {
+          items: candidates.map(candidate => ({
+            enterprise_org_id: candidate.enterpriseOrgId,
+            display_name: candidate.displayName,
+          })),
+        },
+      }
+    }
+
+    if (rest === '/member-candidates' && method === 'GET') {
+      await requireParkMember(driver, auth, parkOrgId, [PARK_ROLE.SYSTEM])
+      const candidates = await repo.searchUsersForMembership(parkOrgId, url.searchParams.get('q') ?? '')
+      return {
+        status: 200,
+        body: { items: candidates.map(candidate => ({ user_id: candidate.userId, display_name: candidate.displayName })) },
       }
     }
 
@@ -580,9 +623,66 @@ async function enterpriseNameMap(repo: import('./parkRepository.js').ParkReposit
   return new Map(profiles.map(p => [p.enterpriseOrgId, p.enterpriseName]))
 }
 
+/** 审计事件展示名解析：actor 一律取用户名；target 按 target_type 分流，查不到给 null（前端回退 ID）。 */
+async function projectAuditEvents(
+  repo: ParkRepository,
+  parkOrgId: string,
+  events: ParkAuditEvent[],
+): Promise<Array<Record<string, unknown>>> {
+  const actorNames = await repo.userNamesByIds(events.map(event => event.actorUserId))
+  const targetIds = (type: string): string[] =>
+    events.filter(event => event.targetType === type && event.targetId).map(event => event.targetId!)
+  const enterpriseNames = await enterpriseNameMap(repo, parkOrgId)
+  const leadEnterprises = await repo.leadEnterprisesByIds(targetIds('lead'))
+  const assistantNames = await repo.assistantNamesByIds(targetIds('assistant'))
+  const memberNames = await repo.userNamesByIds(targetIds('park_member'))
+  const settingsName = events.some(event => event.targetType === 'park_settings')
+    ? (await repo.getOrgProfile(parkOrgId))?.displayName ?? null
+    : null
+
+  const targetName = (event: ParkAuditEvent): string | null => {
+    if (!event.targetId) return null
+    switch (event.targetType) {
+      case 'enterprise_org':
+        return enterpriseNames.get(event.targetId) ?? null
+      case 'lead': {
+        const enterpriseOrgId = leadEnterprises.get(event.targetId)
+        return enterpriseOrgId ? enterpriseNames.get(enterpriseOrgId) ?? null : null
+      }
+      case 'assistant':
+        return assistantNames.get(event.targetId) ?? null
+      case 'park_member':
+        return memberNames.get(event.targetId) ?? null
+      case 'park_settings':
+        return settingsName
+      default:
+        return null
+    }
+  }
+
+  return events.map(event => ({
+    audit_id: event.auditId,
+    action: event.action,
+    target_type: event.targetType,
+    target_id: event.targetId,
+    target_name: targetName(event),
+    actor_user_id: event.actorUserId,
+    actor_name: actorNames.get(event.actorUserId) ?? null,
+    reason: event.reason,
+    before: parseJsonOrRaw(event.beforeSummaryJson),
+    after: parseJsonOrRaw(event.afterSummaryJson),
+    result: event.result,
+    created_at: event.createdAt,
+  }))
+}
+
 // ---- projections ----
 
-function projectLead(lead: import('./parkRepository.js').Lead, enterpriseName?: string | null) {
+function projectLead(
+  lead: import('./parkRepository.js').Lead,
+  enterpriseName?: string | null,
+  ownerName?: string | null,
+) {
   return {
     lead_id: lead.leadId,
     park_org_id: lead.parkOrgId,
@@ -596,17 +696,19 @@ function projectLead(lead: import('./parkRepository.js').Lead, enterpriseName?: 
     policy_matches: parseJsonOrRaw(lead.policyMatchesJson),
     suggested_action: lead.suggestedAction,
     owner_id: lead.ownerId,
+    owner_name: ownerName ?? null,
     status: lead.status,
     created_at: lead.createdAt,
     updated_at: lead.updatedAt,
   }
 }
 
-function projectMember(member: import('./parkRepository.js').ParkMember) {
+function projectMember(member: import('./parkRepository.js').ParkMember, userName?: string) {
   return {
     id: member.id,
     park_org_id: member.parkOrgId,
     user_id: member.userId,
+    user_name: userName ?? null,
     park_role: member.parkRole,
     created_at: member.createdAt,
   }
@@ -637,6 +739,9 @@ async function projectEnterpriseDetail(repo: ParkRepository, parkOrgId: string, 
     contact_name: profile.contactName,
     contact_phone: profile.contactPhone,
     assigned_owner_id: profile.assignedOwnerId,
+    assigned_owner_name: profile.assignedOwnerId
+      ? (await repo.userNamesByIds([profile.assignedOwnerId])).get(profile.assignedOwnerId) ?? null
+      : null,
     tags: parseStringArray(profile.tagsJson),
     lifecycle: binding?.lifecycle ?? profile.lifecycle,
     lead_summary: {

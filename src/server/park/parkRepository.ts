@@ -115,6 +115,25 @@ export type ParkAuditEvent = {
   createdAt: number
 }
 
+/** assistant-candidates 候选项（与 assignAssistant 校验同条件的已发布助手）。 */
+export type AssistantCandidate = {
+  assistantId: string
+  name: string
+  displayName: string
+}
+
+/** bindable-enterprises 候选项（org_type='enterprise' 且未绑定任何园区）。 */
+export type BindableEnterpriseOrg = {
+  enterpriseOrgId: string
+  displayName: string
+}
+
+/** member-candidates 候选项（按关键字搜索、排除已是本园区成员的用户）。 */
+export type MemberCandidate = {
+  userId: string
+  displayName: string
+}
+
 function parseJsonArray(raw: unknown): string[] {
   if (typeof raw !== 'string' || raw.trim() === '') return []
   try {
@@ -559,6 +578,89 @@ export class ParkRepository {
         [filter.parkOrgId, limit],
       )
     return rows.map(mapAuditEvent)
+  }
+
+  // ---- ID→名称映射与下拉候选查询（展示层用）----
+
+  /** 批量取用户名（display_name 优先，空回退 name）；查不到的 id 不进 Map。 */
+  async userNamesByIds(userIds: string[]): Promise<Map<string, string>> {
+    const ids = [...new Set(userIds.filter(Boolean))]
+    if (ids.length === 0) return new Map()
+    const placeholders = ids.map(() => '?').join(', ')
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT id, COALESCE(NULLIF(display_name, ''), name) AS display_name FROM users WHERE id IN (${placeholders})`,
+      ids,
+    )
+    return new Map(rows.map(row => [String(row.id), String(row.display_name)]))
+  }
+
+  /** 批量取助手名（display_name 优先，空回退 name）；查不到的 id 不进 Map。 */
+  async assistantNamesByIds(assistantIds: string[]): Promise<Map<string, string>> {
+    const ids = [...new Set(assistantIds.filter(Boolean))]
+    if (ids.length === 0) return new Map()
+    const placeholders = ids.map(() => '?').join(', ')
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT id, COALESCE(NULLIF(display_name, ''), name) AS display_name FROM tenant_assistants WHERE id IN (${placeholders})`,
+      ids,
+    )
+    return new Map(rows.map(row => [String(row.id), String(row.display_name)]))
+  }
+
+  /** lead_id → enterprise_org_id（审计对象列解析 lead 类型用）。 */
+  async leadEnterprisesByIds(leadIds: string[]): Promise<Map<string, string>> {
+    const ids = [...new Set(leadIds.filter(Boolean))]
+    if (ids.length === 0) return new Map()
+    const placeholders = ids.map(() => '?').join(', ')
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT lead_id, enterprise_org_id FROM leads WHERE lead_id IN (${placeholders})`,
+      ids,
+    )
+    return new Map(rows.map(row => [String(row.lead_id), String(row.enterprise_org_id)]))
+  }
+
+  /** 本园区已发布助手（与 assignAssistant 的校验 SQL 同条件）。 */
+  async listApprovedAssistants(parkOrgId: string): Promise<AssistantCandidate[]> {
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT id, name, display_name FROM tenant_assistants WHERE org_id = ? AND status = 'approved' ORDER BY created_at DESC`,
+      [parkOrgId],
+    )
+    return rows.map(row => ({
+      assistantId: String(row.id),
+      name: String(row.name ?? ''),
+      displayName: row.display_name == null ? String(row.name ?? '') : String(row.display_name),
+    }))
+  }
+
+  /** 未绑定任何园区的企业 org（数据源与 createBinding 校验 getOrgProfile 同表）。 */
+  async listBindableEnterpriseOrgs(): Promise<BindableEnterpriseOrg[]> {
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT p.moss_org_id, p.display_name
+       FROM park_org_profiles p
+       WHERE p.org_type = 'enterprise'
+         AND NOT EXISTS (SELECT 1 FROM park_enterprise_bindings b WHERE b.enterprise_org_id = p.moss_org_id)
+       ORDER BY p.display_name`,
+    )
+    return rows.map(row => ({
+      enterpriseOrgId: String(row.moss_org_id),
+      displayName: String(row.display_name ?? ''),
+    }))
+  }
+
+  /** 按关键字（姓名/手机号/邮箱）搜可添加为成员的用户；排除已是本园区成员（UNIQUE 约束）。 */
+  async searchUsersForMembership(parkOrgId: string, query: string, limit = 20): Promise<MemberCandidate[]> {
+    const q = query.trim()
+    if (!q) return []
+    const pattern = `%${q.replace(/[\\%_]/g, match => `\\${match}`)}%`
+    const rows = await this.driver.all<SqlRow>(
+      `SELECT u.id, COALESCE(NULLIF(u.display_name, ''), u.name) AS display_name
+       FROM users u
+       WHERE (u.name LIKE ? ESCAPE '\\' OR u.display_name LIKE ? ESCAPE '\\'
+              OR u.phone LIKE ? ESCAPE '\\' OR u.email LIKE ? ESCAPE '\\')
+         AND NOT EXISTS (SELECT 1 FROM park_members m WHERE m.park_org_id = ? AND m.user_id = u.id)
+       LIMIT ?`,
+      [pattern, pattern, pattern, pattern, parkOrgId, limit],
+    )
+    return rows.map(row => ({ userId: String(row.id), displayName: String(row.display_name) }))
   }
 }
 

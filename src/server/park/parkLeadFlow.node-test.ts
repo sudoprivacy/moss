@@ -140,7 +140,6 @@ void describe('parkLeadFlow 线索链路（S1-S16）', () => {
       assert.equal(badAssistant.status, 400, '非本园区 Assistant 不能分配')
       const badEnterprise = await callPark(deps, sysopAuth, 'POST', '/api/v1/parks/park-org/assistant-assignments', { assistant_id: 'as-1', enterprise_org_id: 'park-org-2' }, store)
       assert.equal(badEnterprise.status, 400, '未绑定企业不能获分配')
-
       // ---- S1 搜集-检索 ----
       const s1 = await callAgent(deps, entAuth, 'GET', '/api/v1/agent/park/policies/search', store, '?q=' + encodeURIComponent('租金'))
       assert.equal(s1.status, 200)
@@ -247,6 +246,13 @@ void describe('parkLeadFlow 线索链路（S1-S16）', () => {
       const reClaim = await callPark(deps, opsAuth, 'POST', `/api/v1/parks/park-org/leads/${lead.leadId}/claim`, {}, store)
       assert.equal(reClaim.status, 200, 'owner 重复认领幂等')
       assert.equal(reClaim.body.owner_id, 'ops')
+      // 认领后列表/详情带负责人名称与企业名称（ID→名称展示，计划 4.1-A）
+      const ownerView = await callPark(deps, opsAuth, 'GET', '/api/v1/parks/park-org/leads', {}, store)
+      const claimedRow = (ownerView.body.items as any[]).find(l => l.lead_id === lead.leadId)
+      assert.equal(claimedRow?.owner_name, 'ops', '列表带负责人名称')
+      const detailOwned = await callPark(deps, opsAuth, 'GET', `/api/v1/parks/park-org/leads/${lead.leadId}`, {}, store)
+      assert.equal(detailOwned.body.owner_name, 'ops', '详情带负责人名称')
+      assert.equal(detailOwned.body.enterprise_name, '星澜智能', '详情带企业名称')
       // 仅更新跟进字段（不带 status）也应落库（计划 2.3"跟进（owner 本人）"）
       const followUpOnly = await callPark(deps, opsAuth, 'PATCH', `/api/v1/parks/park-org/leads/${lead.leadId}`, { suggested_action: '下周回访' }, store)
       assert.equal(followUpOnly.status, 200, 'owner 仅跟进更新成功')
@@ -382,6 +388,44 @@ void describe('parkLeadFlow 线索链路（S1-S16）', () => {
       assert.ok(leaderActions.some(e => e.action === 'park.lead_dispatch' || e.action === 'park.lead_transition'), '领导操作有记录')
       const rejectAudit = (auditOps.body.items as any[]).find(e => e.action === 'park.lead_transition' || e.action === 'park.lead_claim')
       assert.ok(rejectAudit && (rejectAudit.before || rejectAudit.after), '审计含 before/after 摘要')
+      // 审计名称解析（ID→名称展示，计划 4.1-A）：操作人实时取名、对象按 target_type 分流
+      assert.ok(auditItems.some(e => e.action === 'park.lead_claim' && e.target_id === lead.leadId && e.actor_name === 'ops'), '审计操作人带用户名')
+      assert.ok(auditItems.some(e => e.action === 'park.lead_claim' && e.target_id === lead.leadId && e.target_name === '星澜智能'), 'lead 对象解析为企业名')
+      assert.ok(auditItems.some(e => e.action === 'park.register_enterprise' && e.target_name === '星澜智能'), 'enterprise_org 对象解析为企业名')
+      assert.ok(auditItems.some(e => e.action === 'park.register_enterprise' && e.actor_name === '张三'), '注册审计操作人取联系人名')
+
+      // ---- S13b 候选端点（admin Modal 下拉，计划 4.1-B）----
+      const candDenied = await callPark(deps, opsAuth, 'GET', '/api/v1/parks/park-org/assistant-candidates', {}, store)
+      assert.equal(candDenied.status, 403, '非系统运营不能拉助手候选')
+      const assistants = await callPark(deps, sysopAuth, 'GET', '/api/v1/parks/park-org/assistant-candidates', {}, store)
+      assert.equal(assistants.status, 200)
+      assert.deepEqual(assistants.body.items, [{ assistant_id: 'as-1', name: 'park-consultation', display_name: '园区咨询' }])
+      const bindableEmpty = await callPark(deps, sysopAuth, 'GET', '/api/v1/parks/park-org/bindable-enterprises', {}, store)
+      assert.equal(bindableEmpty.status, 200)
+      assert.equal((bindableEmpty.body.items as any[]).length, 0, '注册企业已自动绑定，无候选')
+      db.prepare('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, 1)').run('ent-org-c', '未绑企业')
+      await repo.upsertOrgProfile({ mossOrgId: 'ent-org-c', orgType: 'enterprise', displayName: '未绑企业' })
+      const bindable = await callPark(deps, sysopAuth, 'GET', '/api/v1/parks/park-org/bindable-enterprises', {}, store)
+      assert.deepEqual(bindable.body.items, [{ enterprise_org_id: 'ent-org-c', display_name: '未绑企业' }], '仅未绑定任何园区的企业可候选')
+      const memberDenied = await callPark(deps, opsAuth, 'GET', '/api/v1/parks/park-org/member-candidates?q=ops', {}, store)
+      assert.equal(memberDenied.status, 403, '非系统运营不能搜成员候选')
+      const memberEmpty = await callPark(deps, sysopAuth, 'GET', '/api/v1/parks/park-org/member-candidates?q=', {}, store)
+      assert.deepEqual(memberEmpty.body.items, [], '空关键字返回空')
+      const memberHit = await callPark(deps, sysopAuth, 'GET', '/api/v1/parks/park-org/member-candidates?q=' + encodeURIComponent('ops2'), {}, store)
+      assert.equal(memberHit.status, 200)
+      assert.deepEqual(memberHit.body.items, [{ user_id: 'ops2', display_name: 'ops2' }], '按用户名精确命中（ops2 而非 ops）')
+      const memberOps = await callPark(deps, sysopAuth, 'GET', '/api/v1/parks/park-org/member-candidates?q=ops', {}, store)
+      const opsCandidates = memberOps.body.items as any[]
+      assert.ok(opsCandidates.some(u => u.user_id === 'ops2'), '非本园区用户可搜到')
+      assert.ok(!opsCandidates.some(u => u.user_id === 'ops' || u.user_id === 'ops-b'), '已是本园区成员的不出现')
+
+      // ---- S13c 成员/分配列表带名称（计划 4.1-A）----
+      const membersView = await callPark(deps, sysopAuth, 'GET', '/api/v1/parks/park-org/members', {}, store)
+      assert.ok((membersView.body.items as any[]).some(m => m.user_id === 'ops' && m.user_name === 'ops'), '成员带用户名')
+      const assignmentsView = await callPark(deps, sysopAuth, 'GET', '/api/v1/parks/park-org/assistant-assignments', {}, store)
+      assert.ok((assignmentsView.body.items as any[]).some(
+        a => a.assistant_id === 'as-1' && a.assistant_name === '园区咨询' && a.enterprise_name === '星澜智能',
+      ), '分配带助手与企业名称')
 
       // ---- S14 企业侧 ----
       const entInquiries = await callPark(deps, entAuth, 'GET', '/api/v1/enterprise/inquiries', {}, store)
