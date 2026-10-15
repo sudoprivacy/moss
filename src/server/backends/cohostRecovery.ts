@@ -26,7 +26,7 @@ export async function startCohostExecution(
         durableSessionId: existing.durable_session_id, workspacePath: existing.workspace_path }, isResume: false }
     }
     resumeSessionId = existing.durable_session_id
-    try { await agent.cancel(existing.session_id) }
+    try { await agent.cancel(existing.session_id, existing.session_endpoint) }
     catch (error) { if (!isUnknownManagedSession(error, existing.session_id)) throw error }
   }
   if (recovery.isResumeRequired && !resumeSessionId) {
@@ -37,7 +37,7 @@ export async function startCohostExecution(
     try {
       const session = await agent.startSession({ ...input, resumeSessionId })
       if (recovery.signal?.aborted) {
-        try { await agent.cancel(session.sessionId) }
+        try { await agent.cancel(session.sessionId, session.sessionEndpoint) }
         catch (error) {
           if (!isUnknownManagedSession(error, session.sessionId)) {
             throw new AggregateError([recovery.signal.reason, error], 'Cancelled cohost creation could not be cleaned up')

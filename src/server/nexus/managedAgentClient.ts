@@ -2,6 +2,9 @@
 import { NexusSessionTransport, type NexusVfsClient, type NexusSessionEndpoint, type SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
 import { z } from 'zod'
 
+const IDLE_EXECUTION_CHECK_MS = 5_000
+const EXECUTION_RECONNECT_TIMEOUT_MS = 30_000
+
 /**
  * Raw subprocess spec. The launch-logic SSOT stays moss-side: nexus executes
  * `cmd` + `args` with `env` in `cwd` and supervises the child, nothing more.
@@ -73,6 +76,7 @@ export function isUnknownManagedSession(error: unknown, processId: string): bool
   const failure = rpcFailure(error)
   return failure?.message === `managed_agent.get_session_v1: invalid argument: unknown session_id ${JSON.stringify(processId)}` ||
     failure?.message === `managed_agent.cancel_v1: invalid argument: unknown session_id ${JSON.stringify(processId)}`
+    || failure?.message === `managed_agent.cancel_v2: invalid argument: unknown session_id ${JSON.stringify(processId)}`
 }
 
 function rpcFailure(error: unknown): { message: string } | undefined {
@@ -161,8 +165,12 @@ export class ManagedAgentClient {
   }
 
   /** Terminate the session nexus is supervising. */
-  async cancel(sessionId: string, mode: 'session' = 'session'): Promise<void> {
-    await this.call<unknown>('managed_agent.cancel_v1', { session_id: sessionId, mode })
+  async cancel(sessionId: string, endpoint?: Pick<NexusSessionEndpoint, 'channel_id'>): Promise<void> {
+    if (endpoint) {
+      await this.call<unknown>('managed_agent.cancel_v2', { session_id: sessionId, channel_id: endpoint.channel_id })
+    } else {
+      await this.call<unknown>('managed_agent.cancel_v1', { session_id: sessionId, mode: 'session' })
+    }
   }
 
   /** Read the daemon's ownership and workspace record without starting a session. */
@@ -198,26 +206,41 @@ export class ManagedAgentClient {
     onMessage(message: SessionRpcMessage): void
     onClose(error: Error | undefined): void
   }, managedProcessId?: string): NexusSessionTransport {
+    let lastVerifiedAt = performance.now()
+    let unavailableSince: number | undefined
+    const verifyExecution = async (cause?: unknown): Promise<void> => {
+      let snapshot: ManagedSessionSnapshot
+      try { snapshot = await this.getSession(managedProcessId!) }
+      catch (error) {
+        if (isUnknownManagedSession(error, managedProcessId!)) {
+          throw new Error('Managed execution disappeared; resume the durable session', { cause: error })
+        }
+        throw error
+      }
+      if (snapshot.session_id !== managedProcessId || snapshot.state === 'terminated' ||
+        !snapshot.session_endpoint || Object.entries(endpoint).some(([key, value]) =>
+          snapshot.session_endpoint![key as keyof NexusSessionEndpoint] !== value)) {
+        throw new Error('Managed execution channel changed; resume the durable session', { cause })
+      }
+      lastVerifiedAt = performance.now()
+    }
     const client: Pick<NexusVfsClient, 'streamReadAt' | 'streamWrite'> = managedProcessId ? {
       streamWrite: this.client.streamWrite.bind(this.client),
       streamReadAt: async (...args) => {
-        try { return await this.client.streamReadAt(...args) }
+        try {
+          const result = await this.client.streamReadAt(...args)
+          if (!result.data.length && performance.now() - lastVerifiedAt >= IDLE_EXECUTION_CHECK_MS) await verifyExecution()
+          unavailableSince = undefined
+          return result
+        }
         catch (error) {
-          // A retained conversation can outlive its process. Reconnect only
-          // while the daemon still owns this exact execution and channel.
-          let snapshot: ManagedSessionSnapshot
-          try { snapshot = await this.getSession(managedProcessId) }
-          catch (failure) {
-            if (isUnknownManagedSession(failure, managedProcessId)) {
-              throw new Error('Managed execution disappeared; resume the durable session', { cause: failure })
-            }
-            throw failure
+          const code = (error as { code?: unknown })?.code
+          if (![4, 8, 10, 14, 'DEADLINE_EXCEEDED', 'RESOURCE_EXHAUSTED', 'ABORTED', 'UNAVAILABLE'].includes(code as string | number)) throw error
+          unavailableSince ??= performance.now()
+          if (performance.now() - unavailableSince >= EXECUTION_RECONNECT_TIMEOUT_MS) {
+            throw new Error('Managed execution remained unavailable; resume the durable session', { cause: error })
           }
-          if (snapshot.session_id !== managedProcessId || snapshot.state === 'terminated' ||
-            !snapshot.session_endpoint || Object.entries(endpoint).some(([key, value]) =>
-              snapshot.session_endpoint![key as keyof NexusSessionEndpoint] !== value)) {
-            throw new Error('Managed execution channel changed; resume the durable session', { cause: error })
-          }
+          await verifyExecution(error)
           throw error
         }
       },

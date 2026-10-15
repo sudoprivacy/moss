@@ -69,6 +69,7 @@ import {
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import type { NexusClient } from './nexus/nexusClient.js'
 import { UserPodService } from '@sudo/user-runtime'
+import type { NexusSessionEndpoint } from '@nexus-ai-fs/vfs-client'
 import { assertRuntimePlacement } from './runtime/runtimePlacementPolicy.js'
 import { readRuntimeRelease } from '@sudo/user-runtime/release'
 import { resolveCohostNexusConfig } from './nexus/nexusEnvConfig.js'
@@ -791,19 +792,19 @@ export class RuntimeService {
           const agent = new ManagedAgentClient(connection.client, connection.authToken)
           try {
             const namespace = await readAgentNamespace(connection.client, connection.authToken, ownerId, true)
-            const processes: string[] = []
+            const processes: Array<{ id: string; endpoint: NexusSessionEndpoint }> = []
             for (const execution of namespace.executions.filter(record => record.state !== 'terminated')) {
               if (execution.kind !== 'managed' || execution.state !== 'ready' || !execution.processId) {
                 throw new ResourceAccessError(409, 'Finish active Agent work before upgrading this owner')
               }
               const snapshot = await agent.getSession(execution.processId)
-              if (snapshot.owner_id !== ownerId || !bindings.some(({ binding }) => binding?.ownerId === ownerId &&
+              if (!snapshot.session_endpoint || snapshot.owner_id !== ownerId || !bindings.some(({ binding }) => binding?.ownerId === ownerId &&
                 binding.agentId === snapshot.agent_id && binding.durableSessionId === snapshot.durable_session_id)) {
                 throw new ResourceAccessError(409, 'An external Agent session must drain before this upgrade')
               }
-              processes.push(execution.processId)
+              processes.push({ id: execution.processId, endpoint: snapshot.session_endpoint })
             }
-            for (const processId of processes) await agent.cancel(processId)
+            for (const process of processes) await agent.cancel(process.id, process.endpoint)
             for (const session of sessions) {
               await this.terminateSession(session.sessionId, true)
               paused.add(session.sessionId)

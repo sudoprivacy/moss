@@ -20,7 +20,7 @@ import { shellPathEnvironment, toShellPath } from "../testing/shellPaths.js";
 const root = resolve(import.meta.dir, "../../..");
 
 function extractShellFunction(source: string, name: string): string {
-  const match = source.match(new RegExp(`(?:^|\\n)${name}\\(\\) \\{[\\s\\S]*?\\n\\}`));
+  const match = source.replace(/\r\n/g, "\n").match(new RegExp(`(?:^|\\n)${name}\\(\\) \\{[\\s\\S]*?\\n\\}`));
   expect(match, `${name} must remain extractable from deploy/legacy/install-host.sh`).not.toBeNull();
   return match![0].replace(/^\n/, "");
 }

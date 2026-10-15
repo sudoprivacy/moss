@@ -159,9 +159,14 @@ try {
     })
     clients.push(untrusted)
     await assert.rejects(untrusted.readdir('/agents', ''), /permission|Permission|PERMISSION|denied|-32003/)
-    await agent.cancel(session.sessionId)
+    await agent.cancel(session.sessionId, { channel_id: randomUUID() })
+    const retained = await agent.getSession(session.sessionId)
+    assert.equal(retained.durable_session_id, session.durableSessionId, 'a retired channel cannot terminate the live native session')
+    assert.equal(retained.session_endpoint?.channel_id, session.sessionEndpoint.channel_id)
+    await agent.cancel(session.sessionId, session.sessionEndpoint)
+    await assert.rejects(agent.getSession(session.sessionId), /unknown session_id/)
     proofs.push({ lane, ownerId, durableSessionId: session.durableSessionId, modelRequests: calls.length,
-      isOwnerKeyVerified: true, isForeignOwnerRefused: true })
+      isOwnerKeyVerified: true, isForeignOwnerRefused: true, isChannelCancellationVerified: true })
   }
   assert.notEqual(requests[0]!.key, requests.at(-1)!.key)
   writeFileSync(join(work, 'acceptance.json'), JSON.stringify({ binary, proofs, isScriptedModelResponse: true }, null, 2))

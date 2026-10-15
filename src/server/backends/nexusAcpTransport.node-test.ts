@@ -39,6 +39,9 @@ for (const spawnSpec of [undefined, {cmd: 'scode', args: ['acp'], env: {}, cwd: 
     assert(writes.every(write => write.path === endpoint.transcript))
     assert.equal(JSON.parse(writes[0].envelope.body).message.id, 0)
     assert.equal(calls.filter(call => call.method.includes('cancel')).length, 1)
+    assert.deepEqual(calls.find(call => call.method.includes('cancel')), {
+      method: 'managed_agent.cancel_v2', body: { session_id: 'pid', channel_id: endpoint.channel_id },
+    })
     assert.equal(closes, 1)
   })
 }
@@ -109,4 +112,63 @@ void test('cleanup preserves a cancellation authorization failure', async () => 
   const transport = new NexusAcpTransport(agent, { sessionId: 'pid', osPid: null, sessionEndpoint: endpoint })
   await assert.rejects(transport.close(), /permission denied/)
   assert.equal(closed, true)
+})
+
+for (const outcome of ['reaped', 'changed'] as const) {
+  void test(`an empty retained mailbox cannot keep a dead native attachment alive (${outcome})`, { timeout: 5000 }, async t => {
+    let now = 1000
+    t.mock.method(performance, 'now', () => now)
+    let reads = 0
+    let cancellations = 0
+    const agent = new ManagedAgentClient({
+      async call(method: string, body: string) {
+        if (method.includes('cancel')) {
+          assert.equal(method, 'managed_agent.cancel_v2')
+          assert.equal(JSON.parse(body).channel_id, endpoint.channel_id)
+          cancellations++
+          return JSON.stringify({ cancelled: false })
+        }
+        if (outcome === 'reaped') throw new Error(JSON.stringify({ code: -32603,
+          message: 'managed_agent.get_session_v1: invalid argument: unknown session_id "pid"' }))
+        return JSON.stringify({ session_id: 'pid', agent_id: 'worker', owner_id: 'owner', workspace_path: '/proc/pid/workspace/',
+          session_endpoint: { ...endpoint, channel_id: 'replacement' } })
+      },
+      async streamReadAt(_path: string, offset: string) {
+        reads++
+        now += 5001
+        return { data: Buffer.alloc(0), nextOffset: offset, timedOut: true, eof: false }
+      },
+      async streamWrite() {}, close() {},
+    } as unknown as NexusVfsClient, '')
+    let onFinished!: (error?: Error) => void
+    const finished = new Promise<Error | undefined>(resolve => { onFinished = resolve })
+    const transport = new NexusAcpTransport(agent, { sessionId: 'pid', osPid: null, sessionEndpoint: endpoint })
+    transport.start({ onMessage() {}, onStderr() {}, onClose: (_code, _signal, error) => onFinished(error) })
+    assert.match((await finished)!.message, outcome === 'reaped' ? /disappeared/ : /channel changed/)
+    await transport.close()
+    assert.equal(reads, 1)
+    assert.equal(cancellations, 1)
+  })
+}
+
+void test('a sustained daemon outage closes its attachment instead of retrying forever', { timeout: 5000 }, async t => {
+  let now = 1000
+  t.mock.method(performance, 'now', () => now)
+  let reads = 0
+  const unavailable = () => Object.assign(new Error('daemon unavailable'), { code: 14 })
+  const agent = new ManagedAgentClient({
+    async call(method: string) {
+      if (method.includes('cancel')) return '{}'
+      throw unavailable()
+    },
+    async streamReadAt() { reads++; now += 30001; throw unavailable() },
+    async streamWrite() {}, close() {},
+  } as unknown as NexusVfsClient, '')
+  let onFinished!: (error?: Error) => void
+  const finished = new Promise<Error | undefined>(resolve => { onFinished = resolve })
+  const transport = new NexusAcpTransport(agent, { sessionId: 'pid', osPid: null, sessionEndpoint: endpoint })
+  transport.start({ onMessage() {}, onStderr() {}, onClose: (_code, _signal, error) => onFinished(error) })
+  assert.match((await finished)!.message, /remained unavailable/)
+  await transport.close()
+  assert.equal(reads, 2)
 })

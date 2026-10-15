@@ -39,7 +39,7 @@
         "@opentelemetry/sdk-trace-base": "^2.6.1",
         "@opentelemetry/semantic-conventions": "^1.40.0",
         "@sudo/contracts": "github:sudoprivacy/sudostack#273fd4097cbc33c1c049c39bb1fb60cef2663e2b",
-        "@sudo/user-runtime": "https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.1.2/sudo-user-runtime-0.1.2.tgz",
+        "@sudo/user-runtime": "https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.1.3/sudo-user-runtime-0.1.3.tgz",
         "@xenova/transformers": "^2.17.2",
         "@xmldom/xmldom": "^0.9.9",
         "ajv": "^8.18.0",
@@ -518,7 +518,7 @@
 
     "@sudo/contracts": ["@sudo/contracts@github:sudoprivacy/sudostack#273fd40", { "dependencies": { "ajv": "8.20.0", "jsonc-parser": "3.3.1" } }, "sudoprivacy-sudostack-273fd40", "sha512-Z/cwfFmCElZxS0Dik5cH8ThmRAwireEYV1fNqzhSln+twc9RBVGBfZvCHSiUXQMKpAFIovsSm0F1ueF998foIg=="],
 
-    "@sudo/user-runtime": ["@sudo/user-runtime@https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.1.2/sudo-user-runtime-0.1.2.tgz", { "dependencies": { "@nexus-ai-fs/vfs-client": "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.7.1/nexus-ai-fs-vfs-client-0.7.1.tgz", "zod": "4.3.6" } }, "sha512-YDhUOu1t0iFod1bys0rWxfdtj2pv8RtO2TDOgPQ8ebbsThPMzPSGX16v7RXy7FJwkTOVS7Lp31A6Wk8ceohnFg=="],
+    "@sudo/user-runtime": ["@sudo/user-runtime@https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.1.3/sudo-user-runtime-0.1.3.tgz", { "dependencies": { "@nexus-ai-fs/vfs-client": "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.7.1/nexus-ai-fs-vfs-client-0.7.1.tgz", "zod": "4.3.6" } }, "sha512-pUiA+jsf36d4AMenouJa6uhJIFBamxbaJyIQUry3xvr7WiGFIpufbqGSSTIit3ONi6tiWRQQhzUMc78GxxctHA=="],
 
     "@types/esrecurse": ["@types/esrecurse@4.3.1", "", {}, "sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw=="],
 

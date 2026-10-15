@@ -355,7 +355,7 @@ describe('contracts Node runtime floor', () => {
 
   it('makes the installer reject Node 22.20.x and accept the supported range', () => {
     const installer = readFileSync(resolve(root, 'deploy/legacy/install-host.sh'), 'utf8')
-    const checker = installer.match(/SERVER_NODE_VERSION_CHECK='([\s\S]*?)'\nNODE_VERSION=/)?.[1]
+    const checker = installer.match(/SERVER_NODE_VERSION_CHECK='([\s\S]*?)'\r?\nNODE_VERSION=/)?.[1]
     expect(checker).toBeDefined()
 
     for (const [version, supported] of [

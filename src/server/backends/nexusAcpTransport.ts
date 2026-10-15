@@ -36,7 +36,7 @@ export class NexusAcpTransport implements AcpMessageTransport {
   private async closeResources(): Promise<void> {
     try { await this.mailbox?.close() }
     finally {
-      try { await this.agent.cancel(this.session.sessionId) }
+      try { await this.agent.cancel(this.session.sessionId, this.session.sessionEndpoint) }
       catch (error) { if (!isUnknownManagedSession(error, this.session.sessionId)) throw error }
       finally { this.agent.close() }
     }
