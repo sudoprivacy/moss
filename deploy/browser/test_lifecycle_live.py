@@ -198,6 +198,15 @@ async def test_real_browser_restart_preserves_login_and_human_stop(
                     status == 409
                     and rejected["error"] == "browser_control_held_by_user"
                 )
+            idle_reads = await asyncio.gather(
+                *(host({"kind": "state"}) for _ in range(8))
+            )
+            for code, reply in idle_reads:
+                assert code == 200, reply
+                current = reply["session"]
+                assert current["state"] == "human" and current["isController"]
+                assert current["capabilities"]["pageView"]
+                assert current["activeTargetId"] == human["session"]["activeTargetId"]
             stopping = asyncio.create_task(host({"kind": "stop", **epochs(human)}))
             try:
                 statuses = await asyncio.gather(

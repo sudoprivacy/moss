@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: sudoprivacy/ai-dev-browser
-          ref: 7f5743a03866245760eaf807bbf495eff68d3f11 # Published ai-dev-browser v0.57.4.
+          ref: 73aa079246e81f0469dc8bd05b30bf46e71ca5c2 # Published ai-dev-browser v0.57.5.
           path: adb-core
       - uses: actions/checkout@v4
         with:
