@@ -8,6 +8,9 @@ export class NexusAcpTransport implements AcpMessageTransport {
   private isClosing = false
   private closing?: Promise<void>
   private readiness?: Promise<boolean>
+  private events?: AcpTransportEvents
+  private closeError?: Error
+  private isCloseReported = false
   constructor(private readonly agent: ManagedAgentClient, readonly session: StartSessionResult) {}
   get connected(): boolean { return this.mailbox?.connected ?? false }
   /** Foreground readiness cannot be inferred from a retained mailbox stream. */
@@ -20,6 +23,7 @@ export class NexusAcpTransport implements AcpMessageTransport {
   }
   start(events: AcpTransportEvents): void {
     if (this.mailbox || this.isClosing) throw new Error('Session transport already started or closed')
+    this.events = events
     this.mailbox = this.agent.openSession(this.session.sessionEndpoint, {
       onMessage: message => {
         const params = message.params as {text?: unknown} | undefined
@@ -27,8 +31,10 @@ export class NexusAcpTransport implements AcpMessageTransport {
         else events.onMessage(message)
       },
       onClose: error => {
-        events.onClose(null, null, error)
-        if (!this.isClosing) void this.close().catch(failure => events.onStderr(`${String(failure)}\n`))
+        if (this.isCloseReported) return
+        if (this.isClosing) { this.closeError ??= error; return }
+        this.reportClose(error)
+        void this.close().catch(failure => events.onStderr(`${String(failure)}\n`))
       },
     }, this.session.sessionId)
     this.mailbox.start()
@@ -43,11 +49,24 @@ export class NexusAcpTransport implements AcpMessageTransport {
     return this.closing
   }
   private async closeResources(): Promise<void> {
+    const failures: Error[] = []
+    const recordFailure = (error: unknown) => failures.push(error instanceof Error ? error : new Error(String(error)))
     try { await this.mailbox?.close() }
-    finally {
-      try { await this.agent.cancel(this.session.sessionId, this.session.sessionEndpoint) }
-      catch (error) { if (!isUnknownManagedSession(error, this.session.sessionId)) throw error }
-      finally { this.agent.close() }
-    }
+    catch (error) { recordFailure(error) }
+    try { await this.agent.cancel(this.session.sessionId, this.session.sessionEndpoint) }
+    catch (error) { if (!isUnknownManagedSession(error, this.session.sessionId)) recordFailure(error) }
+    try { this.agent.close() }
+    catch (error) { recordFailure(error) }
+    if (this.closeError && !failures.includes(this.closeError)) failures.unshift(this.closeError)
+    const failure = failures.length > 1
+      ? new AggregateError(failures, failures.map(error => error.message).join('; '))
+      : failures[0]
+    this.reportClose(failure)
+    if (failure) throw failure
+  }
+  private reportClose(error?: Error): void {
+    if (this.isCloseReported) return
+    this.isCloseReported = true
+    this.events?.onClose(null, null, error)
   }
 }

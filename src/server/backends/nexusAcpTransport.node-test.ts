@@ -149,6 +149,50 @@ for (const outcome of ['live', 'reaped', 'changed', 'denied'] as const) {
   })
 }
 
+for (const isRefused of [false, true]) {
+  void test(`requested close waits for native cancellation acknowledgement (${isRefused ? 'refused' : 'accepted'})`, async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let onCancelling!: () => void
+    const cancelling = new Promise<void>(resolve => { onCancelling = resolve })
+    const failure = new Error('native cancellation permission denied')
+    let closedClients = 0
+    const agent = new ManagedAgentClient({
+      async call(method: string) {
+        assert.equal(method, 'managed_agent.cancel_v2')
+        onCancelling()
+        await gate
+        if (isRefused) throw failure
+        return JSON.stringify({ cancelled: true })
+      },
+      async streamReadAt(_path: string, offset: string) {
+        await new Promise(resolve => setTimeout(resolve, 5))
+        return { data: Buffer.alloc(0), nextOffset: offset, timedOut: true, eof: false }
+      },
+      async streamWrite() {}, close() { closedClients++ },
+    } as unknown as NexusVfsClient, '')
+    const exits: (Error | undefined)[] = []
+    const transport = new NexusAcpTransport(agent, { sessionId: 'pid', osPid: null, sessionEndpoint: endpoint })
+    transport.start({ onMessage() {}, onStderr() {}, onClose: (_code, _signal, error) => { exits.push(error) } })
+    const closing = transport.close()
+    const outcome = isRefused ? assert.rejects(closing, /native cancellation permission denied/) : closing
+    try {
+      await cancelling
+      assert.equal(exits.length, 0, 'Closing the mailbox alone must not report a successful execution stop')
+      assert.equal(transport.close(), closing)
+      release()
+      await outcome
+      assert.equal(exits.length, 1)
+      if (isRefused) assert.equal(exits[0], failure)
+      else assert.equal(exits[0], undefined)
+      assert.equal(closedClients, 1)
+    } finally {
+      release()
+      await closing.catch(() => {})
+    }
+  })
+}
+
 void test('cleanup preserves a cancellation authorization failure', async () => {
   let closed = false
   const agent = new ManagedAgentClient({ call: async () => { throw new Error('permission denied') },
