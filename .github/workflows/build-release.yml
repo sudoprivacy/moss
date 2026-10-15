@@ -23,7 +23,7 @@ jobs:
   # nothing in it has ever run against a pull request.
   test:
     name: server-tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16-alpine
@@ -120,7 +120,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -169,7 +169,7 @@ jobs:
 
   cohost-live:
     name: Moss durable session recovery (real daemon)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -195,9 +195,17 @@ jobs:
             ${{ runner.temp }}/moss-cohost-evidence/binary-version.txt
 
   build:
-    name: build-amd64
+    name: build-${{ matrix.arch }}
     needs: [test, runtime-live, cohost-live]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
     services:
       postgres:
         image: postgres:16-alpine
@@ -233,12 +241,16 @@ jobs:
           fi
           [[ "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]
           SCODE_VERSION="$(node -p "require('./src/server/nexus/runtime-versions.json').scode")"
-          SCODE_BUNDLE_SHA256="$(node -p "require('./src/server/nexus/runtime-versions.json')['scode-linux-x64-bundle-sha256']")"
+          case '${{ matrix.arch }}' in
+            amd64) SCODE_CHECKSUM_KEY=scode-linux-x64-bundle-sha256 ;;
+            arm64) SCODE_CHECKSUM_KEY=scode-linux-arm64-sha256 ;;
+          esac
+          SCODE_BUNDLE_SHA256="$(node -p "require('./src/server/nexus/runtime-versions.json')['$SCODE_CHECKSUM_KEY']")"
           [[ "$SCODE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$SCODE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$VERSION-amd64" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$VERSION-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
           echo "scode_version=$SCODE_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
@@ -256,13 +268,18 @@ jobs:
         run: |
           bash -n deploy/install.sh
           bash -n deploy/package-server.sh
+          bash -n deploy/package-control-images.sh
+          bash -n deploy/fetch-scode.sh
+          bash -n deploy/k3s/install-control.sh
+          python3 -m unittest discover -s deploy/k3s -p 'test_*.py'
+          python3 -m unittest discover -s deploy -p 'test_fetch_scode.py'
           bash -n scripts/publish-server-to-cos.sh
           bash -n scripts/e2e/run-server-release-smoke.sh
           node --check scripts/e2e/mock-openai-server.mjs
           node --check scripts/e2e/server-release-smoke.mjs
           node --check scripts/e2e/server-admin-browser-smoke.mjs
           node --check scripts/e2e/packaged-pg-ha-smoke.mjs
-          chmod +x deploy/install.sh deploy/package-server.sh scripts/publish-server-to-cos.sh \
+          chmod +x deploy/install.sh deploy/package-server.sh deploy/package-control-images.sh scripts/publish-server-to-cos.sh \
             scripts/e2e/mock-openai-server.mjs scripts/e2e/server-release-smoke.mjs \
             scripts/e2e/server-admin-browser-smoke.mjs \
             scripts/e2e/run-server-release-smoke.sh
@@ -277,22 +294,22 @@ jobs:
           download_dir="$(mktemp -d)"
           download_output="$(MOSS_RELEASE_TAG=server-vtest MOSS_DOWNLOAD_BASE=http://127.0.0.1:9 \
             deploy/install.sh --download "$download_dir" 2>&1 || true)"
-          grep -Fq '[moss-install] Downloading [1/4] install.sh' <<< "$download_output"
+          grep -Fq '[moss-install] Downloading install.sh' <<< "$download_output"
           ! grep -Fq 'run as root' <<< "$download_output"
           rm -rf "$download_dir"
           offline_output="$(sudo env SUDO_USER="$USER" MOSS_RELEASE_TAG=server-vtest MOSS_NON_INTERACTIVE=1 \
             bash -s -- --offline < deploy/install.sh 2>&1 || true)"
-          install_home="$(getent passwd "$USER" | awk -F: 'NR == 1 { print $6 }')"
-          grep -Fq "[moss-install] Service user: $USER" <<< "$offline_output"
-          grep -Fq "[moss-install] Install directory: $install_home/.moss/server" <<< "$offline_output"
           grep -Fq -- '--offline must be run from the unpacked install.sh file' <<< "$offline_output"
           ! grep -Fq 'unbound variable' <<< "$offline_output"
 
       - name: Build host server package
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: amd64
+          ARCH: ${{ matrix.arch }}
         run: deploy/package-server.sh "$VERSION" "$ARCH" dist
+
+      - name: Build separate Server and Nexus images
+        run: deploy/package-control-images.sh '${{ steps.release.outputs.version }}' '${{ matrix.arch }}' dist
 
       - name: Build and smoke-test session runtime image
         env:
@@ -310,27 +327,28 @@ jobs:
             secret_args+=(--secret "id=hf_token,env=HF_TOKEN")
           fi
           docker buildx build \
-            --platform linux/amd64 \
+            --platform linux/${{ matrix.arch }} \
             --load \
             "${secret_args[@]}" \
             -t "my-moss-runtime:$IMAGE_TAG" \
             -f deploy/runtime/Dockerfile .
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "my-moss-runtime:$IMAGE_TAG")" = "linux/${{ matrix.arch }}"
           docker run --rm "my-moss-runtime:$IMAGE_TAG" scode version 2>&1 | tee dist/scode-version.txt
           grep -Fq "${SCODE_VERSION#v}" dist/scode-version.txt
           docker run --rm "my-moss-runtime:$IMAGE_TAG" nexusd-cohost --version | tee dist/cohost-version.txt
           COHOST_DIGEST="sha256:$(docker run --rm "my-moss-runtime:$IMAGE_TAG" sha256sum /usr/local/bin/nexusd-cohost | awk '{print $1}')"
           IMAGE_DIGEST="$(docker image inspect "my-moss-runtime:$IMAGE_TAG" --format '{{.Id}}')"
-          docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz"
+          docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
           bun scripts/create-runtime-manifest.ts "${{ steps.release.outputs.release_tag }}" \
             "docker.io/library/my-moss-runtime:$IMAGE_TAG" "$IMAGE_DIGEST" \
-            "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz" \
-            dist/scode-version.txt dist/cohost-version.txt "$COHOST_DIGEST" dist/runtime-release.json
+            "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" \
+            dist/scode-version.txt dist/cohost-version.txt "$COHOST_DIGEST" "dist/runtime-release-${{ matrix.arch }}.json"
 
       - name: Assemble installer and checksums
         env:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: amd64
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           sed "s/@@MOSS_RELEASE_TAG@@/$RELEASE_TAG/g" deploy/install.sh > dist/install.sh
@@ -343,13 +361,16 @@ jobs:
           RUNTIME_ARCHIVE="moss-runtime-$VERSION-linux-$ARCH.tar.gz"
           (
             cd dist
-            sha256sum "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE" runtime-release.json > "SHA256SUMS-$ARCH"
+            sha256sum "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE" \
+              "moss-server-image-$VERSION-linux-$ARCH.tar.gz" \
+              "moss-nexus-image-$VERSION-linux-$ARCH.tar.gz" \
+              "moss-deploy-$VERSION-linux-$ARCH.tar.gz" bootstrap-nexus.mjs "runtime-release-$ARCH.json" > "SHA256SUMS-$ARCH"
           )
 
       - name: Validate release contents
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: amd64
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           tar -tzf "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" > dist/server-contents.txt
@@ -376,9 +397,8 @@ jobs:
           test -x dist/fetch-offline-deps.sh
           ! grep -Fq 'api.github.com/repos' dist/install.sh
           grep -Fq 'Offline files are ready' dist/install.sh
-          grep -Fq 'sudo systemctl start' dist/install.sh
-          grep -Fq 'sudo systemctl stop' dist/install.sh
-          grep -Fq 'sudo systemctl restart' dist/install.sh
+          grep -Fq 'moss-server-image-' dist/install.sh
+          grep -Fq 'moss-nexus-image-' dist/install.sh
           grep -Fq -- '--upgrade' dist/install.sh
           grep -Fq 'already installed; no downloads needed' dist/install.sh
           grep -Fq 'packages/$RELEASE_TAG' dist/install.sh
@@ -394,7 +414,7 @@ jobs:
       - name: Run packaged PostgreSQL dual-instance smoke
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: amd64
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           test -n "$MOSS_PG_TEST_URL"
@@ -420,10 +440,20 @@ jobs:
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk zip
           fc-cache -f
 
+      - name: Install native Chromium for browser acceptance
+        run: |
+          set -euo pipefail
+          BROWSER_TOOLS="$RUNNER_TEMP/moss-browser"
+          npm install --prefix "$BROWSER_TOOLS" --no-save --package-lock=false playwright@1.56.1
+          "$BROWSER_TOOLS/node_modules/.bin/playwright" install --with-deps chromium
+          BROWSER="$(node -e 'console.log(require(process.argv[1]).chromium.executablePath())' "$BROWSER_TOOLS/node_modules/playwright")"
+          "$BROWSER" --version
+          echo "MOSS_E2E_BROWSER=$BROWSER" >> "$GITHUB_ENV"
+
       - name: Run packaged Server E2E smoke
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          ARCH: amd64
+          ARCH: ${{ matrix.arch }}
           SCODE_VERSION: ${{ steps.release.outputs.scode_version }}
         run: |
           scripts/e2e/run-server-release-smoke.sh \
@@ -434,9 +464,20 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: moss-server-e2e-${{ steps.release.outputs.version }}-amd64
+          name: moss-server-e2e-${{ steps.release.outputs.version }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/moss-server-e2e/
           retention-days: 14
+          if-no-files-found: warn
+
+      - name: Run Kubernetes image installation E2E
+        run: bash scripts/e2e/run-k3s-release-smoke.sh '${{ steps.release.outputs.version }}' dist
+
+      - name: Upload Kubernetes installation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: moss-k3s-installation-evidence-${{ matrix.arch }}
+          path: dist/k3s-evidence/
           if-no-files-found: warn
 
       - name: Publish Server E2E evidence summary
@@ -466,26 +507,40 @@ jobs:
       - name: Upload architecture assets
         uses: actions/upload-artifact@v5
         with:
-          name: moss-server-release-amd64
+          name: moss-server-release-${{ matrix.arch }}
           path: |
-            dist/moss-server-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
-            dist/moss-runtime-${{ steps.release.outputs.version }}-linux-amd64.tar.gz
-            dist/runtime-release.json
-            dist/SHA256SUMS-amd64
+            dist/moss-server-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/moss-server-image-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/moss-nexus-image-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/moss-deploy-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+            dist/bootstrap-nexus.mjs
+            dist/runtime-release-${{ matrix.arch }}.json
+            dist/SHA256SUMS-${{ matrix.arch }}
             dist/install.sh
             dist/uninstall-k3s.sh
             dist/fetch-offline-deps.sh
-            dist/moss-server-e2e-report-${{ steps.release.outputs.version }}-amd64.zip
+            dist/moss-server-e2e-report-${{ steps.release.outputs.version }}-${{ matrix.arch }}.zip
           retention-days: 30
 
   release:
     name: publish-server-release
     if: startsWith(github.ref, 'refs/tags/server-v')
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout moss
         uses: actions/checkout@v5
+
+      - name: Select release channel
+        id: channel
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_NAME#server-v}" == *-* ]]; then
+            echo 'prerelease=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'prerelease=false' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Download build assets
         uses: actions/download-artifact@v5
@@ -497,13 +552,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir release-assets
-          find artifacts -type f -name '*.tar.gz' -exec cp {} release-assets/ \;
+          for shared in install.sh bootstrap-nexus.mjs uninstall-k3s.sh fetch-offline-deps.sh; do
+            cmp "artifacts/moss-server-release-amd64/$shared" "artifacts/moss-server-release-arm64/$shared"
+          done
+          find artifacts -type f \( -name '*.tar.gz' -o -name 'runtime-release-*.json' \) -exec cp {} release-assets/ \;
+          cp release-assets/runtime-release-amd64.json release-assets/runtime-release.json
+          (cd release-assets && sha256sum runtime-release.json) > release-assets/SHA256SUMS-alias
           find artifacts -type f -name 'moss-server-e2e-report-*.zip' -exec cp {} release-assets/ \;
-          find artifacts -type f -name 'SHA256SUMS-*' -exec cat {} \; | sort -k2 > release-assets/SHA256SUMS
+          find artifacts -type f -name 'SHA256SUMS-*' -exec cat {} \; | sort -k2 | uniq > release-assets/SHA256SUMS
+          cat release-assets/SHA256SUMS-alias >> release-assets/SHA256SUMS
+          rm release-assets/SHA256SUMS-alias
           cp "$(find artifacts -type f -name install.sh -print -quit)" release-assets/install.sh
+          cp "$(find artifacts -type f -name bootstrap-nexus.mjs -print -quit)" release-assets/bootstrap-nexus.mjs
           cp "$(find artifacts -type f -name uninstall-k3s.sh -print -quit)" release-assets/uninstall-k3s.sh
           cp "$(find artifacts -type f -name fetch-offline-deps.sh -print -quit)" release-assets/fetch-offline-deps.sh
-          cp "$(find artifacts -type f -name runtime-release.json -print -quit)" release-assets/runtime-release.json
           chmod +x release-assets/install.sh \
             release-assets/uninstall-k3s.sh release-assets/fetch-offline-deps.sh
           # SHA256SUMS covers only the tarballs (scripts stay out, like install.sh).
@@ -531,17 +593,26 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           generate_release_notes: true
-          make_latest: true
+          body: |
+            Native Linux amd64 and arm64 host packages, Kubernetes Server/Nexus images, session Runtime images, deployment tools, and per-architecture runtime manifests are verified by the release CI.
+
+            The one-click installer deploys Server and Nexus on Kubernetes. Existing external Nexus and ZoneId-bound installations require a separate migration and are refused before services are stopped.
+
+            Prereleases publish complete packages to the fixed COS release directory and keep the current stable `latest` entrypoints unchanged.
+          prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.channel.outputs.prerelease != 'true' }}
           files: |
             release-assets/*.tar.gz
             release-assets/install.sh
+            release-assets/bootstrap-nexus.mjs
             release-assets/uninstall-k3s.sh
             release-assets/fetch-offline-deps.sh
             release-assets/SHA256SUMS
-            release-assets/runtime-release.json
+            release-assets/runtime-release*.json
             release-assets/moss-server-e2e-report-*.zip
 
       - name: Publish Tencent COS Latest entrypoint
+        if: steps.channel.outputs.prerelease != 'true'
         env:
           COS_BUCKET: sudowork-release-1309794936
           COS_ROOT_PATH: moss/server

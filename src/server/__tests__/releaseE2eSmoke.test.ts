@@ -21,7 +21,7 @@ const root = resolve(import.meta.dir, "../../..");
 
 function extractShellFunction(source: string, name: string): string {
   const match = source.match(new RegExp(`(?:^|\\n)${name}\\(\\) \\{[\\s\\S]*?\\n\\}`));
-  expect(match, `${name} must remain extractable from deploy/install.sh`).not.toBeNull();
+  expect(match, `${name} must remain extractable from deploy/legacy/install-host.sh`).not.toBeNull();
   return match![0].replace(/^\n/, "");
 }
 
@@ -166,21 +166,22 @@ function expectRollbackResult(result: RollbackResult, scenario: RollbackScenario
 }
 
 describe("packaged Server E2E smoke", () => {
-  for (const scenario of ["shared release", "legacy release", "missing cohost manifest", "corrupt manifest"] as const) {
-    it("downloads offline assets safely for " + scenario, async () => {
+  for (const arch of ["amd64", "arm64"] as const) for (const scenario of ["shared release", "legacy release", "missing cohost manifest", "corrupt manifest"] as const) {
+    it("downloads " + arch + " offline assets safely for " + scenario, async () => {
       const tempRoot = mkdtempSync(resolve(tmpdir(), "moss-offline-download-"));
       const downloadDir = resolve(tempRoot, "download");
+      const manifestName = arch === "amd64" ? "runtime-release.json" : "runtime-release-arm64.json";
       const isManifestIncluded = scenario === "shared release" || scenario === "corrupt manifest";
       const assets = new Map<string, Buffer>([
         ["install.sh", Buffer.from('#!/usr/bin/env bash\nRELEASE_TAG="${MOSS_RELEASE_TAG:-server-vtest}"\n')],
-        ["moss-server-test-linux-amd64.tar.gz", Buffer.from("host archive fixture\n")],
-        ["moss-runtime-test-linux-amd64.tar.gz", Buffer.from("runtime archive fixture\n")],
+        [`moss-server-test-linux-${arch}.tar.gz`, Buffer.from("host archive fixture\n")],
+        [`moss-runtime-test-linux-${arch}.tar.gz`, Buffer.from("runtime archive fixture\n")],
       ]);
-      if (isManifestIncluded) assets.set("runtime-release.json", Buffer.from('{"schemaVersion":1}\n'));
+      if (isManifestIncluded) assets.set(manifestName, Buffer.from('{"schemaVersion":1}\n'));
       const checksums = [...assets].filter(([name]) => name !== "install.sh")
         .map(([name, data]) => createHash("sha256").update(data).digest("hex") + "  " + name + "\n").join("");
       assets.set("SHA256SUMS", Buffer.from(checksums));
-      if (scenario === "corrupt manifest") assets.set("runtime-release.json", Buffer.from("tampered manifest\n"));
+      if (scenario === "corrupt manifest") assets.set(manifestName, Buffer.from("tampered manifest\n"));
       const server = createServer((request, response) => {
         const data = assets.get(request.url?.slice(1) ?? "");
         response.writeHead(data ? 200 : 404);
@@ -190,10 +191,11 @@ describe("packaged Server E2E smoke", () => {
       try {
         const address = server.address();
         if (!address || typeof address === "string") throw new Error("Missing download fixture address");
-        const child = spawn("bash", [toShellPath(resolve(root, "deploy/install.sh")), "--download", toShellPath(downloadDir)], {
+        const child = spawn("bash", [toShellPath(resolve(root, "deploy/legacy/install-host.sh")), "--download", toShellPath(downloadDir)], {
           env: {
             ...process.env,
             MOSS_RELEASE_TAG: "server-vtest",
+            MOSS_ARCH: arch,
             MOSS_DOWNLOAD_BASE: "http://127.0.0.1:" + address.port,
             MOSS_RUNTIME: scenario === "missing cohost manifest" ? "cohost" : "",
           },
@@ -209,15 +211,15 @@ describe("packaged Server E2E smoke", () => {
         if (scenario === "corrupt manifest" || scenario === "missing cohost manifest") {
           expect(status).not.toBe(0);
           expect(output).not.toContain("Offline files are ready");
-          expect(output).toContain("runtime-release.json");
+          expect(output).toContain("runtime-release");
         } else {
           expect(status).toBe(0);
           expect(output).toContain("Offline files are ready");
-          expect(Buffer.compare(readFileSync(resolve(downloadDir, "moss-server-test-linux-amd64.tar.gz")), assets.get("moss-server-test-linux-amd64.tar.gz")!)).toBe(0);
-          expect(existsSync(resolve(downloadDir, "runtime-release.json"))).toBe(isManifestIncluded);
+          expect(Buffer.compare(readFileSync(resolve(downloadDir, `moss-server-test-linux-${arch}.tar.gz`)), assets.get(`moss-server-test-linux-${arch}.tar.gz`)!)).toBe(0);
+          expect(existsSync(resolve(downloadDir, manifestName))).toBe(isManifestIncluded);
           if (isManifestIncluded) {
-            expect(Buffer.compare(readFileSync(resolve(downloadDir, "runtime-release.json")), assets.get("runtime-release.json")!)).toBe(0);
-            expect(output).toContain("runtime-release.json: OK");
+            expect(Buffer.compare(readFileSync(resolve(downloadDir, manifestName)), assets.get(manifestName)!)).toBe(0);
+            expect(output).toContain(manifestName + ": OK");
           }
         }
       } finally {
@@ -228,7 +230,7 @@ describe("packaged Server E2E smoke", () => {
   }
 
   it("restores failed upgrades without touching Nexus state", () => {
-    const installer = readFileSync(resolve(root, "deploy/install.sh"), "utf8");
+    const installer = readFileSync(resolve(root, "deploy/legacy/install-host.sh"), "utf8");
     const restoreInstallConfig = extractShellFunction(installer, "restore_install_config");
     const rollbackOnError = extractShellFunction(installer, "rollback_on_error");
 
@@ -246,7 +248,7 @@ describe("packaged Server E2E smoke", () => {
   }, process.platform === "win32" ? 60_000 : 5_000);
 
   it("detects rollback behavior removed from the test-local function copy", () => {
-    const installer = readFileSync(resolve(root, "deploy/install.sh"), "utf8");
+    const installer = readFileSync(resolve(root, "deploy/legacy/install-host.sh"), "utf8");
     const restoreInstallConfig = extractShellFunction(installer, "restore_install_config");
     const rollbackOnError = extractShellFunction(installer, "rollback_on_error");
     const scenario: RollbackScenario = {

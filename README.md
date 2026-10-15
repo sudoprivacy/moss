@@ -1,140 +1,86 @@
 # Moss Server
 
-Moss Server 是多用户 AI coding agent 服务。Server 在 Linux 宿主机运行，用户会话
-运行在 Docker Runtime 中。
+Moss Server 是多用户 AI coding agent 服务。完整客户套件包含 Moss Server、Nexus、Sudocode 和 SudoWork，
+由配套 `sudostack` 仓库统一装配，使用 Caddy 提供 HTTPS 入口。
+Moss Server 与 Nexus 使用独立镜像、独立 Kubernetes Deployment；Sudocode 会话按需运行在 gVisor Pod 中。
+业务服务由 k3s 管理，宿主机 systemd 只管理 k3s 基础设施。
 
-## 环境要求
+## 完整套件一键部署
 
-- Linux x86_64/amd64，glibc 2.39+（推荐 Ubuntu 24.04+）
-- systemd、Docker 20.10+
-- root/sudo 权限
-- `curl`、`tar`、`gzip`、`sha256sum`
+**单节点 k3s 一键部署已在 `10.0.1.180` 验证可用。** 当前交付版本为
+`atlas-mvp-0.1.0-k3s.20261012`，完整包约 3.2 GiB。
+这是内部候选包；公网 `moss/server/latest/install.sh` 尚未更新，不能用它安装本套件。
 
-安装包已包含 Node.js 22、`moss-server.mjs`、host 模式 `scode`、运行依赖和 Nexus；
-Runtime 镜像也包含 Docker 模式 `scode`，无需安装 Node.js 或 Docker Compose。
+目标机要求 Linux amd64、root/sudo、Python 3.9+、curl、tar、gzip、flock、openssl 和 sha256sum，
+预留 80、443、8443 端口。当前已验证 Ubuntu 22.04.4。
+完整包包含镜像、k3s、gVisor、Helm 和安装工具，客户机无需安装 Docker 或 Node.js。
 
-## 在线安装
-
-国内（腾讯云 COS）：
-
-```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh | sudo bash
-```
-
-国外（GitHub Release）：
+内部环境可从验收机取得安装包与校验文件，再一起交付到客户服务器：
 
 ```bash
-BASE=https://github.com/sudoprivacy/moss/releases/latest/download
-curl -fL --progress-bar "$BASE/install.sh" | sudo env MOSS_DOWNLOAD_BASE="$BASE" bash
+scp root@10.0.1.180:/root/atlas-mvp-0.1.0-k3s.20261012-amd64.tar .
+scp root@10.0.1.180:/root/atlas-mvp-0.1.0-k3s.20261012-amd64.tar.sha256 .
 ```
 
-安装器会提示安装目录、服务器地址和管理员账号。默认安装到当前用户的
-`~/.moss/server`，默认端口 `43127`。安装完成后访问：
+在客户服务器上校验、解包，然后执行安装。将 `ATLAS_HOST` 改为客户服务器的 IPv4 地址或已解析到该机的域名：
+
+```bash
+sha256sum -c atlas-mvp-0.1.0-k3s.20261012-amd64.tar.sha256
+mkdir -p atlas-k3s
+tar -xf atlas-mvp-0.1.0-k3s.20261012-amd64.tar -C atlas-k3s
+cd atlas-k3s
+ATLAS_HOST=10.0.1.180
+sudo bash install-atlas.sh --host "$ATLAS_HOST" --root /data/atlas --manage-k3s
+```
+
+确认校验结果为 `OK` 后再解包。包的 SHA256 为：
 
 ```text
-http://服务器IP:43127/admin/
+d771e95c683b0107424051ac95447a66b8298ab86421b514bc4f98ebf9b8fabf
 ```
 
-## 离线安装
+`--manage-k3s` 允许安装器安装或重启 k3s，并关闭内置 Traefik，让 Caddy 使用上述端口。
+必须使用完整安装包；仅复制源码中的 `install-atlas.sh` 无法安装。
 
-在有网络的机器准备离线目录：
+## 访问与首次配置
+
+| 用途 | 地址或位置（将 `<host>` 替换为安装时的地址） |
+| --- | --- |
+| SudoWork | `https://<host>`，登录页选择“密码登录” |
+| Moss 管理后台 | `https://<host>:8443/admin/` |
+| 初始管理员账号和随机密码 | 目标机 `/data/atlas/admin-credentials.txt`，仅 root 可读 |
+| 默认测试 CA | 目标机 `/data/atlas/tls/ca.crt`，导入访问端的受信任证书库 |
+
+Caddy 统一承接入口；两套应用都使用 `/api/v1`，因此分别使用 443 和 8443。
+默认生成 90 天测试证书。使用客户证书时，在首次安装命令中同时增加
+`--tls-cert /secure/fullchain.pem --tls-key /secure/key.pem --tls-ca /secure/ca-chain.pem`。
+
+安装器自动验证 HTTPS、WebUI 登录、WebSocket、gVisor 会话和历史记录，验收使用临时模拟模型。
+**真实模型任务需要管理员在 Moss 系统设置中配置客户的 Router 地址和 API Key。**
+
+## 日常管理
 
 ```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
-  | bash -s -- --download ./moss-offline
+sudo /data/atlas/status.sh
+sudo /data/atlas/verify.sh
+sudo /data/atlas/start.sh
+sudo /data/atlas/stop.sh
+sudo /data/atlas/restart.sh
+sudo k3s kubectl -n atlas-system logs deployment/moss-server
+sudo k3s kubectl -n atlas-system logs deployment/nexus-broker
 ```
 
-将生成的 `moss-offline` 目录传到服务器后执行：
+业务数据保存在 PVC 中。相同安装包、相同参数重复执行只验证现有安装，不重启 Pod。
+当前候选拒绝不同版本直接覆盖升级。加密冷备份和本机恢复使用 `/data/atlas/backup.sh`、
+`/data/atlas/restore.sh`，密钥准备和完整命令见配套 `sudostack` 仓库的 `docs/deployment/private-k3s.md`。
 
-```bash
-cd moss-offline
-sudo ./install.sh --offline
-```
+本次已验证登录、模拟模型对话、重启后续聊、加密备份恢复和重复安装。
+Ubuntu 24.04 空机验收、正式制品签名、跨版本升级失败回滚和跨集群恢复尚未完成；
+验收记录见 `sudostack/docs/deployment/10.0.1.180-acceptance.md`。
 
-目录内包含安装脚本、Server 包、Docker Runtime 镜像包和校验文件。离线安装过程
-不访问网络。
+## Moss 控制面单独部署与开发
 
-## k3s（gvisor 隔离运行时）安装
-
-默认运行时是 Docker。若希望每个会话运行在 gvisor 沙箱 Pod 中，先在**计算节点**
-上一键部署 k3s + gvisor + moss-runtime 镜像（与 Server 同一发布版本）：
-
-```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
-  | sudo bash -s -- --role compute
-```
-
-脚本会提示节点 IP、命名空间等必要参数（`--non-interactive` 全部取默认值），完成后
-在 moss server.json 旁写出 `moss-k3s-kubeconfig.yaml`，并打印如何让 moss-server 切到
-k8s 的说明。
-
-离线安装：在有网络的机器运行 `fetch-offline-deps.sh` 生成 `./offline`，连同 `deploy/k3s`
-目录拷到节点后执行 `sudo OFFLINE_MODE=on ./install.sh --role compute`。
-
-部署完成后让 moss-server 使用 k8s，二选一：
-
-- **全新安装**：运行 Server 安装脚本，在“Session runtime”提示处选择 `k8s`（自动写入
-  `k8s` 配置块）。
-- **已安装**：编辑 `~/.moss/server/server.json`，将 `runtimeDefaults.type` 改为 `"k8s"`，
-  重启 moss-server。
-
-### 扩容：多计算节点
-
-单节点不够时，把额外机器作为 **agent** 加入种子节点。种子节点装完会打印含 node-token 的
-加入命令，在每台扩容机执行即可：
-
-```bash
-curl -fL --progress-bar https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/latest/install.sh \
-  | sudo bash -s -- --join https://<种子IP>:6443 --token <node-token>
-```
-
-每台 agent 各自装 gvisor 并把 moss-runtime 镜像 import 进本机 containerd（`imagePullPolicy`
-默认 `IfNotPresent`，Pod 可能被调度到任意节点，故每节点都要有镜像）。节点间需放行种子
-`6443/tcp` 及 flannel `8472/udp`、kubelet `10250/tcp`。Server 侧无需改动，继续用种子的
-kubeconfig。详见 `deploy/README.md`。
-
-### 接入已有的 k8s 集群
-
-若客户已有 k8s 集群，无需运行 `install.sh --role compute`，只需在 `server.json` 的 `k8s` 块里
-指向他们的 kubeconfig。moss-server 通过本机 `kubectl` + kubeconfig 操作集群，前提是
-集群满足：
-
-- `runtimeClassName`：默认 `gvisor`。集群若无 gvisor RuntimeClass，设为 `""`（留空）即
-  省略该字段，Pod 使用集群默认运行时。
-- 镜像：`image` 需在集群各节点可拉取；私有仓库用 `imagePullSecrets`（预先创建的
-  dockerconfigjson Secret 名），`imagePullPolicy` 默认 `IfNotPresent`。
-- 命名空间：不存在时 moss 会自动创建（需 kubeconfig 具备相应权限）。
-
-## 服务管理
-
-```bash
-sudo systemctl status moss-server
-sudo systemctl start moss-server
-sudo systemctl restart moss-server
-sudo systemctl stop moss-server
-sudo journalctl -u moss-server -f
-curl http://127.0.0.1:43127/healthz
-```
-
-## 升级与卸载
-
-```bash
-# 从固定 COS 地址升级到最新版
-sudo ~/.moss/server/install.sh --upgrade
-
-# 卸载程序，保留配置和数据
-sudo ~/.moss/server/uninstall.sh
-
-# 删除程序、配置和数据
-sudo ~/.moss/server/uninstall.sh --purge
-```
-
-升级不需要重新配置，只替换 Server 程序和 Runtime 镜像；管理员、API 配置和运行
-数据保持不变，启动失败会自动回滚。安装目录内的升级脚本只获取小型最新版脚本确认
-版本，同版本不下载 Server 包和 Runtime 镜像，也不重启服务。
-
-在线安装的原始包保留在 `~/.moss/server/packages/server-vX.Y.Z/`。重复执行同版本
-的外部 `install.sh`（包括 `--upgrade`）会直接退出，不联网、不重启服务。
-
-更多参数和目录说明见 [部署文档](deploy/README.md)，接口见
-[Moss Server API](src/server/API.md)。
+本仓库 `deploy/install.sh` 用于仅部署 Moss/Nexus 的场景，二者在同一 Pod 的独立容器中运行，
+与上述完整套件的独立 Deployment 拓扑不同。使用该入口需要配套版本的发布资产。
+镜像构建、持久化、旧进程迁移和发布说明见 [Moss 控制面部署文档](deploy/README.md)，
+接口见 [Moss Server API](src/server/API.md)。

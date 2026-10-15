@@ -49,12 +49,18 @@ EXPECTED_FILES=(
   uninstall-k3s.sh
   fetch-offline-deps.sh
   SHA256SUMS
-  "moss-server-$VERSION-linux-amd64.tar.gz"
-  "moss-runtime-$VERSION-linux-amd64.tar.gz"
+  bootstrap-nexus.mjs
 )
 if [ -f "$ASSETS_DIR/runtime-release.json" ]; then
   EXPECTED_FILES+=(runtime-release.json)
 fi
+
+for arch in amd64 arm64; do
+  EXPECTED_FILES+=("runtime-release-$arch.json")
+  for component in server runtime server-image nexus-image deploy; do
+    EXPECTED_FILES+=("moss-$component-$VERSION-linux-$arch.tar.gz")
+  done
+done
 
 # Scripts also mirrored to the fixed latest/ entrypoint (like install.sh). The
 # k3s companions ride along so an offline operator can grab everything from one

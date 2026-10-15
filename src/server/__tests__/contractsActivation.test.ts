@@ -225,7 +225,7 @@ describe('@sudo/contracts evaluation pin', () => {
 describe('embedded Nexus ZoneId deployment surfaces', () => {
   it('exposes an opt-in value only on single-instance embedded deployments', () => {
     const compose = readFileSync(resolve(root, 'deploy/docker-compose.yml'), 'utf8')
-    const installer = readFileSync(resolve(root, 'deploy/install.sh'), 'utf8')
+    const installer = readFileSync(resolve(root, 'deploy/legacy/install-host.sh'), 'utf8')
     const deploymentDocs = readFileSync(resolve(root, 'deploy/README.md'), 'utf8')
 
     expect(compose).toContain('- MOSS_NEXUS_ZONE_ID')
@@ -354,7 +354,7 @@ describe('contracts Node runtime floor', () => {
   })
 
   it('makes the installer reject Node 22.20.x and accept the supported range', () => {
-    const installer = readFileSync(resolve(root, 'deploy/install.sh'), 'utf8')
+    const installer = readFileSync(resolve(root, 'deploy/legacy/install-host.sh'), 'utf8')
     const checker = installer.match(/SERVER_NODE_VERSION_CHECK='([\s\S]*?)'\nNODE_VERSION=/)?.[1]
     expect(checker).toBeDefined()
 
