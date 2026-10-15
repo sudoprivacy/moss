@@ -221,36 +221,38 @@ func (c *Client) InspectQuota(appID, sender string, w CapWindow, now time.Time) 
 		return nil, errors.New("sender is required to check the daily cap")
 	}
 	from := capWindowStart(now, w)
-	raw, err := c.ListGroupMsgs(appID, from.Unix(), now.Unix(), "", "", 100)
+	msgs, err := c.listGroupMsgsAll(appID, from.Unix(), now.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("list recent broadcasts: %w", err)
 	}
-	var listResp struct {
-		GroupMsgList []groupMsgListEntry `json:"group_msg_list"`
-	}
-	if err := json.Unmarshal(raw, &listResp); err != nil {
-		return nil, fmt.Errorf("decode broadcast list: %w", err)
-	}
 
 	state := &QuotaState{Delivered: map[string]time.Time{}, Pending: map[string]string{}}
-	for _, m := range listResp.GroupMsgList {
+	for _, m := range msgs {
 		if m.MsgID == "" {
 			continue
 		}
 
+		// One send-result read per task serves both checks below. It used to be
+		// read twice (once inside targetsOf, once here), and each read is a
+		// provider call; with a day's worth of tasks that doubling is what
+		// tipped busy send loops into 45009.
+		sum, sumErr := c.GroupMessageSummary(appID, m.MsgID, sender)
+
 		// Is anyone still sitting on this task? get_groupmsg_task needs no
 		// userid, so this sees every assignee regardless of `sender`.
 		unconfirmed, terr := c.hasUnconfirmedTask(appID, m.MsgID)
-		if terr == nil && unconfirmed {
-			for _, id := range c.targetsOf(appID, m.MsgID, sender) {
-				if _, already := state.Pending[id]; !already {
-					state.Pending[id] = m.MsgID
+		if terr == nil && unconfirmed && sumErr == nil {
+			for _, e := range sum.Entries {
+				if e.ChatID == "" {
+					continue
+				}
+				if _, already := state.Pending[e.ChatID]; !already {
+					state.Pending[e.ChatID] = m.MsgID
 				}
 			}
 		}
 
-		sum, err := c.GroupMessageSummary(appID, m.MsgID, sender)
-		if err != nil {
+		if sumErr != nil {
 			// Not visible to this sender, or cancelled (41093). Either way the
 			// delivered set gains nothing; skip rather than fail the check.
 			continue
@@ -274,6 +276,38 @@ func (c *Client) InspectQuota(appID, sender string, w CapWindow, now time.Time) 
 	return state, nil
 }
 
+// maxBroadcastPages bounds the listing walk: 100 per page is far beyond a
+// day's broadcasts, and a cursor that never ends must not spin forever.
+const maxBroadcastPages = 20
+
+// listGroupMsgsAll reads every 群发 record in the window, following the cursor.
+// Reading only the first page would miss tasks past the 100th — and with them
+// any quota those tasks already spent, which is exactly what the guard exists
+// to see.
+func (c *Client) listGroupMsgsAll(appID string, start, end int64) ([]groupMsgListEntry, error) {
+	var all []groupMsgListEntry
+	cursor := ""
+	for page := 0; page < maxBroadcastPages; page++ {
+		raw, err := c.ListGroupMsgs(appID, start, end, "", cursor, 100)
+		if err != nil {
+			return nil, err
+		}
+		var resp struct {
+			GroupMsgList []groupMsgListEntry `json:"group_msg_list"`
+			NextCursor   string              `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return nil, fmt.Errorf("decode broadcast list: %w", err)
+		}
+		all = append(all, resp.GroupMsgList...)
+		if resp.NextCursor == "" || resp.NextCursor == cursor {
+			return all, nil
+		}
+		cursor = resp.NextCursor
+	}
+	return nil, fmt.Errorf("broadcast list did not end within %d pages", maxBroadcastPages)
+}
+
 // hasUnconfirmedTask reports whether any assignee still has this task at
 // status 0 (未发送).
 func (c *Client) hasUnconfirmedTask(appID, msgID string) (bool, error) {
@@ -295,23 +329,6 @@ func (c *Client) hasUnconfirmedTask(appID, msgID string) (bool, error) {
 		}
 	}
 	return false, nil
-}
-
-// targetsOf lists the chat ids a task addresses. The send result enumerates
-// every target regardless of its status, which is what we need for a task that
-// has not been confirmed yet.
-func (c *Client) targetsOf(appID, msgID, sender string) []string {
-	sum, err := c.GroupMessageSummary(appID, msgID, sender)
-	if err != nil {
-		return nil
-	}
-	out := make([]string, 0, len(sum.Entries))
-	for _, e := range sum.Entries {
-		if e.ChatID != "" {
-			out = append(out, e.ChatID)
-		}
-	}
-	return out
 }
 
 // CheckDailyCap returns a *DailyCapViolation when any target already used its

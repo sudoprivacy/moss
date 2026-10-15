@@ -68,7 +68,7 @@ Usage:
   corpapp names --app <name> --rooms <roomid,...>
   corpapp groups --app <name> [--owner <userid,...>] [--cursor <c>] [--limit <n>]
   corpapp group --app <name> --chat-id <id> [--no-name]
-  corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...]
+  corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...] [--json]
                      [--cap-window calendar|rolling24h] [--skip-capped] [--no-cap-check]
   corpapp group-msgs --app <name> --start <ts> --end <ts> [--creator <userid>]
   corpapp group-msg-result --app <name> --msgid <id> --userid <userid> [--cursor <c>]

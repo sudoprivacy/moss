@@ -732,11 +732,12 @@ func runSendGroup(args []string, c *Client, opts RunOptions) error {
 		"daily-cap boundary: calendar (resets at provider midnight) | rolling24h (stricter)")
 	noCapCheck := fs.Bool("no-cap-check", false, "skip the daily-cap pre-check (the provider will still drop over-quota targets)")
 	skipCapped := fs.Bool("skip-capped", false, "drop targets blocked by the cap (delivered or awaiting confirmation), send to the rest")
+	asJSON := fs.Bool("json", false, "emit {ok,msgId,failList} as JSON — scripts must read msgId from this, not scrape the text")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *app == "" || *sender == "" || len(chatIDs) == 0 {
-		return errors.New("usage: corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...]")
+		return errors.New("usage: corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...] [--json]")
 	}
 	if *text == "" && len(files) == 0 && len(mediaIDs) == 0 {
 		return errors.New("send-group: --text, --file or --media-id is required")
@@ -807,6 +808,9 @@ func runSendGroup(args []string, c *Client, opts RunOptions) error {
 	resp, err := c.SendGroupMessage(resolved.ID, targets, *sender, *text, attachments)
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		return FormatAnyJSON(opts.Stdout, resp)
 	}
 	FormatGroupMsg(opts.Stdout, resp)
 	return nil

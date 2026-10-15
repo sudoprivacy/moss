@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -321,5 +322,35 @@ func TestFormatGroupSummaryQuietWhenAllDelivered(t *testing.T) {
 	})
 	if strings.Contains(buf.String(), "WARNING") {
 		t.Errorf("no warning expected when all delivered:\n%s", buf.String())
+	}
+}
+
+// Scripts must be able to read the msgid without scraping prose. Storing the
+// prose line instead made every entry unreconcilable.
+func TestRunSendGroupJSONEmitsBareMsgID(t *testing.T) {
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/resolve"):
+			_, _ = w.Write([]byte(`{"id":"app1","name":"x","type":"wecomapp"}`))
+		case strings.HasSuffix(r.URL.Path, "/group-messages") && r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"ok":true,"msgId":"msg_abc"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"send-group", "--app", "x", "--sender", "u1", "--chat-id", "wr_a", "--text", "hi", "--no-cap-check", "--json"},
+		c, RunOptions{Stdout: &out, Stderr: &errOut})
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	var got GroupMsgResp
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, out.String())
+	}
+	if got.MsgID != "msg_abc" || !got.OK {
+		t.Errorf("got %+v", got)
 	}
 }

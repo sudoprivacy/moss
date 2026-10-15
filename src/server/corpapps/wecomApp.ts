@@ -112,7 +112,9 @@ export class WeComAppConnector implements CorpAppConnector {
 
   async testConnection(): Promise<TestConnectionResult> {
     try {
-      const token = await this.requireClient().getAccessToken()
+      // Bypass the shared cache: a cached token only proves the secret worked
+      // when it was issued, and this is the check run right after editing it.
+      const token = await this.requireClient().getAccessToken({ forceRefresh: true })
       if (!token) return { ok: false, message: '无法获取 access_token' }
       return { ok: true, message: 'access_token 获取成功' }
     } catch (err) {
