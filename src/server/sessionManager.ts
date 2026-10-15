@@ -168,7 +168,7 @@ export type BackendHandle = {
   writeStdin: (data: string) => void
   onStdoutLine: (listener: (line: string) => void) => () => void
   onStderrLine: (listener: (line: string) => void) => () => void
-  onExit: (listener: (code: number | null, signal: NodeJS.Signals | null) => void) => () => void
+  onExit: (listener: (code: number | null, signal: NodeJS.Signals | null, error?: Error) => void) => () => void
   destroy: (force?: boolean) => void | Promise<void>
   /**
    * Busy = scode is mid-turn (writeStdin called and no stopReason yet, or an

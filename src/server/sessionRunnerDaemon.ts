@@ -348,31 +348,30 @@ export class SessionRunnerDaemon {
         this.#broadcast({ type: 'stderr', line })
       })
 
-      handle.onExit(async (code, signal) => {
+      handle.onExit(async (code, signal, exitError) => {
         if (this.#finalized) {
           return
         }
         this.#finalized = true
-        const runtimeState = code === 0 ? 'stopped' : 'failed'
-        // A context-window overflow kills the runtime with SIGKILL, and the
-        // generic "exited before attach became stable" text told the user
-        // nothing about why. scode emits the overflow marker on stdout just
-        // before dying, so surface that as the error instead — the session
-        // stays desired=active and is resumable, but the user needs to know a
-        // fresh session (or a smaller prompt) is what unblocks them.
-        const overflowText = this.#recentContextOverflowText()
+        // Managed executions have no OS exit code. A requested stop with no
+        // code is an orderly shutdown; an unrequested disconnect is a failure.
+        const isOrderlyExit = !exitError && (code === 0 || (this.#stopping && code === null))
+        const runtimeState = isOrderlyExit ? 'stopped' : 'failed'
+        // Keep the actionable context-overflow diagnosis on a failed exit.
+        const overflowText = isOrderlyExit ? null : this.#recentContextOverflowText()
         const errorText =
-          code === 0
+          isOrderlyExit
             ? null
             : overflowText ||
+              exitError?.message ||
               this.#recentStderrText() ||
-              `Runtime exited before attach became stable (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
+              `Runtime exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
         if (overflowText) {
           process.stderr.write(
             `[SessionRunnerDaemon] session ${this.manifest.session.sessionId} died from context-window overflow\n`,
           )
         }
-        this.#state = code === 0 ? 'stopped' : 'failed'
+        this.#state = runtimeState
         // Owner-scoped terminal write: if this daemon was fenced (a new owner
         // claimed the attempt), the UPDATE does not land and stillOwner is
         // false — we must then skip the session terminal write so we don't
@@ -397,7 +396,7 @@ export class SessionRunnerDaemon {
         //   natural exit code=0 (no stopping)     -> status=ended, desired=ended
         //   non-zero exit (no stopping)           -> status=failed, desired=active
         //     keeps last user intent active so client can retry.
-        const { status: nextStatus, desired: nextDesired } = this.#terminalLifecycle(code)
+        const { status: nextStatus, desired: nextDesired } = this.#terminalLifecycle(isOrderlyExit)
         if (stillOwner) {
           await this.#store.markSessionEnded(
             this.manifest.session.sessionId,
@@ -848,13 +847,13 @@ export class SessionRunnerDaemon {
     )
   }
 
-  #terminalLifecycle(code: number | null): { status: 'ended' | 'failed' | 'terminated'; desired: 'active' | 'ended' | 'terminated' } {
+  #terminalLifecycle(isOrderlyExit: boolean): { status: 'ended' | 'failed' | 'terminated'; desired: 'active' | 'ended' | 'terminated' } {
     if (this.#stopping) {
       const isRecoverable = this.#stopReason === 'idle_timeout' ||
         this.#stopReason === 'idle_busy_timeout' || this.#stopReason === 'process_shutdown'
       return isRecoverable ? { status: 'ended', desired: 'active' } : { status: 'terminated', desired: 'terminated' }
     }
-    return code === 0 ? { status: 'ended', desired: 'ended' } : { status: 'failed', desired: 'active' }
+    return isOrderlyExit ? { status: 'ended', desired: 'ended' } : { status: 'failed', desired: 'active' }
   }
 
   async #fail(error: unknown, stopReason: string): Promise<void> {
@@ -862,7 +861,7 @@ export class SessionRunnerDaemon {
       return
     }
     this.#finalized = true
-    const lifecycle = this.#terminalLifecycle(null)
+    const lifecycle = this.#terminalLifecycle(false)
     this.#state = lifecycle.status === 'failed' ? 'failed' : 'stopped'
     if (this.#stopping) stopReason = this.#stopReason
     const message = error instanceof Error ? error.stack || error.message : String(error)
