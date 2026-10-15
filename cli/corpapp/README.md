@@ -250,6 +250,19 @@ If a task sits unconfirmed, `group-msg-remind` re-triggers the sender's
 prompt (WeCom allows 3 reminders per task per 24h; the API does not report
 how many remain, so track your own count).
 
+### Errors worth telling apart
+
+| errcode | Meaning | What to do |
+|---|---|---|
+| `45009` | Rate limited | Transient. moss-server already retries twice (1s, 3s) before surfacing it; if it still reaches you, release the entry and let a later round retry. Never cancel on it. |
+| `41048` | `no customer to send` — WeCom found no recipient for this sender in that group | Not transient: retrying the same sender/group will not help. Check that the 发送人 is actually in that group before re-queuing. |
+| daily cap | `send-group` refused: the group already received, or has a pending, 群发 | Expected on a second same-day send. Not a failure of the message. |
+
+The access_token behind every call is cached process-wide in moss-server, so
+issuing many `corpapp` calls in a row no longer costs a `gettoken` each. Still
+send serially: the provider's per-app rate limits are not documented, and a
+burst of parallel `send-group` calls is the easiest way to meet them.
+
 ### No @-mentions
 
 `text` is **plain text only** — no markdown, no HTML, and no way to @ a
@@ -322,7 +335,9 @@ corpapp internal-group --app 数牍 --chatid chase001
 
 # 改群：加人 / 减人 / 改名 / 换群主（WeCom 无法解散 appchat 群，所以建错了只能改）
 corpapp update-internal-group --app 数牍 --chatid chase001 --add zhaoliu,sunqi
+corpapp update-internal-group --app 数牍 --chatid chase001 --del sunqi
 corpapp update-internal-group --app 数牍 --chatid chase001 --name '追货内部群(新)'
+# --members 是「整体替换」成员名单，不是追加；只想加减人用 --add / --del
 
 # 发消息 / 发文件（文件会先上传再发，可重复 --file）
 corpapp send-internal-group --app 数牍 --chatid chase001 \
@@ -370,13 +385,19 @@ corpapp group-msg-queue --app $APP --action next
 
 # 5. 逐条：占位 → 组装 → 发送 → 标记
 corpapp group-msg-queue --app $APP --action claim --chat-id wr_xxx --entry-id q_...
-corpapp send-group --app $APP --sender linqinhui --chat-id wr_xxx --text "..." --file ./x.xlsx
+# --json 输出 {"ok":true,"msgId":"msg_..."}；mark-sent 只收这个裸 msgId
+corpapp send-group --app $APP --sender linqinhui --chat-id wr_xxx --text "..." --file ./x.xlsx --json
 corpapp group-msg-queue --app $APP --action mark-sent --chat-id wr_xxx \
   --entry-id q_... --msgid msg_... --sender linqinhui
 # 发送失败则归还名额，否则名额空烧一天：
 corpapp group-msg-queue --app $APP --action release --chat-id wr_xxx \
   --entry-id q_... --reason "send-group 失败"
 ```
+
+**`--msgid` 必须是裸 msgid**（`msg_` 开头、无空格），从 `send-group --json` 的 `msgId`
+读。脚本若去截取 `send-group` 的文字输出，会把「group message task created  msgid=…」
+整句存成 msgid —— 这样的条目永远对不上账，一直占着名额直到过期被回收。服务端现在
+会拒绝含空白的 msgid。
 
 **前两步必须跑在 `next` 之前** —— 它们都会释放名额。放到后面，被占住的名额当天不会
 释放，那个群就白白锁死一天。
