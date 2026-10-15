@@ -101,6 +101,29 @@ for (const chunks of [[], ['api returned 403 Forbidden: ', 'enterprise balance i
   })
 }
 
+void test('a subscribed runner receives the original transport error once', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'moss-live-acp-exit-'))
+  let events!: import('./acpTransport.js').AcpTransportEvents
+  const failure = new Error('Managed transport cleanup failed')
+  const transport: import('./acpTransport.js').AcpMessageTransport = {
+    connected: true, start(value) { events = value }, async send() {},
+    async close() { events.onClose(null, null, failure) },
+  }
+  const handle = createAcpBridgeHandle({ transport, sessionId: 'live-exit', cwd, model: 'fixture',
+    enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
+  const exits: unknown[] = []
+  try {
+    handle.onExit((code, signal, error) => exits.push({ code, signal, error }))
+    await handle.destroy()
+    await handle.destroy()
+    assert.deepEqual(exits, [{ code: null, signal: null, error: failure }])
+  } finally {
+    await handle.destroy()
+    assert.ok(cwd.startsWith(join(tmpdir(), 'moss-live-acp-exit-')))
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
 void test('a connection lost before runner subscriptions still reports one terminal exit', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'moss-early-acp-exit-'))
   let events!: import('./acpTransport.js').AcpTransportEvents
@@ -118,12 +141,12 @@ void test('a connection lost before runner subscriptions still reports one termi
   const errors: string[] = []
   try {
     handle.onStderrLine(line => errors.push(line))
-    handle.onExit((code, signal) => exits.push({ code, signal }))
+    handle.onExit((code, signal, error) => exits.push({ code, signal, error }))
     const unsubscribe = handle.onExit(() => assert.fail('Unsubscribed listener must not receive a replay'))
     unsubscribe()
     await new Promise(resolve => setImmediate(resolve))
     await handle.destroy()
-    assert.deepEqual(exits, [{ code: null, signal: null }])
+    assert.deepEqual(exits, [{ code: null, signal: null, error: failure }])
     assert.deepEqual(errors, [failure.message + '\n'])
     assert.equal(handle.isBusy?.(), false)
     assert.equal(sends, 0, 'A stopped connection must not begin a handshake')

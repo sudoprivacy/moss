@@ -93,7 +93,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
   const stdoutListeners = new Set<(line: string) => void>()
   const stderrListeners = new Set<(line: string) => void>()
-  const exitListeners = new Set<(code: number | null, signal: NodeJS.Signals | null) => void>()
+  const exitListeners = new Set<Parameters<BackendHandle['onExit']>[0]>()
   let terminalExit: { code: number | null; signal: NodeJS.Signals | null; error?: Error } | undefined
 
   let rpcId = 1
@@ -1147,7 +1147,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       pendingPermissions.clear()
       pendingAskUserQuestions.clear()
       if (error) for (const listener of stderrListeners) listener(`${error.message}\n`)
-      for (const listener of exitListeners) listener(code, signal)
+      for (const listener of exitListeners) listener(code, signal, error)
     },
   })
 
@@ -1332,7 +1332,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     onExit(l) {
       exitListeners.add(l)
       if (terminalExit) queueMicrotask(() => {
-        if (exitListeners.has(l)) l(terminalExit!.code, terminalExit!.signal)
+        if (exitListeners.has(l)) l(terminalExit!.code, terminalExit!.signal, terminalExit!.error)
       })
       return () => exitListeners.delete(l)
     },

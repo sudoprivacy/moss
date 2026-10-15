@@ -8,6 +8,7 @@ const nodeTestFiles = [
   'scripts/e2e/workspace-proof.test.mjs',
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',
   'src/server/runnerReadiness.node-test.ts',
+  'src/server/runnerExitLifecycle.node-test.ts',
   'src/server/sessionResume.node-test.ts',
   'src/server/sessionSocketAuthorization.node-test.ts',
   'src/server/agentManager.node-test.ts',
