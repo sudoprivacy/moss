@@ -119,7 +119,7 @@ export function safeParse(input: unknown): ${schema.title}ParseResult {
   for (const key of KNOWN_PROPERTIES) {
     if (key in src) value[key] = src[key]
   }
-  return { ok: true, value: value as ${schema.title} }
+  return { ok: true, value: value as unknown as ${schema.title} }
 }
 
 export const parse = safeParse

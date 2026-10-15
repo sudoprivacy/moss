@@ -180,7 +180,9 @@ export class ZoneDelegationService {
       purpose: result.purpose ?? purpose,
       scopeRules: (result.scope_rules ?? []).map(rule => ({
         capability: rule.capability,
-        resourcePrefixes: rule.resource_prefixes,
+        // contracts 将 resource_prefixes 声明为宽松的 ZonePath（生成器落成
+        // 空接口），运行时元素实为字符串前缀；显式收敛到 string[]。
+        resourcePrefixes: (rule.resource_prefixes ?? []).map(String),
       })),
     }
     this.registry.set(cacheKey, issued)

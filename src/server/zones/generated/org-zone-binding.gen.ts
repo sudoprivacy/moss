@@ -58,7 +58,7 @@ export function safeParse(input: unknown): OrgZoneBindingParseResult {
   for (const key of KNOWN_PROPERTIES) {
     if (key in src) value[key] = src[key]
   }
-  return { ok: true, value: value as OrgZoneBinding }
+  return { ok: true, value: value as unknown as OrgZoneBinding }
 }
 
 export const parse = safeParse
