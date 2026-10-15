@@ -65,13 +65,24 @@ containers = spec['template']['spec']['containers']
 assert len(containers) == 2 and containers[0]['image'] != containers[1]['image']
 PY
 node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" --base-url "http://127.0.0.1:$PORT" \
-  --username e2e-admin --password fixture-password --runtimes k8s --output-dir "$EVIDENCE/session-before-restart"
+  --username e2e-admin --password fixture-password --runtimes k8s --keep-sessions --output-dir "$EVIDENCE/session-before-restart"
+session_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runtimes"][0]["sessionId"])' "$EVIDENCE/session-before-restart/e2e-summary.json")"
+session_pod_before="$(sudo k3s kubectl -n moss-sessions-fixture get pods -l "moss.sudo.dev/session-id=$session_id" -o jsonpath='{.items[0].metadata.uid}')"
+[ -n "$session_pod_before" ]
+control_before="$(sudo k3s kubectl -n moss-control-fixture get pods -l app=moss-server -o jsonpath='{.items[0].metadata.uid}')"
+sudo k3s kubectl -n moss-sessions-fixture get pods -l "moss.sudo.dev/session-id=$session_id" -o json > "$EVIDENCE/session-pod-before-restart.json"
 master_before="$(sudo sha256sum "$INSTALL_DIR/.moss/nexus/data/vault/master.key" | awk '{print $1}')"
 sudo "$INSTALL_DIR/restart.sh" > "$EVIDENCE/restart.log" 2>&1
 master_after="$(sudo sha256sum "$INSTALL_DIR/.moss/nexus/data/vault/master.key" | awk '{print $1}')"
 [ "$master_before" = "$master_after" ]
+control_after="$(sudo k3s kubectl -n moss-control-fixture get pods -l app=moss-server -o jsonpath='{.items[0].metadata.uid}')"
+[ -n "$control_after" ] && [ "$control_before" != "$control_after" ]
+session_pod_after="$(sudo k3s kubectl -n moss-sessions-fixture get pods -l "moss.sudo.dev/session-id=$session_id" -o jsonpath='{.items[0].metadata.uid}')"
+[ "$session_pod_before" = "$session_pod_after" ]
+sudo k3s kubectl -n moss-sessions-fixture get pods -l "moss.sudo.dev/session-id=$session_id" -o json > "$EVIDENCE/session-pod-after-restart.json"
 node "$ROOT_DIR/scripts/e2e/server-release-smoke.mjs" --base-url "http://127.0.0.1:$PORT" \
-  --username e2e-admin --password fixture-password --runtimes k8s --output-dir "$EVIDENCE/session-after-restart"
+  --username e2e-admin --password fixture-password --runtimes k8s --output-dir "$EVIDENCE/session-after-restart" \
+  --resume-from "$EVIDENCE/session-before-restart/e2e-summary.json"
 before="$(sudo k3s kubectl -n moss-control-fixture get pods -l app=moss-server -o jsonpath='{.items[0].metadata.uid}')"
 sudo env MOSS_INSTALL_DIR="$INSTALL_DIR" bash "$DIST_DIR/install.sh" --offline > "$EVIDENCE/repeat.log" 2>&1
 after="$(sudo k3s kubectl -n moss-control-fixture get pods -l app=moss-server -o jsonpath='{.items[0].metadata.uid}')"
@@ -84,4 +95,4 @@ sudo env MOSS_NON_INTERACTIVE=1 MOSS_INSTALL_DIR="$INSTALL_DIR" MOSS_K8S_RUNTIME
   bash "$DIST_DIR/install.sh" --offline > "$EVIDENCE/offline-reinstall.log" 2>&1
 [ "$master_before" = "$(sudo sha256sum "$INSTALL_DIR/.moss/nexus/data/vault/master.key" | awk '{print $1}')" ]
 curl -fsS "http://127.0.0.1:$PORT/readyz" > "$EVIDENCE/readiness.json"
-printf '%s\n' '{"status":"passed","separate_images":true,"real_k8s_session":true,"restart":true,"offline_reinstall":true,"vault_key_preserved":true,"systemd_business_service":false}' > "$EVIDENCE/acceptance.json"
+printf '%s\n' '{"status":"passed","separate_images":true,"real_k8s_session":true,"restart":true,"same_session_resumed":true,"session_pod_retained_during_restart":true,"offline_reinstall":true,"vault_key_preserved":true,"systemd_business_service":false}' > "$EVIDENCE/acceptance.json"

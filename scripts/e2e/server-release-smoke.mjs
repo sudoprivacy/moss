@@ -22,15 +22,22 @@ function parseArgs(argv) {
     outputDir: process.cwd(),
     runtimes: ["host", "docker"],
     timeoutMs: 180_000,
+    keepSessions: false,
+    resumeFrom: "",
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = argv[index + 1];
+    if (argument === "--keep-sessions") {
+      result.keepSessions = true;
+      continue;
+    }
     if (argument === "--base-url" && value)
       result.baseUrl = value.replace(/\/$/, "");
     else if (argument === "--username" && value) result.username = value;
     else if (argument === "--password" && value) result.password = value;
     else if (argument === "--output-dir" && value) result.outputDir = value;
+    else if (argument === "--resume-from" && value) result.resumeFrom = value;
     else if (argument === "--runtimes" && value)
       result.runtimes = value.split(",").filter(Boolean);
     else if (argument === "--timeout-seconds" && value)
@@ -48,6 +55,7 @@ function parseArgs(argv) {
 
 const options = parseArgs(process.argv.slice(2));
 fs.mkdirSync(options.outputDir, { recursive: true });
+const retainedSessions = new Map();
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -431,6 +439,9 @@ async function main() {
   }
 
   const summaries = [];
+  const previousSessions = options.resumeFrom
+    ? JSON.parse(fs.readFileSync(options.resumeFrom, "utf8")).runtimes
+    : [];
   if (process.env.MOSS_E2E_EXPECT_K8S_UNAVAILABLE === "1") {
     for (const body of [{ runtime: { type: "k8s" } }, { runtime_type: "k8s" }]) {
       const failed = await request("/api/v1/sessions", {
@@ -451,15 +462,33 @@ async function main() {
   }
   for (const runtime of options.runtimes) {
     let sessionId = "";
+    let preserve = false;
     try {
-      const created = await request("/api/v1/sessions", {
-        method: "POST",
-        headers: authorization(token),
-        body: JSON.stringify({
-          dangerously_skip_permissions: true,
-          runtime: RUNTIME_REQUESTS[runtime],
-        }),
-      });
+      const previous = previousSessions.find((item) => item.runtime === runtime);
+      if (options.resumeFrom) assert(previous?.sessionId && previous?.nonce, `Missing retained ${runtime} session`);
+      let created;
+      let resumeElapsedMs;
+      if (previous) {
+        sessionId = previous.sessionId;
+        const startedAt = Date.now();
+        // Exactly one resume request, immediately after authentication. No
+        // client retry or fixed recovery sleep can hide a server-side 503.
+        const resumed = await request(`/api/v1/sessions/${sessionId}/resume`, {
+          method: "POST", headers: authorization(token), body: "{}",
+        });
+        resumeElapsedMs = Date.now() - startedAt;
+        assert(resumed.session?.sessionId === sessionId, "resume changed session identity");
+        created = { session_id: sessionId, runtime: resumed.session.runtime, ws_url: resumed.ws_url };
+      } else {
+        created = await request("/api/v1/sessions", {
+          method: "POST",
+          headers: authorization(token),
+          body: JSON.stringify({
+            dangerously_skip_permissions: true,
+            runtime: RUNTIME_REQUESTS[runtime],
+          }),
+        });
+      }
       sessionId = created?.session_id || "";
       assert(sessionId, `${runtime} session creation returned no session_id`);
       assert(
@@ -480,15 +509,21 @@ async function main() {
         "active",
         "detached",
       ]);
-      await waitForSessionContext(sessionId, token, [conversation.nonce]);
+      await waitForSessionContext(sessionId, token, [previous?.nonce, conversation.nonce].filter(Boolean));
       summaries.push({
         runtime,
         sessionId,
         status: active.status,
         response: conversation.expected,
+        nonce: conversation.nonce,
+        previousNonce: previous?.nonce,
+        resumed: Boolean(previous),
+        resumeElapsedMs,
       });
+      preserve = options.keepSessions;
+      if (preserve) retainedSessions.set(sessionId, token);
     } finally {
-      if (sessionId) {
+      if (sessionId && !preserve) {
         await request(`/api/v1/sessions/${sessionId}/terminate`, {
           method: "POST",
           headers: authorization(token),
@@ -510,9 +545,17 @@ async function main() {
     `${JSON.stringify(summary, null, 2)}\n`,
   );
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+  retainedSessions.clear();
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
+  // Keeping is only for a completely successful fixture invocation. A later
+  // runtime/assertion/output failure must also clean up earlier successes.
+  for (const [sessionId, token] of retainedSessions) {
+    await request(`/api/v1/sessions/${sessionId}/terminate`, {
+      method: "POST", headers: authorization(token), body: "{}",
+    }).catch(() => {});
+  }
   const message =
     error instanceof Error ? error.stack || error.message : String(error);
   fs.writeFileSync(`${options.outputDir}/e2e-failure.txt`, `${message}\n`);

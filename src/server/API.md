@@ -752,6 +752,14 @@ API may allow several tasks inside one Session.
 
 ### POST `/api/v1/sessions/:sessionId/resume`
 
+An explicit resume waits up to 165 seconds for an in-progress owner takeover
+and runtime startup. Ownership fencing remains in force while waiting; other
+startup or permission errors are returned immediately. A deadline returns a
+retryable HTTP 503. The same deadline covers response owner metadata.
+Disconnecting stops this request's wait without cancelling recovery shared by
+another caller. If takeover polling observes that the session was terminated,
+the request returns HTTP 409 without starting another recovery attempt.
+
 确保 session 当前 runtime 可恢复，并返回新的 `ws_url`。
 
 ### POST `/api/v1/sessions/:sessionId/terminate`

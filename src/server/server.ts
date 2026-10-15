@@ -36,6 +36,7 @@ import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.js'
 import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from './runtimeService.js'
+import { respondAfterSessionResume } from './sessionResume.js'
 import { HttpError, writeError, writeJson } from './httpRespond.js'
 import { authorizeSessionBrowser, browserController, invokeSessionBrowser } from './browser/browserGateway.js'
 import { browserOwnerAllowed } from './browser/browserDeploymentPolicy.js'
@@ -10546,15 +10547,17 @@ export function startServer(
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
-        const ready = await runtime.ensureSessionReady(sessionId)
-        const owner = ready.session.currentAttemptId
-          ? await runtime.store.getAttemptOwnerStatus(ready.session.currentAttemptId, config.heartbeatTimeoutMs)
-          : { ownerInstanceId: null, ownerLive: false }
-        writeJson(res, 200, {
-          session: serializeSession(ready.session),
-          ws_url: buildWsUrl(server, config, sessionId, wsRouteHint(config, owner)),
-          owner_instance_id: owner.ownerInstanceId,
-          owner_live: owner.ownerLive,
+        await respondAfterSessionResume(runtime, sessionId, req, res, async (ready, signal) => {
+          const owner = ready.session.currentAttemptId
+            ? await runtime.store.getAttemptOwnerStatus(ready.session.currentAttemptId, config.heartbeatTimeoutMs)
+            : { ownerInstanceId: null, ownerLive: false }
+          signal.throwIfAborted()
+          writeJson(res, 200, {
+            session: serializeSession(ready.session),
+            ws_url: buildWsUrl(server, config, sessionId, wsRouteHint(config, owner)),
+            owner_instance_id: owner.ownerInstanceId,
+            owner_live: owner.ownerLive,
+          })
         })
         return
       }

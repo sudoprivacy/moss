@@ -7,6 +7,7 @@ const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',
   'src/server/runnerReadiness.node-test.ts',
+  'src/server/sessionResume.node-test.ts',
   'src/server/sessionSocketAuthorization.node-test.ts',
   'src/server/agentManager.node-test.ts',
   'src/server/agentManagerRoutes.node-test.ts',
