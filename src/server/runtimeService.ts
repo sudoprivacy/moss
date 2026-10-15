@@ -477,8 +477,8 @@ export class RuntimeService {
   private readonly mcpStore: McpStore | null
   private readonly mcpUserConfig: McpUserConfigApi | null
   private readonly pendingEnsures = new Map<string, Promise<AttemptRecord>>()
-  /** Dedup set for in-flight background fencing-wait tasks (per sessionId). */
-  readonly #fencingWaits = new Set<string>()
+  /** One ephemeral fencing wait per session, bound to its attempt. */
+  readonly #fencingWaits = new Map<string, { attemptId: string }>()
   private readonly sessionTokens = new Map<string, { token: string; pid: number }>()
   /** Derived usage totals, keyed by scope; see USAGE_CACHE_TTL_MS. */
   private readonly usageCache = new Map<string, { totalTokens: number; at: number }>()
@@ -1081,9 +1081,10 @@ export class RuntimeService {
           runnerInstanceId !== this.options.serverInstanceId
         ) {
           await this.store.setSessionLifecycle(session.sessionId, 'creating', 'active')
-          this.#scheduleFencingWait(session)
+          this.#scheduleFencingWait(session, existing)
           return { session: (await this.store.getSession(sessionId)) ?? session }
         }
+        this.#cancelFencingWait(session.sessionId, existing.attemptId)
         await this.store.setSessionLifecycle(
           session.sessionId,
           'active',
@@ -1391,7 +1392,7 @@ export class RuntimeService {
           // predicate fails on its next tick and fences it, the wait then
           // respawns; the desiredState guard inside covers terminated).
           if (attempt && isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs)) {
-            this.#scheduleFencingWait(session)
+            this.#scheduleFencingWait(session, attempt)
             continue
           }
           // No live runner and no live scode to reattach to. Resurrecting this
@@ -1630,7 +1631,7 @@ export class RuntimeService {
           // still alive on its host with a fresh heartbeat. Fencing kills
           // it within one heartbeat interval; respawning before its
           // heartbeat expires would double-write the transcript/DB.
-          this.#scheduleFencingWait(session)
+          this.#scheduleFencingWait(session, existing)
           throw new AttemptTakeoverPendingError(session.sessionId)
         }
         // Claimed and the old runner is already dead — fall through to the
@@ -1660,9 +1661,10 @@ export class RuntimeService {
           runnerInstanceId &&
           runnerInstanceId !== this.options.serverInstanceId
         ) {
-          this.#scheduleFencingWait(session)
+          this.#scheduleFencingWait(session, existing)
           throw new AttemptTakeoverPendingError(session.sessionId)
         }
+        this.#cancelFencingWait(session.sessionId, existing.attemptId)
         await this.store.setSessionLifecycle(session.sessionId, 'active', session.desiredState)
         return existing
       }
@@ -1709,7 +1711,7 @@ export class RuntimeService {
         // Nothing reachable but the heartbeat is fresh: the runner lives on
         // another host (claim window) or is wedged. Fail fast; the
         // background fencing-wait owns the respawn.
-        this.#scheduleFencingWait(session)
+        this.#scheduleFencingWait(session, existing)
         throw new AttemptTakeoverPendingError(session.sessionId)
       }
 
@@ -1803,12 +1805,24 @@ export class RuntimeService {
     }
   }
 
-  #scheduleFencingWait(session: SessionRecord): void {
-    if (this.#fencingWaits.has(session.sessionId)) return
-    this.#fencingWaits.add(session.sessionId)
+  #cancelFencingWait(sessionId: string, attemptId: string): void {
+    if (this.#fencingWaits.get(sessionId)?.attemptId === attemptId) {
+      this.#fencingWaits.delete(sessionId)
+    }
+  }
+
+  #scheduleFencingWait(session: SessionRecord, expected: AttemptRecord): void {
+    if (this.#fencingWaits.get(session.sessionId)?.attemptId === expected.attemptId) return
+    const wait = { attemptId: expected.attemptId }
+    this.#fencingWaits.set(session.sessionId, wait)
+    const isCurrentWait = () => this.#fencingWaits.get(session.sessionId) === wait
+    const finish = () => {
+      if (isCurrentWait()) this.#fencingWaits.delete(session.sessionId)
+    }
     const timeoutMs = this.options.config.heartbeatTimeoutMs * 3
     const startedAt = Date.now()
     const poll = async () => {
+      if (!isCurrentWait()) return
       let current: SessionRecord | null = null
       let attempt: AttemptRecord | null = null
       try {
@@ -1820,54 +1834,43 @@ export class RuntimeService {
         // DB hiccup: release the slot so a later trigger (foreground 503,
         // adopt timer) can schedule a fresh wait instead of this sessionId
         // staying in the set for the rest of the process lifetime.
-        this.#fencingWaits.delete(session.sessionId)
+        finish()
+        return
+      }
+      if (!isCurrentWait()) return
+      // A wait belongs to one claimed execution. Recovery, termination or a
+      // new owner invalidates it; its deadline cannot fence the replacement.
+      if (!current || !attempt || current.currentAttemptId !== expected.attemptId ||
+        attempt.attemptId !== expected.attemptId || current.desiredState !== 'active' ||
+        (this.options.serverInstanceId !== undefined && attempt.serverInstanceId !== this.options.serverInstanceId)) {
+        finish()
         return
       }
       const timedOut = Date.now() - startedAt > timeoutMs
-      if (
-        !current ||
-        !attempt ||
-        !isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs) ||
-        timedOut
-      ) {
-        this.#fencingWaits.delete(session.sessionId)
-        if (current && attempt && (!isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs) || timedOut)) {
-          // A-1: the user may have terminated this session while we waited —
-          // never resurrect (nor rewrite the attempt state of) what the user
-          // explicitly stopped; the terminate path already settled it.
-          if (current.desiredState === 'active') {
-            // Timeout with a still-fresh heartbeat = the runner lives but its
-            // attach socket is unreachable (e.g. OS tmp-dir cleanup) — the
-            // expiry condition can never become true, so fence instead of
-            // silently giving up (pre-P2 semantics: mark lost + respawn).
-            // markAttemptLost flips runtime_state off 'running'; the runner's
-            // fenced heartbeat exits it within one interval, so the respawn
-            // pays the same short double-write window a normal failover does.
-            if (timedOut && isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs)) {
-              await this.store.markAttemptLost(
-                attempt.attemptId,
-                'fencing wait timed out (attach unreachable, heartbeat fresh)',
-                // M-2: this poll runs ~90s after the claim — long enough for a
-                // faster survivor to have re-claimed the attempt. The owner
-                // predicate keeps us from writing 'lost' over THEIR attempt.
-                this.options.serverInstanceId,
-              )
-              await this.store.addEvent(current.sessionId, attempt.attemptId, 'attempt_lost', {
-                reason: 'fencing_wait_timeout_heartbeat_fresh',
-              })
-            }
-            void this.ensureAttempt(current).catch(async error => {
-              // A-8: takeover-pending is designed control flow, not a failure.
-              if (error instanceof AttemptTakeoverPendingError) return
-              await this.store.addEvent(
-                current.sessionId,
-                attempt.attemptId,
-                'reconcile_failed',
-                { error: errorMessage(error) },
-              )
-            })
-          }
+      const isHeartbeatFresh = isAttemptHeartbeatFresh(attempt, this.options.config.heartbeatTimeoutMs)
+      if (!isHeartbeatFresh || timedOut) {
+        finish()
+        // A live runner whose socket remains unreachable must still be fenced,
+        // but only the attempt and owner for which this wait was scheduled.
+        if (timedOut && isHeartbeatFresh) {
+          await this.store.markAttemptLost(
+            attempt.attemptId,
+            'fencing wait timed out (attach unreachable, heartbeat fresh)',
+            this.options.serverInstanceId,
+          )
+          await this.store.addEvent(current.sessionId, attempt.attemptId, 'attempt_lost', {
+            reason: 'fencing_wait_timeout_heartbeat_fresh',
+          })
         }
+        void this.ensureAttempt(current).catch(async error => {
+          if (error instanceof AttemptTakeoverPendingError) return
+          await this.store.addEvent(
+            current.sessionId,
+            attempt.attemptId,
+            'reconcile_failed',
+            { error: errorMessage(error) },
+          )
+        })
         return
       }
       setTimeout(poll, FENCING_POLL_INTERVAL_MS).unref?.()
