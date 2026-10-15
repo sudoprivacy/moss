@@ -590,4 +590,3 @@ jobs:
           COS_ROOT_PATH: moss/server
           COS_PUBLIC_BASE_URL: https://sudowork-release-1309794936.cos.accelerate.myqcloud.com
         run: bash scripts/publish-server-to-cos.sh release-assets "$GITHUB_REF_NAME" --latest-only
-

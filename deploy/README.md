@@ -136,9 +136,7 @@ sudo ./install.sh --offline
 离线目录包含 `install.sh`、`SHA256SUMS`、`moss-server-image-*`、`moss-nexus-image-*`、
 `moss-runtime-*`、`moss-deploy-*` 及 `offline/` 基础设施资产。已有 k3s 环境无需重复准备基础设施，
 仍须提供四个发布压缩包和校验清单。离线模式缺文件或校验失败会退出，不回退在线下载。
-国内网络可使用 `K3S_MIRROR=cn bash install.sh --download ./moss-offline
-# 在其他架构的机器上预下载 ARM64 产物：
-# MOSS_ARCH=arm64 bash install.sh --download ./moss-arm64`；下载器校验
+国内网络可使用 `K3S_MIRROR=cn bash install.sh --download ./moss-offline`；下载器校验
 k3s 二进制和基础镜像，并兼容国内源的 `.tar.gz` 与上游的 `.tar.zst` 基础镜像包。
 
 ## 本地构建与发布
@@ -149,7 +147,7 @@ bash deploy/package-control-images.sh <版本号> arm64 ./dist
 
 架构参数支持 `amd64` 和 `arm64`；原生 CI runner 分别执行安装和会话验收。该命令构建独立的 Server/Nexus 镜像并导出镜像包和部署工具包。完整发行还需要现有的 Runtime
 构建步骤和带版本号的安装器。`build-release.yml` 在发布资产前执行镜像检查、安装/会话/重启/离线重装
-测试；COS/GitHub Release 同步包含新镜像。完成发布后 `latest/install.sh` 才切换到新安装入口。
+测试；COS/GitHub Release 同步包含新镜像。每种架构还发布 `runtime-release-<arch>.json`，绑定镜像、CLI/cohost 版本和摘要；`runtime-release.json` 保留为 amd64 别名。完成发布后 `latest/install.sh` 才切换到新安装入口。
 构建会话 Runtime 时可通过 `--build-arg HF_ENDPOINT=https://hf-mirror.com --build-arg HF_HUB_DISABLE_XET=1` 指定模型镜像源，
 通过 `--build-arg SCODE_DOWNLOAD_URL=<地址>` 指定 scode 下载地址；scode 仍按仓库固定 SHA256 校验。
 
