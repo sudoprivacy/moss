@@ -353,24 +353,47 @@ export async function probeAttachPath(
   attachPath: string,
   timeoutMs: number,
 ): Promise<boolean> {
+  return probeRunnerSocket(attachPath, timeoutMs, 'listener')
+}
+
+/** A reachable bridge is ready only after its execution backend answers the probe. */
+export async function probeRunnerReady(attachPath: string, timeoutMs: number): Promise<boolean> {
+  return probeRunnerSocket(attachPath, timeoutMs, 'execution')
+}
+
+async function probeRunnerSocket(attachPath: string, timeoutMs: number, mode: 'listener' | 'execution'): Promise<boolean> {
   if (!isNamedPipePath(attachPath) && !existsSync(attachPath)) {
     return false
   }
   return await new Promise<boolean>(resolve => {
     const socket = net.createConnection(attachPath)
-    const timer = setTimeout(() => {
+    const finish = (isReady: boolean) => {
+      clearTimeout(timer)
       socket.destroy()
-      resolve(false)
-    }, timeoutMs)
+      resolve(isReady)
+    }
+    const timer = setTimeout(() => finish(false), timeoutMs)
     socket.once('connect', () => {
-      clearTimeout(timer)
-      socket.destroy()
-      resolve(true)
+      if (mode === 'listener') finish(true)
+      else socket.write(`${JSON.stringify({ type: 'ping' })}\n`)
     })
-    socket.once('error', () => {
-      clearTimeout(timer)
-      resolve(false)
+    let buffer = ''
+    socket.on('data', chunk => {
+      buffer += chunk.toString('utf8')
+      if (buffer.length > 1_048_576) { finish(false); return }
+      for (;;) {
+        const index = buffer.indexOf('\n')
+        if (index < 0) break
+        const line = buffer.slice(0, index)
+        buffer = buffer.slice(index + 1)
+        try {
+          const message = JSON.parse(line) as { type?: unknown; isReady?: unknown }
+          if (message.type === 'pong') { finish(message.isReady === true); return }
+        } catch { finish(false); return }
+      }
     })
+    socket.once('error', () => finish(false))
+    socket.once('close', () => finish(false))
   })
 }
 
@@ -1033,7 +1056,8 @@ export class RuntimeService {
       return { session: (await this.store.getSession(sessionId)) ?? session }
     }
     if (existing?.attachPath && !isTerminalAttemptState(existing.runtimeState)) {
-      const healthy = await probeAttachPath(
+      const probe = session.runtime.type === 'cohost' ? probeRunnerReady : probeAttachPath
+      const healthy = await probe(
         existing.attachPath,
         // Fast probe only — never block the GET on a slow/dead socket.
         Math.min(this.options.config.reattachProbeTimeoutMs, 500),
@@ -1613,7 +1637,8 @@ export class RuntimeService {
         // probe/respawn path below (now as owner).
       }
 
-      const healthy = await probeAttachPath(
+      const probe = session.runtime.type === 'cohost' ? probeRunnerReady : probeAttachPath
+      const healthy = await probe(
         existing.attachPath,
         this.options.config.reattachProbeTimeoutMs,
       )

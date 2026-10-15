@@ -157,6 +157,8 @@ export type BackendAvailableSkill = {
 }
 
 export type BackendHandle = {
+  /** Check the current execution without writing input or changing its identity. */
+  checkReady?: () => Promise<boolean>
   /** Current ManagedAgentService process identity; never included in durable runtime metadata. */
   managedProcessId?: string
   cohostSessionBinding?: CohostSessionBinding

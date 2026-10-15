@@ -7,8 +7,17 @@ export class NexusAcpTransport implements AcpMessageTransport {
   private mailbox?: NexusSessionTransport
   private isClosing = false
   private closing?: Promise<void>
+  private readiness?: Promise<boolean>
   constructor(private readonly agent: ManagedAgentClient, readonly session: StartSessionResult) {}
   get connected(): boolean { return this.mailbox?.connected ?? false }
+  /** Foreground readiness cannot be inferred from a retained mailbox stream. */
+  checkReady(): Promise<boolean> {
+    if (this.isClosing || !this.connected) return Promise.resolve(false)
+    this.readiness ??= this.agent.verifySessionEndpoint(this.session.sessionId, this.session.sessionEndpoint)
+      .then(() => !this.isClosing && this.connected)
+      .finally(() => { this.readiness = undefined })
+    return this.readiness
+  }
   start(events: AcpTransportEvents): void {
     if (this.mailbox || this.isClosing) throw new Error('Session transport already started or closed')
     this.mailbox = this.agent.openSession(this.session.sessionEndpoint, {

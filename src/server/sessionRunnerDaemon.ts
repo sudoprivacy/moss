@@ -535,7 +535,9 @@ export class SessionRunnerDaemon {
     }
     process.stderr.write(`[SessionRunnerDaemon] Parsed message type: ${parsed.type}\n`)
     if (parsed.type === 'ping') {
-      this.#send(socket, { type: 'pong', ts: Date.now() })
+      void this.#checkReady().then(isReady => {
+        this.#send(socket, { type: 'pong', ts: Date.now(), isReady })
+      })
       return
     }
     if (parsed.type === 'shutdown') {
@@ -560,6 +562,18 @@ export class SessionRunnerDaemon {
         this.#pendingStdin.push(parsed.data)
       }
       this.#send(socket, { type: 'stdin_ack' })
+    }
+  }
+
+  async #checkReady(): Promise<boolean> {
+    const handle = this.#handle
+    if (this.#stopping || this.#state !== 'running' || !handle) return false
+    try {
+      if (handle.checkReady && !await handle.checkReady()) return false
+      return !this.#stopping && this.#state === 'running' && this.#handle === handle
+    } catch {
+      // An unavailable backend is not proof that its writer lease was released.
+      return false
     }
   }
 
