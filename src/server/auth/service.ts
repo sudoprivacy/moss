@@ -669,6 +669,7 @@ export class AuthService {
       catalog: new CatalogRepository(this.db.driver), identities: this.identityRepository, secrets,
       policy: pilotPolicyFromEnvironment(),
       members: async orgId => (await this.db.listUsersByOrg(orgId)).filter(user => user.status === 'active').map(user => ({ id: user.id, name: user.displayName || user.name || user.email })),
+      membersPage: (orgId, after, search, limit) => this.db.externalMembersPage(orgId, after, search, limit),
       isActive: async actor => {
         const user = await this.db.getUserByIdAndOrg(actor.userId, actor.orgId)
         return user?.status === 'active'

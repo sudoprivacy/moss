@@ -31,15 +31,15 @@ export interface ProviderAdapter {
 }
 
 /** Only configured adapters are available. A provider label is not an implementation. */
-export class ProviderAdapterRegistry {
-  private readonly adapters = new Map<string, ProviderAdapter>()
-  constructor(adapters: ProviderAdapter[]) {
+export class ProviderAdapterRegistry<T extends Pick<ProviderAdapter, 'kind' | 'capabilities'> = ProviderAdapter> {
+  private readonly adapters = new Map<string, T>()
+  constructor(adapters: T[]) {
     for (const adapter of adapters) {
       if (this.adapters.has(adapter.kind)) throw new Error(`Duplicate provider adapter: ${adapter.kind}`)
       this.adapters.set(adapter.kind, adapter)
     }
   }
-  get(kind: string): ProviderAdapter {
+  get(kind: string): T {
     const adapter = this.adapters.get(kind)
     if (!adapter) throw new ExternalProviderError(409, 'PROVIDER_NOT_IMPLEMENTED')
     return adapter

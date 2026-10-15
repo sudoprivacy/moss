@@ -12,7 +12,8 @@ import { PgDriver, type PgPoolLike } from '../db/driver.js'
 import { applyPgSchema } from '../db/pg_schema.js'
 import { CatalogRepository } from '../catalog/catalogRepository.js'
 import { IdentityRepository } from '../identity/identityRepository.js'
-import { ExternalTaskStore } from './store.js'
+import { ExternalTaskStore, type Binding } from './store.js'
+import { maintainRetention } from './retention.js'
 import { ExternalProviderService } from './service.js'
 import { DifyPilotTransport } from './difyTransport.js'
 
@@ -152,5 +153,36 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     await Promise.all(pools.map(pool => pool.end()))
     await admin.query(`DROP SCHEMA ${schema} CASCADE`)
     await admin.end()
+  }
+})
+
+void test('PostgreSQL: maintenance claims, retirement and idempotency survive independent pools', { skip: !process.env.MOSS_PG_TEST_URL }, async () => {
+  const schema = `external_retention_${randomUUID().replaceAll('-', '')}`
+  const admin = new pg.Pool({ connectionString: process.env.MOSS_PG_TEST_URL! })
+  await admin.query(`CREATE SCHEMA ${schema}`)
+  const pools = [0, 1].map(() => new pg.Pool({ connectionString: process.env.MOSS_PG_TEST_URL!, options: `-c search_path=${schema}`, max: 4 }))
+  const drivers = pools.map(pool => new PgDriver(pool as unknown as PgPoolLike))
+  try {
+    const first = new ExternalTaskStore(drivers[0]); await first.ready
+    const second = new ExternalTaskStore(drivers[1]); await second.ready
+    const now = Date.now(), stores = [first, second]
+    let calls = 0
+    const claims = await Promise.all(Array.from({ length: 12 }, (_, i) => stores[i % 2].scheduled('claim', 1000, async () => { calls++ }, now)))
+    assert.equal(claims.filter(Boolean).length, 1); assert.equal(calls, 1)
+    await assert.rejects(first.scheduled('retry', 1000, async () => { throw new Error('rollback claim') }, now))
+    assert.equal(await second.scheduled('retry', 1000, async () => {}, now), true)
+    const actor = { orgId: 'retention-org', userId: 'retention-user' }
+    const binding = { id: 'retention-agent', orgId: actor.orgId, name: 'retention', source_digest: `sha256:${'a'.repeat(64)}`, provider_kind: 'dify' } as Binding
+    const input = { agent_id: binding.id, query: 'retire synthetic output', idempotency_key: randomUUID() }
+    const task = await first.create(actor, input, binding, 1000)
+    await first.mutate(task.id, value => { value.status = 'succeeded'; value.answer = '42'; return 'answer' })
+    await Promise.all(stores.map(store => maintainRetention(store, now + 31 * 86400_000)))
+    await assert.rejects(second.task(actor, task.id), { code: 'TASK_HISTORY_EXPIRED' })
+    await assert.rejects(second.create(actor, input, binding, 1000), { code: 'TASK_HISTORY_EXPIRED' })
+    assert.equal((await second.history(actor, task.session_id)).length, 0)
+    assert.equal(Number((await drivers[1].get('SELECT COUNT(*) AS total FROM external_pilot_tasks'))?.total), 1)
+  } finally {
+    await Promise.all(pools.map(pool => pool.end()))
+    await admin.query(`DROP SCHEMA ${schema} CASCADE`); await admin.end()
   }
 })

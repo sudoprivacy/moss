@@ -191,3 +191,28 @@ Moss管理API直接消费同仓契约类型。页面按用户与当前组织重�
 - [本次开发测试及 PR 交付总结](dify-development-test-summary-2026-10-13.md)
 
 本节为最新验收结果，前文测试数量和截图保留为各阶段记录。生产安装包、Moss TaskStore PostgreSQL/多副本与生产出口治理仍未验收。
+
+
+## 2026-10-15 review: budgets, registry and bounded retention
+
+The external query-only Pilot rejects remaining dispatch budgets below 100 ms with a durable `DISPATCH_BUDGET_TOO_SHORT` Resolution and no Attempt/Secret/Provider I/O. An accepted task whose budget expires during database work becomes `failed / DISPATCH_DEADLINE` immediately when dispatch is claimed; the Attempt and session are updated in the same transaction. An absolute caller deadline is never extended. The general TaskSpec schema still permits smaller values for other execution profiles.
+
+Admission capabilities and execution factories resolve through the same registered provider definitions. Explicit unknown providers are rejected as `PROVIDER_NOT_IMPLEMENTED`; only missing provider labels on legacy Dify bindings retain the documented Dify interpretation.
+
+Maintenance has a database-backed schedule claim held through each bounded transaction. All instances may request work, but one wins a given expiry/retention batch; failed batches roll back the claim. This is maintenance coordination, not automatic HA takeover of external execution.
+
+Retention defaults for this synthetic Pilot:
+
+- Completed (`succeeded`, `failed`, `rejected`) event deltas compact after one day beyond the dispatch deadline. The full terminal checkpoint remains, and an old event cursor obtains a snapshot.
+- Task instructions, answers, TaskSpec payloads and run bindings retire after 30 days beyond the deadline. Retired histories disappear from the directory; direct requests return `410 TASK_HISTORY_EXPIRED`.
+- A redacted resolution/audit record remains 90 days after retirement; ordinary administrative audit records remain 90 days from creation. Neither stores the task instruction/answer.
+- Task ID, organization/user/session IDs, original request hash and idempotency reservation remain as bounded tombstones. A repeated retired key cannot execute again. Each organization may create at most 10,000 total Pilot tasks, including retired tasks; exceeding this bound returns `429 PILOT_TASK_CAPACITY_REACHED`. A larger deployment requires an explicitly designed archival/idempotency lifecycle.
+- Unknown tasks, including manually reconciled unknown outcomes, remain protected with their session fence. They are not automatically replayed or purged. Unacknowledged Secret-write cleanup guards remain daily reconciliation records until the write can be proven settled; acknowledged cleanup operations keep the existing 30-day retirement rule.
+
+Archive remains irreversible registration retirement with preserved task history subject to the retention policy. Cleanup verifies the Secret creation operation belongs to the retiring binding; referencing another binding's owned namespace does not transfer ownership.
+
+Administrator directory and member search use keyset pages. Connections are fetched only for each directory page's binding IDs. Member search is organization-scoped, active-only, 50 entries per page, with literal name/email search. Empty filtered directory pages can still have a next cursor. Legacy user directory responses traverse bounded internal pages instead of silently stopping at the first 100 bindings.
+
+Desktop and WebUI share in-flight reads per identity. Hidden pages stop history/event polling and refresh on return; ordinary chat-history refresh does not reload the agent directory. Unchanged historical answer Markdown is memoized. Duplicate provider progress/heartbeat snapshots do not schedule database writes; changed output retains the existing 500 ms coalescing and terminal flush.
+
+These changes do not implement standard Task/Session HA, immutable remote revision execution, production DLP/egress enforcement, or a second deployed Provider. Custom HTTP remains a local protocol fixture until a real service is provided.

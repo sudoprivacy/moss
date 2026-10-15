@@ -157,3 +157,12 @@ export interface UpdateExternalAgent {
   review_note: string
 }
 export interface ExternalProviderMember { id: string; name: string }
+
+/** Optional paged directory reads: ?paged=1&after=<last scanned binding id>.
+ * A page can be empty after authorization/archive filtering and still have a cursor.
+ * Cursors only select within the authenticated organization; they grant no access.
+ */
+export interface ExternalAgentPage { items: ExternalAgent[]; next_cursor: string | null }
+export interface ExternalAgentAdminPage { items: ExternalAgentAdmin[]; next_cursor: string | null }
+/** GET /external-agents/admin/members-page?q=<name or email>&after=<member id>, 50 items/page. */
+export interface ExternalProviderMemberPage { items: ExternalProviderMember[]; next_cursor: string | null }

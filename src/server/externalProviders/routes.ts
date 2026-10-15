@@ -17,6 +17,8 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
     if (!service) throw new ExternalProviderError(503, 'EXTERNAL_PROVIDER_UNAVAILABLE')
     await service.authorize(actor)
     const path = url.pathname, base = '/api/v1'
+    const after = url.searchParams.get('after') ?? ''
+    if (after.length > 200 || (after && !/^[\w-]+$/.test(after))) throw new ExternalProviderError(400, 'INVALID_CURSOR')
     let data: unknown, status = 200
     if (path.startsWith(`${base}/external-agents/admin/`)) {
       requireAdmin()
@@ -24,8 +26,9 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
       const admin = service.administration
       if (action === 'policy' && method === 'GET') data = await admin.policy(actor)
       else if (action === 'policy' && method === 'POST') { requirePlatformAdmin(); data = await admin.setPolicy(actor, body) }
+      else if (action === 'members-page' && method === 'GET') data = await admin.memberPage(actor, url.searchParams.get('after') ?? '', url.searchParams.get('q') ?? '')
       else if (action === 'members' && method === 'GET') data = await admin.members(actor)
-      else if (action === 'agents' && method === 'GET') data = await admin.list(actor)
+      else if (action === 'agents' && method === 'GET') data = url.searchParams.get('paged') === '1' ? await admin.listPage(actor, after) : await admin.list(actor)
       else if (action === 'unknown-tasks' && method === 'GET') data = await service.store.unresolved(actor.orgId)
       else if (action === 'reconcile-task' && method === 'POST') {
         const input = body as { task_id?: unknown; note?: unknown; action?: unknown } | null
@@ -42,7 +45,7 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
         else if (match[2] === 'rotate') data = await admin.rotate(actor, match[1], body)
         else data = await admin.archive(actor, match[1], body)
       }
-    } else if (path === `${base}/external-agents` && method === 'GET') data = await service.list(actor)
+    } else if (path === `${base}/external-agents` && method === 'GET') data = url.searchParams.get('paged') === '1' ? await service.listPage(actor, after) : await service.list(actor)
     else if (path === `${base}/external-agents` && method === 'POST') {
       requireAdmin(); data = await service.register(actor, body); status = 201
     } else if (path === `${base}/tasks` && method === 'POST') {

@@ -723,6 +723,12 @@ export class IdentityRepository {
     return row ? mapIntegrationConnection(row) : null
   }
 
+  async getOrganizationConnectionsByIds(orgId: string, ids: string[]): Promise<IntegrationConnection[]> {
+    if (!ids.length) return []
+    const rows = await this.driver.all<SqlRow>(`SELECT * FROM integration_connections WHERE org_id = ? AND id IN (${ids.map(() => '?').join(',')})`, [orgId, ...ids])
+    return rows.map(mapIntegrationConnection)
+  }
+
   async listIntegrationConnections(orgId: string, providerType?: string): Promise<IntegrationConnection[]> {
     const rows = providerType
       ? await this.driver.all<SqlRow>(`

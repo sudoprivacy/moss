@@ -63,7 +63,7 @@ export class CredentialOperations {
       await this.store.saveBinding(binding)
       await this.store.db.run("UPDATE external_pilot_operations SET status = 'complete' WHERE id = ?", [operation.id])
       await this.audit(operation.actor, recovering ? 'credential.operation_recovered' : `credential.${operation.kind}_completed`, binding.id)
-      if (operation.previousRef) await this.queueCleanup(operation.actor, operation.previousRef)
+      if (operation.previousRef) await this.queueCleanup(operation.actor, operation.previousRef, binding.id)
       return binding
     })
   }
@@ -86,7 +86,7 @@ export class CredentialOperations {
     })
   }
 
-  async queueCleanup(actor: ExternalActor, targetRef: string): Promise<void> {
+  async queueCleanup(actor: ExternalActor, targetRef: string, ownerBindingId?: string): Promise<void> {
     const ref = parseNexusSecretRef(targetRef)
     // Reference-only integrations do not transfer ownership of their existing vault entries.
     if (!ref.namespace.startsWith(`org:${actor.orgId}:external:`)) return
@@ -94,6 +94,8 @@ export class CredentialOperations {
     const ownerId = ref.namespace.split(':external:')[1]
     const owner = await this.store.db.get('SELECT document FROM external_pilot_operations WHERE id = ? AND org_id = ?', [ownerId, actor.orgId])
     const original = owner ? JSON.parse(String(owner.document)) as CredentialOperation : null
+    // A reference registration does not become the owner merely by naming our namespace.
+    if (ownerBindingId && (original?.targetRef !== targetRef || original.binding?.id !== ownerBindingId)) return
     const writeConfirmed = original?.targetRef === targetRef && original.writeConfirmed === true
     await this.store.db.run(`INSERT INTO external_pilot_operations (id, org_id, kind, request_id, request_hash, status, lease_until, document)
       VALUES (?, ?, 'cleanup', ?, '', 'cleanup', 0, ?)`, [id, actor.orgId, id, JSON.stringify({ actor, targetRef, writeConfirmed })])

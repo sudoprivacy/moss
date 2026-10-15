@@ -49,10 +49,12 @@ export function createExternalAgentsApi(
   return {
     access: () => get<ExternalProviderAccess>(`${base}/access`),
     list: () => get<ExternalAgentAdmin[]>(`${base}/admin/agents`),
+    listPage: (after = '') => get<{ items: ExternalAgentAdmin[]; next_cursor: string | null }>(`${base}/admin/agents?paged=1&after=${encodeURIComponent(after)}`),
     unknownTasks: () => get<ExternalTask[]>(`${base}/admin/unknown-tasks`),
     reconcileTask: (taskId: string, note: string) =>
       post<ExternalTask>(`${base}/admin/reconcile-task`, { task_id: taskId, action: 'close', note }),
     members: () => get<ExternalProviderMember[]>(`${base}/admin/members`),
+    membersPage: (search = '', after = '') => get<{ items: ExternalProviderMember[]; next_cursor: string | null }>(`${base}/admin/members-page?q=${encodeURIComponent(search)}&after=${encodeURIComponent(after)}`),
     policy: () => get<ExternalPilotPolicy>(`${base}/admin/policy`),
     savePolicy: (body: ExternalPilotPolicy) => post<ExternalPilotPolicy>(`${base}/admin/policy`, body),
     inspect: (body: InspectExternalConnection) => post<ExternalConnectionInspection>(`${base}/admin/inspect`, body),

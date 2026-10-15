@@ -666,6 +666,7 @@ CREATE TABLE IF NOT EXISTS users (
   created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS users_org_idx ON users (org_id);
+CREATE INDEX IF NOT EXISTS users_org_status_id_idx ON users (org_id, status, id);
 CREATE INDEX IF NOT EXISTS users_email_idx ON users (email);
 CREATE INDEX IF NOT EXISTS users_department_idx ON users (department_id);
 CREATE UNIQUE INDEX IF NOT EXISTS users_ext_uniq

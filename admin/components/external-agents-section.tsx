@@ -59,7 +59,12 @@ function ScopedExternalAgents({ query }: { query: string }) {
   const api = useMemo(() => createExternalAgentsApi(undefined, () => controller.current.signal), [controller])
   const [access, setAccess] = useState<ExternalProviderAccess | null>(null)
   const [agents, setAgents] = useState<ExternalAgentAdmin[]>([])
+  const [agentCursor, setAgentCursor] = useState<string | null>(null)
   const [members, setMembers] = useState<ExternalProviderMember[]>([])
+  const [memberSearch, setMemberSearch] = useState('')
+  const [memberCursor, setMemberCursor] = useState<string | null>(null)
+  const [isMembersLoading, setIsMembersLoading] = useState(false)
+  const memberGeneration = useRef(0)
   const [policy, setPolicy] = useState<ExternalPilotPolicy>({ enabled: false, endpoints: [], revision: 0 })
   const [isLoading, setIsLoading] = useState(true)
   const [isBusy, setIsBusy] = useState(false)
@@ -83,10 +88,10 @@ function ScopedExternalAgents({ query }: { query: string }) {
     if (current.signal.aborted) return
     setAccess(permissions)
     if (!permissions.can_manage) return
-    const [rows, people, settings] = await Promise.all([api.list(), api.members(), api.policy()])
+    const [rows, settings] = await Promise.all([api.listPage(), api.policy()])
     if (current.signal.aborted) return
-    setAgents(rows)
-    setMembers(people)
+    setAgents(rows.items)
+    setAgentCursor(rows.next_cursor)
     setPolicy(settings)
   }, [api, controller])
 
@@ -105,6 +110,26 @@ function ScopedExternalAgents({ query }: { query: string }) {
       fileGeneration.current++
     }
   }, [onReload])
+
+  const onMembers = useCallback(async (search: string, after = '') => {
+    const generation = ++memberGeneration.current
+    setIsMembersLoading(true)
+    try {
+      const page = await api.membersPage(search, after)
+      if (generation !== memberGeneration.current || controller.current.signal.aborted) return
+      setMembers(page.items)
+      setMemberCursor(page.next_cursor)
+    } catch (cause) {
+      if (generation === memberGeneration.current && !controller.current.signal.aborted) setError(externalAgentError(cause))
+    } finally {
+      if (generation === memberGeneration.current && !controller.current.signal.aborted) setIsMembersLoading(false)
+    }
+  }, [api, controller])
+  useEffect(() => {
+    if (!dialog) return
+    const timer = setTimeout(() => { void onMembers(memberSearch) }, 250)
+    return () => { clearTimeout(timer); memberGeneration.current++ }
+  }, [dialog, memberSearch, onMembers])
 
   async function onRun(operation: () => Promise<void>) {
     if (isBusyRef.current || !isLive()) return
@@ -284,6 +309,9 @@ function ScopedExternalAgents({ query }: { query: string }) {
       </Field>
       <fieldset className="space-y-2">
         <legend className="mb-2 text-sm font-medium">允许使用的用户</legend>
+        <Input aria-label="搜索组织成员" placeholder="按姓名或邮箱搜索" maxLength={100} value={memberSearch} onChange={event => setMemberSearch(event.target.value)} />
+        <p className="text-xs text-muted-foreground">已选择 {draft.allowed_user_ids.length} 位成员；翻页和搜索会保留选择。</p>
+        <div className="flex flex-wrap gap-2">{draft.allowed_user_ids.filter(id => !members.some(member => member.id === id)).map(id => <Button key={id} type="button" variant="outline" size="sm" onClick={() => setDraft({ ...draft, allowed_user_ids: draft.allowed_user_ids.filter(value => value !== id) })}>移除 {id}</Button>)}</div>
         <div className="grid max-h-40 grid-cols-2 gap-3 overflow-y-auto rounded-md border p-3">
           {members.map((member) => (
             <label key={member.id} className="flex items-center gap-2 text-sm">
@@ -302,7 +330,11 @@ function ScopedExternalAgents({ query }: { query: string }) {
             </label>
           ))}
         </div>
-        <p className="text-xs text-muted-foreground">只允许选择当前组织的有效成员。</p>
+        <div className="flex gap-2">
+          <Button type="button" variant="outline" size="sm" disabled={isMembersLoading} onClick={() => void onMembers(memberSearch)}>第一页</Button>
+          <Button type="button" variant="outline" size="sm" disabled={isMembersLoading || !memberCursor} onClick={() => void onMembers(memberSearch, memberCursor ?? '')}>下一页</Button>
+        </div>
+        <p className="text-xs text-muted-foreground">每页最多 50 位，只允许选择当前组织的有效成员。</p>
       </fieldset>
       <Field id="external-decoder" label="结果格式">
         <select
@@ -384,6 +416,11 @@ function ScopedExternalAgents({ query }: { query: string }) {
       {access?.can_manage ? <UnknownExternalTasks api={api} /> : null}
       {error && !dialog ? <Feedback error>{error}</Feedback> : null}
       {notice ? <Feedback>{notice}</Feedback> : null}
+      {agentCursor && <Button type="button" variant="outline" disabled={isBusy} onClick={() => void onRun(async () => {
+        const page = await api.listPage(agentCursor)
+        setAgents(current => [...new Map([...current, ...page.items].map(agent => [agent.id, agent])).values()])
+        setAgentCursor(page.next_cursor)
+      })}>加载更多智能体</Button>}
       <div className="grid gap-4 md:grid-cols-2">
         {visibleAgents.map((agent) => {
           const isPublished = agent.approved && agent.review_expires_at > Date.now()

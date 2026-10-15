@@ -3,15 +3,18 @@ import type { TaskRecord } from '../../../contracts/task/v1alpha1/contract.js'
 import type { ExternalTask } from '../../../contracts/external-provider/v1/contract.js'
 import { ExternalTaskStore, digest, type Binding, type ExternalActor } from '../externalProviders/store.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
-import { DIFY_CAPABILITIES, HTTP_CAPABILITIES } from './manifest.js'
+import type { ProviderCapabilities } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { canonicalTaskJson, catalogPrincipal, parseTaskSubmission, snapshotVersion, TASK_API } from './taskContract.js'
 
 interface AdmissionHooks {
   lockPolicy: () => Promise<void>
   policy: () => Promise<{ enabled: boolean; endpoints: string[]; revision: number }>
   executable: (binding: Binding) => Promise<void>
+  capabilities: (binding: Binding) => Readonly<ProviderCapabilities>
   timeoutMs: number
 }
+
+export const MIN_DISPATCH_BUDGET_MS = 100
 
 /** All policy decisions for valid submissions are stored before any provider I/O. */
 export async function admitExternalTask(store: ExternalTaskStore, actor: ExternalActor, value: unknown, hooks: AdmissionHooks): Promise<ExternalTask> {
@@ -42,8 +45,13 @@ export async function admitExternalTask(store: ExternalTaskStore, actor: Externa
       }
       if (input.agent.requested_version && input.agent.requested_version !== snapshotVersion(binding.source_digest)) deny('AGENT_VERSION_NOT_FOUND', '请求的来源快照不是当前获批版本。')
       if (input.agent.requested_channel) deny('AGENT_CHANNEL_UNAVAILABLE', '当前接入尚未启用版本频道解析。')
-      const capabilities = binding.provider_kind === 'custom_http' ? HTTP_CAPABILITIES : DIFY_CAPABILITIES
-      if (input.required_capabilities.some(key => capabilities[`supports_${key}` as keyof typeof capabilities] !== true)) deny('CAPABILITY_UNAVAILABLE', '此智能体不支持任务要求的能力。')
+      try {
+        const capabilities = hooks.capabilities(binding)
+        if (input.required_capabilities.some(key => capabilities[`supports_${key}` as keyof typeof capabilities] !== true)) deny('CAPABILITY_UNAVAILABLE', '此智能体不支持任务要求的能力。')
+      } catch (error) {
+        if (!(error instanceof ExternalProviderError)) throw error
+        deny(error.code, '此平台尚未注册可执行的适配器。')
+      }
     }
     if (input.input.resource_refs.length || input.workspace_refs.length) deny('RESOURCE_INPUT_UNSUPPORTED', '当前接入仅允许文本任务，不能传输资源或工作区。')
     if (input.data_classification !== 'synthetic') deny('DATA_DOMAIN_FORBIDDEN', '当前接入仅允许已审核的合成数据任务。')
@@ -58,8 +66,9 @@ export async function admitExternalTask(store: ExternalTaskStore, actor: Externa
     // An unresolved selector is preserved as a rejected task without inventing source or provider facts.
     const selected: Binding = binding ?? { id: input.agent.catalog_id, orgId: actor.orgId, name: input.agent.catalog_id, source_digest: 'unresolved', revision: 1 } as Binding
     const timeout = Math.max(1, Math.min(hooks.timeoutMs, input.constraints.timeout_ms ?? hooks.timeoutMs, input.constraints.deadline ? Date.parse(input.constraints.deadline) - Date.now() : Infinity))
+    if (timeout < MIN_DISPATCH_BUDGET_MS) deny('DISPATCH_BUDGET_TOO_SHORT', '任务剩余时间不足，无法安全派发。')
     return store.create(actor, { agent_id: selected.id, session_id: input.session_id, query: input.input.instruction, idempotency_key: input.constraints.idempotency_key }, selected, timeout, {
-      requestHash, policySnapshot: snapshot,
+      requestHash, policySnapshot: snapshot, deadlineAt: input.constraints.deadline ? Date.parse(input.constraints.deadline) : undefined,
       reason: { status: code === 'ALLOWED' ? 'accepted' : 'rejected', reason_code: code, reason, policy_version: policyVersion },
       record: task => {
         const { kind: _kind, session_id: _session, agent, ...rest } = input

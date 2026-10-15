@@ -8,6 +8,7 @@ import { crashFixture } from '../testing/externalProviderCrashFixture.js'
 import { AGENT_FEDERATION_API, AGENT_HTTP_API } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { TASK_API, type SubmitTask } from '../../../contracts/task/v1alpha1/contract.js'
 import { HTTP_CAPABILITIES } from './manifest.js'
+import { maintainRetention } from '../externalProviders/retention.js'
 import { dispatchExternalProvider } from '../externalProviders/routes.js'
 
 const cleanup: (() => Promise<void>)[] = []
@@ -200,4 +201,112 @@ void test('history follows durable session creation order despite deadlines and 
   assert.deepEqual(history.map(task => task.id), [first.id, second.id, third.id])
   assert.deepEqual(history.map(task => task.session_sequence), [1, 2, 3])
   assert.equal(f.calls.length, 3)
+})
+
+void test('short budgets reject durably without credentials, Attempt or provider calls', async () => {
+  const f = await setup()
+  let reads = 0
+  f.service.administration.options.secrets.getSecret = async () => { reads++; throw new Error('No vault I/O allowed') }
+  for (const constraints of [{ timeout_ms: 1 }, { deadline: new Date(Date.now() + 50).toISOString() }]) {
+    const input = { ...f.input(), constraints: { idempotency_key: randomUUID(), ...constraints } }
+    const task = await f.run(input)
+    assert.equal(task.status, 'rejected')
+    assert(['DISPATCH_BUDGET_TOO_SHORT', 'DEADLINE_EXPIRED'].includes(task.error_code!))
+    assert.equal(task.attempt_id, null)
+    assert.equal((await f.store.taskRecord(f.actor, task.id))?.resolution.status, 'rejected')
+    assert.equal((await f.run(input)).id, task.id)
+  }
+  assert.equal(reads, 0); assert.equal(f.calls.length, 0)
+})
+
+void test('expiry during admission storage terminalizes before dispatch without waiting for maintenance', async () => {
+  const f = await setup()
+  await f.service.close() // Disable background scanning to prove the dispatch path closes the task.
+  let reads = 0
+  f.service.administration.options.secrets.getSecret = async () => { reads++; throw new Error('No vault I/O allowed') }
+  const run = f.driver.run.bind(f.driver)
+  f.driver.run = async (sql, params) => {
+    if (sql.startsWith('INSERT INTO external_pilot_tasks')) await new Promise(resolve => setTimeout(resolve, 150))
+    return run(sql, params)
+  }
+  const task = await f.run({ ...f.input(), constraints: { idempotency_key: randomUUID(), timeout_ms: 100 } })
+  assert.equal(task.status, 'failed'); assert.equal(task.error_code, 'DISPATCH_DEADLINE')
+  assert.equal((await f.store.session(f.actor, task.session_id)).active_task_id, null)
+  assert.equal((await f.driver.get('SELECT status FROM external_pilot_attempts WHERE task_id = ?', [task.id]))?.status, 'failed')
+  assert.equal(reads, 0); assert.equal(f.calls.length, 0)
+})
+
+void test('an unregistered stored provider is rejected before vault or adapter dispatch', async () => {
+  const f = await setup(), binding = await f.store.binding(f.actor, f.agent.id)
+  await f.store.saveBinding({ ...binding, provider_kind: 'future-provider' as typeof binding.provider_kind })
+  let reads = 0
+  f.service.administration.options.secrets.getSecret = async () => { reads++; throw new Error('No vault I/O allowed') }
+  const task = await f.run()
+  assert.equal(task.status, 'rejected'); assert.equal(task.error_code, 'PROVIDER_NOT_IMPLEMENTED')
+  assert.equal(task.attempt_id, null); assert.equal(reads, 0); assert.equal(f.calls.length, 0)
+})
+
+void test('retention compacts terminal events, retires payloads and preserves idempotency and unknown work', async () => {
+  const f = await setup(), input = f.input(), task = await f.run(input)
+  await f.service.close()
+  const uncertain = await f.store.create(f.actor, { agent_id: f.agent.id, query: 'retain uncertain', idempotency_key: randomUUID() }, await f.store.binding(f.actor, f.agent.id), 1000)
+  await f.store.mutate(uncertain.id, value => { value.status = 'unknown'; return 'status' })
+  const day = 86400_000, base = Date.now()
+  await maintainRetention(f.store, base + 2 * day)
+  assert.equal((await f.store.events(f.actor, task.id, 1)).task?.answer, '42')
+  await maintainRetention(f.store, base + 31 * day)
+  assert.equal((await f.store.history(f.actor, task.session_id)).length, 0)
+  assert.equal((await f.store.sessions(f.actor)).some(value => value.id === task.session_id), false)
+  await assert.rejects(f.store.task(f.actor, task.id), { code: 'TASK_HISTORY_EXPIRED' })
+  for (const cursor of [0, 1, 9999]) await assert.rejects(f.store.events(f.actor, task.id, cursor), { code: 'TASK_HISTORY_EXPIRED' })
+  await assert.rejects(f.service.create(f.actor, input), { code: 'TASK_HISTORY_EXPIRED' })
+  assert.equal(f.calls.length, 1)
+  assert.equal((await f.store.task(f.actor, uncertain.id)).status, 'unknown')
+  assert.equal((await f.store.session(f.actor, uncertain.session_id)).active_task_id, uncertain.id)
+  assert.equal((await f.driver.get('SELECT COUNT(*) AS count FROM product_task_records WHERE task_id = ?', [task.id]))?.count, 0)
+  assert((await f.driver.get('SELECT audit_document FROM external_pilot_retention WHERE task_id = ?', [task.id]))?.audit_document)
+  await maintainRetention(f.store, base + 122 * day)
+  assert.equal((await f.driver.get('SELECT audit_document FROM external_pilot_retention WHERE task_id = ?', [task.id]))?.audit_document, null)
+  await assert.rejects(f.service.create(f.actor, input), { code: 'TASK_HISTORY_EXPIRED' })
+})
+
+void test('scheduled maintenance claims coalesce instances and a failed batch can retry', async () => {
+  const f = await setup()
+  let calls = 0
+  const now = Date.now() + 10000
+  const claims = await Promise.all(Array.from({ length: 8 }, () => f.store.scheduled('test', 1000, async () => { calls++ }, now)))
+  assert.equal(claims.filter(Boolean).length, 1); assert.equal(calls, 1)
+  await assert.rejects(f.store.scheduled('failed-test', 1000, async () => { throw new Error('rollback') }, now))
+  assert.equal(await f.store.scheduled('failed-test', 1000, async () => {}, now), true)
+})
+
+void test('Pilot capacity counts tombstones, preserves retries and rejects new work without partial state', async () => {
+  const f = await setup(), input = f.input(), task = await f.run(input)
+  await f.service.close()
+  await f.driver.run(`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < 9999)
+    INSERT INTO external_pilot_tasks(id, org_id, user_id, session_id, idempotency_key, request_hash, status, deadline_at, sequence, document)
+    SELECT 'retired-' || n, ?, ?, ?, 'old-key-' || n, 'old-hash', 'succeeded', 1, 1, '{"_retired":true}' FROM ids`,
+  [f.actor.orgId, f.actor.userId, task.session_id])
+  assert.equal((await f.run(input)).id, task.id)
+  await assert.rejects(f.service.create(f.actor, f.input()), { code: 'PILOT_TASK_CAPACITY_REACHED' })
+  assert.equal(f.calls.length, 1)
+  for (const table of ['external_pilot_sessions', 'external_pilot_attempts', 'product_task_records']) {
+    assert.equal((await f.driver.get(`SELECT COUNT(*) AS count FROM ${table}`))?.count, 1)
+  }
+  assert.equal((await f.driver.get('SELECT COUNT(*) AS count FROM external_pilot_tasks'))?.count, 10000)
+})
+
+void test('directory pages advance past archived bindings and member search is paged', async () => {
+  const f = await setup(), binding = await f.store.binding(f.actor, f.agent.id)
+  for (let i = 0; i < 102; i++) await f.store.saveBinding({ ...binding, id: `000-${String(i).padStart(3, '0')}`, archived: true })
+  const first = await f.service.administration.listPage(f.actor)
+  assert.equal(first.items.length, 0); assert(first.next_cursor)
+  const second = await f.service.administration.listPage(f.actor, first.next_cursor!)
+  assert.equal(second.items[0].id, f.agent.id); assert.equal(second.next_cursor, null)
+  assert.equal((await f.service.list(f.actor))[0].id, f.agent.id)
+  f.service.administration.options.members = async () => Array.from({ length: 120 }, (_, i) => ({ id: `member-${String(i).padStart(3, '0')}`, name: `Member ${i}` }))
+  const people = await f.service.administration.memberPage(f.actor, '', 'Member')
+  assert.equal(people.items.length, 50); assert.equal(people.next_cursor, 'member-049')
+  assert.equal((await f.service.administration.memberPage(f.actor, people.next_cursor!, 'Member')).items[0].id, 'member-050')
+  await assert.rejects(f.service.administration.memberPage(f.actor, '../invalid', ''), { code: 'INVALID_CURSOR' })
 })

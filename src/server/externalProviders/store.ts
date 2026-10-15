@@ -10,6 +10,7 @@ import type { TaskRecord } from '../../../contracts/task/v1alpha1/contract.js'
 
 export interface TaskAdmission {
   requestHash: string
+  deadlineAt?: number
   reason: ExternalTask['policy_decision'] & {}
   record: (task: ExternalTask) => TaskRecord
   policySnapshot: unknown
@@ -23,10 +24,16 @@ type SessionRow = SqlRow & { id: string; agent_id: string; agent_name: string; t
 export const isTerminal = (status: ExternalTask['status']): boolean => ['succeeded', 'failed', 'rejected', 'unknown'].includes(status)
 export const digest = (value: string): string => `sha256:${createHash('sha256').update(value).digest('hex')}`
 
+export const MAX_PILOT_TASKS_PER_ORG = 10_000
+
 export class ExternalTaskStore {
   readonly ready: Promise<void>
   constructor(readonly db: DbDriver) {
     this.ready = db.exec(`
+      CREATE TABLE IF NOT EXISTS external_pilot_maintenance (name TEXT PRIMARY KEY, next_run_at BIGINT NOT NULL);
+      CREATE TABLE IF NOT EXISTS external_pilot_capacity (org_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS external_pilot_retention (task_id TEXT PRIMARY KEY, compacted_at BIGINT NOT NULL, retired_at BIGINT, audit_document TEXT);
+      CREATE INDEX IF NOT EXISTS external_pilot_retention_retired ON external_pilot_retention(retired_at);
       CREATE TABLE IF NOT EXISTS external_pilot_policy (org_id TEXT PRIMARY KEY, document TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS external_pilot_admin_operations (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, request_hash TEXT NOT NULL, status TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS external_pilot_operations (
@@ -36,6 +43,7 @@ export class ExternalTaskStore {
       );
       CREATE INDEX IF NOT EXISTS external_pilot_operations_pending ON external_pilot_operations(status, lease_until);
       CREATE TABLE IF NOT EXISTS external_pilot_admin_audit (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL, action TEXT NOT NULL, resource_id TEXT NOT NULL, created_at BIGINT NOT NULL);
+      CREATE INDEX IF NOT EXISTS external_pilot_admin_audit_created ON external_pilot_admin_audit(created_at, id);
       CREATE TABLE IF NOT EXISTS external_pilot_bindings (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, document TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS external_pilot_bindings_org ON external_pilot_bindings(org_id, id);
       CREATE TABLE IF NOT EXISTS external_pilot_sessions (
@@ -123,9 +131,9 @@ export class ExternalTaskStore {
     return row ? parseExternalRunBinding(JSON.parse(String(row.document))) : null
   }
 
-  async bindings(actor: ExternalActor): Promise<Binding[]> {
+  async bindings(actor: ExternalActor, after = '', limit = 100): Promise<Binding[]> {
     await this.ready
-    return (await this.db.all('SELECT document FROM external_pilot_bindings WHERE org_id = ? ORDER BY id LIMIT 100', [actor.orgId])).map(row => JSON.parse(String(row.document)))
+    return (await this.db.all('SELECT document FROM external_pilot_bindings WHERE org_id = ? AND id > ? ORDER BY id LIMIT ?', [actor.orgId, after, limit])).map(row => JSON.parse(String(row.document)))
   }
 
   async saveBinding(binding: Binding): Promise<void> {
@@ -157,6 +165,13 @@ export class ExternalTaskStore {
     await this.ready
     const hash = admission?.requestHash ?? digest(JSON.stringify([input.agent_id, input.session_id ?? null, input.query]))
     return this.db.transaction(async () => {
+      // A bounded Pilot retains idempotency tombstones, so capacity includes retired tasks.
+      await this.db.run('INSERT INTO external_pilot_capacity(org_id) VALUES (?) ON CONFLICT(org_id) DO NOTHING', [actor.orgId])
+      await this.db.run('UPDATE external_pilot_capacity SET org_id = org_id WHERE org_id = ?', [actor.orgId])
+      const existing = await this.existingRequest(actor, input.idempotency_key, hash)
+      if (existing) return existing
+      const capacity = await this.db.get('SELECT COUNT(*) AS total FROM external_pilot_tasks WHERE org_id = ?', [actor.orgId])
+      if (Number(capacity?.total) >= MAX_PILOT_TASKS_PER_ORG) throw new ExternalProviderError(429, 'PILOT_TASK_CAPACITY_REACHED')
       // Reserve the idempotency key before touching a session. ON CONFLICT also serializes concurrent retries on PG.
       const id = randomUUID(), sessionId = input.session_id ?? randomUUID(), now = Date.now()
       const task: ExternalTask = {
@@ -165,7 +180,7 @@ export class ExternalTaskStore {
         configuration_revision: binding.revision ?? 1, query: input.query, answer: '', raw_answer: '', raw_answer_freshness: 'current', output_status: 'pending', error_code: null,
         source_identity_evidence: 'unverified', source_digest: binding.source_digest, provider: binding.source_digest === 'unresolved' ? 'unresolved' : binding.provider_kind ?? 'dify', provider_refs: {},
         cancellation: { status: 'unsupported', reason: 'Provider termination cannot be confirmed in this pilot' },
-        created_at: now, updated_at: now, deadline_at: now + timeoutMs,
+        created_at: now, updated_at: now, deadline_at: Math.min(now + timeoutMs, admission?.deadlineAt ?? Infinity),
       }
       if (admission) {
         task.task_contract_version = 'task.sudo.dev/v1alpha1'
@@ -221,13 +236,13 @@ export class ExternalTaskStore {
 
   async sessions(actor: ExternalActor): Promise<ExternalSession[]> {
     await this.ready
-    const rows = await this.db.all<SessionRow>('SELECT * FROM external_pilot_sessions WHERE org_id = ? AND user_id = ? ORDER BY updated_at DESC, id LIMIT 100', [actor.orgId, actor.userId])
+    const rows = await this.db.all<SessionRow>("SELECT * FROM external_pilot_sessions s WHERE org_id = ? AND user_id = ? AND EXISTS (SELECT 1 FROM external_pilot_tasks t WHERE t.session_id = s.id AND NOT EXISTS (SELECT 1 FROM external_pilot_retention r WHERE r.task_id = t.id AND r.retired_at IS NOT NULL)) ORDER BY updated_at DESC, id LIMIT 100", [actor.orgId, actor.userId])
     return rows.map(row => ({ id: row.id, agent_id: row.agent_id, agent_name: row.agent_name, title: row.title, active_task_id: row.active_task_id, created_at: Number(row.created_at), updated_at: Number(row.updated_at) }))
   }
 
   async history(actor: ExternalActor, sessionId: string): Promise<ExternalTask[]> {
     await this.session(actor, sessionId)
-    const rows = await this.db.all<TaskRow>('SELECT * FROM external_pilot_tasks WHERE session_id = ? LIMIT 200', [sessionId])
+    const rows = await this.db.all<TaskRow>('SELECT * FROM external_pilot_tasks t WHERE session_id = ? AND NOT EXISTS (SELECT 1 FROM external_pilot_retention r WHERE r.task_id = t.id AND r.retired_at IS NOT NULL) LIMIT 200', [sessionId])
     const tasks = await this.projectMany(rows)
     return tasks.sort((a, b) => {
       if (a.session_sequence !== undefined && b.session_sequence !== undefined) return a.session_sequence - b.session_sequence
@@ -252,6 +267,7 @@ export class ExternalTaskStore {
     const row = await this.db.get<TaskRow>('SELECT * FROM external_pilot_tasks WHERE id = ? AND org_id = ? AND user_id = ?', [id, actor.orgId, actor.userId])
     if (!row) throw new ExternalProviderError(404, 'TASK_NOT_FOUND')
     const horizon = Number(row.sequence)
+    if (JSON.parse(row.document)._retired) throw new ExternalProviderError(410, 'TASK_HISTORY_EXPIRED')
     const envelope = { api_version: EXTERNAL_PROVIDER_API, kind: 'ExternalEventsPage' as const }
     const snapshot = async () => ({ ...envelope, task: await this.project(row), snapshot_sequence: horizon, events: [], next_cursor: horizon, has_more: false })
     if (cursor === 0 || cursor > horizon) return snapshot()
@@ -279,6 +295,7 @@ export class ExternalTaskStore {
   }
 
   private async project(row: TaskRow, loaded?: SqlRow[]): Promise<ExternalTask> {
+    if (JSON.parse(row.document)._retired) throw new ExternalProviderError(410, 'TASK_HISTORY_EXPIRED')
     const { _checkpoint_sequence: checkpoint = Number(row.sequence), ...task } = JSON.parse(row.document) as Checkpoint
     if (![EXTERNAL_PROVIDER_API, 'external-provider.sudo.dev/v1alpha4', 'external-provider.sudo.dev/v1alpha3'].includes(task.api_version)) task.raw_answer_freshness = 'legacy_checkpoint'
     task.api_version = EXTERNAL_PROVIDER_API
@@ -350,10 +367,23 @@ export class ExternalTaskStore {
     })
   }
 
+  async scheduled(name: string, intervalMs: number, action: () => Promise<void>, now = Date.now()): Promise<boolean> {
+    await this.ready
+    return this.db.transaction(async () => {
+      await this.db.run('INSERT INTO external_pilot_maintenance(name, next_run_at) VALUES (?, 0) ON CONFLICT(name) DO NOTHING', [name])
+      const claimed = await this.db.run('UPDATE external_pilot_maintenance SET next_run_at = ? WHERE name = ? AND next_run_at <= ?', [now + intervalMs, name, now])
+      if (!claimed) return false
+      // Hold the row lock through the batch; rollback also releases a failed claim.
+      await action()
+      return true
+    })
+  }
+
   async expire(now = Date.now()): Promise<void> {
     await this.ready
     const rows = await this.db.all('SELECT id FROM external_pilot_tasks WHERE status IN (?, ?, ?) AND deadline_at <= ? LIMIT 100', ['accepted', 'dispatching', 'running', now])
     for (const row of rows) await this.mutate(String(row.id), task => {
+      if (task.deadline_at > now || !['accepted', 'dispatching', 'running'].includes(task.status)) return false
       task.status = task.status === 'accepted' ? task.task_contract_version ? 'failed' : 'rejected' : 'unknown'
       task.error_code = ['rejected', 'failed'].includes(task.status) ? 'DISPATCH_DEADLINE' : 'EXECUTION_UNCONFIRMED'
       return 'status'

@@ -7,11 +7,10 @@ import { parseNexusSecretRef, type DifySecretPort } from '../dify/difyConnection
 import type { ExternalAgent } from '../../../contracts/external-provider/v1/contract.js'
 import { ExternalTaskStore, digest, type Binding, type ExternalActor } from './store.js'
 import { ExternalProviderError, assertPilot, parseRegistration, type PilotPolicy } from './policy.js'
-import { DifyPilotTransport } from './difyTransport.js'
 import { decodeOutput } from './decoder.js'
-import { CustomHttpAdapter } from '../agentFederation/customHttpAdapter.js'
 import { providerDefinition } from './providerDefinition.js'
-import { DifyGatewayAdapter } from '../agentFederation/difyAdapter.js'
+import { createRuntimeRegistry } from '../agentFederation/runtimeRegistry.js'
+import { maintainRetention } from './retention.js'
 import { admitExternalTask } from '../agentFederation/taskIngress.js'
 
 export class ExternalProviderService {
@@ -21,8 +20,10 @@ export class ExternalProviderService {
   private maintenance: Promise<void> | null = null
   private nextCredentialMaintenance = 0
   readonly administration: ExternalProviderAdministration
+  private readonly adapters: ReturnType<typeof createRuntimeRegistry>
   constructor(readonly store: ExternalTaskStore, private readonly options: AdministrationOptions) {
     this.administration = new ExternalProviderAdministration(store, options)
+    this.adapters = createRuntimeRegistry(options)
     this.timer = setInterval(() => { void this.maintain().catch(() => {}) }, 1000)
     this.timer.unref()
     void this.maintain().catch(() => {})
@@ -38,10 +39,11 @@ export class ExternalProviderService {
   maintain(): Promise<void> {
     if (this.maintenance) return this.maintenance
     this.maintenance = (async () => {
-      await this.store.expire()
+      await this.store.scheduled('expiry', 1000, () => this.store.expire())
       if (Date.now() >= this.nextCredentialMaintenance) {
         this.nextCredentialMaintenance = Date.now() + 60_000
         await this.administration.operations.reconcile()
+        await maintainRetention(this.store)
       }
     })().finally(() => { this.maintenance = null })
     return this.maintenance
@@ -92,6 +94,7 @@ export class ExternalProviderService {
     let parametersDigest: string | null = null
     let credentialVersion: number | undefined
     if (approved) {
+      this.adapters.get(binding.provider_kind ?? 'dify')
       if (binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
       parseRegistration(this.definition(binding), actor.orgId, await this.administration.effectivePolicy(actor))
       if (binding.credentialRecoveryRequired) throw new ExternalProviderError(409, 'CREDENTIAL_ROTATION_REQUIRED')
@@ -111,20 +114,32 @@ export class ExternalProviderService {
   }
 
   async list(actor: ExternalActor): Promise<ExternalAgent[]> {
+    const items: ExternalAgent[] = []
+    let after = ''
+    for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+      const page = await this.listPage(actor, after)
+      items.push(...page.items)
+      if (!page.next_cursor) return items
+      after = page.next_cursor
+    }
+    throw new ExternalProviderError(429, 'PILOT_DIRECTORY_CAPACITY_REACHED')
+  }
+
+  async listPage(actor: ExternalActor, after = '') {
     await this.authorize(actor)
     const effectivePolicy = await this.administration.effectivePolicy(actor)
-    if (!effectivePolicy.orgIds.includes(actor.orgId)) return []
-    const bindings = await this.store.bindings(actor)
+    if (!effectivePolicy.orgIds.includes(actor.orgId)) return { items: [], next_cursor: null }
+    const page = await this.store.bindings(actor, after, 101), bindings = page.slice(0, 100)
     const [agents, connections] = await Promise.all([
       this.options.catalog.getOrganizationAgentsByIds(actor.orgId, bindings.map(binding => binding.id)),
-      this.options.identities.listIntegrationConnections(actor.orgId),
+      this.options.identities.getOrganizationConnectionsByIds(actor.orgId, bindings.map(binding => binding.connectionId)),
     ])
     const context = { policy: effectivePolicy, agents: new Map(agents.map(agent => [agent.id, agent])), connections: new Map(connections.map(connection => [connection.id, connection])) }
     const result: ExternalAgent[] = []
     for (const binding of bindings) {
       try { await this.executable(actor, binding, context); result.push(this.describe(binding)) } catch (error) { if (!(error instanceof ExternalProviderError)) throw error }
     }
-    return result
+    return { items: result, next_cursor: page.length > 100 ? bindings.at(-1)!.id : null }
   }
 
   async create(actor: ExternalActor, input: unknown) {
@@ -135,6 +150,7 @@ export class ExternalProviderService {
       policy: () => this.administration.policy(actor),
       executable: binding => this.executable(actor, binding),
       timeoutMs: this.options.policy.timeoutMs,
+      capabilities: binding => this.adapters.get(binding.provider_kind ?? 'dify').capabilities,
     })
     if (task.status === 'accepted' && !this.executions.has(task.id)) {
       const execution = this.execute(actor, task.id).catch(() => { /* Persisted dispatch intent is expired to unknown if the DB is unavailable. */ }).finally(() => this.executions.delete(task.id))
@@ -145,15 +161,18 @@ export class ExternalProviderService {
 
   async waitForTask(id: string): Promise<void> { await this.executions.get(id) }
 
-  private get transport() { return this.options.transport ?? new DifyPilotTransport() }
-
   private async execute(actor: ExternalActor, id: string): Promise<void> {
     // A durable CAS wins dispatch once across processes; never replay a claimed attempt.
     const task = await this.store.mutate(id, current => {
-      if (current.status !== 'accepted' || current.deadline_at <= Date.now()) return false
+      if (current.status !== 'accepted') return false
+      if (current.deadline_at <= Date.now()) {
+        current.status = current.task_contract_version ? 'failed' : 'rejected'
+        current.error_code = 'DISPATCH_DEADLINE'
+        return 'status'
+      }
       current.status = 'dispatching'; current.attempt_id ??= randomUUID(); return 'status'
     })
-    if (!task) return
+    if (!task || task.status !== 'dispatching') return
     const controller = new AbortController()
     this.controllers.add(controller)
     const timeout = setTimeout(() => controller.abort(), Math.max(1, task.deadline_at - Date.now()))
@@ -163,14 +182,11 @@ export class ExternalProviderService {
       await this.authorize(actor)
       await this.executable(actor, binding)
       if (task.configuration_revision !== undefined && task.configuration_revision !== (binding.revision ?? 1)) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
+      const adapter = this.adapters.get(binding.provider_kind ?? 'dify').create(binding)
       const secret = await this.secret(binding)
       if (binding.credentialVersion !== secret.version) throw new ExternalProviderError(409, 'CREDENTIAL_CHANGED')
       const key = secret.value
       const session = await this.store.session(actor, task.session_id)
-      if (binding.provider_kind === 'custom_http' && !binding.sourceManifest) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
-      const adapter = binding.provider_kind === 'custom_http'
-        ? new CustomHttpAdapter({ manifest: binding.sourceManifest!, digest: binding.source_digest }, this.options.httpRequest)
-        : new DifyGatewayAdapter(binding.parametersDigest!, this.transport)
       const result = await adapter.invoke({
         task_id: task.id, attempt_id: task.attempt_id!, session_id: task.session_id,
         binding_id: binding.id, external_agent_id: binding.app_id, source_digest: binding.source_digest,
@@ -230,6 +246,7 @@ export class ExternalProviderService {
   }
 
   private async executable(actor: ExternalActor, binding: Binding, context?: { policy: PilotPolicy; agents: Map<string, CatalogAgent>; connections: Map<string, IntegrationConnection> }): Promise<void> {
+    this.adapters.get(binding.provider_kind ?? 'dify')
     if (binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
     assertPilot(context?.policy ?? await this.administration.effectivePolicy(actor), actor.orgId, binding.endpoint)
     if (binding.archived || binding.credentialUpdating || binding.credentialRecoveryRequired || !binding.approved || !binding.parametersDigest || binding.review_expires_at <= Date.now() || !binding.allowed_user_ids.includes(actor.userId)) throw new ExternalProviderError(403, 'AGENT_NOT_APPROVED_FOR_USER')

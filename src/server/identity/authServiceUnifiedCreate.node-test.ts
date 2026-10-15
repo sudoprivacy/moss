@@ -5,6 +5,23 @@ import { AuthService, AuthServiceError } from '../auth/service.js'
 import { AuthCenterDb, verifyPassword } from '../authCenter/db.js'
 import { createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 
+void test('external member search uses active organization membership, literal wildcards and stable pages', async () => {
+  const db = new DatabaseSync(':memory:'), auth = new AuthCenterDb(db)
+  try {
+    for (const org of ['org-a', 'org-b']) await auth.createOrganization(org, org, 1)
+    for (let i = 0; i < 55; i++) await auth.driver.run(`INSERT INTO users(id, org_id, email, name, role, status, local_auth, created_at)
+      VALUES (?, ?, ?, ?, 'user', ?, 1, 1)`, [`member-${String(i).padStart(3, '0')}`, i === 53 ? 'org-b' : 'org-a', `user${i}@example.test`, i === 52 ? 'Literal%_!' : `Member ${i}`, i === 54 ? 'disabled' : 'active'])
+    const first = await auth.externalMembersPage('org-a', '', '', 50)
+    assert.equal(first.length, 50)
+    const second = await auth.externalMembersPage('org-a', first.at(-1)!.id, '', 50)
+    assert.deepEqual(second.map(member => member.id), ['member-050', 'member-051', 'member-052'])
+    assert.deepEqual((await auth.externalMembersPage('org-a', '', '%_!', 50)).map(member => member.id), ['member-052'])
+    assert.deepEqual((await auth.externalMembersPage('org-a', '', 'USER51@EXAMPLE', 50)).map(member => member.id), ['member-051'])
+    assert.equal((await auth.externalMembersPage('org-a', '', 'user53', 50)).length, 0)
+    assert.equal((await auth.externalMembersPage('org-a', '', 'user54', 50)).length, 0)
+  } finally { db.close() }
+})
+
 void test('Moss native deletion removes an empty organization and its identity records', async () => {
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)

@@ -35,11 +35,20 @@ export class ProgressCoalescer {
   private timer: ReturnType<typeof setTimeout> | undefined
   private lastStarted = 0
   private failure: unknown
+  private lastRaw: string | undefined
+  private lastRefs: string | undefined
   constructor(private readonly write: (progress: ProviderProgress) => Promise<void>, private readonly interval = 500) {}
 
   push(progress: ProviderProgress): void {
     if (this.failure) throw this.failure
+    const refs = JSON.stringify(Object.entries(progress.refs).sort(([a], [b]) => a.localeCompare(b)))
+    if (progress.raw === this.lastRaw && refs === this.lastRefs) return
+    this.lastRaw = progress.raw; this.lastRefs = refs
     this.pending = progress
+    this.schedule()
+  }
+
+  private schedule(): void {
     if (!this.active && !this.timer) {
       const delay = Math.max(0, this.interval - (Date.now() - this.lastStarted))
       if (!delay) this.start()
@@ -53,7 +62,7 @@ export class ProgressCoalescer {
     this.pending = undefined; this.lastStarted = Date.now()
     this.active = Promise.resolve().then(() => this.write(progress)).catch(error => { this.failure = error }).finally(() => {
       this.active = undefined
-      if (this.pending && !this.failure) this.push(this.pending)
+      if (this.pending && !this.failure) this.schedule()
     })
   }
 

@@ -311,7 +311,7 @@ void test('transport abort deadline marks unknown without pretending remote canc
     if (String(url).endsWith('/parameters')) return Response.json({ user_input_form: [], file_upload: { enabled: false } })
     return new Response(new ReadableStream({ start(controller) { init?.signal?.addEventListener('abort', () => controller.error(new Error('aborted'))) } }), { headers: { 'content-type': 'text/event-stream' } })
   }) as typeof fetch)
-  const service = new ExternalProviderService(f.store, { catalog: f.catalog, identities: f.identities, policy: { ...policy, timeoutMs: 30 }, transport, isActive: async () => true, secrets: { getSecret: async () => ({ value: 'private-app-key', status: 'enabled', version: 1 }) } })
+  const service = new ExternalProviderService(f.store, { catalog: f.catalog, identities: f.identities, policy: { ...policy, timeoutMs: 200 }, transport, isActive: async () => true, secrets: { getSecret: async () => ({ value: 'private-app-key', status: 'enabled', version: 1 }) } })
   cleanups.unshift(async () => service.close())
   const task = await service.create(actor, syntheticTaskSubmission({ ...f.request(), agent_id: binding.id })); await service.waitForTask(task.id)
   const final = await f.store.task(actor, task.id)
@@ -576,7 +576,7 @@ void test('SIGKILL before and after vault writes leaves recoverable onboarding a
       assert.throws(() => execFileSync(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('../testing/externalProviderCrashFixture.ts', import.meta.url)), directory, kind, stage], { stdio: 'pipe', timeout: 10000 }), error => (error as { signal: string }).signal === 'SIGKILL')
       const f = await crashFixture(directory)
       try {
-        await f.store.ready
+        await f.service.maintain()
         await f.driver.run("UPDATE external_pilot_operations SET lease_until = 0 WHERE status = 'pending'")
         await f.service.administration.operations.reconcile()
         const bindings = await f.store.bindings(f.actor)
@@ -873,4 +873,24 @@ void test('archive removes owned credentials, retains history and never deletes 
   const other = await setup(), binding = await other.store.binding(actor, other.registered.id)
   await other.service.administration.archive(actor, binding.id, { revision: 2 })
   assert.equal((await other.driver.get("SELECT COUNT(*) AS count FROM external_pilot_operations WHERE kind = 'cleanup'"))?.count, 0)
+})
+
+void test('unchanged provider heartbeats never write another progress transaction', async () => {
+  let writes = 0
+  const stream = new ProgressCoalescer(async () => { writes++ }, 1)
+  stream.push({ raw: 'answer', refs: { message_id: 'message' } }); await stream.flush()
+  for (let i = 0; i < 1000; i++) stream.push({ raw: 'answer', refs: { message_id: 'message' } })
+  await stream.flush(); assert.equal(writes, 1)
+  stream.push({ raw: 'answer', refs: { message_id: 'message', task_id: 'remote-task' } }); await stream.flush()
+  assert.equal(writes, 2, 'Changed provider references must remain durable')
+})
+
+void test('referencing a Moss-owned namespace never transfers its credential cleanup ownership', async () => {
+  const f = await administrationSetup(); await f.enable()
+  const owner = await f.admin.onboard(actor, f.body()), binding = await f.store.binding(actor, owner.id)
+  await f.store.saveBinding({ ...binding, id: 'reference-consumer', connectionId: 'reference-connection', registrationMode: 'reference_compat' })
+  await f.admin.archive(actor, 'reference-consumer', { revision: 1 })
+  await f.admin.operations.reconcile()
+  assert.equal(f.values.size, 1, 'Archiving the reference must not delete the owner key')
+  assert.equal((await f.driver.get("SELECT COUNT(*) AS count FROM external_pilot_operations WHERE kind = 'cleanup'"))?.count, 0)
 })

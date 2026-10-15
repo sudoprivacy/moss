@@ -468,6 +468,7 @@ export class AuthCenterDb {
       CREATE INDEX IF NOT EXISTS departments_org_idx ON departments (org_id);
       CREATE INDEX IF NOT EXISTS departments_parent_idx ON departments (parent_id);
       CREATE INDEX IF NOT EXISTS users_org_idx ON users (org_id);
+      CREATE INDEX IF NOT EXISTS users_org_status_id_idx ON users (org_id, status, id);
       CREATE INDEX IF NOT EXISTS users_email_idx ON users (email);
       CREATE INDEX IF NOT EXISTS api_keys_org_idx ON api_keys (org_id);
       CREATE INDEX IF NOT EXISTS api_keys_user_idx ON api_keys (user_id);
@@ -1488,6 +1489,15 @@ export class AuthCenterDb {
       SELECT * FROM users WHERE id = ? AND org_id = ? LIMIT 1
     `, [id, orgId])
     return row ? mapUser(row) : null
+  }
+
+  async externalMembersPage(orgId: string, after: string, search: string, limit: number): Promise<{ id: string; name: string }[]> {
+    const pattern = `%${search.toLowerCase().replace(/[!%_]/g, value => `!${value}`)}%`
+    const rows = await this.driver.all<SqlRow>(`SELECT id, name, display_name, email FROM users
+      WHERE org_id = ? AND status = 'active' AND id > ?
+      AND LOWER(COALESCE(display_name, '') || ' ' || COALESCE(name, '') || ' ' || COALESCE(email, '')) LIKE ? ESCAPE '!'
+      ORDER BY id LIMIT ?`, [orgId, after, pattern, limit])
+    return rows.map(row => ({ id: String(row.id), name: String(row.display_name || row.name || row.email) }))
   }
 
   async listUsersByOrg(orgId: string): Promise<AuthCenterUser[]> {

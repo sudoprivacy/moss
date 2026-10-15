@@ -21,6 +21,7 @@ export interface AdministrationOptions {
   catalog: CatalogRepository; identities: IdentityRepository; secrets: ExternalSecretPort; policy: PilotPolicy
   isActive: (actor: ExternalActor) => Promise<boolean>
   members?: (orgId: string) => Promise<ExternalProviderMember[]>
+  membersPage?: (orgId: string, after: string, search: string, limit: number) => Promise<ExternalProviderMember[]>
   transport?: DifyPilotTransport
   httpRequest?: ProviderRequest
 }
@@ -72,7 +73,19 @@ export class ExternalProviderAdministration {
     })
   }
   async members(actor: ExternalActor): Promise<ExternalProviderMember[]> { return this.options.members?.(actor.orgId) ?? [] }
+  async memberPage(actor: ExternalActor, after: string, search: string) {
+    if (after.length > 200 || (after && !/^[\w-]+$/.test(after)) || search.length > 100) return fail('INVALID_CURSOR')
+    const rows = this.options.membersPage
+      ? await this.options.membersPage(actor.orgId, after, search, 51)
+      : (await this.members(actor)).filter(member => member.id > after && member.name.toLowerCase().includes(search.toLowerCase())).sort((a, b) => a.id < b.id ? -1 : 1).slice(0, 51)
+    const items = rows.slice(0, 50)
+    return { items, next_cursor: rows.length > 50 ? items.at(-1)!.id : null }
+  }
   async list(actor: ExternalActor): Promise<ExternalAgentAdmin[]> { return (await this.store.bindings(actor)).filter(binding => !binding.archived).map(binding => this.describe(binding)) }
+  async listPage(actor: ExternalActor, after = '') {
+    const rows = await this.store.bindings(actor, after, 101), page = rows.slice(0, 100)
+    return { items: page.filter(binding => !binding.archived).map(binding => this.describe(binding)), next_cursor: rows.length > 100 ? page.at(-1)!.id : null }
+  }
 
   async inspect(actor: ExternalActor, input: unknown) {
     const body = object(input, ['endpoint', 'api_key', 'provider_kind', 'source_definition'])
@@ -205,7 +218,7 @@ export class ExternalProviderAdministration {
       current.archived = true; current.approved = false; current.parametersDigest = null
       const connection = await this.options.identities.getIntegrationConnection(current.connectionId)
       if (connection) await this.options.identities.putIntegrationConnection({ ...connection, enabled: false })
-      await this.operations.queueCleanup(actor, current.credential_ref)
+      await this.operations.queueCleanup(actor, current.credential_ref, current.id)
       await this.options.catalog.updateAgentConfiguration(id, actor.orgId, { enabled: false, status: 'pending' })
     })
   }
