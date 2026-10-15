@@ -43,7 +43,7 @@ Each controller lifetime has a fresh server instance ID. Each owned Attempt has 
 
 The provider commits dispatch intent before calling the model. A lost model result becomes unknown and is never automatically rerun. Moss recovery and provider recovery are different: a live provider can answer a new Moss observer, but a crashed provider cannot promise recovery of an in-flight upstream model response.
 
-Pilot runtime migration is transactional: preserve IDs/request hashes/checkpoints/event bytes, verify copied facts, clear old payloads and seal old runtime tables against writes. **Stop old writers and back up before migration.** Mixed old/new writers and rolling schema rollback are unsupported. Restore the pre-cutover backup with all new writers stopped if rollback is required.
+Pilot runtime migration is transactional: preserve IDs/request hashes/checkpoints/event bytes, verify copied facts, clear old payloads and seal old runtime tables against writes. **Stop old writers and back up before migration.** Mixed old/new writers and rolling schema rollback are unsupported. Backup rollback is limited to the maintenance window before new traffic is admitted, with all new writers stopped. Restoring returns to the backup point. If new Tasks were accepted after cutover, preserve and reconcile their Task/Attempt/provider-run and idempotency facts before designing a separate recovery procedure; do not blindly restore an older snapshot while the independent provider has already advanced.
 
 ## Bounds and deployment
 
