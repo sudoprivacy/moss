@@ -40,6 +40,17 @@ RUN unzip -q Xenova.zip -d out \
     && find out -name '.cache' -type d -prune -exec rm -rf {} + \
     && test -f out/Xenova/multilingual-e5-small/onnx/model_quantized.onnx
 
+# Both control-plane containers run kubectl: Moss creates the session Pod,
+# Nexus owns its exec subprocess. Verify the official binary before copying it.
+FROM debian:bookworm-slim AS kubectl-dl
+ARG TARGETARCH
+ARG KUBECTL_VERSION=v1.34.1
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fSL --retry 5 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" -o /kubectl \
+    && curl -fSL --retry 5 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" -o /kubectl.sha256 \
+    && echo "$(cat /kubectl.sha256)  /kubectl" | sha256sum -c - \
+    && chmod 755 /kubectl
+
 # --- Stage 1: JS/TS bundles + admin frontend (bun) ---------------------------
 FROM oven/bun:1 AS js-builder
 WORKDIR /src
@@ -57,6 +68,12 @@ RUN bun run build:node
 # build:node also builds Go CLIs for the BUILD host arch (wrong for a
 # cross-platform image); the Go stage below rebuilds wiki/corpapp for the target
 # arch and overrides them.
+
+# Installer-only bootstrap artifact; no node credential is shipped in an image.
+FROM js-builder AS nexus-bootstrap-builder
+RUN bun build deploy/k3s/bootstrap-nexus.ts --target=node --outfile=/out/bootstrap-nexus.mjs
+FROM scratch AS nexus-bootstrap-bundle
+COPY --from=nexus-bootstrap-builder /out/bootstrap-nexus.mjs /bootstrap-nexus.mjs
 
 # --- Stage 2: Go CLIs cross-compiled for the target arch ---------------------
 FROM golang:1.22-alpine AS go-builder
@@ -87,7 +104,10 @@ RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)
       amd64) NEXUS_SHA256="c1a68a14e636dbe3a408947b05c74765e28a16bfb0c7f129b9c39e62986372ff" ;; \
       arm64) NEXUS_SHA256="48777cdf40a04623c77df5de4de89735a8b286288e7bd5955fbf22c0cef63444" ;; \
     esac \
-    && curl -fsSL "https://github.com/nexi-lab/nexus-vfs/releases/download/v${NEXUSD_CLUSTER_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
+    && (curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
+          "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/release/v${NEXUSD_CLUSTER_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
+        || curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
+          "https://github.com/nexi-lab/nexus-vfs/releases/download/v${NEXUSD_CLUSTER_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz) \
     && echo "${NEXUS_SHA256}  nexus.tar.gz" | sha256sum -c - \
     && tar -xzf nexus.tar.gz \
     && mkdir -p /out/bin/nexus \
@@ -96,15 +116,18 @@ RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)
 # vault plugin (GenericSecretsService — AES-256-GCM secrets storage). Loaded by
 # nexusd via --plugin-dir; the dylib AND its Ed25519 .sig must ship together
 # (nexusd refuses to load an unsigned/unsigned-looking plugin). NOTE release tag
-# prefix is "vault-v*", NOT "nexusd-cluster-v*". No linux-aarch64 artifact is
-# published — fail fast on non-amd64 instead of shipping an image whose secrets
-# layer cannot load.
+# prefix is "vault-v*", NOT "nexusd-cluster-v*". Both architectures ship the
+# plugin together with its signature from the same fixed release.
 RUN NEXUS_VAULT_VERSION="$(jq -er '."nexus-vault"' /runtime-versions.json)" \
-    && if [ "$TARGETARCH" != "amd64" ]; then \
-      echo "ERROR: this server package currently supports amd64 only" && exit 1; \
-    fi \
-    && VAULT_SHA256="60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914" \
-    && curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/vault-v${NEXUS_VAULT_VERSION}/nexus-vault-linux-x86_64.tar.gz" -o vault.tar.gz \
+    && case "$TARGETARCH" in \
+      amd64) VAULT_ARCH=x86_64; VAULT_SHA256="60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914" ;; \
+      arm64) VAULT_ARCH=aarch64; VAULT_SHA256="2954afa5a5732451188b6e84a6d143805e3afebc77f67f4a1e8feebc67648f04" ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && (curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
+          "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vault/release/v${NEXUS_VAULT_VERSION}/nexus-vault-linux-${VAULT_ARCH}.tar.gz" -o vault.tar.gz \
+        || curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
+          "https://github.com/nexi-lab/nexus/releases/download/vault-v${NEXUS_VAULT_VERSION}/nexus-vault-linux-${VAULT_ARCH}.tar.gz" -o vault.tar.gz) \
     && echo "${VAULT_SHA256}  vault.tar.gz" | sha256sum -c - \
     && tar -xzf vault.tar.gz \
     && mkdir -p /out/bin/nexus/plugins \
@@ -113,25 +136,12 @@ RUN NEXUS_VAULT_VERSION="$(jq -er '."nexus-vault"' /runtime-versions.json)" \
 # stages do not fetch it unless the host package is being exported.
 FROM nexus-dl AS dl
 ARG TARGETARCH
+ARG SCODE_DOWNLOAD_URL
 WORKDIR /dl
-# The static x64 bundle has no host glibc dependency. Verify the complete
-# bundle, then copy only the scode binary; Moss generates session config itself.
-RUN set -e; \
-    SCODE_VERSION="$(jq -er '.scode' /runtime-versions.json)"; \
-    SCODE_SHA256="$(jq -er '."scode-linux-x64-bundle-sha256"' /runtime-versions.json)"; \
-    case "$TARGETARCH" in \
-      amd64) SCODE_ASSET="scode-linux-x64-bundle.tar.gz" ;; \
-      *) echo "scode bundle only supports amd64, got: $TARGETARCH" && exit 1 ;; \
-    esac; \
-    echo "scode version: $SCODE_VERSION asset: $SCODE_ASSET"; \
-    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/${SCODE_ASSET}" -o "$SCODE_ASSET"; \
-    echo "$SCODE_SHA256  $SCODE_ASSET" | sha256sum -c -; \
-    tar -xzf "$SCODE_ASSET"; \
-    (cd scode-linux-x64-bundle && sha256sum -c SHA256SUMS.txt); \
-    install -D -m 0755 scode-linux-x64-bundle/scode /out/bin/scode; \
-    printf '%s\n' "$SCODE_VERSION" > /out/bin/scode.version
+COPY deploy/fetch-scode.sh /fetch-scode.sh
+RUN bash /fetch-scode.sh /runtime-versions.json "$TARGETARCH" /out/bin/scode
 
-# Validate the installed static bundle on the oldest supported host userspace.
+# Validate both the static x64 and glibc ARM64 binary on the oldest host userspace.
 FROM ubuntu:22.04 AS host-scode-runtime
 COPY --from=dl /out/bin/scode /usr/local/bin/scode
 COPY --from=dl /out/bin/scode.version /tmp/scode.version
@@ -142,8 +152,9 @@ RUN chmod +x /usr/local/bin/scode \
 
 # --- Stage 5: runtime image --------------------------------------------------
 # Keep the existing Node 22 trixie server runtime. The scode bundle is
-# static-pie and no longer depends on this image's glibc version.
+# static on x64; ARM64 is validated against Ubuntu 22.04 above.
 FROM node:22.22.1-trixie-slim AS server-runtime
+ARG TARGETARCH
 # Let apt auto-retry transient mirror failures and download serially so a flaky
 # proxy doesn't fail the whole layer.
 RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
@@ -219,22 +230,6 @@ ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo 'Asia/Shanghai' > /etc/timezone
 
-# Docker CLI (retry + domestic mirror fallback)
-RUN for i in 1 2 3; do \
-        if curl -fsSL --connect-timeout 30 https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null; then \
-            break; \
-        elif curl -fsSL --connect-timeout 30 https://mirrors.aliyun.com/docker-ce/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null; then \
-            break; \
-        else \
-            echo "Retry $i: Failed to download Docker GPG key, waiting..."; sleep 5; \
-        fi; \
-    done \
-    && [ -f /usr/share/keyrings/docker-archive-keyring.gpg ] || { echo "ERROR: Docker GPG key download failed"; exit 1; } \
-    && DISTRO_CODENAME=$(/usr/bin/lsb_release -cs) \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DISTRO_CODENAME} stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
-    && apt-get update && apt-get install -y docker-ce-cli \
-    && rm -rf /var/lib/apt/lists/*
-
 # LibreOffice + PDF tools (retry loop, same rationale as above)
 RUN apt-get update \
     && for i in 1 2 3 4 5 6 7 8; do \
@@ -267,11 +262,7 @@ COPY --from=go-builder /out/corpapp ./bin/corpapp
 # nexusd lives in /app/bin/nexus/ (NOT /root/.moss/nexus/bin/) because
 # docker-compose mounts the host ./.moss over /root/.moss and would shadow it;
 # NexusManager.resolveBinary() falls back to <cwd>/bin/nexus/nexusd (cwd=/app).
-COPY --from=dl /out/bin/nexus/nexusd ./bin/nexus/nexusd
-COPY --from=dl /out/bin/nexus/plugins ./bin/nexus/plugins
-COPY --from=dl /out/bin/scode ./bin/scode
-
-RUN chmod +x ./bin/wiki ./bin/corpapp ./bin/scode ./bin/nexus/nexusd
+RUN chmod +x ./bin/wiki ./bin/corpapp
 
 # Runtime external deps (@xenova/transformers + onnxruntime-node + sharp), so
 # the wiki embedder can import('@xenova/transformers') instead of degrading to
@@ -293,7 +284,7 @@ ENV MOSS_MODELS_DIR=/app/models
 # 通配符也救不了「目录不存在」的情况。缺失时此层跳过，镜像照常构建 ——
 # 只是会话存档拉取不可用（连接器会在运行时报出可读的错误）。
 COPY deploy/ /tmp/deploy-src/
-RUN if [ -f /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so ]; then \
+RUN if [ "$TARGETARCH" = amd64 ] && [ -f /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so ]; then \
         cp /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so /usr/local/lib/ \
         && ldconfig \
         && echo "WeCom finance SDK installed"; \
@@ -372,4 +363,40 @@ COPY --from=host-package /out/ /
 
 # Preserve the historical default: a build without --target still produces the
 # fully self-contained server container image.
+FROM server-runtime AS control-server-image
+COPY --from=kubectl-dl /kubectl /usr/local/bin/kubectl
+ENV PATH=/app/bin:/usr/local/bin:/usr/bin:/bin
+
+# Dedicated daemon image: no Moss application, frontend or model assets.
+# serve-local binds loopback, shared only with Moss in the same Pod.
+FROM node:22.22.1-trixie-slim AS nexus-image
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=nexus-dl /out/bin/nexus /app/bin/nexus
+COPY --from=kubectl-dl /kubectl /usr/local/bin/kubectl
+ENV PATH=/app/bin:/usr/local/bin:/usr/bin:/bin
+ENTRYPOINT ["/app/bin/nexus/nexusd"]
+CMD ["serve-local", "--port", "2126", "--no-tls", "--data-dir", "/data/nexus/data", "--plugin-dir", "/app/bin/nexus/plugins"]
+
+# Compatibility target for manually maintained Compose installations.
 FROM server-runtime AS server-image
+# Docker CLI (retry + domestic mirror fallback)
+RUN for i in 1 2 3; do \
+        if curl -fsSL --connect-timeout 30 https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null; then \
+            break; \
+        elif curl -fsSL --connect-timeout 30 https://mirrors.aliyun.com/docker-ce/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null; then \
+            break; \
+        else \
+            echo "Retry $i: Failed to download Docker GPG key, waiting..."; sleep 5; \
+        fi; \
+    done \
+    && [ -f /usr/share/keyrings/docker-archive-keyring.gpg ] || { echo "ERROR: Docker GPG key download failed"; exit 1; } \
+    && DISTRO_CODENAME=$(/usr/bin/lsb_release -cs) \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DISTRO_CODENAME} stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update && apt-get install -y docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=dl /out/bin/nexus/nexusd ./bin/nexus/nexusd
+COPY --from=dl /out/bin/nexus/plugins ./bin/nexus/plugins
+COPY --from=dl /out/bin/scode ./bin/scode

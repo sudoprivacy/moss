@@ -8,7 +8,12 @@ DIST_DIR="$(cd "${3:?usage: run-server-release-smoke.sh VERSION ARCH DIST_DIR [D
 DIAGNOSTICS_DIR="${4:-$DIST_DIR/e2e-diagnostics}"
 SCODE_VERSION="${5:-}"
 
-[ "$ARCH" = amd64 ] || { echo "E2E smoke only supports amd64" >&2; exit 1; }
+case "$(uname -m)" in
+  x86_64|amd64) HOST_ARCH=amd64 ;;
+  aarch64|arm64) HOST_ARCH=arm64 ;;
+  *) echo "Unsupported native runner: $(uname -m)" >&2; exit 1 ;;
+esac
+[ "$ARCH" = "$HOST_ARCH" ] || { echo "E2E smoke requires a native $ARCH runner" >&2; exit 1; }
 
 TEST_USER="moss-e2e"
 TEST_HOME="/tmp/moss-e2e-home"
@@ -118,8 +123,9 @@ fi
 sudo useradd --create-home --home-dir "$TEST_HOME" --shell /bin/bash "$TEST_USER"
 sudo install -d -m 0755 -o "$TEST_USER" -g "$TEST_USER" "$WORKSPACE_DIR"
 mkdir -p "$OFFLINE_DIR"
-cp "$DIST_DIR/install.sh" "$OFFLINE_DIR/install.sh"
-cp "$DIST_DIR/SHA256SUMS-$ARCH" "$OFFLINE_DIR/SHA256SUMS"
+sed "s/@@MOSS_RELEASE_TAG@@/server-v$VERSION/g" "$ROOT_DIR/deploy/legacy/install-host.sh" > "$OFFLINE_DIR/install.sh"
+awk -v s="$SERVER_ARCHIVE" -v r="$RUNTIME_ARCHIVE" '$2 == s || $2 == r' \
+  "$DIST_DIR/SHA256SUMS-$ARCH" > "$OFFLINE_DIR/SHA256SUMS"
 cp "$DIST_DIR/$SERVER_ARCHIVE" "$DIST_DIR/$RUNTIME_ARCHIVE" "$OFFLINE_DIR/"
 chmod 755 "$OFFLINE_DIR/install.sh"
 (cd "$OFFLINE_DIR" && sha256sum -c SHA256SUMS)

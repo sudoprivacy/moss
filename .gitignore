@@ -24,3 +24,6 @@ tests/
 # Nexus writes its encrypted vault (incl. master.key) here when run without an
 # explicit --data-dir; never commit this local runtime data.
 nexus-data/
+
+# Python deployment tooling
+__pycache__/

@@ -1,5 +1,5 @@
 # ---------------------------------------------------------
-# Session Runtime 使用 Ubuntu 24.04；scode bundle 本身为静态二进制。
+# Session Runtime 使用 Ubuntu 24.04；scode 按目标架构下载并校验。
 # docker build -t my-moss-runtime:v1 -f deploy/runtime/Dockerfile .
 # scode 版本统一读取 src/server/nexus/runtime-versions.json。
 # ---------------------------------------------------------
@@ -60,6 +60,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
     git \
+    jq \
     python3 \
     python3-venv \
     ffmpeg \
@@ -76,10 +77,12 @@ RUN apt-get update && apt-get install -y \
 ENV SUDOWORK_SUBTITLE_PYTHON=/opt/sudowork-subtitles/bin/python \
     SUDOWORK_WHISPER_MODEL_DIR=/opt/sudowork-models/faster-whisper-small
 COPY deploy/runtime/fetch-whisper-model.py /tmp/fetch-whisper-model.py
+RUN python3 -m venv /opt/sudowork-subtitles \
+    && /opt/sudowork-subtitles/bin/python -m pip install --no-cache-dir faster-whisper==1.2.1 av==16.1.0
+ARG HF_ENDPOINT=https://huggingface.co
+ARG HF_HUB_DISABLE_XET=0
 RUN --mount=type=secret,id=hf_token \
-    python3 -m venv /opt/sudowork-subtitles \
-    && /opt/sudowork-subtitles/bin/python -m pip install --no-cache-dir faster-whisper==1.2.1 av==16.1.0 \
-    && HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
+    HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
        /opt/sudowork-subtitles/bin/python /tmp/fetch-whisper-model.py \
     && rm -f /tmp/fetch-whisper-model.py \
     && /opt/sudowork-subtitles/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('/opt/sudowork-models/faster-whisper-small', device='cpu', compute_type='int8', cpu_threads=2)" \
@@ -97,23 +100,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 从 GitHub 下载并校验 scode bundle，只安装静态 scode 二进制
+# 3. 从 GitHub 下载并校验原生 scode，只安装二进制
 # 版本与 Server host 安装包共用仓库配置
-# 当前 Release 仅发布 linux/amd64 bundle
 ARG TARGETARCH
+ARG SCODE_DOWNLOAD_URL
 COPY src/server/nexus/runtime-versions.json /tmp/moss-runtime-versions.json
-RUN SCODE_VERSION="$(node -p 'require("/tmp/moss-runtime-versions.json").scode')" && \
-    SCODE_SHA256="$(node -p 'require("/tmp/moss-runtime-versions.json")["scode-linux-x64-bundle-sha256"]')" && \
-    case "$TARGETARCH" in amd64) ;; *) echo "scode bundle only supports amd64, got: $TARGETARCH"; exit 1 ;; esac && \
-    SCODE_ASSET=scode-linux-x64-bundle.tar.gz && \
-    curl -fsSL "https://github.com/sudoprivacy/sudocode/releases/download/${SCODE_VERSION}/${SCODE_ASSET}" -o "/tmp/$SCODE_ASSET" && \
-    echo "$SCODE_SHA256  /tmp/$SCODE_ASSET" | sha256sum -c - && \
-    tar -xzf "/tmp/$SCODE_ASSET" -C /tmp && \
-    (cd /tmp/scode-linux-x64-bundle && sha256sum -c SHA256SUMS.txt) && \
-    install -m 0755 /tmp/scode-linux-x64-bundle/scode /usr/local/bin/scode && \
+COPY deploy/fetch-scode.sh /tmp/fetch-scode.sh
+RUN bash /tmp/fetch-scode.sh /tmp/moss-runtime-versions.json "$TARGETARCH" /usr/local/bin/scode && \
     scode --version && \
-    rm -rf /tmp/scode-linux-x64-bundle "/tmp/$SCODE_ASSET" && \
-    rm -f /tmp/moss-runtime-versions.json && \
+    rm -f /tmp/moss-runtime-versions.json /tmp/fetch-scode.sh /usr/local/bin/scode.version && \
     ln -s /usr/local/bin/scode /usr/bin/scode
 
 # 5. Agent-facing CLIs (built in the wiki / corpapp / corpauth / fetchurl stages):
