@@ -12,7 +12,7 @@
  * 由 scripts/build.js 在 `--target=node` 且 win32/darwin 且非 CI 时调用；也可
  * `bun scripts/fetch-nexus-runtime.js` 独立运行（便于单独验证与手动重取）。
  *
- * 版本来源：src/server/nexus/runtime-versions.json；升级版本时必须同步更新下方 SHA256 表。
+ * Versions and artifact checksums share src/server/nexus/runtime-versions.json.
  */
 import { execFileSync } from 'child_process'
 import { createHash } from 'crypto'
@@ -41,35 +41,18 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = process.cwd()
 
 // COS 桶来源：sudowork packages/common/src/cos.ts（sudowork 侧基础设施；moss 仓库无引用）。
-// 升级版本时按平台矩阵逐条复测对齐。
+// 已本机实测 6 个 win/mac 制品 200 + sha256 MATCH。升级版本时按平台矩阵逐条复测对齐。
 const COS_RUNTIME = 'https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com'
 const COS_LEGACY = 'https://sudoclaw-download-1309794936.cos.ap-beijing.myqcloud.com'
 
-// sha256 真源 = nexusd-cluster v0.8.2 / nexus-vault v0.5.71 官方 release 产物实测值：
-// - nexusd：与 nexi-lab/nexus-vfs release v0.8.2 的 SHA256SUMS.txt 逐条一致，
-//   并经 CI 三平台（linux-x86_64/macos-aarch64/windows-x86_64）双镜像下载交叉验证；
-// - vault：release 无 SUMS 文件，GitHub 官方资产逐个下载实测，CI 双镜像 got 值一致。
-// Linux 条目供 CI runtime-live（ubuntu）使用；win/mac 供本地 build:node 使用；
-// server.Dockerfile.local 的内联 sha 与此表同源。升级 runtime-versions.json 时必须同步此表。
-const SHA256 = {
-  'nexus-vault-linux-x86_64.tar.gz': '2f7f32d3b2dde51fa5947cb635d4c0072a98cb0d7256287f8d8c8a42a556de16',
-  'nexus-vault-linux-aarch64.tar.gz': 'b322d142abcffcb210af961dde0dfc5817f752fd27c1c07f2ea4a305e1fca6f3',
-  'nexus-vault-macos-arm64.tar.gz': '815c52881295f4577eddfce7cf707270938edce9ee64181f0df615f69b9717cb',
-  'nexus-vault-macos-x86_64.tar.gz': '4fecb251ef787e3fc6a1408cedd72ab2001f8901d6ef8f8071cfdaec28b79450',
-  'nexus-vault-windows-x86_64.zip': 'dbfb23bc2722ebf1f24c53225ea90ff7942ea92111c6e0cfcdf99503837050f3',
-  'nexusd-cluster-macos-aarch64.tar.gz': 'aeb464e7b6cb9bad10a41a1b1e3c1b22dcc47768c8432101942282592bd8d55e',
-  'nexusd-cluster-macos-x86_64.tar.gz': 'e27989e73e05dc9c53fb7e21a59cd0b8f687d5c32e29c72fe0c3cc4ce9620d8e',
-  'nexusd-cluster-windows-x86_64.zip': '4eca66fc4b2dc8704d2eba698ea0ddb8ad4997042631131896f0442243b72a38',
-  'nexusd-cluster-linux-x86_64.tar.gz': '626b2bc12425debacf3d50ae3ad61aa72d164b99beeef3b646cb29f01e4023a2',
-  'nexusd-cluster-linux-aarch64.tar.gz': 'fd0f1b826de38be4db67441069d8c0d1cb29c4c7757c535a2d7dda0480ff783f',
-}
+// Native installation and both Docker builds consume the same verified pins.
+const RUNTIME_PINS = JSON.parse(readFileSync(join(SCRIPT_DIR, '..', 'src', 'server', 'nexus', 'runtime-versions.json'), 'utf8'))
+const SHA256 = RUNTIME_PINS['artifact-sha256']
 
 const GITHUB = 'https://github.com/nexi-lab/nexus/releases/download'
 
 function loadVersions() {
-  const p = join(SCRIPT_DIR, '..', 'src', 'server', 'nexus', 'runtime-versions.json')
-  const j = JSON.parse(readFileSync(p, 'utf8'))
-  return { vault: j['nexus-vault'], nexusd: j['nexusd-cluster'] }
+  return { vault: RUNTIME_PINS['nexus-vault'], nexusd: RUNTIME_PINS['nexusd-cluster'] }
 }
 
 // ── 平台映射 ──────────────────────────────────────────────────────────────────
@@ -273,9 +256,8 @@ async function ensureNexusd(version) {
     return
   }
   const expectedSha = SHA256[artifact]
-  if (!expectedSha) {
-    console.warn(`[fetch-nexus] nexusd: no known sha256 for ${artifact}; skip (unsupported platform).`)
-    return
+  if (typeof expectedSha !== 'string' || !/^[0-9a-f]{64}$/.test(expectedSha)) {
+    throw new Error(`Invalid or missing cluster checksum for ${artifact} at v${version}`)
   }
   const binDir = join(REPO_ROOT, 'bin', 'nexus')
   const targetName = platform === 'win32' ? 'nexusd.exe' : 'nexusd'
