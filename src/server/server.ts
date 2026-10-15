@@ -6503,6 +6503,15 @@ export function startServer(
                 writeJson(res, 400, { error: { code: 'invalid_payload', message: 'chatId, entryId(s), msgid and sender are required' } })
                 return
               }
+              // A msgid is one opaque token. Anything with whitespace is a
+              // caller passing send-group's human-readable output ("group
+              // message task created  msgid=msg_…") instead of the id: stored
+              // as-is it can never be reconciled, so the entry would sit `sent`
+              // until reap cancels it as undelivered — even if it was delivered.
+              if (/\s/.test(msgid)) {
+                writeJson(res, 400, { error: { code: 'invalid_payload', message: 'msgid must be the bare WeCom msgid (use send-group --json and read msgId)' } })
+                return
+              }
               writeJson(res, 200, await q.markSent(corpAppId, chatId, entryIds, msgid, sender))
               return
             }

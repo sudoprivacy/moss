@@ -324,3 +324,87 @@ func TestBlockedIDsUnionsBothReasons(t *testing.T) {
 		}
 	}
 }
+
+// Each task's send result is read once: it serves both the pending targets and
+// the delivered check. Reading it twice doubled the provider calls per send.
+func TestInspectQuotaReadsEachSummaryOnce(t *testing.T) {
+	now := time.Now()
+	created := now.Add(-time.Hour).Unix()
+	reads := map[string]int{}
+	inner := capStub(t,
+		[]map[string]any{{"msgid": "msg_pending", "create_time": created}},
+		map[string]string{"msg_pending": `{"entries":[{"chatId":"wr_a","status":0,"delivered":false}]}`},
+		map[string]string{"msg_pending": `{"task_list":[{"userid":"linqinhui","status":0}]}`},
+	)
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/summary") {
+			reads[r.URL.Path]++
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, now); err == nil {
+		t.Fatal("the pending task must still block")
+	}
+	for path, n := range reads {
+		if n != 1 {
+			t.Errorf("%s read %d times, want 1", path, n)
+		}
+	}
+}
+
+// A day with more than one page of broadcasts: a quota spent by a task on the
+// second page must still block.
+func TestInspectQuotaFollowsListCursor(t *testing.T) {
+	now := time.Now()
+	sent := now.Add(-time.Hour).Unix()
+	pages := 0
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/resolve"):
+			_, _ = io.WriteString(w, `{"id":"app1","name":"x","type":"wecomapp"}`)
+		case strings.HasSuffix(r.URL.Path, "/group-messages"):
+			pages++
+			if r.URL.Query().Get("cursor") == "" {
+				_, _ = io.WriteString(w, `{"group_msg_list":[{"msgid":"msg_p1","create_time":`+itoa(sent)+`}],"next_cursor":"c2"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"group_msg_list":[{"msgid":"msg_p2","create_time":`+itoa(sent)+`}],"next_cursor":""}`)
+		case strings.HasSuffix(r.URL.Path, "/task"):
+			_, _ = io.WriteString(w, `{"task_list":[{"userid":"linqinhui","status":2}]}`)
+		case strings.Contains(r.URL.Path, "/msg_p2/summary"):
+			_, _ = io.WriteString(w, `{"entries":[{"chatId":"wr_late","status":1,"delivered":true,"sendTime":`+itoa(sent)+`}]}`)
+		case strings.Contains(r.URL.Path, "/summary"):
+			_, _ = io.WriteString(w, `{"entries":[]}`)
+		default:
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+
+	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_late"}, CapWindowCalendar, now)
+	var v *DailyCapViolation
+	if !errors.As(err, &v) || v.Delivered["wr_late"].IsZero() {
+		t.Fatalf("delivery on page 2 must block; got %v", err)
+	}
+	if pages != 2 {
+		t.Errorf("want 2 list pages read, got %d", pages)
+	}
+}
+
+// A cursor that never ends is an error, not an endless walk.
+func TestInspectQuotaBoundsRunawayCursor(t *testing.T) {
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/group-messages") {
+			_, _ = io.WriteString(w, `{"group_msg_list":[],"next_cursor":"c`+r.URL.Query().Get("cursor")+`x"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, time.Now()); err == nil {
+		t.Error("want an error when the listing never ends")
+	}
+}

@@ -28,7 +28,7 @@ corpapp names --app <name> --rooms <roomid,...>                          # roomi
 
 corpapp groups --app <name> [--owner <userid,...>] [--cursor <c>] [--limit <n>]  # list 客户群
 corpapp group --app <name> --chat-id <id> [--no-name]                    # one group + members
-corpapp send-group --app <name> --sender <userid> --chat-id <id> ...     # create a 群发 task
+corpapp send-group --app <name> --sender <userid> --chat-id <id> ... [--json]  # create a 群发 task
 corpapp group-msgs --app <name> --start <ts> --end <ts> [--creator <u>]  # past 群发 tasks
 corpapp group-msg-summary --app <name> --msgid <id> --userid <u> [--json]  # what actually landed
 corpapp group-msg-result --app <name> --msgid <id> --userid <u>          # raw per-target status

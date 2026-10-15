@@ -2,9 +2,9 @@
  * Shared WeCom REST client.
  *
  * Wraps the 企业微信 server API (qyapi.weixin.qq.com): acquires an
- * access_token via /cgi-bin/gettoken and caches it for the documented
- * 7200s TTL minus a safety buffer, transparently retrying once on the
- * "token invalid/expired" errcodes.
+ * access_token via /cgi-bin/gettoken and caches it process-wide for the
+ * documented 7200s TTL minus a safety buffer, transparently retrying once
+ * on the "token invalid/expired" errcodes and briefly on 45009 throttling.
  *
  * The token + retry logic mirrors sources/wecomDrive.ts; it is extracted
  * here because the WeComApp corp-app connector needs the same behaviour
@@ -17,14 +17,53 @@
  *   - https://developer.work.weixin.qq.com/document/path/90236 (message/send)
  */
 
+import { createHash } from 'node:crypto'
+
 const API_BASE = process.env.WECOM_API_BASE || 'https://qyapi.weixin.qq.com'
 const TOKEN_TTL_SAFETY_MS = 5 * 60_000
 
 /** errcodes that mean "token is no longer valid" — clear cache + retry. */
 const TOKEN_INVALID_CODES = new Set([40014, 42001, 41001])
 
+/** WeCom "freq out of limit". The call was refused, not processed, so it is safe to repeat. */
+const THROTTLE_CODE = 45009
+
+type CachedToken = { token: string; expiresAt: number }
+
+/**
+ * access_tokens shared by every client of the same app, process-wide.
+ *
+ * Connectors are built per request (`createCorpApp`), so a cache on the
+ * instance lasted one HTTP request and every `corpapp` call paid a gettoken.
+ * WeCom throttles gettoken: a send-group whose daily-cap check fans out into
+ * dozens of calls got 45009 within seconds, failing sends and cap checks alike.
+ *
+ * Keyed by corpId plus a digest of the secret, not corpId alone: two apps in
+ * one corp hold different secrets and different tokens, and a rotated secret
+ * must not be answered with the old secret's token. WeCom returns the same
+ * token to repeated gettoken calls within its validity, so separate processes
+ * each holding their own copy do not invalidate one another.
+ */
+const sharedTokens = new Map<string, CachedToken>()
+/** A gettoken already on the wire, so a burst on a cold cache makes one call, not N. */
+const inflightTokens = new Map<string, Promise<CachedToken>>()
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+function isThrottleError(err: unknown): boolean {
+  return new RegExp(`errcode=${THROTTLE_CODE}\\b`).test(err instanceof Error ? err.message : String(err))
+}
+
 export class WeComApiClient {
-  private cachedToken: { token: string; expiresAt: number } | null = null
+  /**
+   * Waits before each retry of a throttled call; its length is the number of
+   * retries. Bounded and short on purpose: the caller (often an agent loop) is
+   * waiting on this request, and a throttle that outlasts a few seconds is
+   * better reported than hidden behind a long stall.
+   */
+  static throttleRetryDelaysMs: number[] = [1_000, 3_000]
+
+  private readonly cacheKey: string
 
   /**
    * @param corpId WeCom corp ID (used as `corpid` in gettoken)
@@ -33,38 +72,78 @@ export class WeComApiClient {
   constructor(
     private readonly corpId: string,
     private readonly secret: string,
-  ) {}
+  ) {
+    this.cacheKey = `${corpId}:${createHash('sha256').update(secret).digest('hex')}`
+  }
 
-  /** Acquire a cached access_token, refreshing when expired. */
-  async getAccessToken(): Promise<string> {
-    if (this.cachedToken && this.cachedToken.expiresAt > Date.now()) {
-      return this.cachedToken.token
+  /**
+   * Acquire a cached access_token, refreshing when expired.
+   *
+   * `forceRefresh` skips the cache for callers whose point is to prove the
+   * credentials still work right now (testConnection); a cached token only
+   * proves they worked when it was issued.
+   */
+  async getAccessToken(opts: { forceRefresh?: boolean } = {}): Promise<string> {
+    if (!opts.forceRefresh) {
+      const cached = sharedTokens.get(this.cacheKey)
+      if (cached && cached.expiresAt > Date.now()) return cached.token
     }
+    let pending = inflightTokens.get(this.cacheKey)
+    if (!pending) {
+      pending = this.fetchToken().finally(() => inflightTokens.delete(this.cacheKey))
+      inflightTokens.set(this.cacheKey, pending)
+    }
+    return (await pending).token
+  }
+
+  private async fetchToken(): Promise<CachedToken> {
     const url = `${API_BASE}/cgi-bin/gettoken?corpid=${encodeURIComponent(
       this.corpId,
     )}&corpsecret=${encodeURIComponent(this.secret)}`
-    const resp = await fetch(url)
-    if (!resp.ok) {
-      throw new Error(`gettoken HTTP ${resp.status}`)
+    const cached = await this.withThrottleRetry(async () => {
+      const resp = await fetch(url)
+      if (!resp.ok) {
+        throw new Error(`gettoken HTTP ${resp.status}`)
+      }
+      const json = (await resp.json()) as {
+        errcode?: number
+        errmsg?: string
+        access_token?: string
+        expires_in?: number
+      }
+      if (json.errcode && json.errcode !== 0) {
+        throw new Error(`gettoken errcode=${json.errcode} ${json.errmsg ?? ''}`)
+      }
+      if (!json.access_token) {
+        throw new Error('gettoken: no access_token in response')
+      }
+      const ttlMs = (json.expires_in ?? 7200) * 1000
+      return { token: json.access_token, expiresAt: Date.now() + ttlMs - TOKEN_TTL_SAFETY_MS }
+    })
+    sharedTokens.set(this.cacheKey, cached)
+    return cached
+  }
+
+  /**
+   * Drop the cached token after WeCom rejected it. Only if it is still the one
+   * that was rejected: a concurrent request may already have replaced it, and
+   * clearing the replacement would just cost another gettoken.
+   */
+  private invalidate(token: string): void {
+    if (sharedTokens.get(this.cacheKey)?.token === token) sharedTokens.delete(this.cacheKey)
+  }
+
+  /** Run `fn`, repeating it after a short wait while WeCom answers 45009. */
+  private async withThrottleRetry<T>(fn: () => Promise<T>): Promise<T> {
+    const delays = WeComApiClient.throttleRetryDelaysMs
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn()
+      } catch (err) {
+        if (attempt >= delays.length || !isThrottleError(err)) throw err
+        await sleep(delays[attempt])
+      }
     }
-    const json = (await resp.json()) as {
-      errcode?: number
-      errmsg?: string
-      access_token?: string
-      expires_in?: number
-    }
-    if (json.errcode && json.errcode !== 0) {
-      throw new Error(`gettoken errcode=${json.errcode} ${json.errmsg ?? ''}`)
-    }
-    if (!json.access_token) {
-      throw new Error('gettoken: no access_token in response')
-    }
-    const ttlMs = (json.expires_in ?? 7200) * 1000
-    this.cachedToken = {
-      token: json.access_token,
-      expiresAt: Date.now() + ttlMs - TOKEN_TTL_SAFETY_MS,
-    }
-    return json.access_token
   }
 
   /**
@@ -88,21 +167,7 @@ export class WeComApiClient {
       }
       return (await resp.json()) as Record<string, unknown>
     }
-
-    const token = await this.getAccessToken()
-    const json = await send(token)
-    const code = Number(json.errcode ?? 0)
-    if (code === 0) return json
-
-    if (TOKEN_INVALID_CODES.has(code)) {
-      this.cachedToken = null
-      const retryToken = await this.getAccessToken()
-      const retryJson = await send(retryToken)
-      const retryCode = Number(retryJson.errcode ?? 0)
-      if (retryCode === 0) return retryJson
-      throw new Error(`${endpoint} errcode=${retryCode} ${String(retryJson.errmsg ?? '')}`)
-    }
-    throw new Error(`${endpoint} errcode=${code} ${String(json.errmsg ?? '')}`)
+    return this.callJson(endpoint, send)
   }
 
   /**
@@ -120,20 +185,32 @@ export class WeComApiClient {
       }
       return (await resp.json()) as Record<string, unknown>
     }
+    return this.callJson(endpoint, send)
+  }
 
-    const token = await this.getAccessToken()
-    const json = await send(token)
-    const code = Number(json.errcode ?? 0)
-    if (code === 0) return json
+  /**
+   * The shared half of post/get: send with the cached token, retry once with
+   * a fresh one when WeCom says it is invalid, and repeat briefly on 45009.
+   */
+  private callJson(
+    endpoint: string,
+    send: (token: string) => Promise<Record<string, unknown>>,
+  ): Promise<Record<string, unknown>> {
+    return this.withThrottleRetry(async () => {
+      const token = await this.getAccessToken()
+      const json = await send(token)
+      const code = Number(json.errcode ?? 0)
+      if (code === 0) return json
 
-    if (TOKEN_INVALID_CODES.has(code)) {
-      this.cachedToken = null
-      const retryJson = await send(await this.getAccessToken())
-      const retryCode = Number(retryJson.errcode ?? 0)
-      if (retryCode === 0) return retryJson
-      throw new Error(`${endpoint} errcode=${retryCode} ${String(retryJson.errmsg ?? '')}`)
-    }
-    throw new Error(`${endpoint} errcode=${code} ${String(json.errmsg ?? '')}`)
+      if (TOKEN_INVALID_CODES.has(code)) {
+        this.invalidate(token)
+        const retryJson = await send(await this.getAccessToken())
+        const retryCode = Number(retryJson.errcode ?? 0)
+        if (retryCode === 0) return retryJson
+        throw new Error(`${endpoint} errcode=${retryCode} ${String(retryJson.errmsg ?? '')}`)
+      }
+      throw new Error(`${endpoint} errcode=${code} ${String(json.errmsg ?? '')}`)
+    })
   }
 
   /**
@@ -180,7 +257,7 @@ export class WeComApiClient {
     if (r.error) {
       const code = Number(r.error.errcode ?? 0)
       if (TOKEN_INVALID_CODES.has(code)) {
-        this.cachedToken = null
+        this.invalidate(token)
         r = await send(await this.getAccessToken())
       }
       if (r.error) {
@@ -233,20 +310,6 @@ export class WeComApiClient {
       }
       return (await resp.json()) as Record<string, unknown>
     }
-
-    const token = await this.getAccessToken()
-    const json = await send(token)
-    const code = Number(json.errcode ?? 0)
-    if (code === 0) return json
-
-    if (TOKEN_INVALID_CODES.has(code)) {
-      this.cachedToken = null
-      const retryToken = await this.getAccessToken()
-      const retryJson = await send(retryToken)
-      const retryCode = Number(retryJson.errcode ?? 0)
-      if (retryCode === 0) return retryJson
-      throw new Error(`${endpoint} errcode=${retryCode} ${String(retryJson.errmsg ?? '')}`)
-    }
-    throw new Error(`${endpoint} errcode=${code} ${String(json.errmsg ?? '')}`)
+    return this.callJson(endpoint, send)
   }
 }
