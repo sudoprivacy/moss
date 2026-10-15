@@ -70,7 +70,7 @@ Usage:
   corpapp group --app <name> --chat-id <id> [--no-name]
   corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...] [--json]
                      [--cap-window calendar|rolling24h] [--skip-capped] [--no-cap-check]
-  corpapp group-msgs --app <name> --start <ts> --end <ts> [--creator <userid>]
+  corpapp group-msgs --app <name> --start <ts> --end <ts> [--creator <userid>] [--cursor <c>] [--limit <n>]
   corpapp group-msg-result --app <name> --msgid <id> --userid <userid> [--cursor <c>]
   corpapp group-msg-summary --app <name> --msgid <id> --userid <userid> [--json]
   corpapp group-msg-task --app <name> --msgid <id> [--cursor <c>]
@@ -78,14 +78,18 @@ Usage:
   corpapp group-msg-queue --app <name> --action <verb> [--chat-id <id>] [--entry-id <id>] ...
                      verbs: enqueue|next|claim|release|mark-sent|cancel|reap|list
                             reconcile (diagnostic only — the loop never needs it)
+                     [--meta <json>] [--idempotency-key <k>] [--expires-at <RFC3339>]
+                     [--msgid <id>] [--sender <userid>] [--reason <text>]
+                     [--state <state>] [--limit <n>] [--cancel-wecom] [--json]
   corpapp create-internal-group --app <name> --name <群名> --owner <userid>
-                     [--members <a,b,c>] [--chatid <id>]
+                     [--members <a,b,c>] [--chatid <id>] [--json]
   corpapp internal-group --app <name> --chatid <id>
   corpapp update-internal-group --app <name> --chatid <id> [--name <群名>]
                                 [--owner <userid>] [--add <a,b>] [--del <c>]
+                                [--members <a,b,c>  (REPLACES the roster)] [--json]
   corpapp send-internal-group --app <name> --chatid <id> [--text <msg>]
                      [--format text|markdown] [--file <path>...]
-                     [--mention <userid,...>] [--mention-all]
+                     [--mention <userid,...>] [--mention-all] [--json]
 
 Colored / styled messages:
   --format markdown enables styling. --format text (the default) has no
@@ -201,6 +205,10 @@ The message queue (group-msg-queue):
                              as "reconciled"
     5. per entry: claim -> compose -> send-group -> mark-sent
                   (on failure: release, so the slot is not burned)
+                  mark-sent --msgid takes the BARE id: run send-group --json
+                  and pass its msgId. Scraping the text output stores a
+                  sentence as the msgid, and such an entry can never be
+                  reconciled (the server now rejects a msgid with spaces).
                   merged send: if one group has several intents due the same
                   day, compose ONE message and mark-sent them together —
                   --entry-id takes a comma-separated list, all bound to the one
