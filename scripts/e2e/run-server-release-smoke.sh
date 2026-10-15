@@ -228,7 +228,8 @@ MOSS_E2E_EXPECT_COHOST_DENIED=1 MOSS_E2E_EXPECT_K8S_UNAVAILABLE=1 node "$ROOT_DI
   --runtimes host,docker \
   --timeout-seconds 180
 
-sudo "$INSTALL_DIR/current/node/bin/node" "$ROOT_DIR/scripts/e2e/server-admin-browser-smoke.mjs" \
+sudo env MOSS_E2E_BROWSER="${MOSS_E2E_BROWSER:-}" \
+  "$INSTALL_DIR/current/node/bin/node" "$ROOT_DIR/scripts/e2e/server-admin-browser-smoke.mjs" \
   --base-url "http://127.0.0.1:$PORT" \
   --username "$ADMIN_USERNAME" \
   --password "$ADMIN_PASSWORD" \

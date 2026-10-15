@@ -440,6 +440,16 @@ jobs:
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk zip
           fc-cache -f
 
+      - name: Install native Chromium for browser acceptance
+        run: |
+          set -euo pipefail
+          BROWSER_TOOLS="$RUNNER_TEMP/moss-browser"
+          npm install --prefix "$BROWSER_TOOLS" --no-save --package-lock=false playwright@1.56.1
+          "$BROWSER_TOOLS/node_modules/.bin/playwright" install --with-deps chromium
+          BROWSER="$(node -e 'console.log(require(process.argv[1]).chromium.executablePath())' "$BROWSER_TOOLS/node_modules/playwright")"
+          "$BROWSER" --version
+          echo "MOSS_E2E_BROWSER=$BROWSER" >> "$GITHUB_ENV"
+
       - name: Run packaged Server E2E smoke
         env:
           VERSION: ${{ steps.release.outputs.version }}
@@ -583,6 +593,12 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           generate_release_notes: true
+          body: |
+            Native Linux amd64 and arm64 host packages, Kubernetes Server/Nexus images, session Runtime images, deployment tools, and per-architecture runtime manifests are verified by the release CI.
+
+            The one-click installer deploys Server and Nexus on Kubernetes. Existing external Nexus and ZoneId-bound installations require a separate migration and are refused before services are stopped.
+
+            Prereleases publish complete packages to the fixed COS release directory and keep the current stable `latest` entrypoints unchanged.
           prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}
           make_latest: ${{ steps.channel.outputs.prerelease != 'true' }}
           files: |
