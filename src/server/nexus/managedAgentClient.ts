@@ -178,6 +178,23 @@ export class ManagedAgentClient {
     return managedSessionSchema.parse(await this.call<unknown>('managed_agent.get_session_v1', { session_id: sessionId }))
   }
 
+  /** Verify the live execution, including its channel generation, without submitting input. */
+  async verifySessionEndpoint(processId: string, endpoint: NexusSessionEndpoint, cause?: unknown): Promise<void> {
+    let snapshot: ManagedSessionSnapshot
+    try { snapshot = await this.getSession(processId) }
+    catch (error) {
+      if (isUnknownManagedSession(error, processId)) {
+        throw new Error('Managed execution disappeared; resume the durable session', { cause: error })
+      }
+      throw error
+    }
+    if (snapshot.session_id !== processId || snapshot.state === 'terminated' ||
+      !snapshot.session_endpoint || Object.entries(endpoint).some(([key, value]) =>
+        snapshot.session_endpoint![key as keyof NexusSessionEndpoint] !== value)) {
+      throw new Error('Managed execution channel changed; resume the durable session', { cause })
+    }
+  }
+
   /** Discover an owned live execution from the daemon's existing registry, without persisting a PID. */
   async findSession(input: { ownerId: string; agentId: string; repositoryPath?: string; durableSessionId?: string }): Promise<ManagedSessionSnapshot | undefined> {
     if (!input.repositoryPath && !input.durableSessionId) throw new Error('A durable session or repository is required')
@@ -209,19 +226,7 @@ export class ManagedAgentClient {
     let lastVerifiedAt = performance.now()
     let unavailableSince: number | undefined
     const verifyExecution = async (cause?: unknown): Promise<void> => {
-      let snapshot: ManagedSessionSnapshot
-      try { snapshot = await this.getSession(managedProcessId!) }
-      catch (error) {
-        if (isUnknownManagedSession(error, managedProcessId!)) {
-          throw new Error('Managed execution disappeared; resume the durable session', { cause: error })
-        }
-        throw error
-      }
-      if (snapshot.session_id !== managedProcessId || snapshot.state === 'terminated' ||
-        !snapshot.session_endpoint || Object.entries(endpoint).some(([key, value]) =>
-          snapshot.session_endpoint![key as keyof NexusSessionEndpoint] !== value)) {
-        throw new Error('Managed execution channel changed; resume the durable session', { cause })
-      }
+      await this.verifySessionEndpoint(managedProcessId!, endpoint, cause)
       lastVerifiedAt = performance.now()
     }
     const client: Pick<NexusVfsClient, 'streamReadAt' | 'streamWrite'> = managedProcessId ? {

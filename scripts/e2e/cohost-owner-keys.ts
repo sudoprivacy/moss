@@ -148,6 +148,9 @@ try {
     assert(calls.length > 0, 'the real native engine must call the HTTP model')
     assert(calls.every(request => request.key === apiKey && request.prompt.includes(marker)), 'every model request uses its owner key')
     assert(controller.updates.some(update => update.content?.text?.includes(marker)))
+    await agent.verifySessionEndpoint(session.sessionId, session.sessionEndpoint)
+    await assert.rejects(agent.verifySessionEndpoint(session.sessionId,
+      { ...session.sessionEndpoint, channel_id: randomUUID() }), /channel changed/)
     const namespace = await readAgentNamespace(connection.client, connection.authToken, ownerId, true)
     assert(namespace.names.includes('same-agent-name'), 'Agent discovery reads the real persistent namespace')
     assert(namespace.executions.some(execution => execution.name === 'same-agent-name' && execution.ownerId === ownerId && execution.kind === 'managed'), 'native registry proves owner and conversation capability')
@@ -165,8 +168,9 @@ try {
     assert.equal(retained.session_endpoint?.channel_id, session.sessionEndpoint.channel_id)
     await agent.cancel(session.sessionId, session.sessionEndpoint)
     await assert.rejects(agent.getSession(session.sessionId), /unknown session_id/)
+    await assert.rejects(agent.verifySessionEndpoint(session.sessionId, session.sessionEndpoint), /execution disappeared/)
     proofs.push({ lane, ownerId, durableSessionId: session.durableSessionId, modelRequests: calls.length,
-      isOwnerKeyVerified: true, isForeignOwnerRefused: true, isChannelCancellationVerified: true })
+      isOwnerKeyVerified: true, isForeignOwnerRefused: true, isChannelCancellationVerified: true, isExecutionReadinessVerified: true })
   }
   assert.notEqual(requests[0]!.key, requests.at(-1)!.key)
   writeFileSync(join(work, 'acceptance.json'), JSON.stringify({ binary, proofs, isScriptedModelResponse: true }, null, 2))

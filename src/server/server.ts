@@ -11028,11 +11028,9 @@ export function startServer(
           return
         }
 
-        // A freshly started local runner was already probed by spawnAttempt().
-        // Reusing it here avoids a second disposable socket racing the actual
-        // WebSocket attachment. Missing, stale, or newly adopted attempts still
-        // go through the regular probe/recovery path.
-        const ready = locallyOwnedAttempt
+        // Native execution lives beyond the local bridge. Check its channel
+        // even when the bridge's owner and heartbeat are still current.
+        const ready = locallyOwnedAttempt && session.runtime.type !== 'cohost'
           ? { session, attempt: locallyOwnedAttempt }
           : await runtime.ensureSessionReady(sessionId)
         // A client can send as soon as the HTTP upgrade completes. Finish the

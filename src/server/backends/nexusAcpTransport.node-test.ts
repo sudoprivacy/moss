@@ -7,6 +7,50 @@ import { SessionCodec, type NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 const endpoint = {protocol: 'acp-mailbox/1', channel_id: 'generation', agent: 'worker', controller: 'operator',
   transcript: '/conversations/0123456789abcdef0123456789abcdef/transcript'} as const
 
+for (const outcome of ['live', 'reaped', 'changed', 'unavailable', 'denied'] as const) {
+  void test(`foreground readiness checks the actual execution, without replaying input (${outcome})`, async () => {
+    let probes = 0
+    let writes = 0
+    let cancels = 0
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const agent = new ManagedAgentClient({
+      async call(method: string) {
+        if (method.includes('cancel')) { cancels++; return '{}' }
+        assert.equal(method, 'managed_agent.get_session_v1')
+        probes++
+        await gate
+        if (outcome === 'reaped') throw new Error(JSON.stringify({ code: -32603,
+          message: 'managed_agent.get_session_v1: invalid argument: unknown session_id "pid"' }))
+        if (outcome === 'denied') throw new Error('credential refused')
+        if (outcome === 'unavailable') throw Object.assign(new Error('daemon unavailable'), { code: 14 })
+        return JSON.stringify({ session_id: 'pid', agent_id: 'worker', owner_id: 'owner', workspace_path: '/proc/pid/workspace/',
+          state: 'ready', session_endpoint: { ...endpoint, channel_id: outcome === 'changed' ? 'replacement' : endpoint.channel_id } })
+      },
+      async streamReadAt(_path: string, offset: string) {
+        await new Promise(resolve => setTimeout(resolve, 5))
+        return { data: Buffer.alloc(0), nextOffset: offset, timedOut: true, eof: false }
+      },
+      async streamWrite() { writes++ }, close() {},
+    } as unknown as NexusVfsClient, '')
+    const transport = new NexusAcpTransport(agent, { sessionId: 'pid', osPid: null, sessionEndpoint: endpoint })
+    assert.equal(await transport.checkReady(), false)
+    transport.start({ onMessage() {}, onStderr() {}, onClose() {} })
+    const first = transport.checkReady()
+    const second = transport.checkReady()
+    assert.equal(first, second)
+    release()
+    if (outcome === 'live') assert.deepEqual(await Promise.all([first, second]), [true, true])
+    else await assert.rejects(Promise.all([first, second]), outcome === 'reaped' ? /disappeared/ :
+      outcome === 'changed' ? /channel changed/ : outcome === 'denied' ? /credential refused/ : /daemon unavailable/)
+    assert.equal(probes, 1)
+    assert.equal(writes, 0)
+    assert.equal(cancels, 0)
+    await transport.close()
+    assert.equal(await transport.checkReady(), false)
+  })
+}
+
 for (const spawnSpec of [undefined, {cmd: 'scode', args: ['acp'], env: {}, cwd: '/workspace'}]) {
   void test(`both hosting modes use one mailbox (${spawnSpec ? 'subprocess' : 'cohost'})`, async () => {
     const calls: any[] = []

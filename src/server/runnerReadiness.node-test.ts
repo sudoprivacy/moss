@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { test, type TestContext } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { waitForRunnerReady } from './runtimeService.js'
+import { probeRunnerReady, waitForRunnerReady } from './runtimeService.js'
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'moss-runner-ready-'))
@@ -26,7 +26,7 @@ async function fixture(t: TestContext) {
     await new Promise<void>(resolve => server.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   })
-  return { attach, status, stderr }
+  return { attach, status, stderr, server }
 }
 
 void test('a listening runner stays unavailable until its execution backend is running', { timeout: 10_000 }, async t => {
@@ -51,4 +51,39 @@ void test('malformed status never turns a listening socket into a ready executio
   const f = await fixture(t)
   await writeFile(f.status, '{')
   await assert.rejects(waitForRunnerReady(f.attach, f.status, f.stderr, 250), /Timed out waiting/)
+})
+
+void test('a retained listening bridge cannot report a missing execution ready', { timeout: 10_000 }, async t => {
+  const f = await fixture(t)
+  let isBackendReady = false
+  let probes = 0
+  f.server.on('connection', socket => {
+    socket.write(`${JSON.stringify({ type: 'hello', state: 'running' })}\n`)
+    socket.on('data', data => {
+      assert.equal(JSON.parse(data.toString()).type, 'ping')
+      probes++
+      const response = JSON.stringify({ type: 'pong', ts: Date.now(), isReady: isBackendReady })
+      socket.write(response.slice(0, 8))
+      socket.write(`${response.slice(8)}\n`)
+    })
+  })
+  assert.equal(await probeRunnerReady(f.attach, 1000), false)
+  isBackendReady = true
+  assert.equal(await probeRunnerReady(f.attach, 1000), true)
+  assert.equal(probes, 2)
+})
+
+void test('legacy liveness acknowledgements do not claim execution readiness', { timeout: 10_000 }, async t => {
+  const f = await fixture(t)
+  f.server.on('connection', socket => {
+    socket.on('data', () => socket.write(`${JSON.stringify({ type: 'pong', ts: Date.now() })}\n`))
+  })
+  assert.equal(await probeRunnerReady(f.attach, 1000), false)
+})
+
+void test('an unresponsive or closed execution probe is bounded', { timeout: 10_000 }, async t => {
+  const f = await fixture(t)
+  assert.equal(await probeRunnerReady(f.attach, 100), false)
+  f.server.on('connection', socket => socket.end())
+  assert.equal(await probeRunnerReady(f.attach, 1000), false)
 })

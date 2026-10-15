@@ -107,6 +107,67 @@ for (const fixedIdentity of [false, true]) {
   })
 }
 
+void test('resume waits for native recovery when its local bridge still accepts connections', { timeout: 10_000 }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'moss-native-resume-'))
+  const store = new DirectConnectStore(':memory:')
+  const attachPath = process.platform === 'win32' ? `\\\\.\\pipe\\moss-native-${randomUUID()}` : join(root, 'bridge.sock')
+  let isNativeReady = false
+  let probes = 0
+  const server = createServer(client => {
+    client.on('data', data => {
+      assert.equal(JSON.parse(data.toString()).type, 'ping')
+      probes++
+      client.end(`${JSON.stringify({ type: 'pong', ts: Date.now(), isReady: isNativeReady })}\n`)
+    })
+  })
+  server.listen(attachPath)
+  await once(server, 'listening')
+  t.after(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await store.close()
+    await rm(root, { recursive: true, force: true })
+  })
+  const instance = await store.registerServerInstance('moss', process.pid)
+  await store.createSession({ sessionId: 'native', transcriptSessionId: 'transcript',
+    transcriptPath: join(root, 'transcript.jsonl'), userId: 'user', orgId: 'org', role: 'user', scopes: [],
+    cwd: root, runtime: { type: 'cohost', engine: 'scode' } as never, status: 'active', desiredState: 'active' })
+  const old = await store.createAttempt({ sessionId: 'native', generation: 1, backendType: 'cohost',
+    resumeTranscriptSessionId: 'transcript', serverInstanceId: instance.instanceId, attachPath })
+  await store.setCurrentAttempt('native', old.attemptId)
+  await store.touchAttemptHeartbeat(old.attemptId, 'running', instance.instanceId)
+  const runtime = new RuntimeService({ config: { runtimeDir: root, heartbeatTimeoutMs: 30000,
+    reattachProbeTimeoutMs: 100, resumeOnMissingRuntime: true } as ServerConfig,
+    store, authService: {} as never, serverInstanceId: instance.instanceId })
+  await assert.rejects(runtime.ensureSessionReady('native'), AttemptTakeoverPendingError)
+  assert.equal((await store.getAttempt(old.attemptId))?.runtimeState, 'running', 'unavailability alone cannot release a writer lease')
+  let isResumed = false
+  const resumed = waitForSessionResume(runtime, 'native', { timeoutMs: 3000, retryDelayMs: 5 })
+    .then(result => { isResumed = true; return result })
+  await delay(30)
+  assert.equal(isResumed, false)
+  // Model the old bridge observing definitive native loss. A fresh attempt is
+  // created by the existing recovery path; the logical session remains intact.
+  let spawns = 0
+  const mutable = runtime as unknown as { spawnAttempt(session: SessionRecord): Promise<AttemptRecord> }
+  mutable.spawnAttempt = async session => {
+    spawns++
+    assert.equal(session.sessionId, 'native')
+    const next = await store.createAttempt({ sessionId: session.sessionId, generation: 2, backendType: 'cohost',
+      resumeTranscriptSessionId: 'transcript', serverInstanceId: instance.instanceId, attachPath })
+    await store.setCurrentAttempt(session.sessionId, next.attemptId)
+    await store.touchAttemptHeartbeat(next.attemptId, 'running', instance.instanceId)
+    isNativeReady = true
+    return next
+  }
+  await store.markAttemptStopped(old.attemptId, { runtimeState: 'failed', exitCode: null,
+    exitSignal: null, stopReason: 'runtime_exit', errorText: 'native Pod disappeared' }, instance.instanceId)
+  const result = await resumed
+  assert.equal(spawns, 1)
+  assert.equal(result.session.sessionId, 'native')
+  assert.equal(result.attempt.generation, 2)
+  assert(probes >= 2)
+})
+
 void test('resume only retries takeover; resource, startup and draining errors remain immediate', async () => {
   for (const failure of [new HttpError(403, 'Forbidden'), new SessionStartupError(new Error('startup failed')),
     new ServerDrainingError(), new Error('Unexpected failure')]) {

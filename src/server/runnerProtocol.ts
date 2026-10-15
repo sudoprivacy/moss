@@ -38,6 +38,7 @@ export type RunnerServerMessage =
   | {
       type: 'pong'
       ts: number
+      isReady: boolean
     }
   | {
       // Acknowledgement of a 'stdin' message, sent by the daemon right after

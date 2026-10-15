@@ -120,6 +120,7 @@ export class CohostBackend implements SessionBackend {
       runtime,
     })
     handle.availableSkills = availableSkills
+    handle.checkReady = () => transport.checkReady()
     handle.managedProcessId = session.sessionId
     handle.cohostSessionBinding = { ownerId: options.userId!, agentId, durableSessionId: session.durableSessionId!, repositoryPath }
     return handle
