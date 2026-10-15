@@ -7,8 +7,9 @@ import type {
 import { sessionAgentName } from '../agentIdentity.js'
 import { buildAvailableSkillSnapshot, buildSessionEnv, getAssistantRuntimeConfig } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
+import { acpMcpServers } from './acpMcpServers.js'
 import { NexusAcpTransport } from './nexusAcpTransport.js'
-import { resolveCohostNexusConfig } from '../nexus/nexusEnvConfig.js'
+import { resolveCohostConnection } from '../nexus/cohostConnection.js'
 import { isUnknownManagedSession, ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { ownerField } from '../nexus/sessionIdentity.js'
 import { connectSessionRuntime } from '../nexus/sessionConnection.js'
@@ -27,6 +28,7 @@ import { startCohostExecution } from './cohostRecovery.js'
 export class CohostBackend implements SessionBackend {
   async spawn(options: BackendSpawnOptions): Promise<BackendHandle> {
     options.signal?.throwIfAborted()
+    const mcpServers = acpMcpServers(options.mcpSettings)
     const assistantConfig = await getAssistantRuntimeConfig(options.assistantName)
     const enabledSkills = options.assistantName
       ? [...new Set([...assistantConfig.enabledSkills, ...(options.enabledSkillNames ?? [])])]
@@ -42,11 +44,7 @@ export class CohostBackend implements SessionBackend {
     }
     const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)
 
-    // Secrets and ordinary Moss services may use the deployment's primary
-    // Nexus. The co-host runtime can be a separate local cohost daemon (for
-    // example during the 0.2.23 rollout), so give it an explicit connection
-    // namespace instead of silently moving Moss's vault connection with it.
-    const config = resolveCohostNexusConfig()
+    const config = resolveCohostConnection()
     const saved = options.cohostSessionBinding ??
       (options.resumeSessionId ? await readCohostSessionState(options.cwd) : undefined)
     const agentId = requireAgentId(options)
@@ -103,6 +101,7 @@ export class CohostBackend implements SessionBackend {
     const transport = new NexusAcpTransport(agent, session)
     const handle = createAcpBridgeHandle({
       transport,
+      mcpServers,
       sessionId: options.sessionId,
       cwd: options.cwd,
       ...(repositoryPath && session.workspacePath ? {

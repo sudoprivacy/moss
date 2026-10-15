@@ -13,15 +13,8 @@ import { ServerDrainingError, TokenQuotaExceededError, AttemptTakeoverPendingErr
 import { AuthServiceError } from './auth/service.js'
 import type { ServerLogger } from './serverLog.js'
 
-export class HttpError extends Error {
-  constructor(
-    readonly statusCode: number,
-    message: string,
-  ) {
-    super(message)
-    this.name = 'HttpError'
-  }
-}
+export { HttpError } from './httpError.js'
+import { HttpError } from './httpError.js'
 
 export function writeJson(
   res: http.ServerResponse,

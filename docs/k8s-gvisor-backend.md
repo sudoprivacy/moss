@@ -6,6 +6,67 @@ subprocess (`ScodeBackend`) or a local docker container (`DockerBackend`). It
 plugs into the same `SessionBackend` seam and is selected by
 `runtime.type === 'k8s'`.
 
+## Native user runtime boxes
+
+`MOSS_USER_RUNTIME_IMAGE` (`k8s.userRuntimeImage`) selects the image used for
+native `cohost` sessions. The image contains a paired `nexusd-cohost`, signed
+Vault plugins and the agent's userland tools. `k8s.image` supplies the existing
+standalone session image.
+`MOSS_USER_RUNTIME_HOST` (`k8s.userRuntimeHost`) supplies the private compute
+node host used to reach each runtime's Kubernetes NodePort Service.
+
+[`UserPodService`](https://github.com/sudoprivacy/sudostack/tree/user-runtime-v0.1.0/packages/user-runtime)
+is the shared Sudostack lifecycle used by the main `RuntimeService`.
+It coordinates one owner-bound Pod and retained PVC for each
+user. Session runners receive its resolved connection and reuse the same box.
+The control plane issues short-lived owner credentials; each connection
+validates the runtime server name derived from that owner.
+Placement becomes available after Kubernetes reports the Pod Ready and an
+owner-authenticated Nexus request succeeds. This includes the time needed to
+project and reload a refreshed server certificate when the controller reconnects.
+
+```mermaid
+flowchart LR
+    UI[Browser or desktop] --> Moss[Moss authenticated session API]
+    Moss --> Placement[RuntimeService and UserPodService]
+    Placement --> Issuer[Root Nexus credential issuer]
+    Placement --> K8s[Kubernetes API]
+    K8s --> Config[Projected configuration and bounded credentials]
+    Placement --> Transport[Owned Kubernetes Service]
+    Moss --> Runner[Session runner]
+    Runner --> Transport
+    Transport --> Pod[gVisor user Pod]
+    Config --> Pod
+    Pod --> Native[Native cohost and ManagedAgentService]
+    Native --> Engines[Multiple Sudo Code engines]
+    Native --> Data[Retained PVC: Agent homes and flat session storage]
+```
+
+Configuration and server credentials reach the compute node through a Secret.
+The writable global configuration directory is `/data/scode`; its
+`sudocode.json` links to the projected configuration. Credential renewal keeps
+the current configuration, including after controller restart. Model backend
+changes require an explicit runtime restart because backend mounts are boot
+configuration. Runtime endpoints and renewal timers stay in the
+controller's process. Closing that controller retains Pods, Services and PVCs.
+
+The namespace Role grants `get/create/patch` for Secrets and PVCs and `get/create`
+for Services, alongside the Pod permissions below. Each resource
+carries its owner annotation; the coordinator verifies that owner before
+changing credentials or using a volume.
+
+The [Agent storage matrix](https://s.shareone.vip/s/agent-context-storage-matrix)
+owns logical paths, links and durable session format. The
+[Nexus authentication architecture](https://s.shareone.vip/s/nexus-auth-architecture)
+owns credential issuance and runtime confinement.
+
+The real-cluster acceptance scripts are
+[`user-pod-runtime.ts`](../scripts/e2e/user-pod-runtime.ts) for concurrent native
+sessions and owner isolation, and
+[`user-pod-recovery.ts`](../scripts/e2e/user-pod-recovery.ts) for Pod replacement,
+exact durable bytes and resumed model replies. Recovery operates on the first
+script's synthetic owner fixture and retains its PVC and Service.
+
 ## Retaining workspace files across runtime restarts
 
 Set `MOSS_K8S_WORKSPACE_STORAGE_CLASS=local-path` for the bundled k3s storage

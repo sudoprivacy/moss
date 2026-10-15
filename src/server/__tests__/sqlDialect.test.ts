@@ -4,12 +4,27 @@
 // fixes live in pgBackend.test.ts (gated on MOSS_PG_TEST_URL).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PgDriver } from "../db/driver.js";
+import { PgDriver, type PgPoolLike } from "../db/driver.js";
 import { isUniqueViolationOn } from "../auth/service.js";
 import { DirectConnectStore } from "../db.js";
+
+describe('PostgreSQL idle connection failure', () => {
+  it('keeps a dropped idle connection from crashing the controller and preserves query failures', async t => {
+    const pool = new EventEmitter() as EventEmitter & PgPoolLike;
+    pool.query = async () => { throw new Error('query connection failed'); };
+    const diagnostics: string[] = [];
+    t.mock.method(process.stderr, 'write', (value: string) => { diagnostics.push(value); return true; });
+    const driver = new PgDriver(pool);
+    assert.equal(pool.emit('error', new Error('private connection details')), true);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0]!.includes('private connection details'), false);
+    await assert.rejects(driver.run('SELECT 1'), /query connection failed/);
+  });
+});
 
 describe("A2: PgDriver.rewriteLikeToILike", () => {
   it("rewrites a bare LIKE operator to ILIKE", () => {

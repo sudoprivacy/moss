@@ -195,6 +195,7 @@ def manifest(root, state, config, env):
         resource("ServiceAccount", "moss-controller"),
         resource("Role", "moss-controller", namespace=sessions, api="rbac.authorization.k8s.io/v1", rules=[
             {"apiGroups": [""], "resources": ["pods", "secrets"], "verbs": ["get", "list", "watch", "create", "patch", "delete"]},
+            {"apiGroups": [""], "resources": ["services"], "verbs": ["get", "create"]},
             {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["get", "create"]},
             {"apiGroups": [""], "resources": ["persistentvolumeclaims"], "verbs": ["get", "create", "patch"]}]),
         resource("RoleBinding", "moss-controller", namespace=sessions, api="rbac.authorization.k8s.io/v1",

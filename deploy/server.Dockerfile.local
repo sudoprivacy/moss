@@ -100,10 +100,7 @@ RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)
       arm64) NEXUS_ARCH="aarch64" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
     esac \
-    && case "$TARGETARCH" in \
-      amd64) NEXUS_SHA256="c1a68a14e636dbe3a408947b05c74765e28a16bfb0c7f129b9c39e62986372ff" ;; \
-      arm64) NEXUS_SHA256="48777cdf40a04623c77df5de4de89735a8b286288e7bd5955fbf22c0cef63444" ;; \
-    esac \
+    && NEXUS_SHA256="$(jq -er --arg artifact "nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" '."artifact-sha256"[$artifact]' /runtime-versions.json)" \
     && (curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
           "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/release/v${NEXUSD_CLUSTER_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
         || curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
@@ -120,10 +117,11 @@ RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)
 # plugin together with its signature from the same fixed release.
 RUN NEXUS_VAULT_VERSION="$(jq -er '."nexus-vault"' /runtime-versions.json)" \
     && case "$TARGETARCH" in \
-      amd64) VAULT_ARCH=x86_64; VAULT_SHA256="60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914" ;; \
-      arm64) VAULT_ARCH=aarch64; VAULT_SHA256="2954afa5a5732451188b6e84a6d143805e3afebc77f67f4a1e8feebc67648f04" ;; \
+      amd64) VAULT_ARCH=x86_64 ;; \
+      arm64) VAULT_ARCH=aarch64 ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
+    && VAULT_SHA256="$(jq -er --arg artifact "nexus-vault-linux-${VAULT_ARCH}.tar.gz" '."artifact-sha256"[$artifact]' /runtime-versions.json)" \
     && (curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
           "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vault/release/v${NEXUS_VAULT_VERSION}/nexus-vault-linux-${VAULT_ARCH}.tar.gz" -o vault.tar.gz \
         || curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
@@ -158,24 +156,11 @@ ARG TARGETARCH
 # Let apt auto-retry transient mirror failures and download serially so a flaky
 # proxy doesn't fail the whole layer.
 RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
-# Mirror: deb.debian.org is intermittently 502/unreachable through some proxies
-# (a single probe can pass, then a later apt call in the same build 502s), so
-# rewrite the trixie sources to mirrors.aliyun.com UNCONDITIONALLY. Use http://
-# (not https://): some egress proxies mangle the TLS handshake to the mirror,
-# which surfaces as apt "Ign:" on the InRelease files and a failed update; plain
-# http avoids that path and the deb822 Signed-By keyring still authenticates the
-# release. If aliyun can't refresh the index, fall back to the original
-# deb.debian.org. node:22.22.1-trixie-slim uses the deb822 format at
-# /etc/apt/sources.list.d/debian.sources.
-RUN cp -a /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.orig 2>/dev/null || true; \
-    sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org|http://mirrors.aliyun.com|g' \
-      /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
-    sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org|http://mirrors.aliyun.com|g' \
-      /etc/apt/sources.list 2>/dev/null || true; \
-    if ! apt-get update; then \
-      echo "mirrors.aliyun.com apt-get update failed; reverting to deb.debian.org"; \
-      cp -a /etc/apt/sources.list.d/debian.sources.orig /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
-      apt-get update; \
+# Hosted CI uses Debian's official mirrors; local builds can opt into a mirror.
+# Signed apt metadata is still checked after replacing the transport endpoint.
+ARG DEBIAN_MIRROR
+RUN if [ -n "$DEBIAN_MIRROR" ]; then \
+      sed -i "s|https\\?://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.d/debian.sources; \
     fi
 # Docker CLI + LibreOffice deps. Retry loop converges past transient mirror 502s
 # (apt cache persists within the RUN). jq is required by the OAuth2 credential script.

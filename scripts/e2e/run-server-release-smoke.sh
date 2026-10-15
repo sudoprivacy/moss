@@ -108,6 +108,7 @@ test -f "$DIST_DIR/install.sh"
 test -f "$DIST_DIR/SHA256SUMS-$ARCH"
 test -f "$DIST_DIR/$SERVER_ARCHIVE"
 test -f "$DIST_DIR/$RUNTIME_ARCHIVE"
+test -f "$DIST_DIR/runtime-release-$ARCH.json"
 
 # A hosted runner is disposable, but keep cleanup narrowly scoped and fail if a
 # foreign moss-server service is already present instead of deleting it.
@@ -124,9 +125,9 @@ sudo useradd --create-home --home-dir "$TEST_HOME" --shell /bin/bash "$TEST_USER
 sudo install -d -m 0755 -o "$TEST_USER" -g "$TEST_USER" "$WORKSPACE_DIR"
 mkdir -p "$OFFLINE_DIR"
 sed "s/@@MOSS_RELEASE_TAG@@/server-v$VERSION/g" "$ROOT_DIR/deploy/legacy/install-host.sh" > "$OFFLINE_DIR/install.sh"
-awk -v s="$SERVER_ARCHIVE" -v r="$RUNTIME_ARCHIVE" '$2 == s || $2 == r' \
+awk -v s="$SERVER_ARCHIVE" -v r="$RUNTIME_ARCHIVE" -v m="runtime-release-$ARCH.json" '$2 == s || $2 == r || $2 == m' \
   "$DIST_DIR/SHA256SUMS-$ARCH" > "$OFFLINE_DIR/SHA256SUMS"
-cp "$DIST_DIR/$SERVER_ARCHIVE" "$DIST_DIR/$RUNTIME_ARCHIVE" "$OFFLINE_DIR/"
+cp "$DIST_DIR/$SERVER_ARCHIVE" "$DIST_DIR/$RUNTIME_ARCHIVE" "$DIST_DIR/runtime-release-$ARCH.json" "$OFFLINE_DIR/"
 chmod 755 "$OFFLINE_DIR/install.sh"
 (cd "$OFFLINE_DIR" && sha256sum -c SHA256SUMS)
 

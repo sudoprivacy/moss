@@ -51,8 +51,12 @@ EXPECTED_FILES=(
   SHA256SUMS
   bootstrap-nexus.mjs
 )
+if [ -f "$ASSETS_DIR/runtime-release.json" ]; then
+  EXPECTED_FILES+=(runtime-release.json)
+fi
 
 for arch in amd64 arm64; do
+  EXPECTED_FILES+=("runtime-release-$arch.json")
   for component in server runtime server-image nexus-image deploy; do
     EXPECTED_FILES+=("moss-$component-$VERSION-linux-$arch.tar.gz")
   done

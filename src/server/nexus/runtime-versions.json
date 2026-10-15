@@ -1,8 +1,23 @@
 {
-  "nexusd-cluster": "0.8.4",
-  "nexusd-cohost": "0.2.26",
+  "nexusd-cluster": "0.8.14",
+  "nexusd-cohost": "0.2.30",
   "nexus-vault": "0.5.68",
-  "scode": "v0.2.23",
-  "scode-linux-x64-bundle-sha256": "1a7bc195abd66d0c582cfea8caac71dfefc16f7aef25b04d68500fa55d7e8abc",
-  "scode-linux-arm64-sha256": "beef0bc0421ceb88590a4bad61587e771181d759236084d5bbb5cd3b5166874f"
+  "scode": "v0.2.30",
+  "scode-linux-x64-bundle-sha256": "00362660573adf16c9289f4d4fe514d3da74ed0c0a470bb63dac124ae48478ab",
+  "scode-linux-arm64-sha256": "477c2443d3a9014e0e13396c77bbb11c95a23b22bc8c7ba5e16c26805a100743",
+  "artifact-sha256": {
+    "nexusd-cohost-linux-arm64.tar.gz": "3ef089fd746b565d5532cc22f6f7c0a3cf45c769d00cc26c258218bd80cbad39",
+    "nexusd-cohost-linux-x64.tar.gz": "f274f8ec1df4d051f11cc2f867baed061236eb574b195dfa417dcfcb14f23696",
+    "nexus-vault-linux-x86_64.tar.gz": "60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914",
+    "nexus-vault-linux-aarch64.tar.gz": "2954afa5a5732451188b6e84a6d143805e3afebc77f67f4a1e8feebc67648f04",
+    "nexus-vault-macos-arm64.tar.gz": "4d0a0814c94bc9dff4934331885d2d811ee51a13c9c661377fef0f9ca6f4c018",
+    "nexus-vault-macos-x86_64.tar.gz": "6380f3435ea549db9f0c7399ea402600a07efce0f73df94a1bce54b966385525",
+    "nexus-vault-windows-x86_64.zip": "2c8b0818a148a5e9d84b584ef577b62309eaff20a559b7c7c4f0a3a31a1e22cd",
+    "nexusd-cluster-linux-aarch64.tar.gz": "e1969c034e204781b4ea6ed4d0245ae06a1be75a6672b75a1baa24a82f2dee85",
+    "nexusd-cluster-linux-x86_64.tar.gz": "1bebd1e90fc6badbe265c3ae3b636eed049b2f78e20e08fe2d9868afdf46910a",
+    "nexusd-cluster-macos-aarch64.tar.gz": "adf2dd1cfbf6236fd403761f8db52bd87c1d722e79cdddbea4169be3fc5ec5dc",
+    "nexusd-cluster-macos-x86_64.tar.gz": "0db63e8ab806eca8f78aa4ecc507d808f72416b96de505297eec93c334e04883",
+    "nexusd-cluster-windows-aarch64.zip": "63240bdbd2ef82c578122a9ff5818a444b2ade3ef2be31d5577bdc4b4259d830",
+    "nexusd-cluster-windows-x86_64.zip": "8599931dc7146445b255737859e0e516e61cca9a5c1b117d2e5b329e147933ca"
+  }
 }

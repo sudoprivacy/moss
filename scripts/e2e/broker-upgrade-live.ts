@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { NexusSecretClient } from '../../src/server/nexus/nexusSecretClient.js'
+import { resolveVaultDylibName } from '../../src/server/nexus/nexusManager.js'
 import versions from '../../src/server/nexus/runtime-versions.json' with { type: 'json' }
 
 const [oldBinary, newBinary, plugins, evidence, previousPlugins = plugins, rejectionFlag] = process.argv.slice(2)
@@ -121,8 +122,8 @@ try {
   assert.deepEqual(await final.vault.getSecret(namespace, 'fixture'), { value: `updated-${nonce}`, version: 2 })
   const digest = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex')
   writeFileSync(join(root, 'acceptance.json'), JSON.stringify({ oldVersion, newVersion, nonce, stages,
-    oldPluginSha256: digest(join(previousPlugins, 'libnexus_vault.so')),
-    newPluginSha256: digest(join(plugins, 'libnexus_vault.so')),
+    oldPluginSha256: digest(join(previousPlugins, resolveVaultDylibName(process.platform))),
+    newPluginSha256: digest(join(plugins, resolveVaultDylibName(process.platform))),
     checks: ['old-write', 'TLS-preserved', 'VFS-preserved', 'Vault-preserved', 'new-write', 'rollback-read', 'upgrade-again-read'] }, null, 2))
   console.log(`PASS real TLS/VFS/Vault upgrade and rollback: ${root}`)
 } finally {

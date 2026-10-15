@@ -108,8 +108,28 @@ COPY src/server/nexus/runtime-versions.json /tmp/moss-runtime-versions.json
 COPY deploy/fetch-scode.sh /tmp/fetch-scode.sh
 RUN bash /tmp/fetch-scode.sh /tmp/moss-runtime-versions.json "$TARGETARCH" /usr/local/bin/scode && \
     scode --version && \
-    rm -f /tmp/moss-runtime-versions.json /tmp/fetch-scode.sh /usr/local/bin/scode.version && \
+    rm -f /tmp/fetch-scode.sh /usr/local/bin/scode.version && \
     ln -s /usr/local/bin/scode /usr/bin/scode
+
+# The embedded engine and CLI share the release pins. Signed Vault services use
+# the same artifact as the controller; credentials are projected per owner.
+RUN COHOST_VERSION="$(node -p 'require("/tmp/moss-runtime-versions.json")["nexusd-cohost"]')" && \
+    VAULT_VERSION="$(node -p 'require("/tmp/moss-runtime-versions.json")["nexus-vault"]')" && \
+    case "$TARGETARCH" in amd64) COHOST_ARCH=x64; VAULT_ARCH=x86_64 ;; arm64) COHOST_ARCH=arm64; VAULT_ARCH=aarch64 ;; *) exit 1 ;; esac && \
+    mkdir -p /tmp/cohost /opt/scode-plugins && \
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 "https://github.com/sudoprivacy/sudocode/releases/download/nexusd-cohost-v${COHOST_VERSION}/nexusd-cohost-linux-${COHOST_ARCH}.tar.gz" -o /tmp/cohost/runtime.tar.gz && \
+    COHOST_SHA256="$(jq -er --arg artifact "nexusd-cohost-linux-${COHOST_ARCH}.tar.gz" '."artifact-sha256"[$artifact]' /tmp/moss-runtime-versions.json)" && \
+    echo "$COHOST_SHA256  /tmp/cohost/runtime.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/cohost/runtime.tar.gz -C /tmp/cohost && \
+    install -m 0755 "/tmp/cohost/nexusd-cohost-linux-${COHOST_ARCH}/nexusd-cohost" /usr/local/bin/nexusd-cohost && \
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 "https://github.com/nexi-lab/nexus/releases/download/vault-v${VAULT_VERSION}/nexus-vault-linux-${VAULT_ARCH}.tar.gz" -o /tmp/vault.tar.gz && \
+    VAULT_SHA256="$(jq -er --arg artifact "nexus-vault-linux-${VAULT_ARCH}.tar.gz" '."artifact-sha256"[$artifact]' /tmp/moss-runtime-versions.json)" && \
+    echo "$VAULT_SHA256  /tmp/vault.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/vault.tar.gz -C /opt/scode-plugins && \
+    test -f /opt/scode-plugins/libnexus_vault.so.sig && \
+    nexusd-cohost --version && \
+    nexusd-cohost serve-user --help >/dev/null && \
+    rm -rf /tmp/cohost /tmp/vault.tar.gz /tmp/moss-runtime-versions.json
 
 # 5. Agent-facing CLIs (built in the wiki / corpapp / corpauth / fetchurl stages):
 #    wiki (Document Center), corpapp (企业应用), corpauth (企业鉴权),

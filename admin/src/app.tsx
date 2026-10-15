@@ -20,6 +20,8 @@ const ChannelsPage = lazy(() => import('./pages/channels-page'))
 const CorpAppsPage = lazy(() => import('./pages/corp-apps-page'))
 const SkillStorePage = lazy(() => import('./pages/skill-store-page'))
 const AgentHubPage = lazy(() => import('./pages/agent-hub-page'))
+const AgentManagerPage = lazy(() => import('./pages/agent-manager-page'))
+const AgentManagerDetailPage = lazy(() => import('./pages/agent-manager-page').then(module => ({ default: module.AgentManagerDetailPage })))
 const EnterpriseConfigPage = lazy(() => import('./pages/enterprise-config-page'))
 const DocumentCenterPage = lazy(() => import('./pages/document-center-page'))
 const ExternalSourcesPage = lazy(() => import('./pages/external-sources-page'))
@@ -115,6 +117,14 @@ export default function App() {
               <OperationsBillingPage />
             </SuspendedRoute>
           }
+        />
+        <Route
+          path="/agents"
+          element={<SuspendedRoute><AgentManagerPage /></SuspendedRoute>}
+        />
+        <Route
+          path="/agents/:ownerId/:name"
+          element={<SuspendedRoute><AgentManagerDetailPage /></SuspendedRoute>}
         />
         <Route
           path="/sessions"

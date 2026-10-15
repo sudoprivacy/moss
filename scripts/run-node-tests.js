@@ -5,6 +5,13 @@ import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
+  'src/server/runtime/runtimePlacementPolicy.node-test.ts',
+  'src/server/runnerReadiness.node-test.ts',
+  'src/server/sessionSocketAuthorization.node-test.ts',
+  'src/server/agentManager.node-test.ts',
+  'src/server/agentManagerRoutes.node-test.ts',
+  'src/server/nexus/agentNamespace.node-test.ts',
+  'src/server/backends/scodeProxyConfig.node-test.ts',
   'src/server/backends/cohostWorkspace.node-test.ts',
   'src/server/backends/cohostRecovery.node-test.ts',
   'src/server/backends/liveManagedExecution.node-test.ts',
@@ -53,6 +60,9 @@ const nodeTestFiles = [
   'src/server/auth/localExecution.node-test.ts',
   'src/server/auth/userUpdateRoutes.node-test.ts',
   'src/server/backends/acpBridge.node-test.ts',
+  'src/server/browser/browserGateway.node-test.ts',
+  'src/server/browser/browserAgentCapability.node-test.ts',
+  'src/server/browser/browserDeploymentPolicy.node-test.ts',
   'src/server/backends/k8sBackend.node-test.ts',
   'src/server/backends/nexusAcpTransport.node-test.ts',
   'src/server/billing/billingCoordinator.node-test.ts',
@@ -144,7 +154,9 @@ const nodeTestFiles = [
   'src/server/migration/sudoworkP5QmsSourceReader.node-test.ts',
   'src/server/migration/sudoworkSourceSnapshot.node-test.ts',
   'src/server/migration/targetIdentitySnapshot.node-test.ts',
+  'src/server/nexus/cohostConnection.node-test.ts',
   'src/server/nexus/sessionIdentity.node-test.ts',
+  'src/server/nexus/sessionConnection.node-test.ts',
   'src/server/qms/alertService.node-test.ts',
   'src/server/qms/config.node-test.ts',
   'src/server/qms/qmsBootstrap.node-test.ts',

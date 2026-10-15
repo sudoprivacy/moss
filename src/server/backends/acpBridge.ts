@@ -240,6 +240,32 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     return transcriptWrites
   }
 
+  const persistThoughtText = (): void => {
+    if (!currentThoughtText || currentTurnUsedSendUserMessage) return
+    const uuid = randomUUID()
+    void writeTranscript({
+      type: 'thinking', sessionId, uuid, parentUuid: lastPersistedUuid,
+      isSidechain: false, timestamp: new Date().toISOString(), cwd,
+      userType: 'external', version: 'unknown',
+      message: { role: 'assistant', content: [{ type: 'thinking', thinking: currentThoughtText }] },
+    })
+    lastPersistedUuid = uuid
+  }
+
+  const persistAssistantText = (text: string, extra: Record<string, unknown> = {}): void => {
+    if (!text) return
+    const uuid = currentTurnAssistantUuid ?? randomUUID()
+    void writeTranscript({
+      type: 'assistant', sessionId, uuid, parentUuid: lastPersistedUuid,
+      isSidechain: false, timestamp: new Date().toISOString(), cwd,
+      userType: 'external', version: 'unknown',
+      message: {
+        role: 'assistant', content: [{ type: 'text', text }], model: currentModel, ...extra,
+      },
+    })
+    lastPersistedUuid = uuid
+  }
+
   const persistScodeSessionId = (id: string | null | undefined): void => {
     if (!id || !options.scodeSessionIdPath) return
     void mkdir(dirname(options.scodeSessionIdPath), { recursive: true })
@@ -289,8 +315,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const id = customId || `m-${rpcId++}`
     if (method === 'session/prompt') pendingPromptIds.add(id)
     const msg: SessionRpcMessage = { jsonrpc: '2.0', id, method, params }
-    const raw = JSON.stringify(msg) + '\n'
-    process.stderr.write(`[AcpBridge] Sending RPC: ${raw}`)
+    process.stderr.write(`[AcpBridge] Sending RPC: ${JSON.stringify({ id, method })}\n`)
     sendMessage(msg)
   }
 
@@ -315,8 +340,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const sendRpcAndWait = (method: string, params: any, customId?: string, timeoutMs = 30000): Promise<any> => {
     const id = customId || `m-${rpcId++}`
     const msg: SessionRpcMessage = { jsonrpc: '2.0', id, method, params }
-    const raw = JSON.stringify(msg) + '\n'
-    process.stderr.write(`[AcpBridge] Sending RPC (wait): ${raw}`)
+    process.stderr.write(`[AcpBridge] Sending RPC (wait): ${JSON.stringify({ id, method })}\n`)
     sendMessage(msg)
 
     return new Promise((resolve, reject) => {
@@ -678,6 +702,19 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
         if (typeof parsed.id === 'string' && pendingPromptIds.delete(parsed.id) && parsed.error) {
           const message = typeof parsed.error.message === 'string' ? parsed.error.message : 'Model request failed'
+          // A prompt failure may follow streamed provider diagnostics or a partial
+          // answer. Retain those chunks before clearing the turn so history and
+          // refresh show the same information as the live stream.
+          persistThoughtText()
+          const retainedText = currentTurnUsedSendUserMessage ? '' : currentAssistantText
+          persistAssistantText(retainedText || message, { is_error: true, partial: Boolean(retainedText) })
+          if (!retainedText) {
+            emitStdout(JSON.stringify({
+              type: 'assistant', session_id: sessionId, uuid: lastPersistedUuid,
+              timestamp: new Date().toISOString(),
+              message: { role: 'assistant', content: [{ type: 'text', text: message }] },
+            }) + '\n')
+          }
           const resultEvent = {
             type: 'result', session_id: sessionId, status: 'error',
             is_error: true, errors: [message],
@@ -701,7 +738,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
         if (parsed.result?.stopReason) {
           process.stderr.write(`[AcpBridge] Turn Ended. Unblocking UI...\n`)
-          currentTurnAssistantUuid = null // Reset UUID for the next turn
 
           // Older engines may report output without a terminal tool status.
           for (const toolCallId of currentTurnToolCalls.keys()) completeToolCall(toolCallId)
@@ -725,49 +761,12 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           // BEFORE the assistant text event, so the transcript reads
           // thinking -> answer. Chained via lastPersistedUuid so the assistant
           // event that follows parents onto it.
-          if (currentThoughtText && !currentTurnUsedSendUserMessage) {
-            const thinkingUuid = randomUUID()
-            const thinkingEvent = {
-              type: 'thinking',
-              sessionId,
-              uuid: thinkingUuid,
-              parentUuid: lastPersistedUuid,
-              isSidechain: false,
-              timestamp: new Date().toISOString(),
-              cwd,
-              userType: 'external',
-              version: 'unknown',
-              message: {
-                role: 'assistant',
-                content: [{ type: 'thinking', thinking: currentThoughtText }],
-              },
-            }
-            void writeTranscript(thinkingEvent)
-            lastPersistedUuid = thinkingUuid
-          }
+          persistThoughtText()
 
           const assistantUuid = randomUUID()
 
           if (currentAssistantText && !currentTurnUsedSendUserMessage) {
-            const assistantEvent = {
-              type: 'assistant',
-              sessionId,
-              uuid: assistantUuid,
-              parentUuid: lastPersistedUuid,
-              isSidechain: false,
-              timestamp: new Date().toISOString(),
-              cwd,
-              userType: 'external',
-              version: 'unknown',
-              message: {
-                role: 'assistant',
-                content: [{ type: 'text', text: currentAssistantText }],
-                usage,
-                model,
-              },
-            }
-            void writeTranscript(assistantEvent)
-            lastPersistedUuid = assistantUuid
+            persistAssistantText(currentAssistantText, { usage })
           } else if (usageHasTokens) {
             // The turn reported token usage but produced no assistant text event
             // to attach it to (e.g. a turn that ended via SendUserMessage, whose
@@ -812,6 +811,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
           currentAssistantText = ''
           currentThoughtText = ''
+          currentTurnAssistantUuid = null
           currentTurnUsedSendUserMessage = false
           // A2: stopReason is the authoritative "turn done" signal from scode.
           // Re-evaluate busy here; setBusy(false) only if no question / stdin
@@ -1348,25 +1348,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       if (!transcriptPath) return
       try {
         if (currentAssistantText) {
-          const assistantUuid = randomUUID()
-          await writeTranscript({
-            type: 'assistant',
-            sessionId,
-            uuid: assistantUuid,
-            parentUuid: lastPersistedUuid,
-            isSidechain: false,
-            timestamp: new Date().toISOString(),
-            cwd,
-            userType: 'external',
-            version: 'unknown',
-            message: {
-              role: 'assistant',
-              content: [{ type: 'text', text: currentAssistantText }],
-              partial: true,
-            },
-          })
-          lastPersistedUuid = assistantUuid
+          persistAssistantText(currentAssistantText, { partial: true })
+          await transcriptWrites
           currentAssistantText = ''
+          currentTurnAssistantUuid = null
         }
         await writeTranscript({
           type: 'system',
@@ -1380,7 +1365,18 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     },
     async destroy(force = false) {
       try { await transport.close(force) }
-      finally { await transcriptWrites }
+      finally {
+        // Closing a live stream can precede its prompt response. Keep the text
+        // already shown to the user even when no stopReason arrives.
+        if (currentAssistantText && !currentTurnUsedSendUserMessage) {
+          persistThoughtText()
+          persistAssistantText(currentAssistantText, { partial: true })
+          currentAssistantText = ''
+          currentThoughtText = ''
+          currentTurnAssistantUuid = null
+        }
+        await transcriptWrites
+      }
 
       // Host mode session mode cleans configDir.
       if (runtime.type === 'host' && runtime.hostMode === 'session' && runtime.configDir) {

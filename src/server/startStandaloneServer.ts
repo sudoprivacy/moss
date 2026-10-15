@@ -657,6 +657,7 @@ async function finishStandaloneServerStartup(
       }
     }
     await server.stop()
+    await runtime.closeRuntimeServices()
     clearInterval(platformVersionTimer)
     await qmsRuntime?.stop()
     await closeSudoworkRedis?.()

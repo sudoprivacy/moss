@@ -1,3 +1,4 @@
+import { buildScodeProxyConfig } from './scodeProxyConfig.js'
 import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { isDefaultAgentName } from '../agentIdentity.js'
 import { execFile, spawn } from 'child_process'
@@ -27,6 +28,8 @@ import { ownerField } from '../nexus/sessionIdentity.js'
 import { connectSessionRuntime } from '../nexus/sessionConnection.js'
 import { ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { NexusAcpTransport } from './nexusAcpTransport.js'
+import { buildKubectlBaseArgs, kubectlApply, isImmutablePodSpecError } from '@sudo/user-runtime/kubernetes'
+export { buildKubectlBaseArgs, formatKubectlApplyError } from '@sudo/user-runtime/kubernetes'
 
 import { getWorkspaceAgentsMdPath } from '../sharedAgentMemory.js'
 import { collectSkillAssets } from './skillAssets.js'
@@ -306,10 +309,7 @@ export class K8sBackend implements SessionBackend {
     try {
       const baseUrl = env.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1'
       const apiKey = env.ANTHROPIC_API_KEY || ''
-      const scodeConfig = {
-        auth_modes: { proxy: { 'moss-proxy': { baseUrl, apiKey } } },
-      }
-      secretData['sudocode.json'] = JSON.stringify(scodeConfig, null, 2)
+      Object.assign(secretData, buildScodeProxyConfig(baseUrl, apiKey))
       secretMounts.push({ key: 'sudocode.json', mountPath: posixPath.join(scodeHomeDir, 'sudocode.json') })
       process.stderr.write(
         `[K8sBackend] Wrote sudocode.json secret (proxy connection only; models resolved dynamically via sudorouter)\n`,
@@ -595,14 +595,6 @@ export function buildK8sExecArgs(kubectlBase: string[], podName: string, model: 
   ]
 }
 
-export function buildKubectlBaseArgs(namespace: string, kubeconfig?: string): string[] {
-  const args: string[] = []
-  if (kubeconfig) {
-    args.push('--kubeconfig', kubeconfig)
-  }
-  args.push('--namespace', namespace)
-  return args
-}
 
 /**
  * Deterministic, DNS-1123 pod + Secret names derived from the session id.
@@ -741,23 +733,6 @@ async function ensureNamespace(kubeconfig: string | undefined, namespace: string
   }
 }
 
-async function kubectlApply(kubectlBase: string[], manifest: Record<string, unknown>): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn('kubectl', [...kubectlBase, 'apply', '-f', '-'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
-    let stderr = ''
-    child.stderr?.on('data', d => { stderr += d.toString() })
-    child.on('error', reject)
-    child.on('close', code => {
-      if (code === 0) return resolve()
-      reject(formatKubectlApplyError(code, stderr))
-    })
-    child.stdin?.end(JSON.stringify(manifest))
-  })
-}
-
 /**
  * A Pod spec is immutable apart from container images, so `kubectl apply` is only
  * a valid create — never an update. Any session restarted with different config
@@ -767,24 +742,6 @@ async function kubectlApply(kubectlBase: string[], manifest: Record<string, unkn
  * infrastructure, so the correct resolution is to replace it rather than to retry
  * an apply that can never succeed.
  */
-/** Preserve actionable API errors without exposing manifests echoed by kubectl. */
-export function formatKubectlApplyError(code: number | null, stderr: string): Error {
-  const reason = /Error from server \((\w+)\)/.exec(stderr)?.[1]
-  const allowedReasons = new Set([
-    'Forbidden', 'Unauthorized', 'NotFound', 'AlreadyExists', 'Invalid', 'BadRequest',
-    'Timeout', 'ServerTimeout', 'InternalError', 'ServiceUnavailable', 'Gone',
-  ])
-  const detail = isImmutablePodSpecError(new Error(stderr))
-    ? 'pod spec field is immutable'
-    : reason && allowedReasons.has(reason) ? 'Kubernetes API ' + reason : 'manifest rejected'
-  return new Error('kubectl apply failed (code ' + code + '): ' + detail)
-}
-
-function isImmutablePodSpecError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err)
-  return /may not change fields other than|field is immutable/i.test(message)
-}
-
 async function applyPodManifest(
   kubectlBase: string[],
   manifest: Record<string, unknown>,

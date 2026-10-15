@@ -174,6 +174,8 @@ export const serverFileConfigSchema = lazySchema(() =>
     // when runtimeDefaults.type='k8s' or a session requests runtime.type='k8s'.
     k8s: z.object({
       image: z.string().optional(),
+      userRuntimeImage: z.string().min(1).optional(),
+      userRuntimeHost: z.string().min(1).optional(),
       namespace: z.string().default('moss-sessions'),
       // Empty string → omit runtimeClassName (customer cluster without gvisor).
       runtimeClassName: z.string().default('gvisor'),
@@ -698,6 +700,8 @@ export type ServerConfig = {
    */
   k8s?: {
     image?: string
+    userRuntimeImage?: string
+    userRuntimeHost?: string
     namespace: string
     runtimeClassName: string
     kubeconfig?: string
@@ -944,6 +948,9 @@ export type SessionSummary = {
 }
 
 export type SessionCreateInput = {
+  /** Verified management actor; never accepted from a session request body. */
+  managementActorId?: string
+  managementAgent?: { name: string; displayName: string; ownerName: string }
   cwd?: string
   dangerouslySkipPermissions: boolean
   userId: string

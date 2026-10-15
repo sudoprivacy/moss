@@ -586,6 +586,11 @@ export class AuthService {
 
   getOrganizationBillingService(): OrganizationBillingService | undefined { return this.organizationBilling }
 
+  /** Metered personal and organization accounts both require an owner token. */
+  async isSudorouterManaged(orgId: string): Promise<boolean> {
+    return Boolean(this.sudorouterAccounts) || Boolean(await this.organizationBilling?.isShared(orgId))
+  }
+
   configureOrganizationRecharge(payment: OrganizationPaymentPort | undefined, enabled: boolean, exchangeRateMicros = 7_300_000): void {
     if (this.organizationBilling) this.organizationRecharge = new OrganizationRechargeService(this.organizationBilling, payment, { enabled, exchangeRateMicros })
   }
@@ -893,6 +898,11 @@ export class AuthService {
     if (await this.db.isTokenRevoked(auth.jti)) {
       return null
     }
+    // Role changes invalidate the issued grants immediately. Refresh/login
+    // issues a new token with the current role; internal scoped tokens keep
+    // their original limits while their owner's role remains unchanged.
+    const user = await this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
+    if (!user || user.status !== 'active' || user.role !== auth.role) return null
     return auth
   }
 
@@ -1732,6 +1742,22 @@ export class AuthService {
       keyId: auth.keyId,
       orgIdOverride: orgId,
     })
+  }
+
+  /** List Agent owners using the same organization and department boundary as sessions. */
+  async listAgentOwners(auth: AuthContext): Promise<Array<{ id: string; displayName: string; isActive: boolean }>> {
+    const allowed = hasScope(auth.scopes, 'sessions:list:any')
+      ? null : await this.listSubtreeUserIds(auth.orgId, auth)
+    return (await this.db.listUsersByOrg(auth.orgId))
+      .filter(user => !allowed || allowed.has(user.id))
+      .map(user => ({ id: user.id, displayName: user.displayName?.trim() || user.name || user.id, isActive: user.status === 'active' }))
+  }
+
+  /** Resolve the actual owner's runtime privileges without borrowing the administrator's scopes. */
+  async getAgentOwner(userId: string, orgId: string) {
+    const user = await this.db.getUserByIdAndOrg(userId, orgId)
+    return user ? { id: user.id, role: user.role, status: user.status,
+      scopes: defaultScopesForRole(user.role) } : null
   }
 
   async listUsers(

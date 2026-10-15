@@ -12,8 +12,6 @@
 
 import { NexusZoneApiClient, type NexusVfsTlsConfig, type SessionCredential } from '@nexus-ai-fs/vfs-client'
 
-import type { NexusTlsConfig } from './nexusEnvConfig.js'
-
 /**
  * Credentials remain in the execution controller's memory. Renewal preserves
  * its signed actor and owner while replacing the key and certificate. Once
@@ -40,7 +38,7 @@ export type SessionIdentity = {
  */
 export async function mintSessionIdentity(
   endpoint: string,
-  tls: NexusTlsConfig | null,
+  tls: NexusVfsTlsConfig | null,
   ownerId: string | undefined,
 ): Promise<SessionIdentity | null> {
   if (!tls || !ownerId) return null
@@ -68,7 +66,7 @@ export async function mintSessionIdentity(
 /** Renew through the minter, cancelling the issuer RPC when its controller closes. */
 export async function renewSessionCredential(
   endpoint: string,
-  tls: NexusTlsConfig,
+  tls: NexusVfsTlsConfig,
   current: SessionCredential,
   signal: AbortSignal,
 ): Promise<SessionCredential> {

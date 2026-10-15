@@ -10,10 +10,6 @@ on:
     branches:
       - dev
   workflow_dispatch:
-    inputs:
-      candidate_version:
-        description: 'Optional isolated Atlas prerelease version, e.g. 0.1.53-atlas.1'
-        required: false
 
 permissions:
   contents: write
@@ -88,6 +84,8 @@ jobs:
             scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts \
             scripts/e2e/cohost-session-recovery.ts \
             scripts/e2e/cohost-real-model-workflow.ts scripts/e2e/cohost-model-bootstrap.ts \
+            scripts/e2e/cohost-owner-keys.ts scripts/e2e/user-pod-runtime.ts \
+            scripts/e2e/user-pod-recovery.ts scripts/e2e/user-pod-release-upgrade.ts \
             scripts/e2e/server-session-live.ts \
             scripts/e2e/embedded-nexus-live.ts scripts/e2e/broker-upgrade-live.ts scripts/e2e/external-broker-live.ts
 
@@ -232,15 +230,9 @@ jobs:
       - name: Resolve release metadata
         id: release
         shell: bash
-        env:
-          CANDIDATE_VERSION: ${{ inputs.candidate_version }}
         run: |
           set -euo pipefail
-          if [[ -n "$CANDIDATE_VERSION" ]]; then
-            [[ "$CANDIDATE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-atlas\.[0-9]+$ ]]
-            VERSION="$CANDIDATE_VERSION"
-            RELEASE_TAG="server-v$VERSION"
-          elif [[ "$GITHUB_REF" == refs/tags/server-v* ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/server-v* ]]; then
             RELEASE_TAG="$GITHUB_REF_NAME"
             VERSION="${GITHUB_REF_NAME#server-v}"
           else
@@ -263,6 +255,14 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Setup Bun for release manifest generation
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install release manifest dependencies
+        run: bun install --frozen-lockfile
 
       - name: Validate deployment scripts
         run: |
@@ -333,9 +333,16 @@ jobs:
             -t "my-moss-runtime:$IMAGE_TAG" \
             -f deploy/runtime/Dockerfile .
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "my-moss-runtime:$IMAGE_TAG")" = "linux/${{ matrix.arch }}"
-          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode --version 2>&1 | tee dist/scode-version.txt
+          docker run --rm "my-moss-runtime:$IMAGE_TAG" scode version 2>&1 | tee dist/scode-version.txt
           grep -Fq "${SCODE_VERSION#v}" dist/scode-version.txt
+          docker run --rm "my-moss-runtime:$IMAGE_TAG" nexusd-cohost --version | tee dist/cohost-version.txt
+          COHOST_DIGEST="sha256:$(docker run --rm "my-moss-runtime:$IMAGE_TAG" sha256sum /usr/local/bin/nexusd-cohost | awk '{print $1}')"
+          IMAGE_DIGEST="$(docker image inspect "my-moss-runtime:$IMAGE_TAG" --format '{{.Id}}')"
           docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
+          bun scripts/create-runtime-manifest.ts "${{ steps.release.outputs.release_tag }}" \
+            "docker.io/library/my-moss-runtime:$IMAGE_TAG" "$IMAGE_DIGEST" \
+            "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" \
+            dist/scode-version.txt dist/cohost-version.txt "$COHOST_DIGEST" "dist/runtime-release-${{ matrix.arch }}.json"
 
       - name: Assemble installer and checksums
         env:
@@ -357,7 +364,7 @@ jobs:
             sha256sum "$SERVER_ARCHIVE" "$RUNTIME_ARCHIVE" \
               "moss-server-image-$VERSION-linux-$ARCH.tar.gz" \
               "moss-nexus-image-$VERSION-linux-$ARCH.tar.gz" \
-              "moss-deploy-$VERSION-linux-$ARCH.tar.gz" bootstrap-nexus.mjs > "SHA256SUMS-$ARCH"
+              "moss-deploy-$VERSION-linux-$ARCH.tar.gz" bootstrap-nexus.mjs "runtime-release-$ARCH.json" > "SHA256SUMS-$ARCH"
           )
 
       - name: Validate release contents
@@ -498,6 +505,7 @@ jobs:
             dist/moss-nexus-image-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
             dist/moss-deploy-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
             dist/bootstrap-nexus.mjs
+            dist/runtime-release-${{ matrix.arch }}.json
             dist/SHA256SUMS-${{ matrix.arch }}
             dist/install.sh
             dist/uninstall-k3s.sh
@@ -527,9 +535,13 @@ jobs:
           for shared in install.sh bootstrap-nexus.mjs uninstall-k3s.sh fetch-offline-deps.sh; do
             cmp "artifacts/moss-server-release-amd64/$shared" "artifacts/moss-server-release-arm64/$shared"
           done
-          find artifacts -type f -name '*.tar.gz' -exec cp {} release-assets/ \;
+          find artifacts -type f \( -name '*.tar.gz' -o -name 'runtime-release-*.json' \) -exec cp {} release-assets/ \;
+          cp release-assets/runtime-release-amd64.json release-assets/runtime-release.json
+          (cd release-assets && sha256sum runtime-release.json) > release-assets/SHA256SUMS-alias
           find artifacts -type f -name 'moss-server-e2e-report-*.zip' -exec cp {} release-assets/ \;
           find artifacts -type f -name 'SHA256SUMS-*' -exec cat {} \; | sort -k2 | uniq > release-assets/SHA256SUMS
+          cat release-assets/SHA256SUMS-alias >> release-assets/SHA256SUMS
+          rm release-assets/SHA256SUMS-alias
           cp "$(find artifacts -type f -name install.sh -print -quit)" release-assets/install.sh
           cp "$(find artifacts -type f -name bootstrap-nexus.mjs -print -quit)" release-assets/bootstrap-nexus.mjs
           cp "$(find artifacts -type f -name uninstall-k3s.sh -print -quit)" release-assets/uninstall-k3s.sh
@@ -569,6 +581,7 @@ jobs:
             release-assets/uninstall-k3s.sh
             release-assets/fetch-offline-deps.sh
             release-assets/SHA256SUMS
+            release-assets/runtime-release*.json
             release-assets/moss-server-e2e-report-*.zip
 
       - name: Publish Tencent COS Latest entrypoint
@@ -578,35 +591,3 @@ jobs:
           COS_PUBLIC_BASE_URL: https://sudowork-release-1309794936.cos.accelerate.myqcloud.com
         run: bash scripts/publish-server-to-cos.sh release-assets "$GITHUB_REF_NAME" --latest-only
 
-  atlas-candidate:
-    name: publish-isolated-atlas-candidate
-    if: github.event_name == 'workflow_dispatch' && inputs.candidate_version != ''
-    needs: build
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/download-artifact@v5
-        with:
-          pattern: moss-server-release-*
-          path: candidates
-      - name: Publish checked component artifacts as a prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          CANDIDATE_VERSION: ${{ inputs.candidate_version }}
-        run: |
-          set -euo pipefail
-          [[ "$CANDIDATE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-atlas\.[0-9]+$ ]]
-          mkdir candidate
-          for shared in install.sh bootstrap-nexus.mjs uninstall-k3s.sh fetch-offline-deps.sh; do
-            cmp "candidates/moss-server-release-amd64/$shared" "candidates/moss-server-release-arm64/$shared"
-            cp "candidates/moss-server-release-amd64/$shared" candidate/
-          done
-          find candidates -type f -name '*.tar.gz' -exec cp {} candidate/ \;
-          cat candidates/moss-server-release-*/SHA256SUMS-* | sort -k2 | uniq > candidate/SHA256SUMS
-          cd candidate
-          sha256sum -c SHA256SUMS
-          gh release create "server-v$CANDIDATE_VERSION" \
-            ./*.tar.gz ./bootstrap-nexus.mjs ./install.sh ./fetch-offline-deps.sh ./uninstall-k3s.sh ./SHA256SUMS \
-            --target "$GITHUB_SHA" --prerelease --latest=false \
-            --title "Atlas integration candidate $CANDIDATE_VERSION" \
-            --notes "Component build and smoke checks passed. Source commit: $GITHUB_SHA. CI run: https://github.com/$GH_REPO/actions/runs/$GITHUB_RUN_ID. For sudostack integration qualification."

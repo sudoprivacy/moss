@@ -10,6 +10,97 @@ import { createAcpBridgeHandle } from './acpBridge.js'
 import { readSharedAgentMemory } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
 
+void test('closing a live turn retains the rendered answer once without a prompt response', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'moss-close-turn-history-'))
+  const transcriptPath = join(cwd, 'transcript.jsonl')
+  const sent: any[] = []
+  const output: any[] = []
+  let events!: import('./acpTransport.js').AcpTransportEvents
+  const transport: import('./acpTransport.js').AcpMessageTransport = {
+    connected: true, start(value) { events = value },
+    async send(message) { sent.push(message) }, async close() {},
+  }
+  const handle = createAcpBridgeHandle({ transport, sessionId: 'closed-history', cwd,
+    model: 'fixture', transcriptPath, enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
+  handle.onStdoutLine(line => output.push(JSON.parse(line)))
+  try {
+    for (let i = 0; i < 200 && !sent.some(message => message.id === 'm-init'); i++) await delay(10)
+    events.onMessage({ jsonrpc: '2.0', id: 'm-init', result: {} })
+    events.onMessage({ jsonrpc: '2.0', id: 'm-session-new', result: { sessionId: 'native-closed-history' } })
+    handle.writeStdin(JSON.stringify({ type: 'user', message: { role: 'user', content: 'A slow reply' } }))
+    for (let i = 0; i < 200 && !sent.some(message => message.method === 'session/prompt'); i++) await delay(10)
+    assert(sent.some(message => message.method === 'session/prompt'))
+    events.onMessage({ jsonrpc: '2.0', method: 'session/update', params: {
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Visible partial answer' } },
+    } })
+    await handle.destroy(true)
+    await handle.destroy(true)
+    const records = (await readFile(transcriptPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    const assistants = records.filter(record => record.type === 'assistant')
+    assert.equal(assistants.length, 1)
+    assert.equal(assistants[0].message.content[0].text, 'Visible partial answer')
+    assert.equal(assistants[0].message.partial, true)
+    assert.equal(assistants[0].uuid, output.find(event => event.type === 'assistant').uuid)
+    assert.equal(assistants[0].parentUuid, records.find(record => record.type === 'user').uuid)
+  } finally { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) }
+})
+
+for (const chunks of [[], ['api returned 403 Forbidden: ', 'enterprise balance is insufficient']]) {
+  void test(`failed prompt diagnostics survive context reload with ${chunks.length} streamed chunks`, async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'moss-failed-turn-history-'))
+    const transcriptPath = join(cwd, 'transcript.jsonl')
+    const sent: any[] = []
+    const output: any[] = []
+    let events!: import('./acpTransport.js').AcpTransportEvents
+    const transport: import('./acpTransport.js').AcpMessageTransport = {
+      connected: true, start(value) { events = value },
+      async send(message) { sent.push(message) }, async close() {},
+    }
+    const handle = createAcpBridgeHandle({ transport, sessionId: 'failed-history', cwd,
+      model: 'fixture', transcriptPath, enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
+    handle.onStdoutLine(line => output.push(JSON.parse(line)))
+    const receive = (message: any) => events.onMessage({ jsonrpc: '2.0', ...message })
+    const waitFor = async (predicate: () => boolean) => {
+      for (let i = 0; i < 200 && !predicate(); i++) await delay(10)
+      assert(predicate(), 'Timed out waiting for the ACP turn')
+    }
+    try {
+      await waitFor(() => sent.some(message => message.id === 'm-init'))
+      receive({ id: 'm-init', result: {} })
+      receive({ id: 'm-session-new', result: { sessionId: 'native-failed-history' } })
+      handle.writeStdin(JSON.stringify({ type: 'user', message: { role: 'user', content: 'First request' } }))
+      await waitFor(() => sent.some(message => message.method === 'session/prompt'))
+      for (const text of chunks) receive({ method: 'session/update', params: {
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
+      } })
+      const first = sent.find(message => message.method === 'session/prompt')
+      receive({ id: first.id, error: { code: -32603, message: 'Internal error' } })
+      receive({ id: first.id, error: { code: -32603, message: 'Duplicate error response' } })
+      await waitFor(() => output.some(event => event.type === 'result'))
+      assert.equal(handle.isBusy?.(), false)
+      handle.writeStdin(JSON.stringify({ type: 'user', message: { role: 'user', content: 'Retry request' } }))
+      await waitFor(() => sent.filter(message => message.method === 'session/prompt').length === 2)
+      receive({ method: 'session/update', params: {
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Retry succeeded' } },
+      } })
+      const second = sent.filter(message => message.method === 'session/prompt')[1]
+      receive({ id: second.id, result: { stopReason: 'end_turn' } })
+      await waitFor(() => output.filter(event => event.type === 'result').length === 2)
+      await handle.destroy()
+      const records = (await readFile(transcriptPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      const assistants = records.filter(record => record.type === 'assistant')
+      assert.equal(assistants.length, 2, 'Each turn must retain one stable assistant record')
+      assert.equal(assistants[0].message.content[0].text, chunks.join('') || 'Internal error')
+      assert.equal(assistants[0].message.is_error, true)
+      assert.equal(assistants[1].message.content[0].text, 'Retry succeeded')
+      const liveAssistant = output.find(event => event.type === 'assistant')
+      assert.equal(assistants[0].uuid, liveAssistant.uuid, 'Live and durable records must share one identity')
+      const retry = records.find(record => record.type === 'user' && record.message.content === 'Retry request')
+      assert.equal(retry.parentUuid, assistants[0].uuid)
+    } finally { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) }
+  })
+}
+
 void test('a connection lost before runner subscriptions still reports one terminal exit', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'moss-early-acp-exit-'))
   let events!: import('./acpTransport.js').AcpTransportEvents

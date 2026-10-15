@@ -14,6 +14,7 @@ import {
   buildScodeMcpSettings,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
+import { acpMcpServers } from './acpMcpServers.js'
 import { syncWorkspaceSkills, type WorkspaceSkillLink } from '../../utils/scodeBridge.js'
 
 import type {
@@ -183,7 +184,7 @@ export class ScodeBackend implements SessionBackend {
 
     const handle = createAcpBridgeHandle({
       child,
-      mcpServers: [{ name: 'moss-artifacts', command: process.execPath, args: [artifactToolPath], env: [] }],
+      mcpServers: [...acpMcpServers(options.mcpSettings), { name: 'moss-artifacts', command: process.execPath, args: [artifactToolPath], env: [] }],
       sessionId: options.sessionId,
       cwd: options.cwd,
       model: scodeModel,
