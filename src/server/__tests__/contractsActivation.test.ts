@@ -6,23 +6,28 @@ import { dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'bun:test'
 import { buildNexusArgs } from '../nexus/nexusManager.js'
-import { shellPathEnvironment } from '../testing/shellPaths.js'
 
 const root = resolve(import.meta.dir, '../../..')
 const candidateVersion = '0.2.1'
 const baselineVersion = '0.2.0'
-const contentSha = '273fd4097cbc33c1c049c39bb1fb60cef2663e2b'
+// Pin target: sudostack feat/contract-zone 3385ab2 ("rebuild the zone-v1
+// release bundle at the 50bc372d anchor" — the derivation-pinned rebuild of
+// 364ce40's candidate; the derived contract artifacts are byte-identical, only
+// the pack tarball and the git anchor move). The 0.2.1 candidate content
+// is the C-era lineage plus the restored zone-v1 family; digests below are the
+// measured values at this revision.
+const contentSha = '3385ab2bc7cdcc8f73a3be24a38baf93a022e3ff'
 const contentShortSha = contentSha.slice(0, 7)
 const mergeSha = 'dc9cf01acf61dff586d292d15710332d35a5f811'
 const previousCandidateContentSha = '30da0ddd953268ff8a9a0f0980276300ab153003'
 const previousActivationSha = '60bd8dda6fb2d348ec8571b9b1a4eaa535e36dc5'
 const retiredPinSha = '45304cf15d1e8d02814e46b7b2fe0b3c30c1709c'
 const dependencySpec = `github:sudoprivacy/sudostack#${contentSha}`
-const lockIntegrity = 'sha512-Z/cwfFmCElZxS0Dik5cH8ThmRAwireEYV1fNqzhSln+twc9RBVGBfZvCHSiUXQMKpAFIovsSm0F1ueF998foIg=='
-const candidateManifestSha256 = '956a19cbc6b42ebc3c4e1c9ebe93e0842e1c295d1f6465e0d42d532d45785a9b'
-const compatibilitySha256 = 'a27553991ab8bd57d66bc12aaca4b08f52cd8def13a1f971d698fa3f435b35ad'
-const baselineSha256 = '9ec2cffbcb19f3e728a6691176ed739bab6de52a56b60abe4217420d2ce0c17c'
-const tarballSha256 = '1c6b2794de3572bffb59e3dd3f0a504c68a23fd2531c7838773bf78d01469c5e'
+const lockIntegrity = 'sha512-tHmaX3m4kSA7Rf5pgffOgbUMTPxqUHz2ZECY7Ax7Dp/hNpoWq8qY0MC8OO76QHiWGGyjGgMmp6JqheKjX4T6rw=='
+const candidateManifestSha256 = '0cad9da45d55f7952638cccf31c0ca0233dc1621b6864e307dba3bbe2b2cca1c'
+const compatibilitySha256 = '8256655fc5789344102d4295daa08c1519aac818fdf2c175cb916b38a848d756'
+const baselineSha256 = '364c68731c754e563dcea8855aae0263e7014fa4f8e1aeb3331c37959164aed7'
+const tarballSha256 = '30f59756ce8f55daaeaf6b9a6ff6f0c79e3928c5273d9222ee6ae1ae91e564f7'
 const serverNodeVersion = '22.22.1'
 
 function readJson<T>(path: string): T {
@@ -194,10 +199,10 @@ describe('@sudo/contracts evaluation pin', () => {
       const [metadata] = JSON.parse(packed.stdout) as PackMetadata[]
       expect(metadata).toEqual(expect.objectContaining({
         files: expect.any(Array),
-        shasum: '5774dcb821d483bf8848ba0bda511ec728ae6cf9',
-        size: 39_541,
+        shasum: '9cf281a88e20e667e4fd934ad3aa6f90dcc25238',
+        size: 67_270,
       }))
-      expect(metadata.files).toHaveLength(43)
+      expect(metadata.files).toHaveLength(64)
       expect(sha256(resolve(packDir, metadata.filename))).toBe(tarballSha256)
     } finally {
       rmSync(packDir, { recursive: true, force: true })
@@ -263,7 +268,8 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
           ...process.env,
           EXISTING_INSTALL: existingInstall,
           EXPLICIT_DECLARATION: explicitDeclaration,
-          ...shellPathEnvironment({ ENV_PATH: envPath, LOCK_PATH: lockPath }),
+          ENV_PATH: envPath,
+          LOCK_PATH: lockPath,
         },
       })
     try {

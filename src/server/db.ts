@@ -129,6 +129,7 @@ function mapSession(row: SqlRow): SessionRecord {
     lastActiveAt: Number(row.last_active_at),
     endedAt: row.ended_at == null ? null : Number(row.ended_at),
     deletedAt: row.deleted_at == null ? null : Number(row.deleted_at),
+    homeZoneId: row.home_zone_id == null ? null : String(row.home_zone_id),
   }
 }
 
@@ -300,7 +301,6 @@ export class DirectConnectStore {
     if (!this.db) throw new Error('SQLite database handle is unavailable')
     this.db.exec(`
       ${SESSION_SCHEMA}
-
       CREATE TABLE IF NOT EXISTS enterprises (
         id TEXT PRIMARY KEY DEFAULT 'default',
         logo TEXT,
@@ -391,6 +391,38 @@ export class DirectConnectStore {
     if (!sessionsColumns.some(col => col.name === 'assistant_name')) {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN assistant_name TEXT`)
       console.log('[DB] Added assistant_name column to sessions')
+    }
+
+    // P1a expand-only (SW-20260915-002 §8.10)：home Zone 投影列。home_zone_id
+    // 由 Org binding policy 解析（永不取 org_id 字符串，R5.8）；
+    // observed_revision 为 Nexus 权威 Session 的版本标记；null 表示尚未确认。
+    if (!sessionsColumns.some(col => col.name === 'home_zone_id')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_id TEXT`)
+      console.log('[DB] Added home_zone_id column to sessions')
+    }
+    if (!sessionsColumns.some(col => col.name === 'home_zone_observed_at')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_observed_at TEXT`)
+      console.log('[DB] Added home_zone_observed_at column to sessions')
+    }
+    if (!sessionsColumns.some(col => col.name === 'home_zone_observed_revision')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_observed_revision TEXT`)
+      console.log('[DB] Added home_zone_observed_revision column to sessions')
+    }
+    if (!sessionsColumns.some(col => col.name === 'home_zone_sync_error')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN home_zone_sync_error TEXT`)
+      console.log('[DB] Added home_zone_sync_error column to sessions')
+    }
+
+    // P1a：老库的 session_attempts 补 execution_zone_id（表内注释见 DDL）。
+    const attemptsColumns = this.db.prepare(`PRAGMA table_info(session_attempts)`).all() as { name: string }[]
+    if (!attemptsColumns.some(col => col.name === 'execution_zone_id')) {
+      this.db.exec(`ALTER TABLE session_attempts ADD COLUMN execution_zone_id TEXT`)
+      console.log('[DB] Added execution_zone_id column to session_attempts')
+    }
+    // M-5：老库补 run 生命周期对账标记（表内注释见 DDL）。
+    if (!attemptsColumns.some(col => col.name === 'nexus_run_ended_at')) {
+      this.db.exec(`ALTER TABLE session_attempts ADD COLUMN nexus_run_ended_at INTEGER`)
+      console.log('[DB] Added nexus_run_ended_at column to session_attempts')
     }
 
     // Migration: add source and channel_chat_id columns if they don't exist
@@ -4801,6 +4833,7 @@ export function toSessionSummary(session: SessionRecord): SessionSummary {
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
     endedAt: session.endedAt,
+    homeZoneId: session.homeZoneId,
   }
 }
 

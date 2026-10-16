@@ -26,7 +26,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at BIGINT NOT NULL,
   last_active_at BIGINT NOT NULL,
   ended_at BIGINT,
-  deleted_at BIGINT
+  deleted_at BIGINT,
+  -- P1a/H2：session 的 home zone 归属与 observed 对账持久化列。
+  home_zone_id TEXT,
+  home_zone_observed_at TEXT,
+  home_zone_observed_revision TEXT,
+  home_zone_sync_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_attempts (
@@ -40,6 +45,9 @@ CREATE TABLE IF NOT EXISTS session_attempts (
   container_name TEXT,
   attach_path TEXT,
   resume_transcript_session_id TEXT NOT NULL,
+  -- P1a (§8.10 R5.2)：runner generation 的 execution zone。本表仍是
+  -- runtime generation（R5.9）；真正 Attempt.execution_zone_id 属 P1b。
+  execution_zone_id TEXT,
   started_at BIGINT NOT NULL,
   last_heartbeat_at BIGINT,
   stopped_at BIGINT,
@@ -47,6 +55,8 @@ CREATE TABLE IF NOT EXISTS session_attempts (
   exit_signal TEXT,
   stop_reason TEXT,
   error_text TEXT,
+  -- M-5：终态 attempt 的 Nexus run 收尾标记（endZoneRunsForSettledAttempts）。
+  nexus_run_ended_at BIGINT,
   UNIQUE (session_id, generation)
 );
 

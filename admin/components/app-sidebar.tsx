@@ -33,6 +33,7 @@ import {
   Activity,
   ClipboardList,
   Database,
+  Boxes,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -121,6 +122,13 @@ const menuItems: NavItem[] = [
     url: '/agents',
     icon: Bot,
     requiredAnyScopes: ['sessions:list', 'sessions:list:any'],
+  },
+  {
+    // 普通用户可见（页面对其展示"可用 Zone"列表是设计行为，后端 binding
+    // 管理入口 403 兜底）——标题不带"管理"字样，避免误导。
+    title: 'Zone',
+    url: '/zones',
+    icon: Boxes,
   },
   {
     title: '会话管理',
