@@ -18,15 +18,20 @@ export async function crashFixture(directory: string) {
   if (!await auth.getOrganization(actor.orgId)) await auth.createOrganization(actor.orgId, 'Crash test', Date.now())
   const file = (namespace: string, key: string) => join(directory, `${encodeURIComponent(namespace)}-${key}.json`)
   const control = { crash: '' }
+  const crashAt = async (stage: string): Promise<void> => {
+    if (control.crash !== stage) return
+    await writeFile(join(directory, 'crash-checkpoint.json'), JSON.stringify({ stage, pid: process.pid }), { flush: true })
+    process.kill(process.pid, 'SIGKILL')
+  }
   const secrets = {
     async getSecret(namespace: string, key: string) {
       try { return JSON.parse(await readFile(file(namespace, key), 'utf8')) }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
     },
     async putSecret(namespace: string, key: string, value: string) {
-      if (control.crash === 'before-write') process.kill(process.pid, 'SIGKILL')
+      await crashAt('before-write')
       await writeFile(file(namespace, key), JSON.stringify({ value, status: 'enabled', version: 1 }))
-      if (control.crash === 'after-write') process.kill(process.pid, 'SIGKILL')
+      await crashAt('after-write')
     },
     async deleteSecret(namespace: string, key: string) { await rm(file(namespace, key), { force: true }) },
   }

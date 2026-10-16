@@ -10,6 +10,70 @@ import { createAcpBridgeHandle } from './acpBridge.js'
 import { readSharedAgentMemory } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
 
+for (const ending of ['connection loss', 'prompt error', 'cancelled turn', 'forced close']) {
+  void test(`an unfinished tool retains an interrupted result after ${ending}`, { timeout: 10000 }, async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'moss-interrupted-tool-'))
+    const transcriptPath = join(cwd, 'transcript.jsonl')
+    const sent: any[] = []
+    const output: any[] = []
+    const waiters = new Set<{ method: string; resolve: (message: any) => void }>()
+    let events!: import('./acpTransport.js').AcpTransportEvents
+    const transport: import('./acpTransport.js').AcpMessageTransport = {
+      connected: true,
+      start(value) { events = value },
+      async send(message) {
+        sent.push(message)
+        for (const waiter of waiters) {
+          if (message.method === waiter.method) { waiters.delete(waiter); waiter.resolve(message) }
+        }
+      },
+      async close() {},
+    }
+    const waitForSend = (method: string): Promise<any> => {
+      const existing = sent.find(message => message.method === method)
+      return existing ? Promise.resolve(existing) : new Promise(resolve => waiters.add({ method, resolve }))
+    }
+    const handle = createAcpBridgeHandle({ transport, sessionId: 'interrupted-tools', cwd,
+      model: 'fixture', transcriptPath, enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
+    handle.onStdoutLine(line => output.push(JSON.parse(line)))
+    const receive = (message: any) => events.onMessage({ jsonrpc: '2.0', ...message })
+    const update = (value: any) => receive({ method: 'session/update', params: {
+      sessionId: 'native-interrupted', update: value,
+    } })
+    try {
+      await waitForSend('initialize')
+      receive({ id: 'm-init', result: {} })
+      receive({ id: 'm-session-new', result: { sessionId: 'native-interrupted' } })
+      handle.writeStdin(JSON.stringify({ type: 'user', message: { role: 'user', content: 'Run the task' } }))
+      const prompt = await waitForSend('session/prompt')
+      update({ sessionUpdate: 'tool_call', toolCallId: 'completed', title: 'read_file', rawInput: {} })
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'completed', status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'finished bytes' } }] })
+      update({ sessionUpdate: 'tool_call', toolCallId: 'interrupted', title: 'bash', rawInput: { command: 'slow-task' } })
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'interrupted', status: 'in_progress',
+        content: [{ type: 'content', content: { type: 'text', text: 'partial tool output' } }] })
+      if (ending === 'connection loss') events.onClose(null, null, new Error('connection disappeared'))
+      if (ending === 'prompt error') receive({ id: prompt.id, error: { message: 'model request failed' } })
+      if (ending === 'cancelled turn') receive({ id: prompt.id, result: { stopReason: 'cancelled' } })
+      await handle.destroy(true)
+      await handle.destroy(true)
+      const records = (await readFile(transcriptPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      const interrupted = records.filter(record => record.type === 'tool_result' && record.tool_use_id === 'interrupted')
+      assert.equal(interrupted.length, 1, 'reload must retain one terminal result for the unfinished tool')
+      assert.equal(interrupted[0].is_error, true, 'missing acknowledgement cannot be presented as success')
+      assert.match(interrupted[0].content, /partial tool output/)
+      assert.match(interrupted[0].content, /side effects/i)
+      assert.match(interrupted[0].content, /before retrying/i)
+      const completed = records.filter(record => record.type === 'tool_result' && record.tool_use_id === 'completed')
+      assert.equal(completed.length, 1)
+      assert.equal(completed[0].is_error, false)
+      assert.equal(completed[0].content, 'finished bytes')
+      assert.equal(output.filter(record => record.type === 'tool_result' && record.tool_use_id === 'interrupted').length, 1)
+      assert.equal(sent.filter(message => message.method === 'session/prompt').length, 1, 'recovery must not replay a side effect')
+    } finally { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) }
+  })
+}
+
 void test('closing a live turn retains the rendered answer once without a prompt response', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'moss-close-turn-history-'))
   const transcriptPath = join(cwd, 'transcript.jsonl')
