@@ -148,16 +148,26 @@ jobs:
           set -euo pipefail
           OLD="$RUNNER_TEMP/nexus-previous-runtime"
           mkdir -p "$OLD"
-          curl -fsSL --max-time 90 \
-            https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com/nexus-vfs/release/v0.7.19/nexusd-cluster-linux-x86_64.tar.gz \
-            -o "$OLD/runtime.tar.gz"
-          printf '%s  %s\n' deb36ed3f2c63a5c8a53ecef60d76806edcbc3e2826628db701b36094ec0ae34 "$OLD/runtime.tar.gz" | sha256sum --check
+          export OLD
+          node --input-type=module <<'NODE'
+          import { downloadWithFallback } from './scripts/fetch-nexus-runtime.js'
+          const artifacts = [
+            { file: 'runtime.tar.gz', sha: 'deb36ed3f2c63a5c8a53ecef60d76806edcbc3e2826628db701b36094ec0ae34',
+              path: 'nexus-vfs/release/v0.7.19/nexusd-cluster-linux-x86_64.tar.gz',
+              github: 'nexi-lab/nexus-vfs/releases/download/v0.7.19/nexusd-cluster-linux-x86_64.tar.gz' },
+            { file: 'vault.tar.gz', sha: '380ad81dafaaf919acb76ec8c0f57869295b1580bfde8f9e4ccef321e1065735',
+              path: 'nexus-vault/release/v0.5.67/nexus-vault-linux-x86_64.tar.gz',
+              github: 'nexi-lab/nexus/releases/download/vault-v0.5.67/nexus-vault-linux-x86_64.tar.gz' },
+          ]
+          for (const artifact of artifacts) {
+            await downloadWithFallback([
+              { label: 'COS accelerated', url: `https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/${artifact.path}` },
+              { label: 'GitHub', url: `https://github.com/${artifact.github}` },
+            ], artifact.sha, `${process.env.OLD}/${artifact.file}`)
+          }
+          NODE
           tar -xzf "$OLD/runtime.tar.gz" -C "$OLD"
           mkdir -p "$OLD/plugins"
-          curl -fsSL --max-time 90 \
-            https://sudowork-runtime-1309794936.cos.ap-beijing.myqcloud.com/nexus-vault/release/v0.5.67/nexus-vault-linux-x86_64.tar.gz \
-            -o "$OLD/vault.tar.gz"
-          printf '%s  %s\n' 380ad81dafaaf919acb76ec8c0f57869295b1580bfde8f9e4ccef321e1065735 "$OLD/vault.tar.gz" | sha256sum --check
           tar -xzf "$OLD/vault.tar.gz" -C "$OLD/plugins"
           bun build --target=node scripts/e2e/broker-upgrade-live.ts --outfile bin/broker-upgrade-live.mjs
           node bin/broker-upgrade-live.mjs \
