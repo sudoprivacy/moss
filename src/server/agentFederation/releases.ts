@@ -61,14 +61,6 @@ export class AgentReleaseStore {
     await this.principal({ orgId: binding.orgId, userId: 'system' }, binding.id)
   }
 
-  /** Bootstrap an already-reviewed Pilot binding once; preserves its existing approval expiry. */
-  async ensurePublished(actor: ExternalActor, binding: Binding): Promise<void> {
-    await this.ready
-    if (await this.db.get('SELECT catalog_id FROM agent_versions WHERE catalog_id = ? LIMIT 1', [binding.id])) return
-    await this.publish({ ...actor, userId: binding.reviewedBy ?? actor.userId }, binding, this.defaultVersion(binding), 'Import existing approved binding')
-    try { await this.moveChannel(actor, binding.id, 'stable', this.defaultVersion(binding), 0) }
-    catch (error) { if (!(error instanceof ExternalProviderError) || error.code !== 'CHANNEL_REVISION_CONFLICT') throw error }
-  }
   private async principal(actor: ExternalActor, catalogId: string) {
     const row = await this.db.get('SELECT * FROM agent_principals WHERE catalog_id = ? AND org_id = ?', [catalogId, actor.orgId])
     if (!row) throw new ExternalProviderError(404, 'AGENT_PRINCIPAL_NOT_FOUND')

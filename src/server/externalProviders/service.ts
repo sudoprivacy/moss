@@ -40,7 +40,7 @@ export class ExternalProviderService {
   async close(): Promise<void> {
     this.closing = true
     clearInterval(this.timer)
-    await this.maintenance
+    await this.maintenance?.catch(() => {})
     for (const controller of this.controllers) controller.abort()
     await Promise.allSettled(this.executions.values())
     await this.ownership.stop()
@@ -49,7 +49,7 @@ export class ExternalProviderService {
   maintain(): Promise<void> {
     if (this.maintenance) return this.maintenance
     this.maintenance = (async () => {
-      await this.releases.ready
+      await this.store.ready
       await this.ownership.heartbeat()
       await this.store.scheduled('expiry', 1000, () => this.store.expire())
       if (Date.now() >= this.nextCredentialMaintenance) {
@@ -188,10 +188,7 @@ export class ExternalProviderService {
       executable: binding => this.executable(actor, binding),
       timeoutMs: this.options.policy.timeoutMs,
       capabilities: binding => this.adapters.get(binding.provider_kind ?? 'dify').create(binding).capabilities,
-      resolveRelease: async (binding, version, channel) => {
-        await this.releases.ensurePublished(actor, binding)
-        return this.releases.resolve(actor, binding.id, version, channel)
-      },
+      resolveRelease: (binding, version, channel) => this.releases.resolve(actor, binding.id, version, channel),
     })
     if (task.status === 'accepted') this.startTask(task.id)
     return task
@@ -201,7 +198,6 @@ export class ExternalProviderService {
     await this.authorize(actor)
     const binding = await this.store.binding(actor, id)
     await this.executable(actor, binding)
-    await this.releases.ensurePublished(actor, binding)
     return this.releases.options(actor, id, after)
   }
 

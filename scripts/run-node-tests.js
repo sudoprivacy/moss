@@ -17,6 +17,7 @@ const nodeTestFiles = [
   'src/server/agentFederation/provider/provider.node-test.ts',
   'src/server/agentFederation/releases.node-test.ts',
   'src/server/agentFederation/taskPersistence.node-test.ts',
+  'src/server/agentFederation/taskMigrationCli.node-test.ts',
   'src/server/agentFederation/taskIngress.node-test.ts',
   'src/server/backends/cohostWorkspace.node-test.ts',
   'src/server/backends/cohostRecovery.node-test.ts',

@@ -362,3 +362,39 @@ void test('directory pages advance past archived bindings and member search is p
   assert.equal((await f.service.administration.memberPage(f.actor, people.next_cursor!, 'Member')).items[0].id, 'member-050')
   await assert.rejects(f.service.administration.memberPage(f.actor, '../invalid', ''), { code: 'INVALID_CURSOR' })
 })
+
+void test('legacy approved bindings remain unpublished on member/admin GET and member task submission', async () => {
+  const f = await setup()
+  // Simulate an approved Pilot binding that predates the release ledger.
+  for (const table of ['agent_channel_events', 'agent_channels', 'agent_version_decisions', 'agent_versions']) {
+    await f.driver.run(`DELETE FROM ${table} WHERE catalog_id = ?`, [f.agent.id])
+  }
+  const tables = ['agent_principals', 'agent_versions', 'agent_version_decisions', 'agent_channels', 'agent_channel_events', 'external_pilot_admin_audit']
+  const snapshot = () => Promise.all(tables.map(table => f.driver.all(`SELECT * FROM ${table} ORDER BY 1`)))
+  const before = await snapshot()
+  const notAdmin = () => { throw new Error('Member has no administration permission') }
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const member = await dispatchExternalProvider(f.service, f.actor, 'GET', new URL(`http://test/api/v1/external-agents/${f.agent.id}/versions`), null, notAdmin)
+    assert.equal(member.status, 200)
+    assert.deepEqual((member.body.data as { items: unknown[] }).items, [])
+    const admin = await dispatchExternalProvider(f.service, f.actor, 'GET', new URL(`http://test/api/v1/external-agents/admin/${f.agent.id}/versions`), null, () => {})
+    assert.equal(admin.status, 200)
+    assert.deepEqual((admin.body.data as { items: unknown[] }).items, [])
+  }
+  const rejected = await f.run()
+  assert.equal(rejected.status, 'rejected'); assert.equal(rejected.attempt_id, null)
+  assert.equal(f.calls.length, 0)
+  assert.deepEqual(await snapshot(), before, 'Reading or executing cannot publish, approve or promote a channel')
+  const binding = await f.store.binding(f.actor, f.agent.id)
+  const forbidden = await dispatchExternalProvider(f.service, f.actor, 'POST', new URL(`http://test/api/v1/external-agents/${f.agent.id}/review`), { approved: true, revision: binding.revision }, notAdmin)
+  assert.notEqual(forbidden.status, 200)
+  assert.deepEqual(await snapshot(), before)
+  const reviewed = await dispatchExternalProvider(f.service, f.actor, 'POST', new URL(`http://test/api/v1/external-agents/${f.agent.id}/review`), { approved: true, revision: binding.revision }, () => {})
+  assert.equal(reviewed.status, 200)
+  const options = await f.service.releaseOptions(f.actor, f.agent.id)
+  assert.equal(options.items.length, 1); assert.equal(options.channels[0].name, 'stable')
+  const published = await snapshot()
+  await f.service.releaseOptions(f.actor, f.agent.id)
+  assert.deepEqual(await snapshot(), published)
+  assert.equal((await f.run()).status, 'succeeded')
+})

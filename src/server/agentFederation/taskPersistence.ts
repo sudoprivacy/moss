@@ -7,55 +7,105 @@ export function attemptState(status: ExternalTask['status']): string {
     : status === 'running' ? 'running' : status === 'succeeded' ? 'stopped' : status === 'unknown' ? 'lost' : 'failed'
 }
 
-/** One-way, transactional adoption of Pilot facts. Legacy writers fail after cutover. */
-export async function migrateExternalTaskPersistence(db: DbDriver): Promise<void> {
-  await db.exec(`${SESSION_SCHEMA}
-    CREATE TABLE IF NOT EXISTS federation_task_migrations (id TEXT PRIMARY KEY, completed INTEGER NOT NULL);
+const legacyTables = ['external_pilot_sessions', 'external_pilot_tasks', 'external_pilot_attempts', 'external_pilot_events'] as const
+const migrationSchema = 'CREATE TABLE IF NOT EXISTS federation_task_migrations (id TEXT PRIMARY KEY, completed INTEGER NOT NULL);'
+
+async function tableExists(db: DbDriver, name: string): Promise<boolean> {
+  return Boolean(await db.get(db.kind === 'postgres'
+    ? 'SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?'
+    : "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [name]))
+}
+
+async function completed(db: DbDriver): Promise<boolean> {
+  return await tableExists(db, 'federation_task_migrations') &&
+    Number((await db.get("SELECT completed FROM federation_task_migrations WHERE id = 'canonical-v1'"))?.completed) === 1
+}
+
+async function lockSchema(db: DbDriver): Promise<void> {
+  if (db.kind === 'postgres') await db.get("SELECT pg_advisory_xact_lock(hashtextextended('moss-external-task-schema-v1', 0))")
+}
+
+async function createCanonicalSchema(db: DbDriver): Promise<void> {
+  await db.exec(SESSION_SCHEMA)
+  if (db.kind === 'postgres') {
+    await db.exec('ALTER TABLE session_events ADD COLUMN IF NOT EXISTS task_id TEXT; ALTER TABLE session_events ADD COLUMN IF NOT EXISTS sequence BIGINT;')
+  } else {
+    const columns = await db.all('PRAGMA table_info(session_events)')
+    if (!columns.some(row => row.name === 'task_id')) await db.exec('ALTER TABLE session_events ADD COLUMN task_id TEXT')
+    if (!columns.some(row => row.name === 'sequence')) await db.exec('ALTER TABLE session_events ADD COLUMN sequence BIGINT')
+  }
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL, session_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, status TEXT NOT NULL,
+      deadline_at BIGINT NOT NULL, sequence INTEGER NOT NULL, document TEXT NOT NULL,
+      attempt_id TEXT UNIQUE,
+      UNIQUE(org_id, user_id, idempotency_key),
+      FOREIGN KEY(session_id) REFERENCES sessions(session_id) DEFERRABLE INITIALLY DEFERRED
+    );
+    CREATE INDEX IF NOT EXISTS tasks_deadline ON tasks(status, deadline_at);
+    CREATE INDEX IF NOT EXISTS tasks_session ON tasks(session_id);
+    CREATE INDEX IF NOT EXISTS sessions_external_owner ON sessions(org_id, user_id, last_active_at) WHERE runtime_type = 'external';
+    CREATE TABLE IF NOT EXISTS external_session_bindings (
+      id TEXT PRIMARY KEY REFERENCES sessions(session_id), agent_id TEXT NOT NULL, agent_name TEXT NOT NULL,
+      active_task_id TEXT, conversation_id TEXT
+    );
+    CREATE TABLE IF NOT EXISTS external_attempt_leases (
+      attempt_id TEXT PRIMARY KEY REFERENCES session_attempts(attempt_id), token TEXT NOT NULL,
+      lease_until BIGINT NOT NULL, invocation_context TEXT
+    );
+    CREATE INDEX IF NOT EXISTS external_attempt_leases_expiry ON external_attempt_leases(lease_until);
+    CREATE UNIQUE INDEX IF NOT EXISTS session_events_task_sequence ON session_events(task_id, sequence);
+    CREATE VIEW external_sessions AS
+      SELECT s.session_id AS id, s.org_id, s.user_id, x.agent_id, x.agent_name, s.title,
+        x.active_task_id, x.conversation_id, s.created_at, s.last_active_at AS updated_at
+      FROM sessions s JOIN external_session_bindings x ON x.id = s.session_id WHERE s.runtime_type = 'external';
+    CREATE VIEW task_attempts AS
+      SELECT a.attempt_id AS id, t.id AS task_id, t.status, a.started_at, a.last_heartbeat_at AS updated_at
+      FROM session_attempts a JOIN tasks t ON t.attempt_id = a.attempt_id;
+    CREATE VIEW task_events AS
+      SELECT task_id, sequence, payload_json AS document FROM session_events WHERE task_id IS NOT NULL;
   `)
+}
+
+/** Normal startup may initialize a new database, but must never cut over a legacy store (even empty). */
+export async function initializeExternalTaskPersistence(db: DbDriver): Promise<void> {
   await db.transaction(async () => {
-    await db.run("INSERT INTO federation_task_migrations(id, completed) VALUES ('canonical-v1', 0) ON CONFLICT(id) DO NOTHING")
-    await db.run("UPDATE federation_task_migrations SET id = id WHERE id = 'canonical-v1'")
-    if (Number((await db.get("SELECT completed FROM federation_task_migrations WHERE id = 'canonical-v1'"))?.completed)) return
-    if (db.kind === 'postgres') {
-      await db.exec('LOCK TABLE external_pilot_sessions, external_pilot_tasks, external_pilot_attempts, external_pilot_events IN ACCESS EXCLUSIVE MODE')
-      await db.exec('ALTER TABLE session_events ADD COLUMN IF NOT EXISTS task_id TEXT; ALTER TABLE session_events ADD COLUMN IF NOT EXISTS sequence BIGINT;')
-    } else {
-      const columns = await db.all('PRAGMA table_info(session_events)')
-      if (!columns.some(row => row.name === 'task_id')) await db.exec('ALTER TABLE session_events ADD COLUMN task_id TEXT')
-      if (!columns.some(row => row.name === 'sequence')) await db.exec('ALTER TABLE session_events ADD COLUMN sequence BIGINT')
+    await lockSchema(db)
+    if (await completed(db)) return
+    for (const table of legacyTables) {
+      if (await tableExists(db, table)) throw new Error('EXTERNAL_TASK_MIGRATION_REQUIRED: stop all old writers, then run scripts/migrate-external-tasks.ts in a maintenance window; see docs/external-task-migration.md')
     }
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL, session_id TEXT NOT NULL,
-        idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, status TEXT NOT NULL,
-        deadline_at BIGINT NOT NULL, sequence INTEGER NOT NULL, document TEXT NOT NULL,
-        attempt_id TEXT UNIQUE,
-        UNIQUE(org_id, user_id, idempotency_key),
-        FOREIGN KEY(session_id) REFERENCES sessions(session_id) DEFERRABLE INITIALLY DEFERRED
-      );
-      CREATE INDEX IF NOT EXISTS tasks_deadline ON tasks(status, deadline_at);
-      CREATE INDEX IF NOT EXISTS tasks_session ON tasks(session_id);
-      CREATE INDEX IF NOT EXISTS sessions_external_owner ON sessions(org_id, user_id, last_active_at) WHERE runtime_type = 'external';
-      CREATE TABLE IF NOT EXISTS external_session_bindings (
-        id TEXT PRIMARY KEY REFERENCES sessions(session_id), agent_id TEXT NOT NULL, agent_name TEXT NOT NULL,
-        active_task_id TEXT, conversation_id TEXT
-      );
-      CREATE TABLE IF NOT EXISTS external_attempt_leases (
-        attempt_id TEXT PRIMARY KEY REFERENCES session_attempts(attempt_id), token TEXT NOT NULL,
-        lease_until BIGINT NOT NULL, invocation_context TEXT
-      );
-      CREATE INDEX IF NOT EXISTS external_attempt_leases_expiry ON external_attempt_leases(lease_until);
-      CREATE UNIQUE INDEX IF NOT EXISTS session_events_task_sequence ON session_events(task_id, sequence);
-      CREATE VIEW external_sessions AS
-        SELECT s.session_id AS id, s.org_id, s.user_id, x.agent_id, x.agent_name, s.title,
-          x.active_task_id, x.conversation_id, s.created_at, s.last_active_at AS updated_at
-        FROM sessions s JOIN external_session_bindings x ON x.id = s.session_id WHERE s.runtime_type = 'external';
-      CREATE VIEW task_attempts AS
-        SELECT a.attempt_id AS id, t.id AS task_id, t.status, a.started_at, a.last_heartbeat_at AS updated_at
-        FROM session_attempts a JOIN tasks t ON t.attempt_id = a.attempt_id;
-      CREATE VIEW task_events AS
-        SELECT task_id, sequence, payload_json AS document FROM session_events WHERE task_id IS NOT NULL;
-    `)
+    await createCanonicalSchema(db)
+    await db.exec(migrationSchema)
+    await db.run("INSERT INTO federation_task_migrations(id, completed) VALUES ('canonical-v1', 1)")
+  })
+}
+
+export interface ExternalTaskMigrationAuthorization {
+  oldWritersStopped: true
+  backupSha256: string
+}
+
+/** Explicit maintenance operation only. The CLI backs up first; startup never calls this function. */
+export async function migrateExternalTaskPersistence(db: DbDriver, authorization: ExternalTaskMigrationAuthorization): Promise<void> {
+  if (authorization?.oldWritersStopped !== true || !/^[a-f0-9]{64}$/.test(authorization.backupSha256)) {
+    throw new Error('Maintenance window confirmation and a verified backup SHA-256 are required')
+  }
+  await db.transaction(async () => {
+    await lockSchema(db)
+    if (await completed(db)) return
+    for (const table of legacyTables) {
+      if (!await tableExists(db, table)) throw new Error('Legacy external task schema is incomplete; restore or repair before migration')
+    }
+    if (db.kind === 'postgres') {
+      await db.exec("SET LOCAL lock_timeout = '5s'")
+      await db.exec('LOCK TABLE external_pilot_sessions, external_pilot_tasks, external_pilot_attempts, external_pilot_events IN ACCESS EXCLUSIVE MODE')
+    }
+    await db.exec(migrationSchema)
+    await db.run("INSERT INTO federation_task_migrations(id, completed) VALUES ('canonical-v1', 0) ON CONFLICT(id) DO NOTHING")
+    await createCanonicalSchema(db)
+    await db.exec('CREATE TABLE IF NOT EXISTS external_pilot_reconciliations (task_id TEXT PRIMARY KEY, attempt_id TEXT, document TEXT NOT NULL)')
     let cursor = ''
     while (true) {
       const rows = await db.all('SELECT * FROM external_pilot_sessions WHERE id > ? ORDER BY id LIMIT 100', [cursor])
@@ -83,6 +133,7 @@ export async function migrateExternalTaskPersistence(db: DbDriver): Promise<void
       if (!rows.length) break
       for (const row of rows) {
         const task = JSON.parse(String(row.document)) as Partial<ExternalTask>
+        if (task.reconciliation) await db.run('INSERT INTO external_pilot_reconciliations(task_id, attempt_id, document) VALUES (?, ?, ?) ON CONFLICT(task_id) DO NOTHING', [String(row.id), task.attempt_id ?? null, JSON.stringify(task.reconciliation)])
         const oldAttempt = await db.get('SELECT * FROM external_pilot_attempts WHERE task_id = ?', [String(row.id)])
         const attemptId = oldAttempt ? String(oldAttempt.id) : task.attempt_id ?? null
         await db.run(`INSERT INTO tasks(id, org_id, user_id, session_id, idempotency_key, request_hash, status, deadline_at, sequence, document, attempt_id)
@@ -104,12 +155,25 @@ export async function migrateExternalTaskPersistence(db: DbDriver): Promise<void
       cursor = String(rows.at(-1)!.id)
     }
     const mismatches = await db.get(`SELECT COUNT(*) AS total FROM external_pilot_tasks p LEFT JOIN tasks t ON t.id = p.id
-      WHERE t.id IS NULL OR t.document != p.document OR t.sequence != p.sequence OR t.request_hash != p.request_hash`)
+      WHERE t.id IS NULL OR t.document != p.document OR t.sequence != p.sequence OR t.request_hash != p.request_hash
+        OR t.org_id != p.org_id OR t.user_id != p.user_id OR t.session_id != p.session_id
+        OR t.idempotency_key != p.idempotency_key OR t.status != p.status OR t.deadline_at != p.deadline_at`)
     if (Number(mismatches?.total)) throw new Error('Canonical external task migration verification failed')
     const eventMismatches = await db.get(`SELECT COUNT(*) AS total FROM external_pilot_events p
       LEFT JOIN session_events e ON e.task_id = p.task_id AND e.sequence = p.sequence
       WHERE e.event_id IS NULL OR e.payload_json != p.document`)
     if (Number(eventMismatches?.total)) throw new Error('Canonical external event migration verification failed')
+    const sessionMismatches = await db.get(`SELECT COUNT(*) AS total FROM external_pilot_sessions p
+      LEFT JOIN external_sessions s ON s.id = p.id
+      WHERE s.id IS NULL OR s.org_id != p.org_id OR s.user_id != p.user_id OR s.agent_id != p.agent_id
+        OR s.agent_name != p.agent_name OR s.title != p.title OR s.created_at != p.created_at OR s.updated_at != p.updated_at
+        OR COALESCE(s.active_task_id, '') != COALESCE(p.active_task_id, '')
+        OR COALESCE(s.conversation_id, '') != COALESCE(p.conversation_id, '')`)
+    const attemptMismatches = await db.get(`SELECT COUNT(*) AS total FROM external_pilot_attempts p
+      LEFT JOIN session_attempts a ON a.attempt_id = p.id LEFT JOIN tasks t ON t.id = p.task_id
+      WHERE a.attempt_id IS NULL OR t.id IS NULL OR t.attempt_id != p.id OR a.session_id != t.session_id
+        OR a.started_at != p.started_at OR a.last_heartbeat_at != p.updated_at`)
+    if (Number(sessionMismatches?.total) || Number(attemptMismatches?.total)) throw new Error('Canonical external session/attempt migration verification failed')
     await db.exec('DROP TABLE federation_task_order')
     const tables = ['external_pilot_sessions', 'external_pilot_tasks', 'external_pilot_attempts', 'external_pilot_events']
     // The verified canonical rows are now the sole facts. Do not retain ungoverned copies of task text.

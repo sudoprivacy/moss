@@ -137,7 +137,12 @@ async function startFixture(extraEnv: Record<string, string> = {}): Promise<LbFi
       await stderrDrained
       throw new Error(`Fixture exited before readiness: ${stderrOutput.join('')}`)
     }),
-  ])
+  ]).catch(async error => {
+    fixtureProcess.kill()
+    await fixtureProcess.exited
+    await rm(rootDir, { recursive: true, force: true })
+    throw error
+  })
 
   const baseUrl = `http://127.0.0.1:${port}`
   const response = await fetch(`${baseUrl}/api/v1/auth/token`, {
@@ -325,3 +330,8 @@ describe('LB lifecycle E2E (real server process, node runtime)', () => {
     expect(response.headers.get('set-cookie')).toBe(null)
   }, 60_000)
 })
+
+
+it('legacy external task schema rejects real server startup before readiness', async () => {
+  await expect(startFixture({ MOSS_TEST_LEGACY_EXTERNAL_STORE: '1' })).rejects.toThrow('EXTERNAL_TASK_MIGRATION_REQUIRED')
+}, 30_000)

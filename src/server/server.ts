@@ -2057,7 +2057,8 @@ export function startServer(
   }) : null
 
   const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient) : null
-  void externalProviders?.store.ready.catch(() => logger.error('External provider task store initialization failed'))
+  const externalStoreReady = externalProviders?.store.ready ?? Promise.resolve()
+  let isStopped = false
 
   // Cron Service - scheduled task execution engine
   const cronService = new CronService(runtime.store.driver, {
@@ -11181,9 +11182,15 @@ export function startServer(
       }
       resolvePort(port)
     })
+    // Refuse legacy task stores before listening; cutover requires a maintenance window.
+    void externalStoreReady.then(() => {
+      if (isStopped) throw new Error('Server stopped before initialization completed')
+      server.listen(config.port, config.host)
+    }).catch(error => {
+      void externalProviders?.close().catch(() => {})
+      onError(error instanceof Error ? error : new Error('External provider task store initialization failed'))
+    })
   })
-
-  server.listen(config.port, config.host)
 
   // ============================================================
   // 企业应用管理: PUBLIC corp-app callback listener (separate port)
@@ -11291,15 +11298,16 @@ export function startServer(
     callbackServer.on('error', (err) => {
       logger.error(`[corp-app callback] listener error: ${err.message}`)
     })
-    callbackServer.listen(callbackPort, config.host, () => {
+    void ready.then(() => !isStopped && callbackServer!.listen(callbackPort, config.host, () => {
       console.log(`[server] corp-app callback listener on ${config.host}:${callbackPort} (public; callback route only)`)
-    })
+    })).catch(() => {})
   }
 
   return {
     port: null,
     ready,
     stop: async () => {
+      isStopped = true
       await externalProviders?.close()
       wikiJobExecutor.stop()
       sourceSyncWorker.stop()
@@ -11326,7 +11334,7 @@ export function startServer(
       }
       await new Promise<void>((resolveClose, reject) => {
         server.close(error => {
-          if (error) {
+          if (error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') {
             reject(error)
           } else {
             resolveClose()

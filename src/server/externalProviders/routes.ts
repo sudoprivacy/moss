@@ -40,8 +40,7 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
       else {
         const release = /^([\w-]+)\/(versions|channels|revoke-version)$/.exec(action)
         if (release) {
-          const binding = await service.store.binding(actor, release[1])
-          if (binding.approved) await service.releases.ensurePublished(actor, binding)
+          await service.store.binding(actor, release[1])
           if (release[2] === 'versions' && method === 'GET') data = await service.releases.list(actor, release[1], after)
           else if (release[2] === 'versions' && method === 'POST') { data = await service.publishVersion(actor, release[1], body); status = 201 }
           else if (release[2] === 'channels' && method === 'POST') {
