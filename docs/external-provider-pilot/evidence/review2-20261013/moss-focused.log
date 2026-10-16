@@ -1,0 +1,55 @@
+(node:30070) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ success persists answer, attempt, ordered events and a provider conversation for the next turn (36.159959ms)
+✔ concurrent idempotent retries dispatch once and mismatching body conflicts (10.041917ms)
+✔ session CAS serializes different prompts; wrong owner and wrong organization are hidden (9.890209ms)
+✔ stream EOF without confirmed terminals is unknown and retains session lock; retry never resubmits (9.313708ms)
+✔ workflow success alone or message_end alone cannot prove Chatflow answer completed (17.055834ms)
+✔ provider 4xx is rejected; 5xx acceptance stays unknown (16.838833ms)
+✔ confirmed workflow failure releases lock without reporting success (9.363542ms)
+✔ restart expires claimed work to unknown, never reassigns it, and expires unsent intent to rejected (10.307125ms)
+✔ parameters drift rejects before provider POST (10.331375ms)
+✔ approval, user allowlist, review expiry, catalog revoke and connection revoke gate dispatch (8.466542ms)
+✔ registration forbids plaintext keys, cross-tenant secret references, DNS and unapproved endpoints (2.048125ms)
+✔ decoder streams only root reply; escaped unicode and incomplete JSON are handled; actions never execute (0.231458ms)
+✔ API enforces admin review, cursor validation, ownership and honest cancellation (9.559375ms)
+✔ malformed or oversized provider output is bounded and remains unconfirmed (16.765834ms)
+✔ transport abort deadline marks unknown without pretending remote cancellation (39.628209ms)
+✔ task intent survives a database close/reopen and unconfirmed work is not replayed (9.29275ms)
+✔ administration policy persists per organization, CAS prevents stale updates, and only platform admins can write it (8.976875ms)
+✔ onboarding stores keys only in Secret, is idempotent, and remains hidden until approval (14.178917ms)
+✔ onboarding rejects inactive members, tool DSL and unapproved endpoints without writing credentials (8.88675ms)
+✔ failed Secret writes leave no draft or reservation and allow a safe retry (9.680417ms)
+✔ editing revokes approval; stale reviews conflict; archive preserves history and prevents new tasks (10.217417ms)
+✔ credential rotation revokes before write and prevents concurrent edit, archive and publication (9.923125ms)
+✔ admin HTTP routes reject ordinary users and cross-organization binding access (7.59225ms)
+✔ review requires the exact positive integer revision at both HTTP and service boundaries (8.747ms)
+✔ query-only capability profile rejects modern and legacy attachment switches (0.212542ms)
+✔ rotation and reapproval during preflight reject the old execution snapshot before any POST (11.222833ms)
+✔ legacy management cannot view, change ACL, attach datasets, or delete external agents (8.245375ms)
+✔ the same onboarding UUID can complete independently in two organizations (10.036958ms)
+✔ expired rotation recovers an immutable written Secret as an unapproved draft (9.830959ms)
+✔ an expired unwritten rotation cannot be published by a late writer and its Secret is cleaned (10.355584ms)
+✔ SIGKILL before and after vault writes leaves recoverable onboarding and rotation operations (881.54975ms)
+✔ incremental events bound storage, support replacements, page cursors and checkpoint resync without read writes (153.678666ms)
+ℹ 128000 answer characters: 180860 event document characters
+✔ administrator reconciliation preserves unknown status, audit and the session fence (9.746834ms)
+✔ upgrading a legacy interrupted rotation requires a fresh key and never republishes it (8.467625ms)
+✔ configuration and policy mutations during preflight invalidate pending dispatch (43.630792ms)
+✔ onboarding rejects changed credentials, including completed retries and old unfingerprinted hashes (9.491709ms)
+✔ raw deltas survive checkpoint gaps, restart, replacement and unknown finalization (8.077667ms)
+✔ legacy alpha2 streams resync to a labelled snapshot and unknown versions are not replayed (8.508666ms)
+✔ history batches pending projections and skips event queries for completed checkpoints (13.807291ms)
+✔ reconciliation records attempt closure while preserving unknown outcome and is idempotent (8.774792ms)
+✔ acknowledged cleanup becomes terminal, stops vault calls and expires after retention (7.87325ms)
+✔ uncertain cleanup retains a compact guard without repeated deletes and catches late writes (7.612375ms)
+✔ progress coalesces a blocked writer to one latest snapshot and flushes before terminal (0.257042ms)
+✔ a write acknowledged during an absence check is cleaned again before terminal retirement (7.011042ms)
+ℹ tests 44
+ℹ suites 0
+ℹ pass 44
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1976.925458

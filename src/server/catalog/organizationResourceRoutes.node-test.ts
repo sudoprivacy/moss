@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
@@ -53,7 +53,8 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
     wikiIndex: { enabled: false },
   }))
   const repo = resolve(import.meta.dirname, '../../..')
-  execFileSync('bun', ['build', 'src/server/tenantAssistantRoutes.fixture.ts', '--target=node', '--format=esm', '--outdir', join(root, 'build'), '--external=sharp', '--external=@xenova/transformers', '--external=onnxruntime-node'], { cwd: repo, stdio: 'pipe' })
+  await symlink(join(repo, 'node_modules'), join(root, 'node_modules'), 'junction')
+  execFileSync('bun', ['build', 'src/server/tenantAssistantRoutes.fixture.ts', '--target=node', '--format=esm', '--external=@sudo/contracts/common/v1/resource-ref', '--outdir', join(root, 'build'), '--external=sharp', '--external=@xenova/transformers', '--external=onnxruntime-node'], { cwd: repo, stdio: 'pipe' })
   const child = spawn(process.execPath, [join(root, 'build/tenantAssistantRoutes.fixture.js')], {
     cwd: repo, env: { ...process.env, MOSS_HOME: join(root, 'moss-home'), MOSS_SERVER_CONFIG: configPath, MOSS_HUB_API_BASE_URL: hubUrl }, stdio: ['ignore', 'pipe', 'pipe'],
   })

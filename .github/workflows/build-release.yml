@@ -72,6 +72,9 @@ jobs:
       - name: Run server tests
         run: bun run test
 
+      - name: Verify external provider concurrency on real PostgreSQL
+        run: node --import tsx --test src/server/externalProviders/externalProviders.pg-test.ts src/server/agentFederation/*.pg-test.ts src/server/agentFederation/provider/*.pg-test.ts
+
       # `scripts/e2e/session-owner-live.ts` needs a live auth-on daemon and an
       # operator's node certificate, so CI cannot run it. Keeping it compiling
       # is what stops it rotting into something nobody can run — and it lives
@@ -465,7 +468,9 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: moss-server-e2e-${{ steps.release.outputs.version }}-${{ matrix.arch }}
-          path: ${{ runner.temp }}/moss-server-e2e/
+          path: |
+            ${{ runner.temp }}/moss-server-e2e/
+            ${{ runner.temp }}/moss-server-pg-ha/instance-*.log
           retention-days: 14
           if-no-files-found: warn
 

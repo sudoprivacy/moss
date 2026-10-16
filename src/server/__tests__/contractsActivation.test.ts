@@ -320,6 +320,20 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
 })
 
 describe('contracts Node runtime floor', () => {
+  it('ships the exact external ResourceRef package in standalone runtime dependencies', () => {
+    const runtimePackage = JSON.parse(readFileSync(resolve(root, 'deploy/runtime-deps.package.json'), 'utf8'))
+    const sourcePackage = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
+    expect(sourcePackage.dependencies['@sudo/contracts']).toBe(dependencySpec)
+    expect(runtimePackage.dependencies['@sudo/contracts']).toBe(
+      `https://codeload.github.com/sudoprivacy/sudostack/tar.gz/${contentSha}`,
+    )
+    // Both container variants and the host package must load the validator and
+    // its module-relative schemas using only their installed runtime tree.
+    for (const file of ['deploy/server.Dockerfile', 'deploy/server.Dockerfile.local']) {
+      expect(readFileSync(resolve(root, file), 'utf8')).toContain("import('@sudo/contracts/common/v1/resource-ref')")
+    }
+  })
+
   it('pins the effective Moss server and release-test runtimes above the package minimum', () => {
     const serverDockerfile = readFileSync(resolve(root, 'deploy/server.Dockerfile'), 'utf8')
     const localDockerfile = readFileSync(resolve(root, 'deploy/server.Dockerfile.local'), 'utf8')

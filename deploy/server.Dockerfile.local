@@ -253,6 +253,7 @@ RUN chmod +x ./bin/wiki ./bin/corpapp
 # the wiki embedder can import('@xenova/transformers') instead of degrading to
 # grep-only. Lands at /app/node_modules (cwd=/app), the default resolution root.
 COPY --from=runtime-deps /deps/node_modules ./node_modules
+RUN node --input-type=module -e "await import('@sudo/contracts/common/v1/resource-ref')"
 
 # Embedding model baked into the image at /app/models (NOT /root/.moss/models:
 # docker-compose mounts the host ./.moss over /root/.moss and would shadow it).
@@ -315,7 +316,7 @@ ENV PATH=/opt/node/bin:$PATH
 WORKDIR /deps
 COPY deploy/runtime-deps.package.json package.json
 RUN npm install --omit=dev --no-audit --no-fund \
-    && node -e "Promise.all([import('@xenova/transformers'), import('sharp')]).then(() => console.log('runtime deps ok'))"
+    && node -e "Promise.all([import('@sudo/contracts/common/v1/resource-ref'), import('@xenova/transformers'), import('sharp')]).then(() => console.log('runtime deps ok'))"
 
 FROM ubuntu:22.04 AS host-package
 ARG RELEASE_VERSION

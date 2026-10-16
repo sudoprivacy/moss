@@ -2,7 +2,7 @@ import type { DbDriver, SqlRow } from '../db/driver.js'
 import type { VisibilityFilter, VisibleTo } from '../visibilityFilter.js'
 import { isVisibleTo } from '../visibilityFilter.js'
 
-export type CatalogProviderType = 'local' | 'moss_runtime' | 'dify'
+export type CatalogProviderType = 'local' | 'moss_runtime' | 'dify' | 'custom_http'
 export type CatalogSupportedModes = 'local' | 'cloud' | 'both'
 export type CatalogResourceType = 'agent' | 'skill'
 export type CatalogAvailability = 'organization' | 'all' | 'assigned'
@@ -411,6 +411,12 @@ export class CatalogRepository {
       DELETE FROM catalog_resource_org_assignments WHERE resource_type = 'skill' AND resource_id = ?
     `, [id])
     return true
+  }
+
+  async getOrganizationAgentsByIds(orgId: string, ids: string[]): Promise<CatalogAgent[]> {
+    if (!ids.length) return []
+    if (ids.length > 100) throw new Error('agent lookup limit exceeded')
+    return (await this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants WHERE org_id = ? AND id IN (${ids.map(() => '?').join(',')})`, [orgId, ...ids])).map(mapAgent)
   }
 
   async listAgents(options: ListOptions): Promise<{ items: CatalogAgent[]; hasMore: boolean; nextCursor: string | null }> {

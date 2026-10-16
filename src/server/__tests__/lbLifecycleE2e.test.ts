@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 // Every case passes 60_000 as bun:test's per-case timeout (third argument):
 // each spawns a real server process (DB migrations + service init take 3-8s on
 // Windows), far beyond the 5s default.
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdtemp, rm, writeFile, symlink } from 'fs/promises'
 import { createServer } from 'net'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'
@@ -45,6 +45,7 @@ const bundle = Bun.spawnSync(
     '--format=esm',
     '--outdir', bundleDir,
     '--external=better-sqlite3',
+    '--external=@sudo/contracts/common/v1/resource-ref',
     '--external=@xenova/transformers',
     '--external=onnxruntime-node',
     '--external=sharp',
@@ -54,6 +55,8 @@ const bundle = Bun.spawnSync(
 if (bundle.exitCode !== 0) {
   throw new Error(`Fixture bundle failed: ${bundle.stderr.toString()}`)
 }
+// Match production: the owner validator and its schema files remain an installed dependency.
+await symlink(resolve(import.meta.dir, '../../..', 'node_modules'), join(bundleDir, 'node_modules'), 'junction')
 const bundleEntry = join(bundleDir, 'lbLifecycleE2e.fixture.js')
 
 async function startFixture(extraEnv: Record<string, string> = {}): Promise<LbFixture> {
@@ -134,7 +137,12 @@ async function startFixture(extraEnv: Record<string, string> = {}): Promise<LbFi
       await stderrDrained
       throw new Error(`Fixture exited before readiness: ${stderrOutput.join('')}`)
     }),
-  ])
+  ]).catch(async error => {
+    fixtureProcess.kill()
+    await fixtureProcess.exited
+    await rm(rootDir, { recursive: true, force: true })
+    throw error
+  })
 
   const baseUrl = `http://127.0.0.1:${port}`
   const response = await fetch(`${baseUrl}/api/v1/auth/token`, {
@@ -322,3 +330,8 @@ describe('LB lifecycle E2E (real server process, node runtime)', () => {
     expect(response.headers.get('set-cookie')).toBe(null)
   }, 60_000)
 })
+
+
+it('legacy external task schema rejects real server startup before readiness', async () => {
+  await expect(startFixture({ MOSS_TEST_LEGACY_EXTERNAL_STORE: '1' })).rejects.toThrow('EXTERNAL_TASK_MIGRATION_REQUIRED')
+}, 30_000)

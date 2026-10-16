@@ -1,0 +1,10 @@
+{
+  "host": "0.0.0.0",
+  "port": 8093,
+  "database_file": "/data/provider.sqlite",
+  "router_config_file": "/run/secrets/router.json",
+  "allowed_router_endpoints": ["https://hk.sudorouter.ai/v1"],
+  "clients": [{ "id": "moss-review", "token_file": "/run/secrets/client.token", "agent_ids": ["review-assistant"] }],
+  "definitions": [{ "external_agent_id": "review-assistant", "name": "Review assistant", "system_prompt": "Answer synthetic test questions accurately. Return concise plain text. Do not request sensitive data.", "router_endpoint": "https://hk.sudorouter.ai/v1", "model": "gemini-3.1-flash-lite", "max_output_tokens": 512 }],
+  "concurrency": 4
+}

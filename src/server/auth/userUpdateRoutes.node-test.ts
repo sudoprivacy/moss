@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn, execFileSync } from 'node:child_process'
@@ -10,6 +10,7 @@ import { waitForFixtureReady } from '../testing/fixtureReady.js'
 void test('HTTP user updates await authorization and persistence before responding', { timeout: 90_000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'moss-user-update-'))
   const repo = resolve(import.meta.dirname, '../../..')
+  await symlink(join(repo, 'node_modules'), join(root, 'node_modules'), 'junction')
   let child: ReturnType<typeof spawn> | undefined
   try {
     const configPath = join(root, 'server.json')
@@ -21,7 +22,7 @@ void test('HTTP user updates await authorization and persistence before respondi
     }))
     // These optional providers are not installed or invoked by this HTTP fixture.
     const external = ['sharp', '@xenova/transformers', 'onnxruntime-node', '@anthropic-ai/bedrock-sdk', '@anthropic-ai/foundry-sdk', '@anthropic-ai/vertex-sdk', '@anthropic-ai/mcpb']
-    execFileSync('bun', ['build', 'src/server/tenantAssistantRoutes.fixture.ts', '--target=node', '--format=esm', '--outdir', join(root, 'build'), ...external.map(name => `--external=${name}`)], { cwd: repo, stdio: 'pipe' })
+    execFileSync('bun', ['build', 'src/server/tenantAssistantRoutes.fixture.ts', '--target=node', '--format=esm', '--external=@sudo/contracts/common/v1/resource-ref', '--outdir', join(root, 'build'), ...external.map(name => `--external=${name}`)], { cwd: repo, stdio: 'pipe' })
     child = spawn(process.execPath, [join(root, 'build/tenantAssistantRoutes.fixture.js')], {
       cwd: repo, env: { ...process.env, MOSS_HOME: join(root, 'moss-home'), MOSS_SERVER_CONFIG: configPath }, stdio: ['ignore', 'pipe', 'pipe'],
     })

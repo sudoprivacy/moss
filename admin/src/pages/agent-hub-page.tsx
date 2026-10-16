@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import ExternalAgentsSection from '@/components/external-agents-section'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
@@ -1975,10 +1976,47 @@ export default function AgentHubPage() {
     )
   }
 
+  const installedAgentFilters = (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-sm text-muted-foreground mr-1">类型</span>
+      {([['all', '全部'], ['chat', '对话智能体'], ['workflow', '业务流程']] as const).map(([key, label]) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => setInstalledFilterAgentType(key)}
+          className={cn(
+            'rounded-full px-3 py-1 text-sm transition-colors',
+            installedFilterAgentType === key
+              ? 'bg-primary text-primary-foreground'
+              : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+          )}
+        >
+          {label}
+        </button>
+      ))}
+      <span className="text-sm text-muted-foreground ml-3 mr-1">可见性</span>
+      {([['all', '全部'], ['public', '全员可见'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => setInstalledFilterVisibility(key)}
+          className={cn(
+            'rounded-full px-3 py-1 text-sm transition-colors',
+            installedFilterVisibility === key
+              ? 'bg-primary text-primary-foreground'
+              : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+          )}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+
   return (
     <DashboardLayout
       title="智能体管理"
-      description="浏览、安装和管理 Hub 智能体，安装动作在 server 侧执行。"
+      description="浏览智能体库，管理组织专属智能体、外部平台接入和个人配置。"
     >
       <div className="space-y-6">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -1986,7 +2024,7 @@ export default function AgentHubPage() {
             {/* <Badge variant={tenantId ? 'secondary' : 'outline'}>
               {tenantId ? `专属技能租户: ${tenantId}` : '未配置专属技能租户 ID'}
             </Badge> */}
-            <Badge variant="secondary">已安装 {hubAgents.length + approvedTenantAssistantCount + filteredCustomAgents.length} 个智能体</Badge>
+            <Badge variant="secondary">已安装 {hubAgents.length + approvedTenantAssistantCount + filteredCustomAgents.length} 个内部托管智能体</Badge>
           </div>
 
           <div className="flex items-center gap-2">
@@ -2058,18 +2096,6 @@ export default function AgentHubPage() {
                   />
                 </div>
               </div>
-
-              {activeTab === 'exclusive' ? (
-                <Button onClick={() => {
-                  void loadAvailableWikis()
-                  void loadAvailableCorpApps()
-                  applyDefaultCreateVisibility()
-                  setCreateOpen(true)
-                }}>
-                  <Plus className="mr-2 size-4" />
-                  {isStoreAdmin ? '创建专属智能体' : '发布专属智能体'}
-                </Button>
-              ) : null}
             </div>
 
             {activeTab === 'store' ? (
@@ -2108,42 +2134,7 @@ export default function AgentHubPage() {
                   </button>
                 ))}
               </div>
-            ) : (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm text-muted-foreground mr-1">类型</span>
-                {([['all', '全部'], ['chat', '对话智能体'], ['workflow', '业务流程']] as const).map(([key, label]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => setInstalledFilterAgentType(key)}
-                    className={cn(
-                      'rounded-full px-3 py-1 text-sm transition-colors',
-                      installedFilterAgentType === key
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
-                <span className="text-sm text-muted-foreground ml-3 mr-1">可见性</span>
-                {([['all', '全部'], ['public', '全员可见'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => setInstalledFilterVisibility(key)}
-                    className={cn(
-                      'rounded-full px-3 py-1 text-sm transition-colors',
-                      installedFilterVisibility === key
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            )}
+            ) : activeTab === 'custom' ? installedAgentFilters : null}
           </CardHeader>
 
           <CardContent className="pt-6">
@@ -2212,6 +2203,23 @@ export default function AgentHubPage() {
               </TabsContent>
 
               <TabsContent value="exclusive" className="space-y-4">
+                <ExternalAgentsSection query={searchQuery} />
+                <div role="group" aria-label="内部托管操作" className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-semibold">内部托管</h3>
+                    <p className="mt-1 text-sm text-muted-foreground">由组织创建和管理，使用 Sudo 执行能力的智能体。</p>
+                  </div>
+                  <Button onClick={() => {
+                    void loadAvailableWikis()
+                    void loadAvailableCorpApps()
+                    applyDefaultCreateVisibility()
+                    setCreateOpen(true)
+                  }}>
+                    <Plus className="mr-2 size-4" />
+                    创建智能体
+                  </Button>
+                </div>
+                {installedAgentFilters}
                 {tenantAssistantsLoading ? (
                   <LoadingSkeleton />
                 ) : filteredTenantAssistants.length === 0 ? (
@@ -2222,13 +2230,13 @@ export default function AgentHubPage() {
                       </EmptyMedia>
                       <EmptyTitle>
                         {searchQuery.trim() || installedFilterAgentType !== 'all' || installedFilterVisibility !== 'all'
-                          ? '未找到匹配的专属智能体'
-                          : '暂无专属智能体'}
+                          ? '未找到匹配的内部托管智能体'
+                          : '暂无内部托管智能体'}
                       </EmptyTitle>
                       <EmptyDescription>
                         {searchQuery.trim() || installedFilterAgentType !== 'all' || installedFilterVisibility !== 'all'
                           ? '请尝试调整筛选条件。'
-                          : '审批通过的专属智能体会在这里展示。'}
+                          : '组织创建并审批的内部托管智能体会在这里展示。'}
                       </EmptyDescription>
                     </EmptyHeader>
                   </Empty>
@@ -3370,7 +3378,7 @@ export default function AgentHubPage() {
       >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{isStoreAdmin ? '创建专属智能体' : '提交专属智能体发布申请'}</DialogTitle>
+            <DialogTitle>{isStoreAdmin ? '创建智能体' : '提交智能体发布申请'}</DialogTitle>
             <DialogDescription>
               {isStoreAdmin
                 ? '创建一个组织内共享的专属智能体（自动审批通过，按可见范围对成员可见）。自定义智能体由客户端创建并同步。'

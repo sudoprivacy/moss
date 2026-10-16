@@ -83,7 +83,7 @@ export class DifyConnectionService {
 
   async resolveOrganizationContext(orgId: string): Promise<DifyOrganizationContext> {
     const enabled = (await this.options.identities.listIntegrationConnections(orgId, 'dify'))
-      .filter(connection => connection.enabled)
+      .filter(connection => connection.enabled && connection.config.executionMode !== 'external_hosted')
     const defaults = enabled.filter(connection => connection.config.isDefault === true)
     const selected = enabled.length === 1 ? enabled[0] : defaults.length === 1 ? defaults[0] : null
     if (!selected) {
@@ -118,6 +118,7 @@ export class DifyConnectionService {
     const visible = agent && agent.enabled && agent.status === 'approved' && isVisibleTo(agent.visibleTo, visibility)
     if (!available || !visible) throw new DifyDomainError(403, 'AGENT_NOT_VISIBLE', 'agent not visible to user')
     if (agent.providerType !== 'dify' || !agent.providerBinding) return { enabled: false, mode: null }
+    if (agent.providerBinding.executionMode === 'external_hosted') return { enabled: false, mode: null }
     const appId = requiredBindingString(agent.providerBinding, 'appId')
     if (appId) {
       return { enabled: true, mode: requiredBindingString(agent.providerBinding, 'mode') === 'workflow' ? 'workflow' : 'agent-chat' }
@@ -182,6 +183,8 @@ export class DifyConnectionService {
     if (agent.providerType !== 'dify' || !agent.providerBinding) {
       throw new DifyDomainError(404, 'AGENT_BINDING_MISSING', 'agent binding missing')
     }
+
+    if (agent.providerBinding.executionMode === 'external_hosted') throw new DifyDomainError(409, 'EXTERNAL_TASK_API_REQUIRED', 'Use the external task API')
 
     const legacyEnterpriseId = await this.options.identities.getNumericAlias('enterprise', actor.orgId)
     const legacyUserId = await this.options.identities.getNumericAlias('user', actor.userId)

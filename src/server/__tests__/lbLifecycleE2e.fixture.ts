@@ -20,6 +20,8 @@ import {
   ensureSqliteCompatibilityDomainSchemas,
 } from '../db/compatibilitySchema.js'
 import { repairConfigAvailability } from '../configuration/configAvailabilitySchema.js'
+import { seedExternalTaskMigration } from '../testing/externalTaskMigrationFixture.js'
+import type { NexusClient } from '../nexus/nexusClient.js'
 
 const configPath = process.env.MOSS_SERVER_CONFIG
 if (!configPath) {
@@ -137,12 +139,14 @@ if (process.env.MOSS_TEST_DELAYED_RUNNER === '1') {
     })
   }
 }
+const legacyExternal = process.env.MOSS_TEST_LEGACY_EXTERNAL_STORE === '1'
+if (legacyExternal) await seedExternalTaskMigration(store.driver)
 const server = startServer(config, runtime, authService, {
   info: () => {},
   warn: () => {},
   error: message => process.stderr.write(`LB_E2E_ERROR:${message}\n`),
   debug: () => {},
-})
+}, legacyExternal ? { getSecret: async () => null } as unknown as NexusClient : undefined)
 const port = await server.ready
 
 if (port === null) {

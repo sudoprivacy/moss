@@ -1,0 +1,20 @@
+{
+  "verifiedAt": "2026-10-13T14:05:25+0800",
+  "checks": [
+    "platform administrator can save organization endpoint policy and test the existing connection",
+    "organization administrator has onboarding but no policy write; invalid key cannot advance; cancel clears key",
+    "real organization-admin wizard stores a pending external agent through existing Moss/Nexus API",
+    "explicit review publishes with selected validity; client does not show pending registrations",
+    "SudoWork exclusive directory -> real Dify 42 -> 50, without management/download/native-rule actions",
+    "editing revokes publication; existing personal history remains readable and sending is disabled",
+    "saved credential rotation through Moss UI requires review again",
+    "organization administrator can stop new execution while preserving user history",
+    "archive removes the test registration and retains personal transcript; original published agent unchanged",
+    "ordinary Moss user has no external management section"
+  ],
+  "pageErrors": [],
+  "testAgentId": "e764dba7-7a9c-4fcd-b486-48b14e9f73c2",
+  "testAgentArchived": true,
+  "sessionUrl": "http://localhost:26808/#/conversation/external%3A2a269248-9619-4ce7-8ec4-4c494f0411e4",
+  "originalAgentPreserved": true
+}

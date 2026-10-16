@@ -1,0 +1,86 @@
+{
+  "captured_at": "2026-10-13T09:23:56.721354+00:00",
+  "source": {
+    "maturity": "experimental-synthetic-pilot",
+    "semanticOwner": "moss",
+    "repository": "https://github.com/sudoprivacy/moss",
+    "revision": "3d12c355c52d6017df73efb6d99b0910ad2d4902",
+    "path": "contracts/external-provider/v1/contract.ts",
+    "digest": "sha256:cd3102357a54f54ddfdcc902605475654445afe4dc0cea8fc84cfc9b57f11cab"
+  },
+  "artifact": {
+    "repository": "https://github.com/sudoprivacy/sudostack",
+    "revision": "f6ec49b2a7e917878a2db7bb21377bf8fc521bd7",
+    "path": "contracts/experimental/external-provider/contract.gen.ts",
+    "source_lock_path": "contracts/experimental/external-provider/source.lock.json",
+    "digest": "sha256:54311e527366c8c38eb3e85d0b9496a80a5a54e0d0b67cd95aaf972d463e96ea"
+  },
+  "code_heads": {
+    "moss": "ced61fd934ef0659bbd3941690177a3b8f352325",
+    "sudowork": "4a112610edadd7379e98a0bcae58ed06255f56e9"
+  },
+  "validation": {
+    "moss_focused": {
+      "passed": 44
+    },
+    "moss_node_full": {
+      "passed": 923,
+      "skipped": 3
+    },
+    "moss_postgres_two_instances": {
+      "passed": 1
+    },
+    "sudowork_full": {
+      "passed": 3152,
+      "skipped": 29
+    },
+    "sudowork_focused": {
+      "passed": 23
+    },
+    "webui_full": {
+      "passed": 375
+    },
+    "stack_full": {
+      "passed": 139
+    },
+    "stack_generator": {
+      "passed": 2
+    },
+    "stack_adr005_coverage": {
+      "passed": 12
+    },
+    "moss_build": "passed",
+    "desktop_build": "passed (NODE_OPTIONS=--max-old-space-size=8192)",
+    "webui_build": "passed (NODE_OPTIONS=--max-old-space-size=8192)",
+    "file_database_reopen": "passed, twice; no process SIGKILL",
+    "document_reader_review": "passed after clarifying restart scope and adding consumer logs",
+    "moss_full": {
+      "passed": 1591,
+      "skipped": 8,
+      "runner_pass_counts": [
+        279,
+        50,
+        201,
+        138,
+        923
+      ]
+    }
+  },
+  "log_sha256": {
+    "dify-review2-moss-full.log": "8c717321c9002befb0aad05a7b6e9615a0d0d039345120b34b6d9d4de2d38336",
+    "dify-review2-work-full.log": "7d17267eb61a24bd729067036a26b0e993a9f651c6c1d87f5d6b40a1a627c7b0",
+    "dify-review2-webui-tests-final.log": "88c4d8b1d93cb917154b3812c69bf841338df7d6f5cea3def0df0d141e9121bd",
+    "dify-review2-moss-types-final.log": "d332b99f165a3b60383211b3fbd08e5e82cdfd4db4200808abf172e31a032d6d",
+    "dify-review2-work-types.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "dify-review2-webui-types.log": "ef37eca47beb8c50764609a33c8fe09268fd3544fc4ba7f8ac37e2d91d2f0dab",
+    "dify-review2-stack-full.log": "3902c37f98e90f79be653eb0a85d1036cd63e9d10638521b74f1dd37aab3f0f8",
+    "dify-review2-stack-generator.log": "6119a9c698f595e4ebba79185c0cdc6d50edcddccc32e0ae31287dbfa4ac29ed",
+    "dify-review2-stack-coverage.log": "7c7004bd13abf15f0b79d5b6f541d00569a7d91597664a0492eb190e13182289",
+    "dify-review2-desktop-build.log": "b55392e416c93d2e38e58adc12645d77bf6e070b577fe92ff9d9a206d8948b0f",
+    "dify-review2-webui-build-final.log": "5af8dec5f34dcee3952fe80273ed2957f16af2397a5e68681353a8c2aacedcc1",
+    "dify-review2-moss-build.log": "afc0a9dab3297f483c3e97353f1d6ac78595a65ea09a388eaa2c1ac6436b8d12",
+    "dify-review2-moss-full-final.log": "e0c6833a067022681dac58789692c3672b763cd6f297456081282e9eb9fac649",
+    "dify-review2-moss-focused-final.log": "b3558a92914c580d55795cacf9ad0a17e2bce2fb9ad2ee27b24836a14f1a72f6",
+    "dify-review2-moss-build-final.log": "9da56a48534bb3636cc5217cca3899d80ff6a09532109d522739625a792576ce"
+  }
+}

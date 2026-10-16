@@ -1,3 +1,4 @@
+import { SESSION_SCHEMA } from '../storage/sessionSchema.js'
 import { ORGANIZATION_RESOURCE_PG_SCHEMA } from '../catalog/organizationResourceSchema.js'
 import { COHOST_SESSION_SCHEMA } from '../storage/cohostSessionSchema.js'
 /**
@@ -40,74 +41,7 @@ import { ORGANIZATION_MODEL_SETTINGS_SCHEMA } from '../configuration/organizatio
 const MIGRATION_0001_INITIAL_SCHEMA = `
 -- ============ DirectConnectStore: sessions & runtime lifecycle ============
 
-CREATE TABLE IF NOT EXISTS sessions (
-  session_id TEXT PRIMARY KEY,
-  transcript_session_id TEXT NOT NULL,
-  org_id TEXT NOT NULL,
-  user_id TEXT NOT NULL,
-  role TEXT NOT NULL,
-  scopes_json TEXT NOT NULL,
-  cwd TEXT NOT NULL,
-  runtime_type TEXT NOT NULL,
-  docker_image TEXT,
-  docker_mode TEXT,
-  config_dir TEXT,
-  container_name TEXT,
-  status TEXT NOT NULL,
-  desired_state TEXT NOT NULL,
-  current_attempt_id TEXT,
-  transcript_path TEXT NOT NULL,
-  title TEXT,
-  summary TEXT,
-  assistant_name TEXT,
-  source TEXT,
-  channel_chat_id TEXT,
-  client_metadata TEXT,
-  created_at BIGINT NOT NULL,
-  last_active_at BIGINT NOT NULL,
-  ended_at BIGINT,
-  deleted_at BIGINT
-);
-
-CREATE TABLE IF NOT EXISTS session_attempts (
-  attempt_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(session_id),
-  generation BIGINT NOT NULL,
-  backend_type TEXT NOT NULL,
-  runtime_state TEXT NOT NULL,
-  server_instance_id TEXT,
-  runner_pid BIGINT,
-  container_name TEXT,
-  attach_path TEXT,
-  resume_transcript_session_id TEXT NOT NULL,
-  started_at BIGINT NOT NULL,
-  last_heartbeat_at BIGINT,
-  stopped_at BIGINT,
-  exit_code BIGINT,
-  exit_signal TEXT,
-  stop_reason TEXT,
-  error_text TEXT,
-  UNIQUE (session_id, generation)
-);
-
-CREATE TABLE IF NOT EXISTS server_instances (
-  instance_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
-  pid BIGINT,
-  started_at BIGINT NOT NULL,
-  heartbeat_at BIGINT NOT NULL,
-  stopped_at BIGINT,
-  status TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS session_events (
-  event_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(session_id),
-  attempt_id TEXT,
-  event_type TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  created_at BIGINT NOT NULL
-);
+${SESSION_SCHEMA}
 
 CREATE INDEX IF NOT EXISTS sessions_user_idx
   ON sessions (org_id, user_id, last_active_at DESC);
@@ -666,6 +600,7 @@ CREATE TABLE IF NOT EXISTS users (
   created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS users_org_idx ON users (org_id);
+CREATE INDEX IF NOT EXISTS users_org_status_id_idx ON users (org_id, status, id);
 CREATE INDEX IF NOT EXISTS users_email_idx ON users (email);
 CREATE INDEX IF NOT EXISTS users_department_idx ON users (department_id);
 CREATE UNIQUE INDEX IF NOT EXISTS users_ext_uniq
@@ -2026,6 +1961,10 @@ const MIGRATIONS: PgMigration[] = [
       ON user_agents (org_id, user_id, created_at);
   ` },
   { version: 11, name: 'cohost-session-bindings', sql: COHOST_SESSION_SCHEMA },
+  { version: 12, name: 'custom-http-catalog-provider', sql: `
+    ALTER TABLE tenant_assistants DROP CONSTRAINT IF EXISTS tenant_assistants_provider_type_check;
+    ALTER TABLE tenant_assistants ADD CONSTRAINT tenant_assistants_provider_type_check CHECK (provider_type IN ('local', 'moss_runtime', 'dify', 'custom_http'));
+  ` },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

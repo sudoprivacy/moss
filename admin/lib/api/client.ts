@@ -130,6 +130,7 @@ export class ApiRequestError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code?: string,
   ) {
     super(message)
     this.name = 'ApiRequestError'
@@ -213,14 +214,14 @@ export class ApiClient {
       const error = await response.json().catch(() => ({ error: response.statusText }))
       const raw = (error as any).error
       const message = typeof raw === 'string' ? raw : (raw?.message || (error as any).message || 'Request failed')
-      throw new ApiRequestError(response.status, message)
+      throw new ApiRequestError(response.status, message, typeof raw?.code === 'string' ? raw.code : undefined)
     }
 
     return response.json()
   }
 
-  get<T>(path: string): Promise<T> {
-    return this.request<T>(path)
+  get<T>(path: string, options: Partial<RequestInit> = {}): Promise<T> {
+    return this.request<T>(path, options)
   }
 
   post<T>(path: string, body?: unknown, options: Partial<RequestInit> = {}): Promise<T> {

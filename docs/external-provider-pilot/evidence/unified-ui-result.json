@@ -1,0 +1,13 @@
+{
+  "checks": [
+    "organization agent absent from My Agents",
+    "directory -> unified chat -> real Dify 42",
+    "same session Enter continuation returns 50",
+    "no native model picker or fake cancel",
+    "shared sidebar and reload restore two-turn history",
+    "legacy external history URL redirects to unified chat",
+    "ordinary user can choose published agent but cannot manage or read admin history"
+  ],
+  "pageErrors": [],
+  "sessionId": "b750fa47-c228-4c3e-937d-7d68dec39b13"
+}

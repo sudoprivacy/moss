@@ -175,3 +175,16 @@ void describe('DifyConnectionService', () => {
     db.close()
   })
 })
+
+
+void test('external-hosted pilots cannot bypass task policy through legacy runtime or enhancement routes', async () => {
+  const { db, service, catalog, identities, reads } = await setup()
+  await catalog.updateAgentConfiguration('agent-a', 'org-a', { providerBinding: { executionMode: 'external_hosted', connectionId: 'dify-org-a', appId: 'app-a' } })
+  assert.deepEqual(await service.describeEnhancement(actor, 'agent-a', visibility), { enabled: false, mode: null })
+  await assert.rejects(service.resolveRuntimeContext(actor, 'agent-a', visibility), { code: 'EXTERNAL_TASK_API_REQUIRED' })
+  await assert.rejects(service.resolveEnhancementContext(actor, 'agent-a', visibility), { code: 'EXTERNAL_TASK_API_REQUIRED' })
+  assert.equal(reads.length, 0)
+  await identities.putIntegrationConnection({ id: 'external', orgId: 'org-a', providerType: 'dify', name: 'External', enabled: true, secretRef: 'nexus://org:org-a:dify/key', config: { executionMode: 'external_hosted', tenantId: 'external-workspace' } })
+  assert.equal((await service.resolveOrganizationContext('org-a')).connectionId, 'dify-org-a')
+  db.close()
+})

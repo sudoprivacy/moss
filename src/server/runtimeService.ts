@@ -1036,6 +1036,7 @@ export class RuntimeService {
     sessionId: string,
   ): Promise<{ session: SessionRecord }> {
     const session = await this.store.getSession(sessionId)
+    if (session?.runtime.type === 'external') throw new ResourceAccessError(409, 'Use the external task API for this session')
     if (!session) {
       throw new Error('Session not found')
     }
@@ -1450,6 +1451,7 @@ export class RuntimeService {
 
   async terminateSession(sessionId: string, isRuntimeRestart = false): Promise<void> {
     const session = await this.store.getSession(sessionId)
+    if (session?.runtime.type === 'external') throw new ResourceAccessError(409, 'Use the external task API for this session')
     if (!session) return
     const attempt = await this.store.getCurrentAttempt(sessionId)
     // Revoke auth proxy token. The registry is instance-local (tokens are
@@ -1574,6 +1576,7 @@ export class RuntimeService {
   }
 
   private async ensureAttempt(session: SessionRecord): Promise<AttemptRecord> {
+    if (session.runtime?.type === 'external') throw new ResourceAccessError(409, 'Use the external task API for this session')
     const pending = this.pendingEnsures.get(session.sessionId)
     if (pending) {
       return pending
@@ -1995,6 +1998,7 @@ export class RuntimeService {
       enabledSkills?: string[]
     } = {},
   ): Promise<AttemptRecord> {
+    if (session.runtime?.type === 'external') throw new ResourceAccessError(409, 'Use the external task API for this session')
     if (this.draining) throw new ServerDrainingError()
     if (this.upgradingOwners.has(session.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
     const scope = await this.resourceScope(session)

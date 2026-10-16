@@ -1,3 +1,5 @@
+import { SESSION_SCHEMA } from './storage/sessionSchema.js'
+import { isExternalHosted } from './catalog/executionMode.js'
 import { ensureOrganizationResourceSchema } from './catalog/organizationResourceSchema.js'
 import { randomUUID } from 'crypto'
 import { mkdirSync } from 'fs'
@@ -64,6 +66,7 @@ function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
 
 function mapRuntime(row: SqlRow): SessionRuntimeInfo {
   const rawType = String(row.runtime_type)
+  if (rawType === 'external') return { type: 'external', engine: 'external_provider' }
   const type: SessionRuntimeInfo['type'] =
     rawType === 'docker'
       ? 'docker'
@@ -296,74 +299,7 @@ export class DirectConnectStore {
   private initializeSqliteTables(): void {
     if (!this.db) throw new Error('SQLite database handle is unavailable')
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        session_id TEXT PRIMARY KEY,
-        transcript_session_id TEXT NOT NULL,
-        org_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        scopes_json TEXT NOT NULL,
-        cwd TEXT NOT NULL,
-        runtime_type TEXT NOT NULL,
-        docker_image TEXT,
-        docker_mode TEXT,
-        config_dir TEXT,
-        container_name TEXT,
-        status TEXT NOT NULL,
-        desired_state TEXT NOT NULL,
-        current_attempt_id TEXT,
-        transcript_path TEXT NOT NULL,
-        title TEXT,
-        summary TEXT,
-        assistant_name TEXT,
-        source TEXT,
-        channel_chat_id TEXT,
-        client_metadata TEXT,
-        created_at INTEGER NOT NULL,
-        last_active_at INTEGER NOT NULL,
-        ended_at INTEGER,
-        deleted_at INTEGER
-      );
-
-      CREATE TABLE IF NOT EXISTS session_attempts (
-        attempt_id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL REFERENCES sessions(session_id),
-        generation INTEGER NOT NULL,
-        backend_type TEXT NOT NULL,
-        runtime_state TEXT NOT NULL,
-        server_instance_id TEXT,
-        runner_pid INTEGER,
-        container_name TEXT,
-        attach_path TEXT,
-        resume_transcript_session_id TEXT NOT NULL,
-        started_at INTEGER NOT NULL,
-        last_heartbeat_at INTEGER,
-        stopped_at INTEGER,
-        exit_code INTEGER,
-        exit_signal TEXT,
-        stop_reason TEXT,
-        error_text TEXT,
-        UNIQUE (session_id, generation)
-      );
-
-      CREATE TABLE IF NOT EXISTS server_instances (
-        instance_id TEXT PRIMARY KEY,
-        host TEXT NOT NULL,
-        pid INTEGER,
-        started_at INTEGER NOT NULL,
-        heartbeat_at INTEGER NOT NULL,
-        stopped_at INTEGER,
-        status TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS session_events (
-        event_id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL REFERENCES sessions(session_id),
-        attempt_id TEXT,
-        event_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
+      ${SESSION_SCHEMA}
 
       CREATE TABLE IF NOT EXISTS enterprises (
         id TEXT PRIMARY KEY DEFAULT 'default',
@@ -2147,13 +2083,13 @@ export class DirectConnectStore {
     const placeholders = states.map(() => '?').join(',')
     const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM session_attempts
-      WHERE runtime_state IN (${placeholders})
+      WHERE backend_type != 'external' AND runtime_state IN (${placeholders})
     `, states)
     return rows.map(mapAttempt)
   }
 
   async listSessionRecords(filter: SessionListFilter): Promise<SessionRecord[]> {
-    const clauses = ['org_id = ?']
+    const clauses = ['org_id = ?', "runtime_type != 'external'"]
     const values: Array<string | number> = [filter.orgId]
     if (filter.userId) {
       clauses.push('user_id = ?')
@@ -2199,6 +2135,7 @@ export class DirectConnectStore {
       SELECT *
       FROM sessions
       WHERE desired_state = 'active'
+        AND runtime_type != 'external'
         AND deleted_at IS NULL
         AND status IN ('creating', 'active', 'detached', 'lost', 'failed')
       ORDER BY last_active_at DESC
@@ -2223,6 +2160,7 @@ export class DirectConnectStore {
       FROM sessions s
       JOIN session_attempts a ON a.attempt_id = s.current_attempt_id
       WHERE s.desired_state = 'active'
+        AND s.runtime_type != 'external'
         AND s.deleted_at IS NULL
         AND s.status IN ('creating', 'active', 'detached', 'lost', 'failed')
         AND a.server_instance_id IS NOT NULL
@@ -3030,18 +2968,19 @@ export class DirectConnectStore {
     if (status) { conds.push('status = ?'); params.push(status) }
     if (orgId) { conds.push('org_id = ?'); params.push(orgId) }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
-    return this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`, params as SqlParam[])
+    const rows = await this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`, params as SqlParam[])
+    // Hosted providers share Catalog storage but have no native template or rules artifact.
+    return rows.filter(row => !isExternalHosted(parseJsonObject(row.provider_binding)))
   }
 
   async getTenantAssistant(id: string, orgId?: string): Promise<SqlRow | null> {
-    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?${orgId ? " AND org_id = ? AND source_type = 'tenant'" : ''}`, orgId ? [id, orgId] : [id])) ?? null
+    const row = await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?${orgId ? " AND org_id = ? AND source_type = 'tenant'" : ''}`, orgId ? [id, orgId] : [id])
+    return row && !isExternalHosted(parseJsonObject(row.provider_binding)) ? row : null
   }
 
   async getTenantAssistantByName(name: string, orgId?: string): Promise<SqlRow | null> {
-    if (orgId) {
-      return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ? AND org_id = ?`, [name, orgId])) ?? null
-    }
-    return (await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ?`, [name])) ?? null
+    const rows = await this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ?${orgId ? ' AND org_id = ?' : ''}`, orgId ? [name, orgId] : [name])
+    return rows.find(row => !isExternalHosted(parseJsonObject(row.provider_binding))) ?? null
   }
 
   async createTenantAssistant(row: {
