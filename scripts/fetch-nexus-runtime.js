@@ -29,8 +29,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'fs'
-import { get as httpGet } from 'http'
-import { get as httpsGet } from 'https'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -99,43 +99,10 @@ function nexusdUrls(ver, artifact) {
 }
 
 // ── 下载 / 校验 / 解压 ────────────────────────────────────────────────────────
-function downloadTo(url, dest) {
-  return new Promise((resolve, reject) => {
-    let redirects = 0
-    const doReq = u => {
-      if (redirects++ > 10) return reject(new Error('too many redirects'))
-      const getter = u.startsWith('https:') ? httpsGet : httpGet
-      getter(u, res => {
-        const code = res.statusCode
-        if (code && [301, 302, 307, 308].includes(code) && res.headers.location) {
-          res.resume()
-          doReq(res.headers.location)
-          return
-        }
-        if (code === 404) {
-          res.resume()
-          reject(new Error('NOT_FOUND'))
-          return
-        }
-        if (code !== 200) {
-          res.resume()
-          reject(new Error(`HTTP ${code}`))
-          return
-        }
-        const file = createWriteStream(dest)
-        res.pipe(file)
-        file.on('finish', () => file.close(() => resolve()))
-        file.on('error', err => {
-          try { unlinkSync(dest) } catch {}
-          reject(err)
-        })
-      }).on('error', err => {
-        try { unlinkSync(dest) } catch {}
-        reject(err)
-      })
-    }
-    doReq(url)
-  })
+async function downloadTo(url, dest, timeoutMs) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+  if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(dest))
 }
 
 function sha256File(p) {
@@ -143,11 +110,11 @@ function sha256File(p) {
 }
 
 // 阶梯下载：任一级失败（404 / 网络 reset/超时/非200 / sha256 不符）都回退下一级；全失败才抛错。
-async function downloadWithFallback(urls, expectedSha, dest) {
+export async function downloadWithFallback(urls, expectedSha, dest, { timeoutMs = 45_000 } = {}) {
   let lastErr = 'unknown error'
   for (const { label, url } of urls) {
     try {
-      await downloadTo(url, dest)
+      await downloadTo(url, dest, timeoutMs)
       const actual = sha256File(dest)
       if (actual !== expectedSha) {
         try { unlinkSync(dest) } catch {}
@@ -158,6 +125,7 @@ async function downloadWithFallback(urls, expectedSha, dest) {
       console.log(`[fetch-nexus] ${label} OK: ${url}`)
       return
     } catch (e) {
+      try { unlinkSync(dest) } catch {}
       lastErr = e instanceof Error ? e.message : String(e)
       console.warn(`[fetch-nexus] ${label} ${url} -> ${lastErr}, trying next mirror`)
     }
