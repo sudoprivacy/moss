@@ -23,6 +23,32 @@ log() { printf '[moss-install] %s\n' "$*"; }
 warn() { printf '[moss-install] WARNING: %s\n' "$*" >&2; }
 die() { printf '[moss-install] ERROR: %s\n' "$*" >&2; exit 1; }
 
+runtime_placement_environment() {
+  local env_path="$1" default_manifest="$2" key value assignment
+  local keys=(MOSS_RUNTIME_MANIFEST_PATH MOSS_USER_RUNTIME_IMAGE MOSS_USER_RUNTIME_HOST
+    MOSS_SCODE_IMAGE MOSS_K8S_NAMESPACE MOSS_K8S_RUNTIME_CLASS MOSS_K8S_KUBECONFIG
+    MOSS_K8S_IMAGE_PULL_POLICY MOSS_K8S_IMAGE_PULL_SECRETS MOSS_K8S_WORKSPACE_STORAGE_CLASS
+    MOSS_K8S_WORKSPACE_STORAGE_SIZE MOSS_K8S_POD_READY_TIMEOUT_SEC)
+  for key in "${keys[@]}"; do
+    if [ "${!key+x}" = x ]; then
+      value="${!key}"
+    elif [ -f "$env_path" ] && assignment="$(grep -E "^[[:space:]]*$key=" "$env_path" | tail -n 1)" && [ -n "$assignment" ]; then
+      printf '%s\n' "$assignment"
+      continue
+    elif [ "$key" = MOSS_RUNTIME_MANIFEST_PATH ] && [ -n "$default_manifest" ]; then
+      value="$default_manifest"
+    else
+      continue
+    fi
+    case "$value" in
+      *$'\n'*|*$'\r'*) die "$key must be a single-line EnvironmentFile value" ;;
+    esac
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s="%s"\n' "$key" "$value"
+  done
+}
+
 assert_nexus_zone_id_upgrade_safe() {
   local existing_install="$1"
   local env_path="$2"
@@ -1556,10 +1582,12 @@ elif [ -f "$ENV_PATH" ]; then
   ' "$ENV_PATH")"
 fi
 
-MOSS_RUNTIME_MANIFEST_LINE=""
+DEFAULT_RUNTIME_MANIFEST=""
 if [ "$MOSS_RUNTIME_VALUE" = cohost ]; then
-  MOSS_RUNTIME_MANIFEST_LINE="MOSS_RUNTIME_MANIFEST_PATH=$INSTALL_DIR/current/runtime-release.json"
+  DEFAULT_RUNTIME_MANIFEST="$INSTALL_DIR/current/runtime-release.json"
 fi
+# Program upgrades retain the declared execution release until a runtime rollout.
+MOSS_RUNTIME_PLACEMENT_LINES="$(runtime_placement_environment "$ENV_PATH" "$DEFAULT_RUNTIME_MANIFEST")"
 MOSS_CONNECTION_LINES=""
 if [ -f "$ENV_PATH" ]; then
   MOSS_CONNECTION_LINES="$(grep -E '^MOSS_(COHOST_)?NEXUS_(MODE|ENDPOINT|AUTH_TOKEN|TLS_CA|TLS_CERT|TLS_KEY|TLS_SERVER_NAME)=' "$ENV_PATH" || true)"
@@ -1601,7 +1629,7 @@ MOSS_SERVER_URL=http://$SESSION_REACHABLE_HOST:$MOSS_PORT_VALUE
 $MOSS_INSTANCE_ID_LINE
 $MOSS_NEXUS_ZONE_ID_LINE
 $MOSS_CONNECTION_LINES
-$MOSS_RUNTIME_MANIFEST_LINE
+$MOSS_RUNTIME_PLACEMENT_LINES
 $MOSS_WORKSPACE_LINE
 $MOSS_COHOST_ACCESS_LINE
 PATH=$INSTALL_DIR/current/node/bin:$INSTALL_DIR/current/app/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
