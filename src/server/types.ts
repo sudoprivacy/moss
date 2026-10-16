@@ -176,6 +176,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       image: z.string().optional(),
       userRuntimeImage: z.string().min(1).optional(),
       userRuntimeHost: z.string().min(1).optional(),
+      userRuntimeAgentsPerAllocation: z.number().int().positive().optional(),
       namespace: z.string().default('moss-sessions'),
       // Empty string → omit runtimeClassName (customer cluster without gvisor).
       runtimeClassName: z.string().default('gvisor'),
@@ -702,6 +703,7 @@ export type ServerConfig = {
     image?: string
     userRuntimeImage?: string
     userRuntimeHost?: string
+    userRuntimeAgentsPerAllocation?: number
     namespace: string
     runtimeClassName: string
     kubeconfig?: string

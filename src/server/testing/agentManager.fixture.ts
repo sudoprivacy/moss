@@ -22,8 +22,11 @@ const reservedAgentNames = ['mine', 'install', 'visible', 'create', 'tenant', 'p
 runtime.readAgentNamespace = async ownerId => ({ isOwnerConfined: true,
   names: ['persistent-agent', 'worker-agent', ...reservedAgentNames], managedNames: ['persistent-agent', ...reservedAgentNames],
   executions: [{ name: 'worker-agent', ownerId, state: 'ready', kind: 'worker' }] })
-runtime.upgradeUserRuntime = async ownerId => ({ ownerId, allocationId: 'primary', isPresent: true, isDrifted: false,
-  phase: 'Running', expectedImage: 'fixture:verified', observedImageDigest: null, releaseId: null })
+runtime.upgradeUserRuntime = async ownerId => {
+  const allocation = { ownerId, allocationId: 'primary', isPresent: true, isDrifted: false,
+    phase: 'Running', expectedImage: 'fixture:verified', observedImageDigest: null, releaseId: null }
+  return { ...allocation, allocations: [allocation] }
+}
 runtime.createSession = async input => {
   if (input.source === 'agent-manager' && input.runtime?.engine !== 'scode') throw new Error('Managed Agents require the shared engine')
   const sessionId = randomUUID()

@@ -40,11 +40,14 @@ export function createCohostWorkspaceAccess(
   const withWorkspace = async <T>(operation: (client: NexusVfsClient, token: string, root: string) => Promise<T>): Promise<T> => {
     const channel = await runtime.connectInternalChannel(session.sessionId)
     const { processId, binding } = await readLiveManagedExecution(channel, session.sessionId)
-    const { client, authToken } = await runtime.connectCohostRuntime(session.userId)
+    const expectedAgent = session.assistantName ? sessionAgentName(session.userId, session.assistantName) : undefined
+    if (!expectedAgent || binding.ownerId !== session.userId || binding.agentId !== expectedAgent) {
+      throw new ResourceAccessError(403, 'Cohost workspace owner does not match the session')
+    }
+    const { client, authToken } = await runtime.connectCohostRuntime(session.userId, expectedAgent)
     try {
       const descriptor = await new ManagedAgentClient(client, authToken).getSession(processId)
-      const expectedAgent = session.assistantName ? sessionAgentName(session.userId, session.assistantName) : undefined
-      if (!expectedAgent || binding.ownerId !== session.userId || binding.agentId !== expectedAgent || descriptor.owner_id !== session.userId || descriptor.agent_id !== expectedAgent ||
+      if (descriptor.owner_id !== session.userId || descriptor.agent_id !== expectedAgent ||
           descriptor.session_id !== processId || descriptor.durable_session_id !== binding.durableSessionId) {
         throw new ResourceAccessError(403, 'Cohost workspace owner does not match the session')
       }

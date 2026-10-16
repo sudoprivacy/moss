@@ -200,7 +200,7 @@ export class SqliteDriver implements DbDriver {
     // Recheck after the await: another awakened waiter may have acquired the handle.
     while (this.activeTx !== null) await this.waitOutTx()
     const run = (async () => {
-      beginImmediateWithBoundedWait(this.db)
+      await this.beginTransaction()
       try {
         const result = await this.txStorage.run({ db: this.db, nextSavepoint: 1 }, fn)
         this.db.exec('COMMIT')
@@ -215,6 +215,26 @@ export class SqliteDriver implements DbDriver {
       return await run
     } finally {
       this.activeTx = null
+    }
+  }
+
+  private async beginTransaction(): Promise<void> {
+    const busyTimeout = Number(this.db.prepare('PRAGMA busy_timeout').get()?.timeout ?? 0)
+    const deadline = Date.now() + SQLITE_BEGIN_BUSY_TIMEOUT_MS
+    while (true) {
+      // SQLite's synchronous busy handler would prevent another connection's
+      // async transaction on this event loop from reaching COMMIT. Restore the
+      // connection setting before yielding so other synchronous callers keep it.
+      this.db.exec('PRAGMA busy_timeout=0')
+      try {
+        this.db.exec('BEGIN IMMEDIATE')
+        return
+      } catch (error) {
+        if (!isSqliteBusy(error) || Date.now() >= deadline) throw error
+      } finally {
+        this.db.exec(`PRAGMA busy_timeout=${busyTimeout}`)
+      }
+      await new Promise(resolve => setTimeout(resolve, SQLITE_BEGIN_BUSY_RETRY_MS))
     }
   }
 

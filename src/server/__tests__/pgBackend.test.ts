@@ -294,7 +294,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -1225,6 +1225,8 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         assert.deepEqual(await driver.all('SELECT session_id FROM sessions'), [{ session_id: 'retained-session' }]);
         await driver.run('INSERT INTO cohost_sessions (session_id, owner_user_id, native_agent_id, durable_session_id, repository_path) VALUES (?, ?, ?, ?, ?)',
           ['retained-session', 'u1', 'retained-agent', 'retained-native-id', '/agents/retained-agent/workspaces/retained-session']);
+        await driver.run('INSERT INTO cohost_agent_homes (owner_user_id, native_agent_id, allocation_id) VALUES (?, ?, ?)',
+          ['u1', 'retained-agent', 'primary']);
         await assert.rejects(driver.run('INSERT INTO cohost_sessions (session_id, owner_user_id, native_agent_id, durable_session_id, repository_path) VALUES (?, ?, ?, ?, ?)',
           ['missing-session', 'u2', 'other-agent', 'other-native-id', '/agents/other-agent/workspaces/missing-session']),
           (error: unknown) => (error as { code?: string }).code === '23503');
@@ -1264,8 +1266,11 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
 
         // Re-run is a no-op: every migration remains applied exactly once.
         await applyPgSchema(driver);
+        assert.deepEqual(await driver.all('SELECT owner_user_id, native_agent_id, allocation_id FROM cohost_agent_homes'), [
+          { owner_user_id: 'u1', native_agent_id: 'retained-agent', allocation_id: 'primary' },
+        ]);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         const localGrants = await driver.all<{ id: string; local_execution_allowed: number }>('SELECT id, local_execution_allowed FROM users ORDER BY id');
         assert.deepEqual(localGrants.map(row => [row.id, Number(row.local_execution_allowed)]), [['local-allowed', 1], ['local-denied', 0]]);
         await driver.run('UPDATE users SET local_execution_allowed = 0 WHERE id = ?', ['local-allowed']);

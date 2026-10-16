@@ -166,49 +166,78 @@ function expectRollbackResult(result: RollbackResult, scenario: RollbackScenario
 }
 
 describe("packaged Server E2E smoke", () => {
-  it("preserves execution placement independently of a program upgrade", () => {
+  const placementOriginal = [
+    'MOSS_USER_RUNTIME_IMAGE="runtime:old"',
+    'MOSS_RUNTIME_MANIFEST_PATH="/releases/old/runtime-release.json"',
+    'MOSS_USER_RUNTIME_HOST=10.0.0.2',
+    'MOSS_USER_RUNTIME_AGENTS_PER_ALLOCATION=16',
+    'MOSS_K8S_RUNTIME_CLASS=""',
+    'MOSS_K8S_WORKSPACE_STORAGE_CLASS=retained-storage',
+    'MOSS_K8S_IMAGE_PULL_POLICY=Never',
+    'UNRELATED=value',
+    '',
+  ].join("\n");
+  const placementScenarios: Array<{
+    name: string;
+    source: string;
+    overrides?: Record<string, string>;
+    defaultManifest?: string;
+    expected?: string;
+    includes?: string[];
+    excludes?: string[];
+    isRejected?: boolean;
+  }> = [
+    { name: "retains execution placement independently of a program upgrade", source: placementOriginal,
+      defaultManifest: "/current/runtime-release.json",
+      includes: placementOriginal.split("\n").filter(line => line.startsWith("MOSS_")).map(line => line + "\n"),
+      excludes: ["UNRELATED", "/current/"] },
+    { name: "keeps an empty placement empty", source: "", expected: "" },
+    { name: "uses the release manifest for a new placement", source: "", defaultManifest: "/current/runtime-release.json",
+      expected: 'MOSS_RUNTIME_MANIFEST_PATH="/current/runtime-release.json"\n' },
+    { name: "applies explicit placement overrides", source: placementOriginal,
+      overrides: { MOSS_USER_RUNTIME_IMAGE: 'runtime:new', MOSS_RUNTIME_MANIFEST_PATH: '/next/runtime-release.json', MOSS_K8S_RUNTIME_CLASS: '', MOSS_USER_RUNTIME_AGENTS_PER_ALLOCATION: '2' },
+      includes: ['MOSS_USER_RUNTIME_IMAGE="runtime:new"\n', 'MOSS_RUNTIME_MANIFEST_PATH="/next/runtime-release.json"\n', 'MOSS_K8S_RUNTIME_CLASS=""\n', 'MOSS_USER_RUNTIME_AGENTS_PER_ALLOCATION="2"\n'],
+      excludes: ["runtime:old", "/releases/old/"] },
+    { name: "retains the last assignment for duplicate placement keys", source: "MOSS_USER_RUNTIME_IMAGE=first\nMOSS_USER_RUNTIME_IMAGE=last\n", expected: "MOSS_USER_RUNTIME_IMAGE=last\n" },
+    { name: "reads literal placement assignments with whitespace and no final newline", source: 'MOSS_USER_RUNTIME_IMAGE_EXTRA=ignored\n  MOSS_USER_RUNTIME_HOST=$(printf must-remain-literal)\nMOSS_USER_RUNTIME_IMAGE="last"',
+      expected: 'MOSS_USER_RUNTIME_IMAGE="last"\n  MOSS_USER_RUNTIME_HOST=$(printf must-remain-literal)\n' },
+    { name: "quotes placement values", source: "", overrides: { MOSS_K8S_KUBECONFIG: 'a"b\\c' }, expected: 'MOSS_K8S_KUBECONFIG="a\\"b\\\\c"\n' },
+    { name: "rejects newline injection into placement values", source: "", overrides: { MOSS_USER_RUNTIME_HOST: "host\ninjected=value" }, isRejected: true },
+  ];
+  // Each real shell invocation gets its own deadline. Windows process startup
+  // must not consume the timeout of unrelated placement scenarios.
+  for (const scenario of placementScenarios) it(scenario.name, async () => {
     const installer = readFileSync(resolve(root, "deploy/legacy/install-host.sh"), "utf8");
     const placement = extractShellFunction(installer, "runtime_placement_environment");
     const tempRoot = mkdtempSync(resolve(tmpdir(), "moss-runtime-placement-"));
     const envPath = resolve(tempRoot, "moss-server.env");
     const scriptPath = resolve(tempRoot, "placement.sh");
     writeFileSync(scriptPath, `set -euo pipefail\n${placement}\ndie() { exit 1; }\nruntime_placement_environment "$ENV_PATH" "$DEFAULT_MANIFEST"\n`);
-    const run = (source: string, overrides: Record<string, string> = {}, defaultManifest = "") => {
-      writeFileSync(envPath, source);
+    try {
+      writeFileSync(envPath, scenario.source);
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
         !/^MOSS_(RUNTIME_MANIFEST_PATH|USER_RUNTIME_|SCODE_IMAGE|K8S_)/.test(key)));
-      return spawnSync("bash", [toShellPath(scriptPath)], {
-        encoding: "utf8",
-        env: { ...env, ...shellPathEnvironment({ ENV_PATH: envPath }), DEFAULT_MANIFEST: defaultManifest, ...overrides },
+      const child = spawn("bash", [toShellPath(scriptPath)], {
+        env: { ...env, ...shellPathEnvironment({ ENV_PATH: envPath }), DEFAULT_MANIFEST: scenario.defaultManifest ?? "", ...scenario.overrides },
       });
-    };
-    try {
-      const original = [
-        'MOSS_USER_RUNTIME_IMAGE="runtime:old"',
-        'MOSS_RUNTIME_MANIFEST_PATH="/releases/old/runtime-release.json"',
-        'MOSS_USER_RUNTIME_HOST=10.0.0.2',
-        'MOSS_K8S_RUNTIME_CLASS=""',
-        'MOSS_K8S_WORKSPACE_STORAGE_CLASS=retained-storage',
-        'MOSS_K8S_IMAGE_PULL_POLICY=Never',
-        'UNRELATED=value',
-        '',
-      ].join("\n");
-      const retained = run(original, {}, "/current/runtime-release.json");
-      expect(retained.status).toBe(0);
-      for (const line of original.split("\n").filter(line => line.startsWith("MOSS_"))) expect(retained.stdout).toContain(line + "\n");
-      expect(retained.stdout).not.toContain("UNRELATED");
-      expect(retained.stdout).not.toContain("/current/");
-      expect(run("").stdout).toBe("");
-      expect(run("", {}, "/current/runtime-release.json").stdout).toBe('MOSS_RUNTIME_MANIFEST_PATH="/current/runtime-release.json"\n');
-      const overridden = run(original, { MOSS_USER_RUNTIME_IMAGE: 'runtime:new', MOSS_RUNTIME_MANIFEST_PATH: '/next/runtime-release.json', MOSS_K8S_RUNTIME_CLASS: '' });
-      expect(overridden.status).toBe(0);
-      expect(overridden.stdout).toContain('MOSS_USER_RUNTIME_IMAGE="runtime:new"\n');
-      expect(overridden.stdout).toContain('MOSS_RUNTIME_MANIFEST_PATH="/next/runtime-release.json"\n');
-      expect(overridden.stdout).not.toContain("runtime:old");
-      expect(overridden.stdout).not.toContain("/releases/old/");
-      expect(run("MOSS_USER_RUNTIME_IMAGE=first\nMOSS_USER_RUNTIME_IMAGE=last\n").stdout).toBe("MOSS_USER_RUNTIME_IMAGE=last\n");
-      expect(run("", { MOSS_K8S_KUBECONFIG: 'a"b\\c' }).stdout).toBe('MOSS_K8S_KUBECONFIG="a\\"b\\\\c"\n');
-      expect(run("", { MOSS_USER_RUNTIME_HOST: "host\ninjected=value" }).status).not.toBe(0);
+      let stdout = "", stderr = "";
+      child.stdout.on("data", chunk => { stdout += chunk.toString(); });
+      child.stderr.on("data", chunk => { stderr += chunk.toString(); });
+      const status = await new Promise<number | null>((resolveExit, reject) => {
+        let isTimedOut = false;
+        const deadline = setTimeout(() => { isTimedOut = true; child.kill("SIGKILL"); }, process.platform === "win32" ? 10_000 : 4_000);
+        child.once("error", error => { clearTimeout(deadline); reject(error); });
+        child.once("close", code => {
+          clearTimeout(deadline);
+          if (isTimedOut) reject(new Error(`Placement shell exceeded its deadline: ${stderr}`));
+          else resolveExit(code);
+        });
+      });
+      if (scenario.isRejected) expect(status).not.toBe(0);
+      else expect(status, stderr).toBe(0);
+      if (scenario.expected !== undefined) expect(stdout).toBe(scenario.expected);
+      for (const line of scenario.includes ?? []) expect(stdout).toContain(line);
+      for (const text of scenario.excludes ?? []) expect(stdout).not.toContain(text);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }

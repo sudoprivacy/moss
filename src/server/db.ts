@@ -30,6 +30,8 @@ import { ALIVE_ATTEMPT_STATES } from './attemptLiveness.js'
 import { runInTransaction } from './storage/sqliteUnitOfWork.js'
 import { COHOST_SESSION_SCHEMA } from './storage/cohostSessionSchema.js'
 import { CohostSessionRepository } from './runtime/cohostSessionRepository.js'
+import { COHOST_AGENT_HOME_SCHEMA } from './storage/cohostAgentHomeSchema.js'
+import { CohostAgentHomeRepository } from './runtime/cohostAgentHomeRepository.js'
 import { sessionAttemptFenceSql, type SessionAttemptFence } from './storage/sessionAttemptFence.js'
 
 type SqlRow = Record<string, unknown>
@@ -287,6 +289,7 @@ export class DirectConnectStore {
       const initialize = (): void => {
         this.initializeSqliteTables()
         this.db!.exec(COHOST_SESSION_SCHEMA)
+        this.db!.exec(COHOST_AGENT_HOME_SCHEMA)
       }
       if (isFreshDatabase) runInTransaction(this.db, initialize)
       else initialize()
@@ -1902,6 +1905,10 @@ export class DirectConnectStore {
 
   get cohostSessions(): CohostSessionRepository {
     return new CohostSessionRepository(this.driver)
+  }
+
+  get cohostAgentHomes(): CohostAgentHomeRepository {
+    return new CohostAgentHomeRepository(this.driver)
   }
 
   async updateSessionMetadata(

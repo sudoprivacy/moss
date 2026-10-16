@@ -211,8 +211,9 @@ void test('workspace requests routed to another Moss host do not require that ho
     close() { closes++ },
   } as unknown as NexusVfsClient
   const access = createCohostWorkspaceAccess(session, {
-    async connectCohostRuntime(owner) {
+    async connectCohostRuntime(owner, expectedAgent) {
       assert.equal(owner, session.userId)
+      assert.equal(expectedAgent, agentId)
       return { client, authToken: 'owner-token', identity: null }
     },
     async connectInternalChannel() {
@@ -254,8 +255,9 @@ void test('workspace I/O uses the verified execution descriptor and closes every
   } as unknown as NexusVfsClient
   try {
     const access = createCohostWorkspaceAccess(session, {
-      async connectCohostRuntime(owner) {
+      async connectCohostRuntime(owner, expectedAgent) {
         assert.equal(owner, session.userId)
+        assert.equal(expectedAgent, sessionAgentName(session.userId, session.assistantName))
         return { client, authToken: 'user-token', identity: null }
       },
       async connectInternalChannel(id) {

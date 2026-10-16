@@ -24,16 +24,32 @@ warn() { printf '[moss-install] WARNING: %s\n' "$*" >&2; }
 die() { printf '[moss-install] ERROR: %s\n' "$*" >&2; exit 1; }
 
 runtime_placement_environment() {
-  local env_path="$1" default_manifest="$2" key value assignment
+  local env_path="$1" default_manifest="$2" key value index line
   local keys=(MOSS_RUNTIME_MANIFEST_PATH MOSS_USER_RUNTIME_IMAGE MOSS_USER_RUNTIME_HOST
+    MOSS_USER_RUNTIME_AGENTS_PER_ALLOCATION
     MOSS_SCODE_IMAGE MOSS_K8S_NAMESPACE MOSS_K8S_RUNTIME_CLASS MOSS_K8S_KUBECONFIG
     MOSS_K8S_IMAGE_PULL_POLICY MOSS_K8S_IMAGE_PULL_SECRETS MOSS_K8S_WORKSPACE_STORAGE_CLASS
     MOSS_K8S_WORKSPACE_STORAGE_SIZE MOSS_K8S_POD_READY_TIMEOUT_SEC)
-  for key in "${keys[@]}"; do
+  local assignments=()
+  if [ -f "$env_path" ]; then
+    # Read once without evaluating EnvironmentFile contents. Keep the last
+    # assignment verbatim, including its existing quoting and whitespace.
+    while IFS= read -r line || [ -n "$line" ]; do
+      for index in "${!keys[@]}"; do
+        key="${keys[index]}"
+        if [[ "$line" =~ ^[[:space:]]*$key= ]]; then
+          assignments[index]="$line"
+          break
+        fi
+      done
+    done < "$env_path"
+  fi
+  for index in "${!keys[@]}"; do
+    key="${keys[index]}"
     if [ "${!key+x}" = x ]; then
       value="${!key}"
-    elif [ -f "$env_path" ] && assignment="$(grep -E "^[[:space:]]*$key=" "$env_path" | tail -n 1)" && [ -n "$assignment" ]; then
-      printf '%s\n' "$assignment"
+    elif [ "${assignments[index]+x}" = x ]; then
+      printf '%s\n' "${assignments[index]}"
       continue
     elif [ "$key" = MOSS_RUNTIME_MANIFEST_PATH ] && [ -n "$default_manifest" ]; then
       value="$default_manifest"
