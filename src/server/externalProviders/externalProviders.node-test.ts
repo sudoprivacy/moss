@@ -1,10 +1,10 @@
 import { syntheticTaskSubmission } from '../testing/externalProviderDefinitionFixture.js'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 import { queryOnlyDefinition } from '../testing/externalProviderDefinitionFixture.js'
-import { execFileSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { crashFixture } from '../testing/externalProviderCrashFixture.js'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
@@ -574,7 +574,14 @@ void test('SIGKILL before and after vault writes leaves recoverable onboarding a
   for (const kind of ['onboard', 'rotate']) for (const stage of ['before-write', 'after-write']) {
     const directory = await mkdtemp(join(tmpdir(), 'moss-external-kill-'))
     try {
-      assert.throws(() => execFileSync(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('../testing/externalProviderCrashFixture.ts', import.meta.url)), directory, kind, stage], { stdio: 'pipe', timeout: 10000 }), error => (error as { signal: string }).signal === 'SIGKILL')
+      const crashed = spawnSync(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('../testing/externalProviderCrashFixture.ts', import.meta.url)), directory, kind, stage], { stdio: 'pipe', timeout: 30000 })
+      assert.equal(crashed.error, undefined, 'the fixture must reach its crash point rather than time out')
+      assert.deepEqual(JSON.parse(await readFile(join(directory, 'crash-checkpoint.json'), 'utf8')), { stage, pid: crashed.pid })
+      if (process.platform === 'win32') {
+        // Node implements SIGKILL through TerminateProcess on Windows.
+        assert.equal(crashed.signal, null)
+        assert.equal(crashed.status, 1)
+      } else assert.equal(crashed.signal, 'SIGKILL')
       const f = await crashFixture(directory)
       try {
         await f.service.maintain()

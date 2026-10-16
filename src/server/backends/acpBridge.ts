@@ -94,7 +94,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const stdoutListeners = new Set<(line: string) => void>()
   const stderrListeners = new Set<(line: string) => void>()
   const exitListeners = new Set<Parameters<BackendHandle['onExit']>[0]>()
-  let terminalExit: { code: number | null; signal: NodeJS.Signals | null; error?: Error } | undefined
+  let terminalExit: { code: number | null; signal: NodeJS.Signals | null; error?: Error; isNotified: boolean } | undefined
 
   let rpcId = 1
   let acpSessionId: string | null = null
@@ -117,7 +117,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   // `tool_result` record (with the tool's actual output) can be persisted on
   // stopReason. Without this the transcript records the call but never its
   // output.
-  const currentTurnToolOutput = new Map<string, { content: unknown; isError: boolean }>()
+  const currentTurnToolOutput = new Map<string, { content: string; isError: boolean }>()
 
   // Pending RPC requests waiting for response
   const pendingRpcRequests = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timeoutId: NodeJS.Timeout }>()
@@ -282,7 +282,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     emitStdout(JSON.stringify({
       type: 'tool_use', sessionId, uuid: toolCallId, parentUuid: lastPersistedUuid,
       isSidechain: false, name: toolInfo.name, tool_use_id: toolCallId,
-      status: 'completed', timestamp: new Date().toISOString(), cwd,
+      status: output?.isError ? 'failed' : 'completed', timestamp: new Date().toISOString(), cwd,
       userType: 'external', version: 'unknown',
     }) + '\n')
     const result = {
@@ -296,6 +296,28 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     lastPersistedUuid = result.uuid
     currentTurnToolCalls.delete(toolCallId)
     currentTurnToolOutput.delete(toolCallId)
+  }
+
+  const interruptPendingTools = (): void => {
+    for (const toolCallId of currentTurnToolCalls.keys()) {
+      const output = currentTurnToolOutput.get(toolCallId)?.content
+      const interruption = 'Tool execution was interrupted before a final result was received. Side effects may already have occurred. Inspect the current state before retrying.'
+      currentTurnToolOutput.set(toolCallId, {
+        content: output ? `${output}\n\n${interruption}` : interruption,
+        isError: true,
+      })
+      completeToolCall(toolCallId)
+    }
+  }
+
+  const persistPartialAssistant = (): void => {
+    if (currentAssistantText && !currentTurnUsedSendUserMessage) {
+      persistThoughtText()
+      persistAssistantText(currentAssistantText, { partial: true })
+      currentAssistantText = ''
+      currentThoughtText = ''
+      currentTurnAssistantUuid = null
+    }
   }
 
   const sendMessage = (message: SessionRpcMessage): void => {
@@ -636,6 +658,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   }
 
   const onMessage = (parsed: any): void => {
+      if (terminalExit) return
       try {
         if (parsed.id === 'm-init') {
           if (parsed.error) throw new Error(`ACP initialization failed: ${parsed.error.message}`)
@@ -730,7 +753,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           currentThoughtText = ''
           currentTurnAssistantUuid = null
           currentTurnUsedSendUserMessage = false
-          currentTurnToolCalls.clear()
+          interruptPendingTools()
           currentTurnToolOutput.clear()
           reevaluateBusy()
           return
@@ -739,8 +762,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         if (parsed.result?.stopReason) {
           process.stderr.write(`[AcpBridge] Turn Ended. Unblocking UI...\n`)
 
+          if (parsed.result.stopReason === 'cancelled') interruptPendingTools()
           // Older engines may report output without a terminal tool status.
-          for (const toolCallId of currentTurnToolCalls.keys()) completeToolCall(toolCallId)
+          else for (const toolCallId of currentTurnToolCalls.keys()) completeToolCall(toolCallId)
           // Clear tracked tool calls / captured output for next turn
           currentTurnToolCalls.clear()
           currentTurnToolOutput.clear()
@@ -1135,7 +1159,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     },
     onClose(code, signal, error) {
       if (terminalExit) return
-      terminalExit = { code, signal, error }
+      terminalExit = { code, signal, error, isNotified: false }
+      interruptPendingTools()
+      persistPartialAssistant()
       setBusy(false)
       const failure = error ?? new Error('ACP connection closed')
       for (const pending of pendingRpcRequests.values()) {
@@ -1147,7 +1173,15 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       pendingPermissions.clear()
       pendingAskUserQuestions.clear()
       if (error) for (const listener of stderrListeners) listener(`${error.message}\n`)
-      for (const listener of exitListeners) listener(code, signal, error)
+      // The runner may exit when notified. Flush retained partial results
+      // before that notification, including subscribers added during the flush.
+      void transcriptWrites.then(() => {
+        const listeners = [...exitListeners]
+        terminalExit!.isNotified = true
+        for (const listener of listeners) {
+          if (exitListeners.has(listener)) listener(code, signal, error)
+        }
+      })
     },
   })
 
@@ -1331,7 +1365,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     },
     onExit(l) {
       exitListeners.add(l)
-      if (terminalExit) queueMicrotask(() => {
+      if (terminalExit?.isNotified) queueMicrotask(() => {
         if (exitListeners.has(l)) l(terminalExit!.code, terminalExit!.signal, terminalExit!.error)
       })
       return () => exitListeners.delete(l)
@@ -1368,13 +1402,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       finally {
         // Closing a live stream can precede its prompt response. Keep the text
         // already shown to the user even when no stopReason arrives.
-        if (currentAssistantText && !currentTurnUsedSendUserMessage) {
-          persistThoughtText()
-          persistAssistantText(currentAssistantText, { partial: true })
-          currentAssistantText = ''
-          currentThoughtText = ''
-          currentTurnAssistantUuid = null
-        }
+        interruptPendingTools()
+        persistPartialAssistant()
         await transcriptWrites
       }
 
