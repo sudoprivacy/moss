@@ -282,9 +282,13 @@ export class ZoneManagementService {
                 ? 'sync_failed' // grant 引用在而远端非 active（404/revoked）——binding 授权异常，不得落 'syncing' 掩盖
                 : null // grant 引用未落库：对账不写 sync_status（洗白根除）
     return {
-      observed_display_name: zoneView.display_name,
-      observed_zone_status: zoneView.status,
-      observed_revision: zoneView.revision,
+      // 中②：zone 404 时 zone 为 null——快照构造不得触碰 zoneView 的属性
+      // （syncStatus 三元链已由 detached/zoneNotFound 分支短路，读
+      // zoneView.status 的分支在 zone=null 时不可达），展示列置 null，让
+      // sync_status='sync_failed' 正常落库纠正本地状态。
+      observed_display_name: zone ? zoneView.display_name : null,
+      observed_zone_status: zone ? zoneView.status : null,
+      observed_revision: zone ? zoneView.revision : null,
       observed_grant_status: grant?.status ?? null,
       observed_grant_source: grant?.sourceType ?? null,
       grant_expires_at_ms: grant?.expires_at ? Date.parse(grant.expires_at) : null,

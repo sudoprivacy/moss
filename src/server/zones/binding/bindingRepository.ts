@@ -102,6 +102,25 @@ function mapOutbox(row: SqlRow): ZoneBindingOutboxRow {
 }
 
 /**
+ * default 候选 zone_id 是否已被**其他 org** 的 binding 行占用。
+ *
+ * 高①碰撞判定单点（migrateFromJson 迁移预判与 reconciler 收敛兜底共用）：
+ * 不区分 desired_state/purpose——detached/显式共享的 zone 数据仍在 Nexus
+ * 侧，挂载即共享，一律视为占用。同 org 的占用（幂等重试/revive）不算。
+ */
+export async function isZoneIdOccupiedByOtherOrg(
+  driver: DbDriver,
+  input: { zoneId: string; nexusDeploymentId: string; orgId: string },
+): Promise<boolean> {
+  const row = await driver.get(
+    `SELECT 1 AS occupied FROM org_zone_bindings
+     WHERE zone_id = ? AND nexus_deployment_id = ? AND org_id != ? LIMIT 1`,
+    [input.zoneId, input.nexusDeploymentId, input.orgId],
+  )
+  return row != null
+}
+
+/**
  * 在 org 创建事务内写入 default binding intent + provision outbox + audit。
  *
  * 调用点：AuthCenterDb.createOrganization（单点汇聚全部 7 个 Org 入口）。

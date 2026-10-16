@@ -27,6 +27,7 @@ import {
   insertDefaultBindingIntent,
   insertDetachIntent,
   insertManagedBindingIntent,
+  isZoneIdOccupiedByOtherOrg,
   reviveBindingIntent,
 } from '../binding/bindingRepository.js'
 import { ZoneBindingReconciler } from '../binding/bindingService.js'
@@ -41,7 +42,11 @@ import {
   NexusZoneUnknownError,
   type ZoneOperationRef,
 } from '../../nexus/nexusZoneClient.js'
-import { reconcilePendingNexusSessions } from '../runtime/sessionZoneBridge.js'
+import {
+  endZoneRunsForSettledAttempts,
+  reconcilePendingNexusSessions,
+  reconcileRunnerGeneration,
+} from '../runtime/sessionZoneBridge.js'
 
 let raw: DatabaseSync
 let db: AuthCenterDb
@@ -215,7 +220,7 @@ describe('zone_binding_outbox claim/fence lifecycle', () => {
 class FakeZoneClient {
   readonly zoneCalls: Array<{ zoneId: string; displayName?: string; key: string }> = []
   readonly grantCalls: Array<{ zoneId: string; grantee: string; sourceId: string; resourcePrefixes?: string[]; key: string }> = []
-  script: Array<'ok' | 'unknown' | 'retryable' | 'fatal'> = ['ok']
+  script: Array<'ok' | 'unknown' | 'retryable' | 'fatal' | 'already-exists'> = ['ok']
 
   async createZone(input: { zoneId: string; displayName?: string }, key: string): Promise<ZoneOperationRef> {
     this.zoneCalls.push({ zoneId: input.zoneId, displayName: input.displayName, key })
@@ -223,6 +228,7 @@ class FakeZoneClient {
     if (step === 'unknown') throw new NexusZoneUnknownError('simulated timeout')
     if (step === 'retryable') throw new NexusZoneApiError('busy', 'ZONE_QUORUM_UNAVAILABLE', true, 503)
     if (step === 'fatal') throw new NexusZoneApiError('bad id', 'INVALID_ZONE_ID', false, 400)
+    if (step === 'already-exists') throw new NexusZoneApiError('zone exists', 'ZONE_ALREADY_EXISTS', false, 409)
     return { operation_id: 'zone-op-1', action: 'create', zone_id: input.zoneId, grant_id: null, state: 'succeeded', step: 'done', retryable: false, error: null }
   }
 
@@ -289,6 +295,51 @@ describe('reconciler', () => {
     assert.equal(second.claimed, 0)
   })
 
+  it('refuses ZONE_ALREADY_EXISTS convergence when another org occupies the candidate (高①B)', async () => {
+    // 两个 org id 去连字符后同 32hex —— default 候选碰撞（高①根因）
+    const holderId = 'aaaaaaaa-0000-4000-8000-000000000001'
+    const colliderId = 'aaaaaaaa000040008000000000000001'
+    await db.createOrganization(holderId, 'Holder', Date.now())
+    // holder 先正常收敛（zone 创建 + grant 落地），保证 collider 的
+    // createZone 真正命中 ZONE_ALREADY_EXISTS 且占用行已存在
+    const first = await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    assert.equal(first.completed, 1)
+    await db.createOrganization(colliderId, 'Collider', Date.now())
+    // 场景前提：唯一约束含 org_id，两条碰撞 binding 共存（高①已实证的约束事实）
+    const zoneIds = raw.prepare(`SELECT DISTINCT zone_id FROM org_zone_bindings`).all() as Array<{ zone_id: string }>
+    assert.equal(zoneIds.length, 1, 'both bindings must target the same colliding zone id')
+    const fake = new FakeZoneClient()
+    fake.script = ['already-exists']
+    const result = await makeReconciler(fake).reconcileOnce()
+    assert.equal(result.failed, 1)
+    // 关键：collider 不被授予 grant —— 自动路径不得跨 org 共享 Zone
+    assert.equal(fake.grantCalls.length, 0)
+    const collider = raw.prepare(
+      `SELECT sync_status, last_error_code FROM org_zone_bindings WHERE org_id = ?`,
+    ).get(colliderId) as Record<string, unknown>
+    assert.equal(collider.sync_status, 'sync_failed')
+    assert.equal(collider.last_error_code, 'ZONE_ID_COLLISION')
+    // holder 的收敛成果不受影响
+    const holder = raw.prepare(
+      `SELECT sync_status FROM org_zone_bindings WHERE org_id = ?`,
+    ).get(holderId) as Record<string, unknown>
+    assert.equal(holder.sync_status, 'active')
+  })
+
+  it('keeps ZONE_ALREADY_EXISTS legal for the same org (idempotent retry, 高①B)', async () => {
+    await db.createOrganization('bbbbbbbb-0000-4000-8000-000000000001', 'Idem', Date.now())
+    const fake = new FakeZoneClient()
+    fake.script = ['already-exists']
+    const result = await makeReconciler(fake).reconcileOnce()
+    // 同 org 幂等重试：无跨 org 占用 → already-exists 仍是合法收敛，grant 照发
+    assert.equal(result.completed, 1)
+    assert.equal(fake.grantCalls.length, 1)
+    const binding = raw.prepare(
+      `SELECT sync_status FROM org_zone_bindings`,
+    ).get() as Record<string, unknown>
+    assert.equal(binding.sync_status, 'active')
+  })
+
   it('unknown network outcome marks the binding unknown and keeps the row retryable', async () => {
     await db.createOrganization('88888888-8888-4888-8888-888888888888', 'Theta', Date.now())
     const fake = new FakeZoneClient()
@@ -312,6 +363,49 @@ describe('reconciler', () => {
       .get()) as Record<string, unknown>
     assert.equal(binding.sync_status, 'sync_failed')
     assert.equal(binding.last_error_code, 'INVALID_ZONE_ID')
+  })
+})
+
+describe('migrateFromJson default-zone collision guard (高①A)', () => {
+  it('skips the second default binding when two legacy org ids collide on one zone candidate', async () => {
+    await db.migrateFromJson({
+      version: 3,
+      issuer: 'legacy-moss',
+      jwtSecret: 'secret',
+      organizations: [
+        // 去连字符后同 32hex —— 唯一真实碰撞面（JSON 存量 org.id 任意字符串）
+        { id: 'aaaaaaaa-0000-4000-8000-000000000001', name: 'OrgA', extOrgId: null, createdAt: 1 },
+        { id: 'aaaaaaaa000040008000000000000001', name: 'OrgB', extOrgId: null, createdAt: 2 },
+      ],
+      users: [],
+      apiKeys: [],
+    })
+    const orgs = raw.prepare(`SELECT COUNT(*) AS c FROM organizations`).get() as { c: number }
+    assert.equal(orgs.c, 2, 'both org rows migrate — 迁移不回滚（低-15② 语义）')
+    const bindings = raw.prepare(
+      `SELECT org_id, zone_id FROM org_zone_bindings`,
+    ).all() as Array<{ org_id: string; zone_id: string }>
+    assert.equal(bindings.length, 1, 'collision skips the second default binding write')
+    assert.equal(bindings[0]!.zone_id, 'org-aaaaaaaa000040008000000000000001')
+    const outbox = raw.prepare(`SELECT COUNT(*) AS c FROM zone_binding_outbox`).get() as { c: number }
+    assert.equal(outbox.c, 1, 'no provision outbox row for the skipped binding')
+  })
+
+  it('isZoneIdOccupiedByOtherOrg ignores same-org occupancy (revive/idempotent semantics)', async () => {
+    const orgId = 'cccccccc-0000-4000-8000-000000000001'
+    await db.createOrganization(orgId, 'Solo', Date.now())
+    // 同 org 的既有 binding（detached 复活 / 幂等重试）不算跨 org 占用
+    assert.equal(await isZoneIdOccupiedByOtherOrg(db.driver, {
+      zoneId: 'org-cccccccc000040008000000000000001',
+      nexusDeploymentId: 'local',
+      orgId,
+    }), false)
+    // 其他 org 视角查询同一候选 → 占用
+    assert.equal(await isZoneIdOccupiedByOtherOrg(db.driver, {
+      zoneId: 'org-cccccccc000040008000000000000001',
+      nexusDeploymentId: 'local',
+      orgId: 'dddddddd-0000-4000-8000-000000000002',
+    }), true)
   })
 })
 
@@ -465,6 +559,32 @@ describe('ZoneDelegationService', () => {
     assert.equal(next.delegationId, 'del-2')
   })
 
+  it('misses the cache after membership_revision changes and re-issues (高②)', async () => {
+    const { orgId, userId } = await seedActiveOrgWithUser()
+    const fake = new FakeDelegationClient()
+    const service = new ZoneDelegationService({
+      driver: db.driver,
+      client: fake as unknown as NexusZoneClient,
+      config: CONFIG,
+    })
+    await service.issueForOrgUser({ orgId, userId })
+    await service.issueForOrgUser({ orgId, userId })
+    assert.equal(fake.issued.length, 1, 'unchanged revision still reuses the cached delegation')
+    // db 层语义：role/status 实际变化必 bump revision（管理员路径外直改模拟
+    // 同一效果——与 p0E2E 场景 8 的直改手法一致）
+    raw.prepare(
+      `UPDATE users SET membership_revision = membership_revision + 1 WHERE id = ?`,
+    ).run(userId)
+    const reissued = await service.issueForOrgUser({ orgId, userId })
+    assert.equal(fake.issued.length, 2, 'revision bump must invalidate the cache entry')
+    assert.equal(reissued.delegationId, 'del-2', 're-issue returns a fresh delegation')
+    assert.equal(
+      (fake.issued[1] as { membershipVersion: string }).membershipVersion,
+      'r1',
+      're-issued delegation carries the bumped revision',
+    )
+  })
+
   it('refuses suspended members and non-active bindings', async () => {
     const { orgId, userId } = await seedActiveOrgWithUser()
     const service = new ZoneDelegationService({
@@ -589,6 +709,78 @@ describe('session home-zone conflict quarantine', () => {
     assert.equal(row.home_zone_sync_error, 'HOME_ZONE_CONFLICT:other-zone')
     assert.equal(await reconcilePendingNexusSessions(db.driver, client), 0)
     assert.equal(creates, 1, 'quarantined conflicts require an explicit error clear before retry')
+  })
+})
+
+describe('runner generation bridge & settled-run reconciliation (中①)', () => {
+  it('best-effort cancels the run when startRuntimeRun outcome is unknown (响应丢失)', async () => {
+    const cancels: string[] = []
+    const client = {
+      async startRuntimeRun() {
+        // 非 NexusZoneApiError：请求可能已达远端并固化 run（OUTCOME_UNKNOWN）
+        throw new Error('simulated response loss')
+      },
+      async getRuntimeRun() {
+        throw new Error('unreachable in this scenario')
+      },
+      async cancelRuntimeRun(pid: string, _reason: string) {
+        cancels.push(pid)
+      },
+    } as unknown as NexusZoneClient
+    const result = await reconcileRunnerGeneration(client, {
+      attemptId: 'att-ghost',
+      sessionId: 'sess-1',
+      homeZoneId: 'zone-home',
+      delegationRef: 'deleg-ref',
+    })
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.errorCode, 'OUTCOME_UNKNOWN')
+    }
+    // 修复点：响应丢失（started 未置位）也必须尝试取消——pid 确定性派生
+    assert.deepEqual(cancels, ['moss-att-ghost'])
+  })
+
+  it('settles lost attempts whose execution_zone_id never landed (扩集)', async () => {
+    raw.exec(`
+      CREATE TABLE sessions (session_id TEXT PRIMARY KEY, home_zone_id TEXT);
+      INSERT INTO sessions (session_id, home_zone_id) VALUES ('sess-1', 'zone-home'), ('sess-2', 'zone-home');
+      CREATE TABLE session_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        runtime_state TEXT NOT NULL,
+        execution_zone_id TEXT,
+        started_at INTEGER NOT NULL,
+        nexus_run_ended_at INTEGER
+      );
+      INSERT INTO session_attempts (attempt_id, session_id, generation, runtime_state, execution_zone_id, started_at) VALUES
+        ('att-lost-nozone', 'sess-1', 1, 'lost', NULL, 100),
+        ('att-lost-zoned',  'sess-2', 1, 'lost', 'zone-home', 200),
+        ('att-running',     'sess-1', 2, 'running', 'zone-home', 300);
+    `)
+    const cancelled: string[] = []
+    const client = {
+      async cancelRuntimeRun(pid: string, _reason: string) {
+        cancelled.push(pid)
+        // run 不存在（从未 zoned 的 lost 行）或已终止——404 幂等
+        throw new NexusZoneApiError('run not found', 'RUN_NOT_FOUND', false, 404)
+      },
+      async getRuntimeRun() {
+        throw new NexusZoneApiError('run not found', 'RUN_NOT_FOUND', false, 404)
+      },
+    } as unknown as NexusZoneClient
+    const ended = await endZoneRunsForSettledAttempts(db.driver, client, 20)
+    // 修复点：lost 且 execution_zone_id 为 NULL 的行（响应丢失/落库失败路径）
+    // 进入扫描集；running 行不受影响
+    assert.equal(ended, 2)
+    assert.deepEqual(cancelled.sort(), ['moss-att-lost-nozone', 'moss-att-lost-zoned'].sort())
+    const rows = raw.prepare(
+      `SELECT attempt_id, nexus_run_ended_at FROM session_attempts ORDER BY attempt_id`,
+    ).all() as Array<{ attempt_id: string; nexus_run_ended_at: number | null }>
+    assert.ok(rows.find((r) => r.attempt_id === 'att-lost-nozone')!.nexus_run_ended_at !== null)
+    assert.ok(rows.find((r) => r.attempt_id === 'att-lost-zoned')!.nexus_run_ended_at !== null)
+    assert.equal(rows.find((r) => r.attempt_id === 'att-running')!.nexus_run_ended_at, null)
   })
 })
 
@@ -1069,6 +1261,42 @@ describe('ZoneManagementService observed snapshot persistence (B-3)', () => {
     assert.equal(bound!.sync_status, 'pending', 'bound row without grant reference must not be whitewashed')
     assert.equal(detached!.sync_status, 'detached')
     assert.ok(detached!.observed_at !== null)
+  })
+
+  it('zone 404 settles to sync_failed without throwing (中②)', async () => {
+    // grant 引用已落库的 bound 行 + 远端 zone/grant 双 404（zone 被删后的
+    // 真实形态）——修复前：zoneView=null 上读 display_name 抛 TypeError，
+    // 手动刷新 500、后台对账跳过写回；修复后：sync_failed 落库纠正本地状态。
+    raw.prepare(
+      `UPDATE org_zone_bindings SET sync_status = 'active', nexus_grant_id = 'grant-obs-1'`,
+    ).run()
+    const notFoundClient = {
+      async getZone() {
+        throw new NexusZoneApiError('zone not found', 'ZONE_NOT_FOUND', false, 404)
+      },
+      async getGrant() {
+        throw new NexusZoneApiError('grant not found', 'GRANT_NOT_FOUND', false, 404)
+      },
+    } as unknown as NexusZoneClient
+    const svc = new ZoneManagementService({
+      driver: db.driver,
+      client: notFoundClient,
+      config: CONFIG,
+    })
+    const binding = (await svc.listBindings(viewer))[0]
+    // 手动刷新不再抛异常
+    await svc.refreshBinding(binding.binding_id, viewer)
+    const row = raw.prepare(
+      `SELECT sync_status, observed_display_name, observed_zone_status, observed_at
+       FROM org_zone_bindings WHERE binding_id = ?`,
+    ).get(binding.binding_id) as Record<string, unknown>
+    assert.equal(row.sync_status, 'sync_failed')
+    assert.equal(row.observed_display_name, null, 'zone 404 的展示列置 null')
+    assert.equal(row.observed_zone_status, null)
+    assert.ok(row.observed_at !== null, 'snapshot write-back happened')
+    // 后台对账同样收敛（行级不再因异常跳过）
+    const written = await svc.reconcileObservedSnapshot()
+    assert.equal(written, 1)
   })
 })
 

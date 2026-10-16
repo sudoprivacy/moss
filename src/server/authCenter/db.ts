@@ -10,7 +10,7 @@ import type { RechargeOrder, RechargeSyncStatus, RefundRecord } from '../credits
 import { runInTransaction } from '../storage/sqliteUnitOfWork.js'
 import { ZONE_BINDING_TABLES_DDL } from '../zones/binding/schema.js'
 import { resolveZoneBindingConfig, type ZoneBindingConfig } from '../zones/binding/config.js'
-import { insertDefaultBindingIntent } from '../zones/binding/bindingRepository.js'
+import { insertDefaultBindingIntent, isZoneIdOccupiedByOtherOrg } from '../zones/binding/bindingRepository.js'
 import { tryDefaultZoneIdCandidate } from '../zones/binding/zoneIdPolicy.js'
 
 export type AuthCenterOrganization = {
@@ -866,9 +866,10 @@ export class AuthCenterDb {
         INSERT INTO organizations (id, name, ext_org_id, created_at) VALUES (?, ?, ?, ?)
       `, [id, name, extOrgId, createdAt])
       // 低-15②：skipZoneBinding 仅供存量迁移（migrateFromJson）使用——org id
-      // 含 zone-id 非法字符的历史数据跳过 binding 写入（org 行照插，binding
-      // 由 backfill 补），不再让 defaultZoneIdCandidate 的 throw 连 org INSERT
-      // 一并回滚。其余 6 个入口不传该参数，行为不变。
+      // 含 zone-id 非法字符的历史数据、或 default zone 候选被其他 org 占用
+      // （高①碰撞，zoneIdPolicy 去连字符+截断所致）时跳过 binding 写入（org
+      // 行照插，binding 由 backfill 补），不再让 defaultZoneIdCandidate 的
+      // throw 连 org INSERT 一并回滚。其余 6 个入口不传该参数，行为不变。
       if (!options.skipZoneBinding) {
         await insertDefaultBindingIntent(this.driver, {
           orgId: id,
@@ -2052,10 +2053,25 @@ export class AuthCenterDb {
       // 迁移（与 backfill 的 invalid 语义对齐）。
       for (const org of jsonStore.organizations) {
         const zoneIdCandidate = tryDefaultZoneIdCandidate(org.id)
+        let skipZoneBinding: boolean
         if (!zoneIdCandidate.ok) {
           console.warn(`[migrateFromJson] org ${org.id} 的 zone-id 候选非法（${zoneIdCandidate.refusal.kind}），跳过 default binding 写入——由 zone-backfill 补齐`)
+          skipZoneBinding = true
+        } else {
+          // 高①A：候选合法仍可能与其他 org 碰撞（zoneIdPolicy 去连字符+截断，
+          // JSON 存量 org.id 为任意字符串）——同事务内可见先插入 org 的 binding
+          // 行，占用即跳过，语义与候选非法一致（org 行照插，绝不自动共享 Zone）。
+          const zoneOccupied = await isZoneIdOccupiedByOtherOrg(this.driver, {
+            zoneId: zoneIdCandidate.zoneId,
+            nexusDeploymentId: this.#zoneBindingConfig.nexusDeploymentId,
+            orgId: org.id,
+          })
+          if (zoneOccupied) {
+            console.warn(`[migrateFromJson] org ${org.id} 的 default zone 候选 ${zoneIdCandidate.zoneId} 已被其他组织占用，跳过 default binding 写入`)
+          }
+          skipZoneBinding = zoneOccupied
         }
-        await this.createOrganization(org.id, org.name, org.createdAt, null, { skipZoneBinding: !zoneIdCandidate.ok })
+        await this.createOrganization(org.id, org.name, org.createdAt, null, { skipZoneBinding })
       }
 
       // Migrate departments

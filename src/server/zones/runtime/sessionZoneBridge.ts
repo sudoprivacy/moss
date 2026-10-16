@@ -216,10 +216,12 @@ export type RunnerGenerationReconcileResult =
  * runner generation 对账（R5.2）：以 attempt 为 pid 在 Nexus 固化 execution
  * zone（默认 home zone），回读校验。
  *
- * 低-15④/M-5：start 成功但后续失败（回读超时等）时立即 best-effort 取消
- * 该 run——"幽灵 run"（Nexus 侧已固化、本地 markAttemptLost 后不再有任何
- * 自动取消路径）不再产生；错误码随结果带出，供 markAttemptLost 的
- * error_text 记录（不再 catch-all 吞根因）。
+ * 低-15④/M-5/中①：任何失败（回读超时、startRuntimeRun 响应丢失——请求
+ * 可能已达远端并固化 run）都立即 best-effort 取消该 run——"幽灵 run"
+ * （Nexus 侧已固化、本地 markAttemptLost 后不再有任何自动取消路径）不再
+ * 产生；cancel 也丢失的极端残余由 endZoneRunsForSettledAttempts 的 lost
+ * 行扩集兜底。错误码随结果带出，供 markAttemptLost 的 error_text 记录
+ * （不再 catch-all 吞根因）。
  */
 export async function reconcileRunnerGeneration(
   client: NexusZoneClient,
@@ -241,7 +243,6 @@ export async function reconcileRunnerGeneration(
   ) {
     throw new Error('cross-Zone execution requires decision reason and policy version')
   }
-  let started = false
   try {
     await client.startRuntimeRun({
       pid,
@@ -251,7 +252,6 @@ export async function reconcileRunnerGeneration(
       decisionReason: input.decisionReason,
       policyVersion: input.policyVersion,
     })
-    started = true
     const readBack = await client.getRuntimeRun(pid)
     return {
       ok: true,
@@ -259,9 +259,11 @@ export async function reconcileRunnerGeneration(
       pid,
     }
   } catch (error) {
-    if (started) {
-      try { await client.cancelRuntimeRun(pid, 'terminate') } catch { /* best-effort */ }
-    }
+    // 中①：无条件 best-effort cancel——回读失败与响应丢失（OUTCOME_UNKNOWN，
+    // 请求可能已达远端并固化 run）同样可能在 Nexus 留下无人收尾的 run。pid
+    // 确定性派生，对从未创建的 run cancel 得到 404，幂等无害；cancel 也丢的
+    // 极端残余由 endZoneRunsForSettledAttempts 的 lost 行扩集兜底。
+    try { await client.cancelRuntimeRun(pid, 'terminate') } catch { /* best-effort */ }
     return {
       ok: false,
       errorCode: error instanceof NexusZoneApiError ? error.code : 'OUTCOME_UNKNOWN',
@@ -381,6 +383,11 @@ export async function parkRunsForZone(
  * nexus_run_ended_at 的行，逐个 cancelRuntimeRun(terminate) 后回填标记。
  * 失败（Nexus 不可达）下轮重试（未标记的行仍在查询集内）；对不存在的
  * run 的 404 也标记（幂等语义，宁可标记）。
+ *
+ * 中①：lost 行不受 execution_zone_id IS NOT NULL 限制——startRuntimeRun
+ * 响应丢失、或 ok 后 execution_zone_id 落库失败时该列为 NULL，但 pid
+ * （attemptId 确定性派生）对应的 run 可能已在 Nexus 固化，必须纳入收尾
+ * （对从未 zoned 的 lost 行 cancel 得 404，幂等标记后不再入扫描集）。
  */
 export async function endZoneRunsForSettledAttempts(
   driver: DbDriver,
@@ -389,8 +396,8 @@ export async function endZoneRunsForSettledAttempts(
 ): Promise<number> {
   const rows = await driver.all(
     `SELECT attempt_id FROM session_attempts
-     WHERE execution_zone_id IS NOT NULL
-       AND nexus_run_ended_at IS NULL
+     WHERE nexus_run_ended_at IS NULL
+       AND (execution_zone_id IS NOT NULL OR runtime_state = 'lost')
        AND runtime_state IN ('stopped', 'failed', 'lost')
      ORDER BY started_at
      LIMIT ?`,

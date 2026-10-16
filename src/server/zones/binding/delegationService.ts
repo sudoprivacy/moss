@@ -144,8 +144,10 @@ export class ZoneDelegationService {
     const purpose = input.purpose ?? 'data-access'
     const scopeRules = input.scopeRules ?? []
     // M-8：cacheKey 含 ttlS——先 ttl=3600 再 ttl=60 命中缓存返回 3600s 的
-    // delegation，请求语义与返回物不符。
-    const cacheKey = `${input.orgId}:${input.userId}:${audience}:${ttlS}:${JSON.stringify([
+    // delegation，请求语义与返回物不符。含 membership_revision——role/status
+    // 变化（db 层必 bump）后旧条目自然 miss 重签，换发不再返回 Nexus 必拒的
+    // 失效委托（安全兜底仍是 nexus verify 复查，此处修的是可用性）。
+    const cacheKey = `${input.orgId}:${input.userId}:${audience}:${ttlS}:${Number(user.membership_revision)}:${JSON.stringify([
       String(binding.nexus_grant_id),
       purpose,
       scopeRules,

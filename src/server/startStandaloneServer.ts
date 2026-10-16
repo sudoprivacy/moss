@@ -636,6 +636,9 @@ async function finishStandaloneServerStartup(
   // management endpoint is not configured — bindings stay pending, which is
   // the specified offline behavior.
   const zoneBindingConfig = resolveZoneBindingConfig()
+  // 中③：声明提升到 if 块外——stop() 需要清理它（此前仅在块内 const + unref，
+  // stop 后进程仍存活时回调会访问已 close 的 store）。仅在 enabled 时赋值。
+  let zoneBindingTimer: ReturnType<typeof setInterval> | undefined
   if (zoneBindingConfig.zoneBindingEnabled) {
     // 低-7：runner 路径（runnerZoneContext）与 API 路径共享同一个 delegation
     // 实例——registry 复用与 membership revoke 钩子对 runner 生效。
@@ -658,7 +661,7 @@ async function finishStandaloneServerStartup(
     let zoneObservedTickCount = 0
     // 低-15⑤：补写轮防重入（上一轮黑洞超时时 pass 不堆叠）。
     let sessionsBackfillInFlight = false
-    const zoneBindingTimer = setInterval(() => {
+    const timer = setInterval(() => {
       // P1a（§8.10 R5.1）：Nexus session 权威写入补写（离线期创建的 session）。
       if (!sessionsBackfillInFlight) {
         sessionsBackfillInFlight = true
@@ -700,7 +703,8 @@ async function finishStandaloneServerStartup(
         })
       }
     }, 30_000)
-    zoneBindingTimer.unref?.()
+    timer.unref?.()
+    zoneBindingTimer = timer
   }
 
   let stopped = false
@@ -724,6 +728,9 @@ async function finishStandaloneServerStartup(
     clearInterval(heartbeatTimer)
     clearInterval(adoptionTimer)
     clearInterval(k8sGcTimer)
+    // 中③：zone binding 对账定时器与上三个同批清理——回调持有 store.driver，
+    // store.close() 后不得再触发。
+    if (zoneBindingTimer !== undefined) clearInterval(zoneBindingTimer)
     authService.destroy()
     if (config.docker?.containerMode === 'user') {
       try {

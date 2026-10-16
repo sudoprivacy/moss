@@ -49,6 +49,13 @@ export class OrganizationIdentityService {
      * 此处只加速收敛）。
      */
     private readonly onUserOrgChanged?: (fromOrgId: string, userId: string) => void,
+    /**
+     * 高②：role/status 实际变化的 membership revoke 钩子（可选——与低-6 同
+     * 模式）。触发条件与 db 层 membership_revision 的 bump 条件（CASE WHEN
+     * role <> ? OR status <> ?）同构；revokeForUser 按 userId 匹配，顺带清空
+     * delegation registry 里按旧 revision 缓存的条目。
+     */
+    private readonly onMembershipChanged?: (orgId: string, userId: string) => void,
   ) {}
 
   createOrganization(input: {
@@ -267,6 +274,15 @@ export class OrganizationIdentityService {
         role: patch.role,
         orgId: patch.orgId,
       })
+      // 高②：role/status 实际变化（与 db 层 revision bump 条件同构）→
+      // membership revoke（清缓存 + best-effort revoke，失败由 nexus verify
+      // 复查兜底）。与低-6 的 org 移动钩子可同时触发，revokeForUser 幂等。
+      if (
+        (patch.role !== undefined && patch.role !== user.role)
+        || (patch.status !== undefined && patch.status !== user.status)
+      ) {
+        this.onMembershipChanged?.(user.orgId, userId)
+      }
       if (patch.orgId && patch.orgId !== user.orgId) {
         await this.repository.moveUserOrganization(userId, patch.orgId)
         // 低-6：跨 org 移动后旧 org 名下的 delegation 主动 revoke（钩子在

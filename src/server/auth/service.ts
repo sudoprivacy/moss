@@ -477,6 +477,13 @@ export class AuthService {
             void this.zoneDelegation?.revokeForUser(fromOrgId, userId).catch(() => {})
           }
         : undefined,
+      // 高②：role/status 实际变化同样使既有 delegation（及 registry 里按旧
+      // revision 缓存的条目）失效——与低-6 同模式 revoke（best-effort）。
+      this.zoneDelegation
+        ? (orgId: string, userId: string) => {
+            void this.zoneDelegation?.revokeForUser(orgId, userId).catch(() => {})
+          }
+        : undefined,
     )
   }
 

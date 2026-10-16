@@ -26,6 +26,7 @@ import {
   completeProvision,
   failOutboxAttempt,
   getBinding,
+  isZoneIdOccupiedByOtherOrg,
   markBindingSyncing,
   type ZoneBindingOutboxRow,
 } from './bindingRepository.js'
@@ -164,6 +165,28 @@ export class ZoneBindingReconciler {
         )
       } catch (error) {
         if (error instanceof NexusZoneApiError && error.code === 'ZONE_ALREADY_EXISTS') {
+          // 高①B 收敛兜底：候选 zone 已被**其他 org** 的 binding 占用（迁移/
+          // backfill 写入的碰撞行）时，不得视为合法收敛——继续 createGrant 会
+          // 在无管理操作的情况下把 Zone 自动共享给第二个 org。与
+          // migrateFromJson 的迁移预判（isZoneIdOccupiedByOtherOrg 单点）同源。
+          const zoneOccupied = await isZoneIdOccupiedByOtherOrg(this.driver, {
+            zoneId: binding.zone_id,
+            nexusDeploymentId: this.config.nexusDeploymentId,
+            orgId: binding.org_id,
+          })
+          if (zoneOccupied) {
+            const failed = await failOutboxAttempt(this.driver, {
+              outboxId: row.id,
+              fence: row.fence,
+              bindingId: binding.binding_id,
+              errorCode: 'ZONE_ID_COLLISION',
+              unknownOutcome: false,
+              retryable: false,
+              now: Date.now(),
+              baseBackoffMs: this.baseBackoffMs,
+            })
+            return failed ? 'failed' : 'retried'
+          }
           zoneOp = { operation_id: '', action: 'create', zone_id: binding.zone_id, grant_id: null, state: 'succeeded', step: 'already-exists', retryable: false, error: null }
         } else {
           throw error
