@@ -187,6 +187,13 @@ void test('startup failures are actionable, safe, and distinct for new attempts'
   assert.doesNotMatch(runner.message, /private|secret/)
 })
 
+void test('credential-class startup failures point to the administrator and are non-retryable', () => {
+  const cred = new SessionStartupError(new Error('Model provider SudoRouter returned 401 from /models'))
+  assert.equal(cred.failure.isRetryable, false)
+  assert.match(cred.failure.message, /园区管理员/)
+  assert.equal(cred.failure.code, 'RUNTIME_START_FAILED')
+})
+
 void test('artifact MCP protocol rejects invalid JSON and accepts valid declarations', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'moss-mcp-'))
   const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', pathToFileURL(resolve('node_modules/tsx/dist/loader.mjs')).href, resolve('src/server/artifactMcp.ts')], cwd: workspace, stderr: 'pipe' })

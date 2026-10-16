@@ -1733,6 +1733,7 @@ export class RuntimeService {
       ))
     }).catch(async error => {
       if (error instanceof ServerDrainingError || error instanceof TokenQuotaExceededError || error instanceof AttemptTakeoverPendingError) throw error
+      process.stderr.write(`[RuntimeService] spawnAttempt failed for session ${session.sessionId}: ${errorMessage(error)}\n`)
       const current = await this.store.getSession(session.sessionId)
       const attemptId = current?.currentAttemptId !== session.currentAttemptId ? current?.currentAttemptId : null
       const failure = new SessionStartupError(error, session.sessionId, attemptId ?? randomUUID())

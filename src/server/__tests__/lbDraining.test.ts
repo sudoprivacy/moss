@@ -7,6 +7,7 @@ import type http from "node:http";
 import { DirectConnectStore } from "../db.js";
 import { RuntimeService, ServerDrainingError } from "../runtimeService.js";
 import { writeError } from "../httpRespond.js";
+import { ParkApiError } from "../park/parkAuthorization.js";
 import type { AuthService } from "../auth/service.js";
 import type { ServerConfig } from "../types.js";
 import type { SessionCreateInput, SessionRecord } from "../types.js";
@@ -105,6 +106,16 @@ describe("writeError → ServerDrainingError maps to 503", () => {
     assert.equal(state.status, 503);
     assert.deepEqual(JSON.parse(state.body), {
       error: "server is draining, not accepting new sessions",
+    });
+  });
+
+  it("writeError → ParkApiError maps to its status with {error:{code,message}}", () => {
+    const { res, state } = fakeRes();
+    const logger = { error() {} } as unknown as Parameters<typeof writeError>[0];
+    writeError(logger, res, new ParkApiError(403, "park_assistant_not_assigned", "该智能体未分配给当前组织"));
+    assert.equal(state.status, 403);
+    assert.deepEqual(JSON.parse(state.body), {
+      error: { code: "park_assistant_not_assigned", message: "该智能体未分配给当前组织" },
     });
   });
 });

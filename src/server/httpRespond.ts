@@ -11,6 +11,7 @@ import { PlatformConfigError } from './configuration/platformConfigService.js'
 import type http from 'http'
 import { ServerDrainingError, TokenQuotaExceededError, AttemptTakeoverPendingError } from './runtimeService.js'
 import { AuthServiceError } from './auth/service.js'
+import { ParkApiError } from './park/parkAuthorization.js'
 import type { ServerLogger } from './serverLog.js'
 
 export class HttpError extends Error {
@@ -72,6 +73,10 @@ export function writeError(
   // until an administrator raises the limit.
   if (error instanceof TokenQuotaExceededError) {
     writeJson(res, 403, { error: error.message })
+    return
+  }
+  if (error instanceof ParkApiError) {
+    writeJson(res, error.status, { error: { code: error.code, message: error.message } })
     return
   }
   if (error instanceof AuthServiceError || error instanceof HttpError || error instanceof PlatformConfigError) {
