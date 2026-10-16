@@ -1,4 +1,5 @@
 import { SessionStartupError } from './sessionStartup.js'
+import { probeAttachPath, probeRunnerReady, waitForBackendRunnerReady } from './runtime/runnerReadiness.js'
 import { withOrganizationResources, requireOrganizationResource, resolveOrganizationSkillIds, snapshotOrganizationResources, pinSessionResourceSnapshot } from './catalog/organizationResources.js'
 import {
   defaultAgentName,
@@ -42,7 +43,6 @@ import type { VisibilityFilterContext } from './sessionManager.js'
 import {
   getAttachPath,
   getAttemptDir,
-  isNamedPipePath,
   getLegacyAttachPath,
   getRuntimeStatusPath,
   getRuntimeStderrLogPath,
@@ -259,141 +259,6 @@ async function spawnSessionRunner(
       })
       resolve(child)
     })
-  })
-}
-
-async function readRunnerFailure(
-  statusPath: string,
-  stderrLogPath: string,
-  includeStderrWithoutStatusError = false,
-): Promise<string | null> {
-  let statusError: string | null = null
-  try {
-    if (existsSync(statusPath)) {
-      const raw = await readFile(statusPath, 'utf8')
-      const parsed = JSON.parse(raw) as {
-        state?: string
-        error?: string
-        code?: number | null
-        signal?: string | null
-      }
-      if (typeof parsed.error === 'string' && parsed.error.trim()) {
-        statusError = parsed.error.trim()
-      } else if (
-        parsed.state === 'failed' ||
-        (typeof parsed.code === 'number' && parsed.code !== 0)
-      ) {
-        statusError = `Runner failed before attach (code=${parsed.code ?? 'null'}, signal=${parsed.signal ?? 'null'})`
-      }
-    }
-  } catch (err) {
-    // Status file may not exist or be malformed - this is expected during normal startup
-    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.warn('[readRunnerFailure] Failed to read status file:', err)
-    }
-  }
-
-  let stderrTail: string | null = null
-  try {
-    if (existsSync(stderrLogPath)) {
-      const stderr = (await readFile(stderrLogPath, 'utf8')).trim()
-      if (stderr) {
-        const lines = stderr.split('\n')
-        stderrTail = lines.slice(-20).join('\n').trim() || null
-      }
-    }
-  } catch (err) {
-    // Stderr log may not exist - this is expected
-    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.warn('[readRunnerFailure] Failed to read stderr log:', err)
-    }
-  }
-
-  if (statusError && stderrTail) {
-    return `${statusError}\n${stderrTail}`
-  }
-  if (statusError) {
-    return statusError
-  }
-  return includeStderrWithoutStatusError ? stderrTail : null
-}
-
-/** The runner listens during startup; only a running backend can accept a session. */
-export async function waitForRunnerReady(
-  attachPath: string,
-  statusPath: string,
-  stderrLogPath: string,
-  timeoutMs: number,
-): Promise<void> {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    const failure = await readRunnerFailure(statusPath, stderrLogPath)
-    if (failure) {
-      throw new Error(failure)
-    }
-    let isRunning = false
-    try {
-      const status = JSON.parse(await readFile(statusPath, 'utf8')) as { state?: string }
-      isRunning = status.state === 'running'
-    } catch {
-      // A missing or partially written startup status is not readiness.
-    }
-    const remainingMs = timeoutMs - (Date.now() - start)
-    if (isRunning && await probeAttachPath(attachPath, Math.max(100, Math.min(remainingMs, 250)))) return
-    await wait(100)
-  }
-  const failure = await readRunnerFailure(statusPath, stderrLogPath, true)
-  if (failure) {
-    throw new Error(failure)
-  }
-  throw new Error(`Timed out waiting for runner socket at ${attachPath}`)
-}
-
-export async function probeAttachPath(
-  attachPath: string,
-  timeoutMs: number,
-): Promise<boolean> {
-  return probeRunnerSocket(attachPath, timeoutMs, 'listener')
-}
-
-/** A reachable bridge is ready only after its execution backend answers the probe. */
-export async function probeRunnerReady(attachPath: string, timeoutMs: number): Promise<boolean> {
-  return probeRunnerSocket(attachPath, timeoutMs, 'execution')
-}
-
-async function probeRunnerSocket(attachPath: string, timeoutMs: number, mode: 'listener' | 'execution'): Promise<boolean> {
-  if (!isNamedPipePath(attachPath) && !existsSync(attachPath)) {
-    return false
-  }
-  return await new Promise<boolean>(resolve => {
-    const socket = net.createConnection(attachPath)
-    const finish = (isReady: boolean) => {
-      clearTimeout(timer)
-      socket.destroy()
-      resolve(isReady)
-    }
-    const timer = setTimeout(() => finish(false), timeoutMs)
-    socket.once('connect', () => {
-      if (mode === 'listener') finish(true)
-      else socket.write(`${JSON.stringify({ type: 'ping' })}\n`)
-    })
-    let buffer = ''
-    socket.on('data', chunk => {
-      buffer += chunk.toString('utf8')
-      if (buffer.length > 1_048_576) { finish(false); return }
-      for (;;) {
-        const index = buffer.indexOf('\n')
-        if (index < 0) break
-        const line = buffer.slice(0, index)
-        buffer = buffer.slice(index + 1)
-        try {
-          const message = JSON.parse(line) as { type?: unknown; isReady?: unknown }
-          if (message.type === 'pong') { finish(message.isReady === true); return }
-        } catch { finish(false); return }
-      }
-    })
-    socket.once('error', () => finish(false))
-    socket.once('close', () => finish(false))
   })
 }
 
@@ -2613,10 +2478,8 @@ export class RuntimeService {
     }
 
     try {
-      const readyTimeoutMs = session.runtime.type === 'k8s'
-        ? ((this.options.config.k8s?.podReadyTimeoutSec ?? 90) + 30) * 1000
-        : 5_000
-      await waitForRunnerReady(attachPath, statusPath, stderrLogPath, readyTimeoutMs)
+      await waitForBackendRunnerReady(attachPath, statusPath, stderrLogPath,
+        session.runtime.type, this.options.config.k8s?.podReadyTimeoutSec)
     } catch (err) {
       // Runner failed to come up. Its child.once('close') will still fire
       // (the process is going to exit), so releaseGuard runs once. We just

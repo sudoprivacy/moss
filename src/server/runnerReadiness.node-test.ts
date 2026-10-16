@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { test, type TestContext } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { probeRunnerReady, waitForRunnerReady } from './runtimeService.js'
+import { probeRunnerReady, waitForBackendRunnerReady, waitForRunnerReady } from './runtime/runnerReadiness.js'
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'moss-runner-ready-'))
@@ -86,4 +86,19 @@ void test('an unresponsive or closed execution probe is bounded', { timeout: 10_
   assert.equal(await probeRunnerReady(f.attach, 100), false)
   f.server.on('connection', socket => socket.end())
   assert.equal(await probeRunnerReady(f.attach, 1000), false)
+})
+
+void test('cohost startup can finish after the local process boot deadline', { timeout: 15_000 }, async t => {
+  const f = await fixture(t)
+  await writeFile(f.status, JSON.stringify({ state: 'starting' }))
+  const ready = waitForBackendRunnerReady(f.attach, f.status, f.stderr, 'cohost')
+  await delay(5_500)
+  await writeFile(f.status, JSON.stringify({ state: 'running' }))
+  await ready
+})
+
+void test('a definitive cohost failure ends its longer startup wait immediately', { timeout: 10_000 }, async t => {
+  const f = await fixture(t)
+  await writeFile(f.status, JSON.stringify({ state: 'failed', error: 'native startup refused' }))
+  await assert.rejects(waitForBackendRunnerReady(f.attach, f.status, f.stderr, 'cohost'), /native startup refused/)
 })
