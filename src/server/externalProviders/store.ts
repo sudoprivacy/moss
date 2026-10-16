@@ -20,7 +20,7 @@ export interface TaskAdmission {
 }
 
 export interface ExternalActor { orgId: string; userId: string }
-export interface Binding extends RegisterExternalAgent { sourceManifest?: import('../../../contracts/agent-federation/v1alpha1/contract.js').CustomAgentManifest; id: string; orgId: string; connectionId: string; approved: boolean; parametersDigest: string | null; reviewedBy: string | null; revision?: number; definitionProfileVersion?: number; archived?: boolean; credentialUpdating?: boolean; credentialVersion?: number; credentialRecoveryRequired?: boolean; credentialOperationId?: string; registrationMode?: 'onboarding' | 'reference_compat' }
+export interface Binding extends RegisterExternalAgent { sourceManifest?: import('../../../contracts/agent-federation/v1alpha1/contract.js').CustomAgentManifest; id: string; orgId: string; connectionId: string; approved: boolean; parametersDigest: string | null; reviewedBy: string | null; reviewedAt?: number | null; revision?: number; definitionProfileVersion?: number; archived?: boolean; credentialUpdating?: boolean; credentialVersion?: number; credentialRecoveryRequired?: boolean; credentialOperationId?: string; registrationMode?: 'onboarding' | 'reference_compat' }
 type Checkpoint = ExternalTask & { _checkpoint_sequence?: number }
 type TaskRow = SqlRow & { document: string; sequence: number; request_hash: string }
 type SessionRow = SqlRow & { id: string; agent_id: string; agent_name: string; title: string; active_task_id: string | null; conversation_id: string | null; created_at: number; updated_at: number }

@@ -4,6 +4,23 @@ export type Capability = 'supported' | 'unsupported' | 'unknown'
 export type ExternalTaskStatus = 'accepted' | 'dispatching' | 'running' | 'succeeded' | 'failed' | 'unknown' | 'rejected'
 export type OutputDecoder = 'text' | 'reply_actions_v1'
 
+/** Optional additive read metadata. Not admission, health, DLP or remote execution evidence. */
+export interface ExternalAgentUsage {
+  data_scope: 'synthetic_only'
+  input: 'text_query_only'
+  attachments: 'unsupported'
+  resource_refs: 'unsupported'
+  tools: 'unsupported'
+  content_classification: 'caller_declared_only'
+  capability_basis: 'adapter_contract'
+  /** Projection time; no provider probe is performed by this read. */
+  evaluated_at: number
+  /** Successful explicit review of this configuration; null for unrecorded/invalidated reviews. */
+  reviewed_at: number | null
+  /** Only the review window; dispatch rechecks policy, grants, credentials and connection. */
+  review_state: 'not_approved' | 'expired' | 'current'
+}
+
 export interface ExternalAgent {
   id: string
   name: string
@@ -17,6 +34,7 @@ export interface ExternalAgent {
   approved: boolean
   review_expires_at: number
   capabilities: { streaming: Capability; cancel: Capability; resume: Capability; version_pin: Capability }
+  usage?: ExternalAgentUsage
 }
 
 /** Client command mapped to SubmitTask by the transport. Never accepted directly by HTTP ingress. */

@@ -1,3 +1,4 @@
+import { ExternalAgentUsageDetails } from './external-agent-usage-details'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Cloud, Loader2, Plus, RefreshCw } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -456,6 +457,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                   有效期至 {new Date(agent.review_expires_at).toLocaleString()}
                 </p>
               ) : null}
+              <ExternalAgentUsageDetails agent={agent} />
               <details className="text-sm">
                 <summary className="cursor-pointer text-muted-foreground">接入详情</summary>
                 <dl className="mt-2 space-y-1 break-all text-xs">

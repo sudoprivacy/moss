@@ -1,4 +1,4 @@
-import { describeCapabilities } from '../agentFederation/runtimeRegistry.js'
+import { describeExternalAgent } from './description.js'
 import { randomUUID } from 'node:crypto'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 export { definitionDigest } from './definition.js'
@@ -244,7 +244,7 @@ export class ExternalProviderAdministration {
     await this.store.db.run('INSERT INTO external_pilot_admin_audit(id, org_id, user_id, action, resource_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), actor.orgId, actor.userId, action, id, Date.now()])
   }
   describe(binding: Binding): ExternalAgentAdmin {
-    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_identity_evidence: 'unverified', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: describeCapabilities(binding), endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, allowed_user_ids: binding.allowed_user_ids, review_note: binding.review_note, revision: binding.revision ?? 1, archived: binding.archived ?? false, credential_configured: Boolean(binding.credential_ref), credential_state: binding.credentialUpdating ? 'updating' : binding.credentialRecoveryRequired ? 'rotation_required' : 'ready', registration_mode: binding.registrationMode ?? 'reference_compat', definition_evidence: binding.definitionProfileVersion === DEFINITION_PROFILE_VERSION ? binding.provider_kind === 'custom_http' ? 'validated_manifest' : 'validated_dsl' : 'digest_only' }
+    return { ...describeExternalAgent(binding), endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, allowed_user_ids: binding.allowed_user_ids, review_note: binding.review_note, revision: binding.revision ?? 1, archived: binding.archived ?? false, credential_configured: Boolean(binding.credential_ref), credential_state: binding.credentialUpdating ? 'updating' : binding.credentialRecoveryRequired ? 'rotation_required' : 'ready', registration_mode: binding.registrationMode ?? 'reference_compat', definition_evidence: binding.definitionProfileVersion === DEFINITION_PROFILE_VERSION ? binding.provider_kind === 'custom_http' ? 'validated_manifest' : 'validated_dsl' : 'digest_only' }
   }
   private async definition(actor: ExternalActor, body: Record<string, unknown>) {
     if (![1, 3, 7].includes(Number(body.review_days))) return fail('INVALID_REVIEW_DAYS')

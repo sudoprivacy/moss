@@ -1,3 +1,4 @@
+import { describeExternalAgent } from './description.js'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 import { ExternalProviderAdministration, object, type AdministrationOptions } from './administration.js'
 import { randomUUID } from 'node:crypto'
@@ -9,7 +10,7 @@ import { ExternalTaskStore, digest, type Binding, type ExternalActor } from './s
 import { ExternalProviderError, assertPilot, parseRegistration, type PilotPolicy } from './policy.js'
 import { decodeOutput } from './decoder.js'
 import { providerDefinition } from './providerDefinition.js'
-import { createRuntimeRegistry, describeCapabilities } from '../agentFederation/runtimeRegistry.js'
+import { createRuntimeRegistry } from '../agentFederation/runtimeRegistry.js'
 import { maintainRetention } from './retention.js'
 import { admitExternalTask } from '../agentFederation/taskIngress.js'
 import { AgentReleaseStore } from '../agentFederation/releases.js'
@@ -127,7 +128,7 @@ export class ExternalProviderService {
     return this.administration.change(actor, id, revision, approved ? 'agent.approved' : 'agent.disabled', async current => {
       if (current.credentialUpdating) throw new ExternalProviderError(409, 'CREDENTIAL_UPDATE_IN_PROGRESS')
       current.credentialVersion = credentialVersion
-      current.approved = approved; current.parametersDigest = parametersDigest; current.reviewedBy = actor.userId
+      current.approved = approved; current.parametersDigest = parametersDigest; current.reviewedBy = actor.userId; current.reviewedAt = approved ? Date.now() : null
       current.review_expires_at = binding.review_expires_at
       await this.options.catalog.updateAgentConfiguration(id, actor.orgId, { status: approved ? 'approved' : 'pending', enabled: approved })
       if (approved) {
@@ -351,7 +352,7 @@ export class ExternalProviderService {
   }
 
   private describe(binding: Binding): ExternalAgent {
-    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_identity_evidence: 'unverified', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: describeCapabilities(binding) }
+    return describeExternalAgent(binding)
   }
 
 

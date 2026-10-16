@@ -1,3 +1,5 @@
+import { describeExternalAgent } from './description.js'
+import { DURABLE_AGENT_HTTP_API } from '../../../contracts/agent-http/v1alpha2/contract.js'
 import { syntheticTaskSubmission } from '../testing/externalProviderDefinitionFixture.js'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 import { queryOnlyDefinition } from '../testing/externalProviderDefinitionFixture.js'
@@ -902,4 +904,44 @@ void test('referencing a Moss-owned namespace never transfers its credential cle
   await f.admin.operations.reconcile()
   assert.equal(f.values.size, 1, 'Archiving the reference must not delete the owner key')
   assert.equal((await f.driver.get("SELECT COUNT(*) AS count FROM external_pilot_operations WHERE kind = 'cleanup'"))?.count, 0)
+})
+
+void test('directory usage is read-only, explicit review time is recorded and historic time is never fabricated', async () => {
+  const f = await setup()
+  const binding = await f.store.binding(actor, f.registered.id)
+  assert.equal(typeof binding.reviewedAt, 'number')
+  const before = JSON.stringify(binding)
+  const [agent] = await f.service.list(actor)
+  assert.equal(agent.usage?.reviewed_at, binding.reviewedAt)
+  assert.equal(agent.usage?.review_state, 'current')
+  assert.equal(agent.usage?.capability_basis, 'adapter_contract')
+  assert.equal(agent.usage?.content_classification, 'caller_declared_only')
+  assert.equal(JSON.stringify(await f.store.binding(actor, binding.id)), before)
+  assert.equal(f.calls.length, 0)
+  const historic = { ...binding, reviewedAt: undefined }
+  assert.equal(describeExternalAgent(historic).usage?.reviewed_at, null)
+  assert.equal(describeExternalAgent(binding, binding.review_expires_at).usage?.review_state, 'expired')
+  assert.equal(describeExternalAgent({ ...binding, approved: false }).usage?.reviewed_at, null)
+  assert.equal(describeExternalAgent({ ...binding, approved: false }).usage?.review_state, 'not_approved')
+  const disabled = await f.service.review(actor, binding.id, false, binding.revision!)
+  assert.equal(disabled.usage?.reviewed_at, null)
+  assert.equal(disabled.usage?.review_state, 'not_approved')
+})
+
+void test('usage describes adapter guarantees without promoting them to identity or execution evidence', async () => {
+  const f = await setup()
+  const binding = await f.store.binding(actor, f.registered.id)
+  const dify = describeExternalAgent(binding, 100)
+  assert.deepEqual(dify.capabilities, { streaming: 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' })
+  const http = describeExternalAgent({ ...binding, provider_kind: 'custom_http' }, 100)
+  assert.deepEqual(http.capabilities, { streaming: 'unsupported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported' })
+  const durable = describeExternalAgent({ ...binding, provider_kind: 'custom_http', sourceManifest: { protocol: DURABLE_AGENT_HTTP_API } as NonNullable<typeof binding.sourceManifest> }, 100)
+  assert.deepEqual(durable.capabilities, { streaming: 'unsupported', cancel: 'unsupported', resume: 'supported', version_pin: 'supported' })
+  assert.equal(durable.source_identity_evidence, 'unverified')
+  assert.deepEqual(durable.usage, dify.usage)
+  assert.deepEqual(http.usage, dify.usage)
+  assert.equal(durable.usage?.data_scope, 'synthetic_only')
+  assert.equal(durable.usage?.input, 'text_query_only')
+  for (const field of ['attachments', 'resource_refs', 'tools'] as const) assert.equal(durable.usage?.[field], 'unsupported')
+  assert.equal('execution' in durable, false)
 })

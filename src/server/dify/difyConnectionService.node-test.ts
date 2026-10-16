@@ -1,3 +1,6 @@
+import { DifyRuntimeService } from './difyRuntimeService.js'
+import { DifyEnhancementService } from './difyEnhancementService.js'
+import type { DifyHttpAdapter } from './difyHttpAdapter.js'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
@@ -188,4 +191,55 @@ void test('external-hosted pilots cannot bypass task policy through legacy runti
   await identities.putIntegrationConnection({ id: 'external', orgId: 'org-a', providerType: 'dify', name: 'External', enabled: true, secretRef: 'nexus://org:org-a:dify/key', config: { executionMode: 'external_hosted', tenantId: 'external-workspace' } })
   assert.equal((await service.resolveOrganizationContext('org-a')).connectionId, 'dify-org-a')
   db.close()
+})
+
+for (const mode of ['agent-chat', 'chatflow', 'workflow', 'rag-only', 'chat', 'completion']) {
+  void test(`external-hosted ${mode} remains isolated from both legacy credential resolvers`, async () => {
+    const { db, service, catalog, reads } = await setup()
+    try {
+      await catalog.updateAgentConfiguration('agent-a', 'org-a', { providerBinding: {
+        executionMode: 'external_hosted', mode, connectionId: 'dify-org-a', appId: 'app-a',
+        appSecretRef: 'nexus://org:org-a:dify/apps/app-a', datasetIds: ['dataset-1'],
+      } })
+      assert.deepEqual(await service.describeEnhancement(actor, 'agent-a', visibility), { enabled: false, mode: null })
+      for (const resolve of [service.resolveRuntimeContext.bind(service), service.resolveEnhancementContext.bind(service)]) {
+        await assert.rejects(resolve(actor, 'agent-a', visibility), (error: unknown) => error instanceof DifyDomainError && error.code === 'EXTERNAL_TASK_API_REQUIRED' && error.status === 409)
+      }
+      assert.deepEqual(reads, [])
+    } finally { db.close() }
+  })
+}
+
+void test('every legacy runtime operation rejects an external binding before secrets or outbound calls', async () => {
+  const { db, service, catalog, reads } = await setup()
+  let outbound = 0
+  const adapter = new Proxy({} as DifyHttpAdapter, { get() { return () => { outbound++; throw new Error('Unexpected legacy provider access') } } })
+  try {
+    await catalog.updateAgentConfiguration('agent-a', 'org-a', { providerBinding: { executionMode: 'external_hosted', connectionId: 'dify-org-a', appId: 'app-a' } })
+    const runtime = new DifyRuntimeService({ adapter, connections: service })
+    const enhancement = new DifyEnhancementService({ adapter, connections: service })
+    const base = { actor, visibility, assistantId: 'agent-a' }
+    const file = { ...base, fileName: 'synthetic.txt', contentType: 'text/plain', bytes: new Uint8Array([1]) }
+    const commands = [
+      () => runtime.chat({ ...base, query: 'synthetic', files: [{ id: 'file' }] }),
+      () => runtime.stopChat({ ...base, taskId: 'task' }),
+      () => runtime.listConversations(base),
+      () => runtime.renameConversation({ ...base, conversationId: 'conversation' }),
+      () => runtime.deleteConversation({ ...base, conversationId: 'conversation' }),
+      () => runtime.listMessages({ ...base, conversationId: 'conversation' }),
+      () => runtime.feedback({ ...base, messageId: 'message', rating: 'like' }),
+      () => runtime.suggested({ ...base, messageId: 'message' }),
+      () => runtime.parameters(base), () => runtime.meta(base),
+      () => runtime.uploadFile(file), () => runtime.audioToText(file),
+      () => runtime.textToAudio({ ...base, text: 'synthetic' }),
+      () => enhancement.invokeBlocking({ ...base, query: 'synthetic' }),
+    ]
+    for (const command of commands) await assert.rejects(command, { code: 'EXTERNAL_TASK_API_REQUIRED', status: 409 })
+    const events = []
+    for await (const event of enhancement.invokeStreaming({ ...base, query: 'synthetic' })) events.push(event)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].kind, 'error')
+    assert.equal(outbound, 0)
+    assert.equal(reads.length, 0)
+  } finally { db.close() }
 })
