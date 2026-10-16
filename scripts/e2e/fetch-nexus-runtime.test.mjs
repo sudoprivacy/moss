@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { downloadWithFallback } from './fetch-nexus-runtime.js'
+import { downloadWithFallback } from '../fetch-nexus-runtime.js'
 
 test('runtime downloads recover from truncated or stalled responses and enforce the pinned checksum', async t => {
   const root = await mkdtemp(join(tmpdir(), 'moss-artifact-download-'))
