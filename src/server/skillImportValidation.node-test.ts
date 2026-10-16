@@ -7,7 +7,7 @@ import { importTenantSkillArchive, importTenantSkillDirectory } from './skillSto
 const clientError = (error: unknown) => error instanceof ResourceAccessError && error.statusCode === 400
 const contentBase64 = Buffer.from('---\nname: qa-invalid-import\ndescription: QA fixture\n---\nFixture').toString('base64')
 
-for (const entryPath of ['../SKILL.md', '/outside/SKILL.md', 'nested/../../SKILL.md', 'C:\\outside\\SKILL.md']) {
+for (const entryPath of ['../SKILL.md', '/outside/SKILL.md', 'nested/../../SKILL.md', 'C:\\outside\\SKILL.md', 'NUL', 'file:stream']) {
   void test(`tenant skill directory rejects unsafe path ${entryPath} as a client error`, async () => {
     await assert.rejects(importTenantSkillDirectory({ userId: 'qa-user', entries: [{ path: entryPath, contentBase64 }] }), clientError)
   })
@@ -25,6 +25,13 @@ void test('a tenant skill archive preserves the original path for traversal vali
 
 void test('a tenant skill without SKILL.md is a client error', async () => {
   await assert.rejects(importTenantSkillDirectory({ userId: 'qa-user', entries: [{ path: 'references/qa.txt', contentBase64 }] }), clientError)
+})
+
+void test('tenant skill archives reject symbolic links before publication', async () => {
+  const zip = new JSZip().file('SKILL.md', Buffer.from(contentBase64, 'base64'))
+    .file('scripts/run.sh', '../outside', { unixPermissions: 0o120777 })
+  await assert.rejects(importTenantSkillArchive({ userId: 'qa-user', fileName: 'qa.zip',
+    archiveBase64: await zip.generateAsync({ type: 'base64', platform: 'UNIX' }) }), clientError)
 })
 
 void test('empty tenant import payloads are client errors', async () => {

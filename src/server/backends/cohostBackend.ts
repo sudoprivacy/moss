@@ -18,7 +18,7 @@ import { resolveWorkspaceSkillSources } from '../../utils/scodeBridge.js'
 import { cohostRepositoryPath, readCohostSessionState } from './cohostSessionState.js'
 import { startCohostExecution } from './cohostRecovery.js'
 import { collectSkillAssets } from './skillAssets.js'
-import { writeCohostWorkspaceFile } from './cohostWorkspace.js'
+import { syncCohostSkills } from './cohostSkills.js'
 
 /**
  * Session backend for a co-hosted sudocode runtime.
@@ -77,10 +77,7 @@ export class CohostBackend implements SessionBackend {
           await client.mkdir(repositoryPath, authToken, { parents: true, existOk: true })
           await client.mkdir(posix.join(repositoryPath, '.drafts'), authToken, { parents: true, existOk: true })
           // Preparation precedes engine discovery and never starts a partial catalog.
-          for (const asset of skillAssets) {
-            options.signal?.throwIfAborted()
-            await writeCohostWorkspaceFile(client, authToken, repositoryPath, asset.path, asset.content, asset.mode)
-          }
+          await syncCohostSkills(client, authToken, repositoryPath, skillAssets, options.signal)
         },
       })
       session = execution.session

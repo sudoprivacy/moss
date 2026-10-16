@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
-import JSZip from 'jszip'
+import { join } from 'node:path'
+import { MAX_RESOURCE_BYTES, MAX_RESOURCE_ENTRIES, RESOURCE_FILES_FORMAT_VERSION, readResourceArchive, writeResourceFiles } from '@sudo/resource-files'
 import { packageAssistantZip, fetchAgentHubAssistantDetail } from '../agentStore.js'
 import { packageSkillZip, fetchSkillHubSkillDetail } from '../skillStore.js'
 import { isVisibleTo, type VisibleTo } from '../visibilityFilter.js'
@@ -56,16 +56,20 @@ export async function prepareClientCatalogResource(kind: 'agents' | 'skills', id
     if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Resource not available')
     const key = `${resource.kind}:${resource.id}`
     if (resolved.has(key)) return
+    if (resolved.size >= MAX_RESOURCE_ENTRIES) throw new ResourceAccessError(400, 'Selected resources exceed entry limit')
     resolved.set(key, resource)
     for (const dependency of dependencyIds(resource)) await visit('skill', dependency)
   }
   await visit(kind === 'agents' ? 'agent' : 'skill', id)
-  const archives = await Promise.all([...resolved.values()].map(async resource => {
+  const archives: Array<{ resource: OrganizationResource; bytes: Buffer; digest: string }> = []
+  let archiveBytes = 0
+  for (const resource of resolved.values()) {
     const bytes = resource.kind === 'agent' ? await packageAssistantZip(resource.id) : await packageSkillZip(resource.id)
-    if (bytes.length > 50 * 1024 * 1024) throw new ResourceAccessError(400, 'Resource archive exceeds size limit')
-    return { resource, bytes, digest: hash(bytes) }
-  }))
-  const preparationId = hash(JSON.stringify(archives.map(({ resource, digest }) => [resource.kind, resource.id, digest])))
+    archiveBytes += bytes.length
+    if (bytes.length > 50 * 1024 * 1024 || archiveBytes > MAX_RESOURCE_BYTES) throw new ResourceAccessError(400, 'Resource archives exceed size limit')
+    archives.push({ resource, bytes, digest: hash(bytes) })
+  }
+  const preparationId = hash(JSON.stringify([RESOURCE_FILES_FORMAT_VERSION, archives.map(({ resource, digest }) => [resource.kind, resource.id, digest])]))
   const target = join(root, preparationId)
   await mkdir(root, { recursive: true })
   const staging = join(root, `.preparing-${randomUUID()}`)
@@ -73,27 +77,18 @@ export async function prepareClientCatalogResource(kind: 'agents' | 'skills', id
   try {
     const resources: ClientPreparedResource[] = []
     const snapshot: OrganizationResource[] = []
+    let expandedBytes = 0
+    let entryCount = 0
     for (const { resource, bytes, digest } of archives) {
       const resourceKind = resource.kind === 'agent' ? 'agents' : 'skills'
       const key = hash(`${resource.kind}:${resource.id}`)
       const directory = join(staging, key)
       await mkdir(directory)
-      const zip = await JSZip.loadAsync(bytes)
-      let expanded = 0
-      const entries = Object.values(zip.files)
-      if (entries.length > 5000) throw new ResourceAccessError(400, 'Resource has too many files')
-      for (const entry of entries) {
-        const name = (entry.unsafeOriginalName || entry.name).replace(/\\/g, '/')
-        const mode = typeof entry.unixPermissions === 'number' ? entry.unixPermissions : 0
-        if (name.startsWith('/') || /^[a-z]:/i.test(name) || name.split('/').includes('..') || (mode & 0o170000) === 0o120000) throw new ResourceAccessError(400, 'Unsafe resource archive')
-        if (entry.dir) continue
-        const content = await entry.async('nodebuffer')
-        expanded += content.length
-        if (expanded > 200 * 1024 * 1024) throw new ResourceAccessError(400, 'Expanded resource exceeds size limit')
-        const file = join(directory, name)
-        await mkdir(dirname(file), { recursive: true })
-        await writeFile(file, content, { mode: mode & 0o100 ? 0o700 : 0o600 })
-      }
+      const files = await readResourceArchive(bytes).catch(() => { throw new ResourceAccessError(400, 'Invalid resource archive') })
+      expandedBytes += files.reduce((size, file) => size + file.content.length, 0)
+      entryCount += files.length
+      if (expandedBytes > MAX_RESOURCE_BYTES || entryCount > MAX_RESOURCE_ENTRIES) throw new ResourceAccessError(400, 'Selected resources exceed expanded limits')
+      await writeResourceFiles(directory, files)
       const runtimeRef = `${PREFIX}${preparationId}:${resourceKind}:${encodeURIComponent(resource.id)}`
       const dependencies: string[] = []
       for (const dependency of dependencyIds(resource)) dependencies.push((await requireOrganizationResource('skill', dependency)).id)
@@ -176,21 +171,23 @@ export async function materializeClientSkills(
   }
   const skills = [...(getOrganizationResourceScope()?.preparedResources?.values() ?? [])].filter(item => item.kind === 'skill')
   const result: { id: string; path: string; name: string }[] = []
+  const pending: { path: string; content: Buffer; mode: number }[] = []
+  let totalBytes = 0
   // Validate the complete graph before writing anything or submitting the user turn.
   for (const resource of skills) {
     const reference = String(resource.meta.catalogRuntimeRef)
     const preparationId = reference.split(':')[1]!
     const { bytes } = await downloadClientPreparation(preparationId, 'skills', resource.id)
-    const zip = await JSZip.loadAsync(bytes)
+    const files = await readResourceArchive(bytes).catch(() => { throw new ResourceAccessError(400, 'Invalid resource archive') })
     const directory = `.nexus/catalog-skills/${hash(reference)}`
-    for (const entry of Object.values(zip.files)) {
-      if (entry.dir || entry.name === '_moss_meta.json') continue
-      const name = (entry.unsafeOriginalName || entry.name).replace(/\\/g, '/')
-      if (name.startsWith('/') || /^[a-z]:/i.test(name) || name.split('/').includes('..')) throw new ResourceAccessError(400, 'Unsafe resource archive')
-      const mode = typeof entry.unixPermissions === 'number' ? entry.unixPermissions : 0
-      await write(`${directory}/${name}`, await entry.async('nodebuffer'), mode & 0o100 ? 0o700 : 0o600)
+    for (const file of files) {
+      if (file.isDirectory || file.path === '_moss_meta.json') continue
+      totalBytes += file.content.length
+      if (totalBytes > MAX_RESOURCE_BYTES || pending.length >= MAX_RESOURCE_ENTRIES) throw new ResourceAccessError(400, 'Selected skills exceed resource limits')
+      pending.push({ ...file, path: `${directory}/${file.path}` })
     }
     result.push({ id: resource.id, name: resource.name, path: `${directory}/SKILL.md` })
   }
+  for (const file of pending) await write(file.path, file.content, file.mode)
   return result
 }

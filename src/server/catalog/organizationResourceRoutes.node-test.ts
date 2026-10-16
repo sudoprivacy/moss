@@ -12,8 +12,18 @@ import { waitForFixtureReady } from '../testing/fixtureReady.js'
 type Result = { status: number; data: any }
 void test('real HTTP: A/B installs, private resources and super-admin organization switching', { timeout: 90_000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'moss-org-routes-'))
-  const skillZip = await new JSZip().file('SKILL.md', '---\nname: shared-skill\ndescription: fixture\n---\nSkill one').generateAsync({ type: 'nodebuffer' })
-  const agentZip = await new JSZip().file('system.md', 'Original shared prompt').generateAsync({ type: 'nodebuffer' })
+  const script = '#!/bin/sh\nprintf resource-ready\n'
+  const skillZip = await new JSZip().file('SKILL.md', '---\nname: shared-skill\ndescription: fixture\n---\nSkill one')
+    .file('scripts/run.sh', script, { unixPermissions: 0o100755 }).generateAsync({ type: 'nodebuffer', platform: 'UNIX' })
+  const agentZip = await new JSZip().file('system.md', 'Original shared prompt')
+    .file('scripts/run.sh', script, { unixPermissions: 0o100755 }).generateAsync({ type: 'nodebuffer', platform: 'UNIX' })
+  const assertExecutableArchive = async (bytes: Buffer) => {
+    const zip = await JSZip.loadAsync(bytes)
+    const entry = zip.file('scripts/run.sh')!
+    assert.ok(entry, 'Resource copies must retain their executable assets')
+    assert.equal(await entry.async('string'), script)
+    if (process.platform !== 'win32') assert.equal(Number(entry.unixPermissions) & 0o7777, 0o700)
+  }
   let isClientSkillAvailable = true
   const hub = createServer((req, res) => {
     if (req.url === '/skill.zip' || req.url === '/agent.zip') {
@@ -125,6 +135,7 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       }
       const oldArchive = await ok('GET', '/api/v1/agents/installed/agent-one/download', a.admin)
       const newArchive = await ok('GET', '/api/v1/agent-templates/installed/agent-one/download', a.admin)
+      await assertExecutableArchive(newArchive)
       const [oldZip, newZip] = await Promise.all([JSZip.loadAsync(oldArchive), JSZip.loadAsync(newArchive)])
       assert.equal(await oldZip.file('system.md')!.async('string'), await newZip.file('system.md')!.async('string'))
       assert.equal((await request('GET', '/api/v1/agents/private-archives', a.user)).status, 200)
@@ -140,7 +151,9 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       assert.notEqual((await ok('GET', '/api/v1/skills/installed', b.admin))[0].version, '2')
       await ok('PATCH', '/api/v1/skills/enabled', a.admin, { skillName: 'skill-one', enabled: false })
       assert.equal((await ok('GET', '/api/v1/skills/installed', b.admin))[0].enabled, true)
-      const skillPackage = await JSZip.loadAsync(await ok('GET', '/api/v1/skills/installed/skill-one/download', a.admin))
+      const skillBytes = await ok('GET', '/api/v1/skills/installed/skill-one/download', a.admin)
+      await assertExecutableArchive(skillBytes)
+      const skillPackage = await JSZip.loadAsync(skillBytes)
       assert.equal(JSON.parse(await skillPackage.file('_moss_meta.json')!.async('string')).enabled, false)
       assert.equal((await request('POST', '/api/v1/skills/uninstall', a.admin, { skillName: 'skill-one' })).status, 409)
       await ok('POST', '/api/v1/agent-templates/uninstall', a.admin, { assistantName: 'agent-one' })
@@ -171,6 +184,7 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
         assert.match(resource.runtimeRef, /^moss-prepared:/)
         const bytes = await ok('GET', resource.downloadRef, a.user)
         assert.ok(Buffer.isBuffer(bytes))
+        await assertExecutableArchive(bytes)
         if (resource.kind === 'agents') {
           assert.match(resource.downloadRef, /\/agent-templates\//)
           assert.match(resource.runtimeRef, /:agents:/)
@@ -231,14 +245,14 @@ void test('real HTTP: A/B installs, private resources and super-admin organizati
       assert.equal((await request('GET', `/api/v1/agent-templates/tenant/${agent.data.id}/rules`, b.admin)).status, 404)
       assert.equal((await request('POST', `/api/v1/admin/agent-templates/tenant/${agent.data.id}/approve`, b.admin, { approved: false })).status, 404)
       assert.equal((await request('PATCH', '/api/v1/agent-templates/meta', b.admin, { assistantName: 'agent-one', updates: { enabledSkills: [skill.id] } })).status, 404)
-      assert.ok(Buffer.isBuffer(await ok('GET', `/api/v1/skills/installed/${custom.id}/download`, a.user)))
+      await assertExecutableArchive(await ok('GET', `/api/v1/skills/installed/${custom.id}/download`, a.user))
       const beforeTenantInstall = (await ok('GET', '/api/v1/skills/installed', a.user)).length
       await ok('POST', '/api/v1/client/catalog/install', a.user, { kind: 'skills', id: skill.id, source: 'tenant' })
       assert.equal((await ok('GET', '/api/v1/skills/installed', a.user)).length, beforeTenantInstall)
       // Publishing preserves custom originals and does not duplicate their DB ID.
       const publication = await ok('POST', '/api/v1/skills/tenant/publish', a.user, { skillId: custom.id })
       await ok('POST', `/api/v1/admin/skills/tenant/${publication.id}/approve`, a.admin, { approved: true })
-      assert.ok(Buffer.isBuffer(await ok('GET', `/api/v1/skills/tenant/${publication.id}/download`, a.admin)))
+      await assertExecutableArchive(await ok('GET', `/api/v1/skills/tenant/${publication.id}/download`, a.admin))
       // A same-name private object in B cannot overwrite A's package.
       await ok('POST', '/api/v1/agent-templates/tenant/create', b.admin, { name: 'private-agent', display_name: 'Private B', rules: 'B private prompt' })
       assert.equal((await ok('GET', `/api/v1/agent-templates/tenant/${agent.data.id}/rules`, a.admin)).rules, 'A private prompt')
