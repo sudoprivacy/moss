@@ -4,6 +4,7 @@ import type {
   SessionBackend,
   SessionRuntimeInfo,
 } from '../sessionManager.js'
+import { posix } from 'node:path'
 import { sessionAgentName } from '../agentIdentity.js'
 import { buildAvailableSkillSnapshot, buildSessionEnv, getAssistantRuntimeConfig } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
@@ -13,9 +14,11 @@ import { resolveCohostConnection } from '../nexus/cohostConnection.js'
 import { isUnknownManagedSession, ManagedAgentClient } from '../nexus/managedAgentClient.js'
 import { ownerField } from '../nexus/sessionIdentity.js'
 import { connectSessionRuntime } from '../nexus/sessionConnection.js'
-import { syncWorkspaceSkills, type WorkspaceSkillLink } from '../../utils/scodeBridge.js'
+import { resolveWorkspaceSkillSources } from '../../utils/scodeBridge.js'
 import { cohostRepositoryPath, readCohostSessionState } from './cohostSessionState.js'
 import { startCohostExecution } from './cohostRecovery.js'
+import { collectSkillAssets } from './skillAssets.js'
+import { writeCohostWorkspaceFile } from './cohostWorkspace.js'
 
 /**
  * Session backend for a co-hosted sudocode runtime.
@@ -36,13 +39,8 @@ export class CohostBackend implements SessionBackend {
 
     const env = buildSessionEnv(options)
     const model = env.MOSS_DEFAULT_MODEL || options.runtime?.model || 'gemini-3-flash-preview'
-    let workspaceSkillLinks: WorkspaceSkillLink[] = []
-    try {
-      workspaceSkillLinks = await syncWorkspaceSkills(options.cwd, enabledSkills, options.visibilityFilter)
-    } catch (error) {
-      process.stderr.write(`[CohostBackend] workspace skill sync warning: ${String(error)}\n`)
-    }
-    const availableSkills = await buildAvailableSkillSnapshot(workspaceSkillLinks)
+    const skillSources = await resolveWorkspaceSkillSources(enabledSkills, options.visibilityFilter)
+    const skillAssets = await collectSkillAssets(skillSources, { includeInstructions: true })
 
     const config = resolveCohostConnection()
     const saved = options.cohostSessionBinding ??
@@ -57,6 +55,9 @@ export class CohostBackend implements SessionBackend {
     }
     // Keep the recorded repository identity when resuming existing native history.
     const repositoryPath = saved ? saved.repositoryPath ?? options.cwd : expectedRepository
+    const availableSkills = await buildAvailableSkillSnapshot(skillSources.map(skill => ({ ...skill,
+      workspacePath: posix.join(repositoryPath, '.nexus/sudocode/skills', skill.name),
+    })))
 
     const { identity, client, authToken } = await connectSessionRuntime(config, options.userId)
     const agent = new ManagedAgentClient(client, authToken)
@@ -71,11 +72,20 @@ export class CohostBackend implements SessionBackend {
         repos: [{ hostPath: repositoryPath, alias: 'workspace' }],
         resumeSessionId: saved?.durableSessionId,
       }, { ownerId: options.userId!, repositoryPath, controllerId: identity?.subjectId },
-      { signal: options.signal, isResumeRequired: !!options.resumeSessionId || !!saved })
+      { signal: options.signal, isResumeRequired: !!options.resumeSessionId || !!saved,
+        prepareWorkspace: async () => {
+          await client.mkdir(repositoryPath, authToken, { parents: true, existOk: true })
+          await client.mkdir(posix.join(repositoryPath, '.drafts'), authToken, { parents: true, existOk: true })
+          // Preparation precedes engine discovery and never starts a partial catalog.
+          for (const asset of skillAssets) {
+            options.signal?.throwIfAborted()
+            await writeCohostWorkspaceFile(client, authToken, repositoryPath, asset.path, asset.content, asset.mode)
+          }
+        },
+      })
       session = execution.session
       isResume = execution.isResume
       if (!session.durableSessionId) throw new Error('Cohost daemon did not return a durable session ID')
-      await client.mkdir(repositoryPath, authToken, { parents: true, existOk: true })
       options.signal?.throwIfAborted()
     } catch (error) {
       let failure = error
@@ -114,6 +124,7 @@ export class CohostBackend implements SessionBackend {
       assistantName: options.assistantName,
       assistantDisplayName: options.assistantDisplayName,
       enabledSkillNames: enabledSkills,
+      workspaceSkills: availableSkills,
       availableWikis: options.availableWikis,
       availableCorpApps: options.availableCorpApps,
       sharedMemory: options.sharedMemory,

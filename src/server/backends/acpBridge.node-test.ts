@@ -9,6 +9,58 @@ import { test } from 'node:test'
 import { createAcpBridgeHandle } from './acpBridge.js'
 import { readSharedAgentMemory } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
+import { readAcpExecutionWorkspace } from './executionWorkspace.js'
+
+void test('runtime workspace metadata is additive but malformed roots fail explicitly', () => {
+  assert.equal(readAcpExecutionWorkspace({ sessionId: 'old-runtime' }), undefined)
+  assert.deepEqual(readAcpExecutionWorkspace({ _meta: { sudocode: { workspace: {
+    fileRoot: '/proc/hosted/workspace', shellRoot: '/data/agent/shell',
+  } } } }, '/agents/helper/workspaces/session'), {
+    repository: '/agents/helper/workspaces/session', workingRoot: '/proc/hosted/workspace', shellRoot: '/data/agent/shell',
+  }, 'a virtual project retains its canonical repository identity')
+  for (const workspace of [{ fileRoot: '../outside', shellRoot: '/project' }, { fileRoot: '/project' }, null]) {
+    assert.throws(() => readAcpExecutionWorkspace({ _meta: { sudocode: { workspace } } }), /Invalid ACP execution workspace/)
+  }
+})
+
+for (const isResume of [false, true]) {
+  void test(`native ${isResume ? 'resume' : 'creation'} uses runtime workspace and installed skills in its first prompt`, async t => {
+    const cwd = await mkdtemp(join(tmpdir(), 'moss-remote-workspace-'))
+    const sent: any[] = []
+    const waiters = new Map<string, (message: any) => void>()
+    let events!: import('./acpTransport.js').AcpTransportEvents
+    const transport: import('./acpTransport.js').AcpMessageTransport = {
+      connected: true, start(value) { events = value },
+      async send(message) { sent.push(message); waiters.get(message.method!)?.(message) }, async close() {},
+    }
+    const waitForSend = (method: string): Promise<any> => {
+      const existing = sent.find(message => message.method === method)
+      return existing ? Promise.resolve(existing) : new Promise(resolve => waiters.set(method, resolve))
+    }
+    const handle = createAcpBridgeHandle({ transport, cwd, sessionId: 'remote-workspace', model: 'fixture',
+      runtime: { type: 'cohost', engine: 'scode' }, resumeSessionId: isResume ? 'native-session' : undefined,
+      executionWorkspace: { repository: '/agents/helper/workspaces/session', workingRoot: '/proc/old/workspace' },
+      workspaceSkills: [{ name: 'authorized-skill', description: 'An installed skill' }],
+    })
+    t.after(async () => { await handle.destroy(true); await rm(cwd, { recursive: true, force: true }) })
+    await waitForSend('initialize')
+    events.onMessage({ jsonrpc: '2.0', id: 'm-init', result: {} })
+    const method = isResume ? 'session/load' : 'session/new'
+    const request = await waitForSend(method)
+    events.onMessage({ jsonrpc: '2.0', id: request.id, result: { sessionId: 'native-session',
+      _meta: { sudocode: { workspace: { fileRoot: '/data/files/project', shellRoot: '/data/files/project' } } },
+    } })
+    handle.writeStdin(JSON.stringify({ type: 'user', message: { role: 'user', content: 'Use my skill' } }))
+    const prompt = await waitForSend('session/prompt')
+    const text = prompt.params.prompt.map((part: any) => part.text ?? '').join('\n')
+    assert.match(text, /Workspace: \/data\/files\/project/)
+    assert.match(text, /Bash starts in \/data\/files\/project/)
+    assert.match(text, /\/data\/files\/project\/\.nexus\/sudocode\/skills\/authorized-skill\/SKILL\.md/)
+    assert(!text.includes(cwd), 'a controller-side directory is not a runtime path')
+    assert(!text.includes('/proc/old/workspace'))
+    assert(!text.includes('workspace/report.txt'), 'the native root must not inherit the old procfs alias instructions')
+  })
+}
 
 for (const ending of ['connection loss', 'prompt error', 'cancelled turn', 'forced close']) {
   void test(`an unfinished tool retains an interrupted result after ${ending}`, { timeout: 10000 }, async () => {

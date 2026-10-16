@@ -13,7 +13,10 @@ interface SkillAsset {
 }
 
 /** Read the authorized skill payload before creating a remote runtime. */
-export async function collectSkillAssets(links: SkillLink[]): Promise<SkillAsset[]> {
+export async function collectSkillAssets(
+  links: SkillLink[],
+  options: { includeInstructions?: boolean } = {},
+): Promise<SkillAsset[]> {
   const assets: SkillAsset[] = []
   let bytes = 0
   let entries = 0
@@ -33,8 +36,8 @@ export async function collectSkillAssets(links: SkillLink[]): Promise<SkillAsset
         if (stat.isDirectory()) {
           await visit(source, path, depth + 1)
         } else if (stat.isFile()) {
-          // SKILL.md is already delivered through the read-only Secret mount.
-          if (depth === 0 && name === 'SKILL.md') continue
+          // Legacy container backends deliver SKILL.md through a Secret mount.
+          if (!options.includeInstructions && depth === 0 && name === 'SKILL.md') continue
           bytes += stat.size
           if (stat.size > 50 * 1024 * 1024 || bytes > 200 * 1024 * 1024) {
             throw new Error('Skill assets exceed size limit')

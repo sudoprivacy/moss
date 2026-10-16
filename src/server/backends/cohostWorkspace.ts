@@ -82,14 +82,24 @@ export function createCohostWorkspaceAccess(
       await rejectWorkspaceLinks(client, token, root, path)
       return client.read(path, token)
     }),
-    writeFile: (relativePath, content, mode) => withWorkspace(async (client, token, root) => {
-      if (mode !== undefined) throw new ResourceAccessError(400, 'Cohost workspace file mode is managed by Nexus')
-      const path = cohostWorkspacePath(root, relativePath)
-      await rejectWorkspaceLinks(client, token, root, path)
-      await client.mkdir(posix.dirname(path), token, { parents: true, existOk: true })
-      await client.write(path, content, token)
-    }),
+    writeFile: (relativePath, content, mode) => withWorkspace((client, token, root) =>
+      writeCohostWorkspaceFile(client, token, root, relativePath, content, mode)),
   }
+}
+
+/** Use one authorized write path for uploads, catalog resources and startup skills. */
+export async function writeCohostWorkspaceFile(
+  client: NexusVfsClient, token: string, root: string,
+  relativePath: string, content: Buffer, mode?: number,
+): Promise<void> {
+  if (mode !== undefined && (!Number.isInteger(mode) || mode < 0 || mode > 0o777)) {
+    throw new ResourceAccessError(400, 'Invalid workspace file mode')
+  }
+  const path = cohostWorkspacePath(root, relativePath)
+  await rejectWorkspaceLinks(client, token, root, path)
+  await client.mkdir(posix.dirname(path), token, { parents: true, existOk: true })
+  await client.write(path, content, token)
+  if (mode !== undefined) await client.chmod(path, mode, token)
 }
 
 async function rejectWorkspaceLinks(client: NexusVfsClient, token: string, root: string, path: string): Promise<void> {

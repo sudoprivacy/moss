@@ -8,7 +8,7 @@ import { createCatalogTestRepository } from '../testing/compatibilityRepositorie
 import { SqliteDriver } from '../db/driver.js'
 import { withOrganizationResources, listOrganizationResources, saveOrganizationInstallation, updateOrganizationResource, removeOrganizationResource, snapshotOrganizationResources, registerOrganizationCustom, requireOrganizationResource, pinSessionResourceSnapshot, type OrganizationResourceScope } from './organizationResources.js'
 import { getAgentSyncProgress, updateAgentSyncProgress } from '../syncProgress.js'
-import { syncWorkspaceSkills, resolveWorkspaceSkillsDir } from '../../utils/scodeBridge.js'
+import { syncWorkspaceSkills, resolveWorkspaceSkillsDir, resolveWorkspaceSkillSources } from '../../utils/scodeBridge.js'
 import { createSkillSymlinks, getAssistantRuntimeConfig } from '../backends/backendUtils.js'
 import { migrateOrganizationResources } from './organizationResourceMigration.js'
 import { publishDirectory } from './publishDirectory.js'
@@ -113,6 +113,7 @@ void test('runner snapshot resolves only authorized resources and clears skills 
   try {
     await withOrganizationResources({ orgId: 'a', userId: 'a-user', snapshot: a }, async () => {
       assert.deepEqual((await getAssistantRuntimeConfig('a')).enabledSkills, ['skill'])
+      assert.deepEqual(await resolveWorkspaceSkillSources(['s']), [{ name: 'skill', sourcePath: skillPath }])
       const links = await syncWorkspaceSkills(workspace, ['s'])
       assert.equal(links.length, 1)
       assert.equal(await readlink(links[0]!.workspacePath), skillPath)
@@ -121,6 +122,8 @@ void test('runner snapshot resolves only authorized resources and clears skills 
     await withOrganizationResources({ orgId: 'b', userId: 'b-user', snapshot: b }, async () => {
       await assert.rejects(getAssistantRuntimeConfig('a'), /not found/)
       await assert.rejects(syncWorkspaceSkills(workspace, ['s']), /not available/)
+      await assert.rejects(resolveWorkspaceSkillSources(['s']), /not available/)
+      assert.deepEqual(await resolveWorkspaceSkillSources(), [])
       assert.deepEqual(await syncWorkspaceSkills(workspace), [])
       await createSkillSymlinks(workspace, [])
       assert.deepEqual(await readdir(resolveWorkspaceSkillsDir(workspace)), [])

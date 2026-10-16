@@ -11,7 +11,8 @@ export async function startCohostExecution(
   agent: Pick<ManagedAgentClient, 'findSession' | 'startSession' | 'cancel'>,
   input: SessionStartInput,
   scope: { ownerId: string; repositoryPath?: string; controllerId?: string },
-  recovery: { timeoutMs?: number; retryMs?: number; signal?: AbortSignal; isResumeRequired?: boolean } = {},
+  recovery: { timeoutMs?: number; retryMs?: number; signal?: AbortSignal; isResumeRequired?: boolean;
+    prepareWorkspace?: () => Promise<void> } = {},
 ): Promise<{ session: StartSessionResult; isResume: boolean }> {
   let resumeSessionId = input.resumeSessionId
   const deadline = Date.now() + (recovery.timeoutMs ?? COHOST_RECOVERY_TIMEOUT_MS)
@@ -32,6 +33,7 @@ export async function startCohostExecution(
   if (recovery.isResumeRequired && !resumeSessionId) {
     throw new Error('Cohost resume has no durable binding or owned live execution; migrate the original session locator before retrying')
   }
+  await recovery.prepareWorkspace?.()
   for (;;) {
     recovery.signal?.throwIfAborted()
     try {

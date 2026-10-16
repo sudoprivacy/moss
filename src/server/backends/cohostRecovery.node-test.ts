@@ -37,6 +37,22 @@ void test('ordinary creation starts once; an owned orphan resumes its original d
   assert.equal(starts[1]?.resumeSessionId, 'native-session')
 })
 
+void test('workspace preparation completes after orphan cancellation and before native skill discovery', async () => {
+  const order: string[] = []
+  const agent = {
+    findSession: async () => snapshot,
+    cancel: async () => { order.push('cancel') },
+    startSession: async () => { order.push('start'); return result },
+  }
+  await startCohostExecution(agent, input, scope, { prepareWorkspace: async () => { order.push('prepare') } })
+  assert.deepEqual(order, ['cancel', 'prepare', 'start'])
+  order.length = 0
+  await assert.rejects(startCohostExecution(agent, input, scope, {
+    prepareWorkspace: async () => { throw new Error('Incomplete skill payload') },
+  }), /Incomplete skill payload/)
+  assert.deepEqual(order, ['cancel'], 'an engine must not discover a partially installed catalog')
+})
+
 void test('the original controller recovers a lost creation reply without creating a second process', async () => {
   const recovered = await startCohostExecution({
     findSession: async () => snapshot,

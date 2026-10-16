@@ -21,6 +21,7 @@ import {
 } from '../server/agentStore.js'
 import type { VisibilityFilterContext } from '../server/sessionManager.js'
 import { buildDraftsInstruction } from '../server/draftsCleanup.js'
+import type { ExecutionWorkspace } from '../server/backends/executionWorkspace.js'
 
 // ============================================================================
 // 工作空间技能同步函数 (新方案)
@@ -42,23 +43,11 @@ export type WorkspaceSkillLink = {
   workspacePath: string
 }
 
-/**
- * 同步技能到工作空间目录
- *
- * 将全局安装的技能通过符号链接同步到工作空间的 .nexus/sudocode/skills/ 目录
- *
- * @param workspace - 工作空间路径
- * @param enabledSkillNames - 可选，只同步指定的技能名称列表
- * @param visibilityFilter - 可选，可见性过滤上下文，用于过滤用户无权访问的技能
- */
-export async function syncWorkspaceSkills(
-  workspace: string,
+/** Resolve the authorized catalog without mutating a controller-side workspace. */
+export async function resolveWorkspaceSkillSources(
   enabledSkillNames?: string[],
-  visibilityFilter?: VisibilityFilterContext | null
-): Promise<WorkspaceSkillLink[]> {
-  const workspaceSkillsDir = resolveWorkspaceSkillsDir(workspace)
-  await mkdir(workspaceSkillsDir, { recursive: true })
-
+  visibilityFilter?: VisibilityFilterContext | null,
+): Promise<Array<Pick<WorkspaceSkillLink, 'name' | 'sourcePath'>>> {
   const scopedSkills = await listOrganizationResources('skill')
   // Scoped sessions never discover capabilities by scanning global directories.
   const skillSourceDirs = scopedSkills ? [] : [
@@ -125,6 +114,31 @@ export async function syncWorkspaceSkills(
       // 目录不存在，跳过
     }
   }
+
+  return Array.from(skillTargets, ([name, sourcePath]) => ({ name, sourcePath }))
+}
+
+/**
+ * 同步技能到工作空间目录
+ *
+ * 将全局安装的技能通过符号链接同步到工作空间的 .nexus/sudocode/skills/ 目录
+ *
+ * @param workspace - 工作空间路径
+ * @param enabledSkillNames - 可选，只同步指定的技能名称列表
+ * @param visibilityFilter - 可选，可见性过滤上下文，用于过滤用户无权访问的技能
+ */
+export async function syncWorkspaceSkills(
+  workspace: string,
+  enabledSkillNames?: string[],
+  visibilityFilter?: VisibilityFilterContext | null
+): Promise<WorkspaceSkillLink[]> {
+  const workspaceSkillsDir = resolveWorkspaceSkillsDir(workspace)
+  await mkdir(workspaceSkillsDir, { recursive: true })
+
+  const skillTargets = new Map(
+    (await resolveWorkspaceSkillSources(enabledSkillNames, visibilityFilter))
+      .map(skill => [skill.name, skill.sourcePath]),
+  )
 
   const linkedTargets = new Map<string, string>()
 
@@ -261,7 +275,8 @@ export async function prepareFirstMessageForScode(
     assistantName?: string | null
     identityName?: string | null
     workspace: string
-    executionWorkspace?: { repository: string; workingRoot: string }
+    executionWorkspace?: ExecutionWorkspace
+    workspaceSkills?: Array<{ name: string; description: string }>
     enabledSkillNames?: string[]
     sharedMemory?: string | null
     /**
@@ -289,14 +304,23 @@ export async function prepareFirstMessageForScode(
   // A user-owned AGENTS.md is preserved; do not repeat identity overrides here.
   // 2. 添加草稿箱使用指令
   instructions.push(buildDraftsInstruction(config.executionWorkspace?.repository ?? config.workspace))
-  if (config.executionWorkspace) {
+  if (config.executionWorkspace?.shellRoot) {
+    instructions.push(
+      `[Execution workspace]\nProject: ${config.executionWorkspace.repository}.\nFile tool paths resolve from ${config.executionWorkspace.workingRoot}.\nBash starts in ${config.executionWorkspace.shellRoot}.\nUse absolute project paths for file tools and drafts.\n[End execution workspace]`,
+    )
+  } else if (config.executionWorkspace) {
     instructions.push(
       `[Nexus file tools]\nUse absolute file paths under ${config.executionWorkspace.repository}.\nRelative file paths resolve from ${config.executionWorkspace.workingRoot}; the repository is mounted there as workspace/.\nFor example, workspace/report.txt addresses ${config.executionWorkspace.repository}/report.txt.\nUse this same namespace for Read, Write, Edit and drafts.\n[End Nexus file tools]`,
     )
   }
 
   // 3. 构建工作空间技能目录提示
-  const skillsHint = await buildWorkspaceSkillsHint(config.workspace, config.enabledSkillNames)
+  const skillsHint = config.workspaceSkills === undefined
+    ? await buildWorkspaceSkillsHint(config.workspace, config.enabledSkillNames)
+    : formatWorkspaceSkillsHint(
+      path.posix.join((config.executionWorkspace?.repository ?? config.workspace).replace(/\\/g, '/'), '.nexus/sudocode/skills'),
+      config.workspaceSkills,
+    )
   if (skillsHint) {
     instructions.push(skillsHint)
   }
@@ -437,12 +461,17 @@ async function buildWorkspaceSkillsHint(
   const installedSkills = await getInstalledSkills()
   const skillDescMap = new Map(installedSkills.map(s => [s.name, s.description]))
 
-  const skillLines = linkedSkills.map(name => {
-    const desc = skillDescMap.get(name)
-    return desc
-      ? `- **${name}** (${desc}): ${workspaceSkillsDir}/${name}/SKILL.md`
-      : `- **${name}**: ${workspaceSkillsDir}/${name}/SKILL.md`
-  })
+  return formatWorkspaceSkillsHint(workspaceSkillsDir, linkedSkills.map(name => ({ name, description: skillDescMap.get(name) ?? '' })))
+}
+
+function formatWorkspaceSkillsHint(
+  workspaceSkillsDir: string,
+  skills: Array<{ name: string; description: string }>,
+): string {
+  if (skills.length === 0) return ''
+  const skillLines = skills.map(({ name, description }) => description
+    ? `- **${name}** (${description}): ${workspaceSkillsDir}/${name}/SKILL.md`
+    : `- **${name}**: ${workspaceSkillsDir}/${name}/SKILL.md`)
 
   return `[Skills Directory]
 Skills are installed at: ${workspaceSkillsDir}

@@ -6,7 +6,7 @@ import type { InternalSessionChannel } from '../internalSessionChannel.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
-import { createCohostWorkspaceAccess, cohostWorkspacePath } from './cohostWorkspace.js'
+import { createCohostWorkspaceAccess, cohostWorkspacePath, writeCohostWorkspaceFile } from './cohostWorkspace.js'
 import { cohostRepositoryPath, cohostSessionStatePath, readCohostSessionState, removeCohostSessionState } from './cohostSessionState.js'
 import { sessionAgentName } from '../agentIdentity.js'
 import type { SessionRecord } from '../types.js'
@@ -19,6 +19,24 @@ void test('cohost workspace paths reject traversal, absolute and drive paths', (
   for (const agent of ['../owner', 'agent\\other', 'agent\0other']) {
     assert.throws(() => cohostRepositoryPath(agent, 'session'))
   }
+})
+
+void test('native skill writes retain the authorization token and apply executable mode to the written file', async () => {
+  const calls: string[] = []
+  const client = {
+    async stat() { return undefined },
+    async mkdir(path: string, token: string) { assert.equal(token, 'owner'); calls.push(`mkdir:${path}`) },
+    async write(path: string, bytes: Buffer, token: string) { assert.equal(token, 'owner'); calls.push(`write:${path}:${bytes.toString()}`) },
+    async chmod(path: string, mode: number, token: string) { assert.equal(token, 'owner'); calls.push(`chmod:${path}:${mode}`) },
+  } as unknown as NexusVfsClient
+  await writeCohostWorkspaceFile(client, 'owner', '/project', 'skills/run.sh', Buffer.from('script'), 0o700)
+  assert.deepEqual(calls, ['mkdir:/project/skills', 'write:/project/skills/run.sh:script', 'chmod:/project/skills/run.sh:448'])
+  for (const mode of [-1, 0o4777, 1.5]) {
+    await assert.rejects(writeCohostWorkspaceFile(client, 'owner', '/project', 'bad', Buffer.from('bad'), mode), /Invalid workspace file mode/)
+  }
+  assert.equal(calls.length, 3, 'invalid modes must not write bytes before failing')
+  client.chmod = async () => { throw new Error('UNIMPLEMENTED') }
+  await assert.rejects(writeCohostWorkspaceFile(client, 'owner', '/project', 'bad', Buffer.from('script'), 0o700), /UNIMPLEMENTED/)
 })
 
 void test('cohost state preserves the durable ID and refuses corrupt recovery metadata', async () => {

@@ -15,6 +15,16 @@ async function fixture() {
 }
 
 describe('remote skill assets', () => {
+  test('includes instructions alongside nested assets for a native cohost', async () => {
+    const root = await fixture()
+    await writeFile(join(root, 'scripts', 'run.sh'), '#!/bin/sh\necho ready\n')
+    const files = await collectSkillAssets([{ name: 'media', sourcePath: root }], { includeInstructions: true })
+    expect(files.map(file => file.path).sort()).toEqual([
+      '.nexus/sudocode/skills/media/SKILL.md',
+      '.nexus/sudocode/skills/media/scripts/run.sh',
+    ])
+    expect(files.find(file => file.path.endsWith('/SKILL.md'))?.content.toString()).toBe('# Media')
+  })
   test('copies nested scripts and binary data while leaving SKILL.md to its Secret', async () => {
     const root = await fixture()
     await writeFile(join(root, 'scripts', 'run.py'), 'print("ready")')
