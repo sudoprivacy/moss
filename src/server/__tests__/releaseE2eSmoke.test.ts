@@ -166,6 +166,54 @@ function expectRollbackResult(result: RollbackResult, scenario: RollbackScenario
 }
 
 describe("packaged Server E2E smoke", () => {
+  it("preserves execution placement independently of a program upgrade", () => {
+    const installer = readFileSync(resolve(root, "deploy/legacy/install-host.sh"), "utf8");
+    const placement = extractShellFunction(installer, "runtime_placement_environment");
+    const tempRoot = mkdtempSync(resolve(tmpdir(), "moss-runtime-placement-"));
+    const envPath = resolve(tempRoot, "moss-server.env");
+    const scriptPath = resolve(tempRoot, "placement.sh");
+    writeFileSync(scriptPath, `set -euo pipefail\n${placement}\ndie() { exit 1; }\nruntime_placement_environment "$ENV_PATH" "$DEFAULT_MANIFEST"\n`);
+    const run = (source: string, overrides: Record<string, string> = {}, defaultManifest = "") => {
+      writeFileSync(envPath, source);
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+        !/^MOSS_(RUNTIME_MANIFEST_PATH|USER_RUNTIME_|SCODE_IMAGE|K8S_)/.test(key)));
+      return spawnSync("bash", [toShellPath(scriptPath)], {
+        encoding: "utf8",
+        env: { ...env, ...shellPathEnvironment({ ENV_PATH: envPath }), DEFAULT_MANIFEST: defaultManifest, ...overrides },
+      });
+    };
+    try {
+      const original = [
+        'MOSS_USER_RUNTIME_IMAGE="runtime:old"',
+        'MOSS_RUNTIME_MANIFEST_PATH="/releases/old/runtime-release.json"',
+        'MOSS_USER_RUNTIME_HOST=10.0.0.2',
+        'MOSS_K8S_RUNTIME_CLASS=""',
+        'MOSS_K8S_WORKSPACE_STORAGE_CLASS=retained-storage',
+        'MOSS_K8S_IMAGE_PULL_POLICY=Never',
+        'UNRELATED=value',
+        '',
+      ].join("\n");
+      const retained = run(original, {}, "/current/runtime-release.json");
+      expect(retained.status).toBe(0);
+      for (const line of original.split("\n").filter(line => line.startsWith("MOSS_"))) expect(retained.stdout).toContain(line + "\n");
+      expect(retained.stdout).not.toContain("UNRELATED");
+      expect(retained.stdout).not.toContain("/current/");
+      expect(run("").stdout).toBe("");
+      expect(run("", {}, "/current/runtime-release.json").stdout).toBe('MOSS_RUNTIME_MANIFEST_PATH="/current/runtime-release.json"\n');
+      const overridden = run(original, { MOSS_USER_RUNTIME_IMAGE: 'runtime:new', MOSS_RUNTIME_MANIFEST_PATH: '/next/runtime-release.json', MOSS_K8S_RUNTIME_CLASS: '' });
+      expect(overridden.status).toBe(0);
+      expect(overridden.stdout).toContain('MOSS_USER_RUNTIME_IMAGE="runtime:new"\n');
+      expect(overridden.stdout).toContain('MOSS_RUNTIME_MANIFEST_PATH="/next/runtime-release.json"\n');
+      expect(overridden.stdout).not.toContain("runtime:old");
+      expect(overridden.stdout).not.toContain("/releases/old/");
+      expect(run("MOSS_USER_RUNTIME_IMAGE=first\nMOSS_USER_RUNTIME_IMAGE=last\n").stdout).toBe("MOSS_USER_RUNTIME_IMAGE=last\n");
+      expect(run("", { MOSS_K8S_KUBECONFIG: 'a"b\\c' }).stdout).toBe('MOSS_K8S_KUBECONFIG="a\\"b\\\\c"\n');
+      expect(run("", { MOSS_USER_RUNTIME_HOST: "host\ninjected=value" }).status).not.toBe(0);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }, process.platform === "win32" ? 15_000 : 5_000);
+
   for (const arch of ["amd64", "arm64"] as const) for (const scenario of ["shared release", "legacy release", "missing cohost manifest", "corrupt manifest"] as const) {
     it("downloads " + arch + " offline assets safely for " + scenario, async () => {
       const tempRoot = mkdtempSync(resolve(tmpdir(), "moss-offline-download-"));
