@@ -32,7 +32,7 @@ import { DifyHttpAdapter } from "../dify/difyHttpAdapter.js";
 import { BillingRepository } from "../billing/billingRepository.js";
 import { WalletService } from "../billing/walletService.js";
 import { BillingCoordinator } from "../billing/billingCoordinator.js";
-import { SudorouterAccountService } from "../billing/sudorouterAccountService.js";
+import { SudorouterAccountError, SudorouterAccountService } from "../billing/sudorouterAccountService.js";
 import type { QuotaSnapshot, SudorouterAccountPort, SudorouterUserAccount } from "../billing/sudorouterAdapter.js";
 import { migrationCommandContext, onlineCommandContext } from "../application/commandContext.js";
 import { repairConfigAvailability } from "../configuration/configAvailabilitySchema.js";
@@ -693,11 +693,17 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         await providerStarted;
         const second = serviceB.create("org-ha", { name: "HA Dataset" }, context)
           .then(value => ({ status: "fulfilled" as const, value }), reason => ({ status: "rejected" as const, reason }));
-        await new Promise(resolve => setTimeout(resolve, 100));
+        const concurrent = await second;
+        assert.equal(concurrent.status, "rejected");
+        if (concurrent.status === "rejected") assert.match(String(concurrent.reason), /is PROCESSING$/);
         releaseProvider();
-        const results = await Promise.all([first, second]);
+        const completed = await first;
+        assert.equal(completed.status, "fulfilled");
+        if (completed.status === "fulfilled") {
+          const replay = await serviceB.create("org-ha", { name: "HA Dataset" }, context);
+          assert.deepEqual(replay, completed.value);
+        }
         assert.equal(providerCalls, 1);
-        assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
       } finally {
         releaseProvider();
         await peer.pool.end();
@@ -749,11 +755,19 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         await providerStarted;
         const second = coordinatorB.adjustPoints(input, context)
           .then(value => ({ status: "fulfilled" as const, value }), reason => ({ status: "rejected" as const, reason }));
-        await new Promise(resolve => setTimeout(resolve, 100));
+        const concurrent = await second;
+        assert.equal(concurrent.status, "fulfilled");
+        if (concurrent.status === "fulfilled") assert.equal(concurrent.value.status, "PROCESSING");
         releaseProvider();
-        const results = await Promise.all([first, second]);
+        const completed = await first;
+        assert.equal(completed.status, "fulfilled");
+        if (completed.status === "fulfilled") {
+          assert.equal(completed.value.status, "SUCCEEDED");
+          const replay = await coordinatorB.adjustPoints(input, context);
+          assert.equal(replay.operationId, completed.value.operationId);
+          assert.equal(replay.status, "SUCCEEDED");
+        }
         assert.equal(changeCalls, 1);
-        assert.equal(results.filter(result => result.status === "fulfilled" && result.value.status === "SUCCEEDED").length, 1);
         assert.equal(await repoA.countLedgerEntries(`wallet:quota:${context.idempotencyKey}`), 1);
       } finally {
         releaseProvider();
@@ -824,10 +838,16 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         await providerStarted;
         const second = serviceB.ensureAccount(input, context)
           .then(value => ({ status: "fulfilled" as const, value }), reason => ({ status: "rejected" as const, reason }));
-        await new Promise(resolve => setTimeout(resolve, 100));
+        const concurrent = await second;
+        assert.equal(concurrent.status, "rejected");
+        if (concurrent.status === "rejected") assert(concurrent.reason instanceof SudorouterAccountError);
         releaseProvider();
-        const results = await Promise.all([first, second]);
-        assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+        const completed = await first;
+        assert.equal(completed.status, "fulfilled");
+        if (completed.status === "fulfilled") {
+          const replay = await serviceB.ensureAccount(input, context);
+          assert.deepEqual(replay, completed.value);
+        }
         assert.deepEqual({ createCalls, quotaCalls, tokenCalls }, { createCalls: 1, quotaCalls: 1, tokenCalls: 1 });
       } finally {
         releaseProvider();
