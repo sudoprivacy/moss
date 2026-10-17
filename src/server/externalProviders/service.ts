@@ -27,9 +27,9 @@ export class ExternalProviderService {
   readonly ownership: ExternalExecutionOwnership
   private closing = false
   private readonly adapters: ReturnType<typeof createRuntimeRegistry>
-  constructor(readonly store: ExternalTaskStore, private readonly options: AdministrationOptions) {
+  constructor(readonly store: ExternalTaskStore, private readonly options: AdministrationOptions, serverInstanceId?: string) {
     this.releases = store.releases
-    this.ownership = new ExternalExecutionOwnership(store)
+    this.ownership = new ExternalExecutionOwnership(store, serverInstanceId)
     this.administration = new ExternalProviderAdministration(store, options)
     this.adapters = createRuntimeRegistry(options)
     this.timer = setInterval(() => { void this.maintain().catch(() => {}) }, 1000)

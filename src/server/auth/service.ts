@@ -664,7 +664,7 @@ export class AuthService {
     })
   }
 
-  createExternalProviderService(secrets: import('../externalProviders/administration.js').ExternalSecretPort): ExternalProviderService {
+  createExternalProviderService(secrets: import('../externalProviders/administration.js').ExternalSecretPort, serverInstanceId: string): ExternalProviderService {
     return new ExternalProviderService(new ExternalTaskStore(this.db.driver), {
       catalog: new CatalogRepository(this.db.driver), identities: this.identityRepository, secrets,
       policy: pilotPolicyFromEnvironment(),
@@ -674,7 +674,7 @@ export class AuthService {
         const user = await this.db.getUserByIdAndOrg(actor.userId, actor.orgId)
         return user?.status === 'active'
       },
-    })
+    }, serverInstanceId)
   }
 
   createSudoworkDifyServices(input: {
