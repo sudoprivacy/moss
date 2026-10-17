@@ -23,7 +23,7 @@ import { CohostSessionRepository } from '../../src/server/runtime/cohostSessionR
 import { COHOST_SESSION_SCHEMA } from '../../src/server/storage/cohostSessionSchema.js'
 import { cohostRepositoryPath } from '../../src/server/backends/cohostSessionState.js'
 import { syncCohostSkills } from '../../src/server/backends/cohostSkills.js'
-import { writeCohostWorkspaceFile } from '../../src/server/backends/cohostWorkspace.js'
+import { writeCohostWorkspaceFile } from '../../src/server/backends/cohostWorkspaceFiles.js'
 import { WORKSPACE_SKILLS_DIRECTORY } from '../../src/utils/skills/localSkillDirectories.js'
 
 const binary = resolve(process.env.NEXUSD_COHOST_BIN ?? 'bin/cohost/nexusd-cohost')

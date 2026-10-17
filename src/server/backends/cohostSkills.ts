@@ -3,7 +3,7 @@ import { MAX_RESOURCE_ENTRIES, MAX_RESOURCE_FILE_BYTES, ownerFileMode } from '@s
 import { posix } from 'node:path'
 import { WORKSPACE_SKILLS_DIRECTORY } from '../../utils/skills/localSkillDirectories.js'
 import { ResourceAccessError } from '../catalog/resourceError.js'
-import { assertCohostWorkspaceNoLinks, cohostWorkspaceEntryName, cohostWorkspacePath, writeCohostWorkspaceFile, writeCohostWorkspaceFiles } from './cohostWorkspace.js'
+import { assertCohostWorkspaceNoLinks, cohostWorkspaceEntryName, cohostWorkspacePath, writeCohostWorkspaceFile, writeCohostWorkspaceFiles } from './cohostWorkspaceFiles.js'
 
 const OWNERSHIP_PATH = '.nexus/sudocode/.moss-skills.json'
 const OWNERSHIP_FORMAT = 'moss-workspace-skills/1'
