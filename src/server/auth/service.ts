@@ -83,7 +83,7 @@ import {
 import { readSudorouterAccount, SudorouterAccountService } from '../billing/sudorouterAccountService.js'
 import { buildClientRuntime } from '../clientRuntime.js'
 import { parseUsd } from '../billing/modelMoney.js'
-import { OrganizationBillingService, type CreateOrganizationModelInput } from '../billing/organizationBillingService.js'
+import { OrganizationBillingError, OrganizationBillingService, type CreateOrganizationModelInput } from '../billing/organizationBillingService.js'
 import type { OrganizationRouterPort } from '../billing/organizationRouterAdapter.js'
 import { OrganizationRechargeService, type OrganizationPaymentPort } from '../billing/organizationRechargeService.js'
 import type { NexusClient } from '../nexus/nexusClient.js'
@@ -2353,19 +2353,33 @@ export class AuthService {
       if (input.memberLimitUsd !== null && input.memberLimitUsd !== undefined) parseUsd(input.memberLimitUsd)
       const reference = input.idempotencyKey ?? `member:${randomUUID()}`
       const billing = this.organizationBilling
-      const created = await billing.exclusive(`identity:${reference}`, () => billing.operation(input.orgId, 'create-member-identity', `identity:${reference}`, {
-        name: input.name, email: input.email, role: input.role, departmentId: input.departmentId, memberLimitUsd: input.memberLimitUsd,
-      }, true, async () => {
-        const previous = await this.identityRepository.getCommandResult<{ userId: string }>('identity.create_user', reference)
-        if (previous) {
-          const user = await this.db.getUserById(previous.userId)
-          if (!user || user.orgId !== input.orgId || user.name !== input.name.trim()) throw new AuthServiceError(409, '成员创建请求不匹配')
-          return { user: sanitizeUser(user) }
+      try {
+        await billing.prepareMemberProvisioning(input.orgId)
+        const shouldActivate = input.status === undefined || input.status === 'active'
+        const created = await billing.exclusive(`identity:${reference}`, () => billing.operation(input.orgId, 'create-member-identity', `identity:${reference}`, {
+          name: input.name, email: input.email, role: input.role, departmentId: input.departmentId, memberLimitUsd: input.memberLimitUsd,
+        }, true, async () => {
+          const previous = await this.identityRepository.getCommandResult<{ userId: string }>('identity.create_user', reference)
+          if (previous) {
+            const user = await this.db.getUserById(previous.userId)
+            if (!user || user.orgId !== input.orgId || user.name !== input.name.trim()) throw new AuthServiceError(409, '成员创建请求不匹配')
+            return { user: sanitizeUser(user) }
+          }
+          return this.createUser({ ...input, status: shouldActivate ? 'pending' : input.status, initialCreditUnits: 0, idempotencyKey: reference }, auth)
+        }))
+        await billing.provisionMemberAccount(input.orgId, created.user.id, input.memberLimitUsd)
+        let user = await this.db.getUserById(created.user.id)
+        if (!user) throw new AuthServiceError(500, 'Created user could not be loaded')
+        if (shouldActivate && user.status === 'pending') {
+          await this.db.activatePendingUser(user.id)
+          user = await this.db.getUserById(user.id)
         }
-        return this.createUser({ ...input, initialCreditUnits: 0, idempotencyKey: reference }, auth)
-      }))
-      await billing.provisionMemberAccount(input.orgId, created.user.id, input.memberLimitUsd)
-      return created
+        if (!user) throw new AuthServiceError(500, 'Created user could not be loaded')
+        return { user: sanitizeUser(user) }
+      } catch (error) {
+        if (error instanceof OrganizationBillingError) throw new AuthServiceError(error.statusCode, error.message)
+        throw error
+      }
     }
     if (!this.sudorouterAccounts) return this.createUser(input, auth)
 
@@ -2404,7 +2418,7 @@ export class AuthService {
     }, onlineCommandContext(idempotencyKey))
 
     if (user.status === 'pending') {
-      await this.db.updateUser(user.id, { status: 'active' })
+      await this.db.activatePendingUser(user.id)
     }
     const active = await this.db.getUserById(user.id)
     if (!active) throw new AuthServiceError(500, 'Created user could not be loaded')

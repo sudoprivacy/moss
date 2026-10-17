@@ -1562,6 +1562,11 @@ export class AuthCenterDb {
     ])
   }
 
+  /** Preserve an administrator's concurrent decision to lock or disable a pending user. */
+  async activatePendingUser(id: string): Promise<void> {
+    await this.driver.run("UPDATE users SET status = 'active' WHERE id = ? AND status = 'pending'", [id])
+  }
+
   async updateUserLastLogin(id: string): Promise<void> {
     await this.driver.run(`
       UPDATE users SET last_login_at = ? WHERE id = ?
