@@ -9,10 +9,20 @@ export const EXTERNAL_EXECUTION_LEASE_MS = 30_000
 
 /** Unique process lifetime identity and per-attempt tokens fence results across Moss controllers. */
 export class ExternalExecutionOwnership {
-  readonly ownerId = randomUUID()
+  readonly ownerId: string
   readonly ready: Promise<void>
-  constructor(readonly store: ExternalTaskStore) {
+  private readonly ownsRegistration: boolean
+  constructor(readonly store: ExternalTaskStore, serverInstanceId?: string) {
+    this.ownsRegistration = serverInstanceId === undefined
+    this.ownerId = serverInstanceId ?? randomUUID()
     this.ready = store.ready.then(async () => {
+      if (!this.ownsRegistration) {
+        const instance = await store.db.get('SELECT pid, status FROM server_instances WHERE instance_id = ?', [this.ownerId])
+        if (!instance || instance.status !== 'running' || Number(instance.pid) !== process.pid) {
+          throw new Error('External execution requires this process\'s registered running controller')
+        }
+        return
+      }
       const now = await store.databaseNow()
       await store.db.run(`INSERT INTO server_instances(instance_id, host, pid, started_at, heartbeat_at, status)
         VALUES (?, ?, ?, ?, ?, 'running')`, [this.ownerId, hostname(), process.pid, now, now])
@@ -20,6 +30,7 @@ export class ExternalExecutionOwnership {
   }
   async heartbeat() {
     await this.ready
+    if (!this.ownsRegistration) return
     await this.store.db.run("UPDATE server_instances SET heartbeat_at = ? WHERE instance_id = ? AND status = 'running'", [await this.store.databaseNow(), this.ownerId])
   }
   async candidates(): Promise<string[]> {
@@ -80,8 +91,10 @@ export class ExternalExecutionOwnership {
   async stop(): Promise<void> {
     await this.ready
     await this.store.db.transaction(async () => {
-      await this.store.db.run("UPDATE server_instances SET status = 'stopped', stopped_at = ? WHERE instance_id = ?", [await this.store.databaseNow(), this.ownerId])
-      await this.store.db.run('UPDATE external_attempt_leases SET lease_until = 0 WHERE attempt_id IN (SELECT attempt_id FROM session_attempts WHERE server_instance_id = ?)', [this.ownerId])
+      if (this.ownsRegistration) {
+        await this.store.db.run("UPDATE server_instances SET status = 'stopped', stopped_at = ? WHERE instance_id = ?", [await this.store.databaseNow(), this.ownerId])
+      }
+      await this.store.db.run("UPDATE external_attempt_leases SET lease_until = 0 WHERE attempt_id IN (SELECT attempt_id FROM session_attempts WHERE server_instance_id = ? AND backend_type = 'external')", [this.ownerId])
     })
   }
 }

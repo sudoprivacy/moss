@@ -362,6 +362,8 @@ export class RuntimeService {
    */
   draining = false
 
+  get serverInstanceId(): string { return this.options.serverInstanceId }
+
   constructor(private readonly options: RuntimeServiceOptions) {
     if (!options.store && options.config.dbBackend === 'postgres') {
       // Never silently fall back to a local sqlite file when the deployment

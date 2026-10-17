@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import pg from 'pg'
 import { PgDriver, type PgPoolLike } from '../db/driver.js'
 import { applyPgSchema } from '../db/pg_schema.js'
+import { forPostgresDirectConnectStore } from '../db.js'
 import { CatalogRepository } from '../catalog/catalogRepository.js'
 import { IdentityRepository } from '../identity/identityRepository.js'
 import { ExternalTaskStore } from '../externalProviders/store.js'
@@ -49,10 +50,14 @@ void test('PostgreSQL Moss takeover preserves the original invocation and Attemp
     }
     for (const driver of drivers.slice(0, 2)) {
       const store = new ExternalTaskStore(driver); await store.ready
-      const service = new ExternalProviderService(store, { catalog: new CatalogRepository(driver), identities: new IdentityRepository(driver), secrets, isActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: [endpoint], timeoutMs: 60_000 } })
+      const controller = forPostgresDirectConnectStore(driver)
+      const instance = await controller.registerServerInstance('integration-controller')
+      const service = new ExternalProviderService(store, { catalog: new CatalogRepository(driver), identities: new IdentityRepository(driver), secrets, isActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: [endpoint], timeoutMs: 60_000 } }, instance.instanceId)
       await service.ownership.ready; await service.releases.ready; services.push(service)
+      assert.equal(service.ownership.ownerId, instance.instanceId)
     }
     const first = services[0], second = services[1]
+    assert.equal(Number((await drivers[0].get("SELECT COUNT(*) AS total FROM server_instances WHERE status = 'running'"))?.total), 2)
     const binding = await first.administration.onboard(actor, { request_id: randomUUID(), provider_kind: 'custom_http', name: 'HA calculator', endpoint, api_key: token, app_id: 'calculator', workspace_id: 'provider-workspace', source_definition: JSON.stringify(agentManifest(agent)), decoder: 'text', allowed_user_ids: [actor.userId], review_days: 1, review_note: 'Synthetic durable provider verification' })
     await first.review(actor, binding.id, true, binding.revision)
     const task = await first.create(actor, { api_version: TASK_API, kind: 'SubmitTask', agent: { catalog_id: binding.id }, request_source: 'interactive', input: { instruction: '6 * 7', resource_refs: [] }, workspace_refs: [], requested_mode: 'auto', data_classification: 'synthetic', required_capabilities: ['version_pin', 'idempotency'], constraints: { idempotency_key: randomUUID() } })
@@ -63,6 +68,7 @@ void test('PostgreSQL Moss takeover preserves the original invocation and Attemp
     assert((await first.store.session(actor, task.session_id)).conversation_id, 'A live session now has a remote ID; recovery must still submit the original null input')
     const oldFence: ExecutionFence = { attemptId: task.attempt_id!, ownerId: first.ownership.ownerId, token: String(oldLease?.token) }
     await first.close()
+    assert.equal((await drivers[0].get('SELECT status FROM server_instances WHERE instance_id = ?', [first.ownership.ownerId]))?.status, 'running', 'Closing external tasks must not stop the controller')
     await second.maintain()
     await until(async () => (await drivers[1].get('SELECT server_instance_id FROM session_attempts WHERE attempt_id = ?', [task.attempt_id]))?.server_instance_id === second.ownership.ownerId)
     assert.equal(await first.store.mutate(task.id, value => { value.status = 'failed'; return 'status' }, oldFence), null)

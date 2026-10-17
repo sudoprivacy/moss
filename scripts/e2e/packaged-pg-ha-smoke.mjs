@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from 'node:child_process'
+import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -155,11 +156,23 @@ async function main() {
   const processes = []
   const report = {
     status: 'failed', backend: 'postgres', instanceIds, bundleSha256,
-    firstStart: false, restart: false, keyRequests,
+    firstStart: false, restart: false, keyRequests, controllerIdentities: [],
+  }
+  let shared
+  async function checkControllerIdentities(label, indexes) {
+    const rows = (await shared.query("SELECT instance_id, pid FROM server_instances WHERE status = 'running' ORDER BY instance_id")).rows.map(row => ({ instance_id: row.instance_id, pid: Number(row.pid) }))
+    const expected = indexes.map(index => ({ instance_id: instanceIds[index], pid: processes[index].pid }))
+    assert.deepEqual(rows, expected, 'Each server process must register exactly one controller identity')
+    for (const row of rows) {
+      const peers = await shared.query("SELECT COUNT(*) AS total FROM server_instances WHERE instance_id != $1 AND status = 'running' AND heartbeat_at >= $2", [row.instance_id, Date.now() - 30_000])
+      assert.equal(Number(peers.rows[0].total), indexes.length - 1, 'Exclude self while retaining genuine peers')
+    }
+    report.controllerIdentities.push({ label, instances: rows })
   }
 
   try {
     await admin.query(`CREATE DATABASE ${databaseName}`)
+    shared = new Pool({ connectionString: database, max: 2 })
     const configs = []
     for (let index = 0; index < 2; index += 1) {
       const runtimeRoot = path.join(options.workDir, `instance-${index + 1}`)
@@ -194,8 +207,11 @@ async function main() {
     }
 
     launch(0)
+    await waitReady(`http://127.0.0.1:${ports[0]}`, processes[0])
+    await checkControllerIdentities('single-start', [0])
     launch(1)
     await Promise.all(ports.map((port, index) => waitReady(`http://127.0.0.1:${port}`, processes[index])))
+    await checkControllerIdentities('dual-start', [0, 1])
     report.firstStart = true
     keyRequests.push('dual-readyz:first-start')
 
@@ -221,10 +237,12 @@ async function main() {
     keyRequests.push('read:instance-b')
 
     await Promise.all(processes.map(stop))
+    await checkControllerIdentities('stopped', [])
     processes.length = 0
     launch(0)
     launch(1)
     await Promise.all(ports.map((port, index) => waitReady(`http://127.0.0.1:${port}`, processes[index])))
+    await checkControllerIdentities('dual-restart', [0, 1])
     const afterRestart = await request(
       `http://127.0.0.1:${ports[1]}`,
       `/api/v1/config-items?name=${encodeURIComponent(marker)}`,
@@ -236,6 +254,7 @@ async function main() {
     keyRequests.push('dual-readyz:restart', 'read-after-restart:instance-b')
   } finally {
     await Promise.all(processes.map(stop))
+    await shared?.end()
     try {
       await admin.query(
         'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',

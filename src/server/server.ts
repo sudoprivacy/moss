@@ -2057,8 +2057,8 @@ export function startServer(
     } catch { return undefined }
   }) : null
 
-  const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient) : null
-  const externalStoreReady = externalProviders?.store.ready ?? Promise.resolve()
+  const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient, runtime.serverInstanceId) : null
+  const externalStoreReady = externalProviders?.ownership.ready ?? Promise.resolve()
   let isStopped = false
 
   // Cron Service - scheduled task execution engine
