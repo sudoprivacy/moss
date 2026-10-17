@@ -7,6 +7,7 @@ import type { DbDriver, SqlRow } from '../db/driver.js'
 import { ResourceAccessError as HttpError } from './resourceError.js'
 import { isVisibleTo, type VisibilityFilter, type VisibleTo } from '../visibilityFilter.js'
 import { publishDirectory } from './publishDirectory.js'
+import { RESOURCE_FILES_FORMAT_VERSION } from '@sudo/resource-files'
 
 export type ResourceKind = 'agent' | 'skill'
 export type ResourceMetadata = Record<string, unknown>
@@ -243,7 +244,7 @@ export async function stageOrganizationArtifact(kind: ResourceKind, bytes: Buffe
   const root = join(process.env.MOSS_HOME || join(homedir(), '.moss'), 'artifacts', kind)
   await mkdir(root, { recursive: true })
   const dir = await mkdtemp(join(root, '.staging-'))
-  const target = join(root, createHash('sha256').update(identity).update(bytes).digest('hex'))
+  const target = join(root, createHash('sha256').update(`resource-files-v${RESOURCE_FILES_FORMAT_VERSION}\0`).update(identity).update(bytes).digest('hex'))
   return { dir, publish: async () => {
     if (!await publishDirectory(dir, target)) {
       await rm(dir, { recursive: true, force: true })

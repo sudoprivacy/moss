@@ -1,6 +1,7 @@
 import { SESSION_SCHEMA } from '../storage/sessionSchema.js'
 import { ORGANIZATION_RESOURCE_PG_SCHEMA } from '../catalog/organizationResourceSchema.js'
 import { COHOST_SESSION_SCHEMA } from '../storage/cohostSessionSchema.js'
+import { COHOST_AGENT_HOME_SCHEMA } from '../storage/cohostAgentHomeSchema.js'
 /**
  * PostgreSQL schema for moss (HA P1-2e).
  *
@@ -1965,6 +1966,7 @@ const MIGRATIONS: PgMigration[] = [
     ALTER TABLE tenant_assistants DROP CONSTRAINT IF EXISTS tenant_assistants_provider_type_check;
     ALTER TABLE tenant_assistants ADD CONSTRAINT tenant_assistants_provider_type_check CHECK (provider_type IN ('local', 'moss_runtime', 'dify', 'custom_http'));
   ` },
+  { version: 13, name: 'cohost-agent-storage-homes', sql: COHOST_AGENT_HOME_SCHEMA },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

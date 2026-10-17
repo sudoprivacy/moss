@@ -1,5 +1,6 @@
 import type { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { z } from 'zod'
+import pMap from 'p-map'
 import type { RuntimeAgentNamespace } from '../agentManager.js'
 
 const registrySchema = z.array(z.object({ name: z.string(), owner_id: z.string(),
@@ -20,12 +21,9 @@ export async function readAgentNamespace(
   const value: unknown = JSON.parse(raw)
   const records = registrySchema.parse(value && typeof value === 'object' && 'result' in value ? value.result : value)
     .filter(record => record.owner_id === ownerId)
-  const managedNames: string[] = []
-  if (isOwnerConfined) {
-    for (const name of names) {
-      if (await client.stat(`/agents/${name}/sessions`, authToken)) managedNames.push(name)
-    }
-  }
+  const managedNames = isOwnerConfined ? (await pMap(names, async name =>
+    await client.stat(`/agents/${name}/sessions`, authToken) ? name : undefined,
+  { concurrency: 8, stopOnError: false })).filter(name => name !== undefined) : []
   return { isOwnerConfined, names, managedNames,
     executions: records.map(record => ({ name: record.name, ownerId: record.owner_id,
       state: record.state.toLowerCase(), kind: record.kind.toLowerCase(),

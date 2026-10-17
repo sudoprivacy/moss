@@ -11,10 +11,11 @@ flowchart LR
   Browser[SudoWork browser] --> Workbench
   Workbench --> Moss[Moss APIs and session controller]
   Moss --> Issuer[Nexus identity issuer]
-  Moss --> Box[Owner Pod on compute VM / gVisor]
-  Box --> Cohost[nexusd-cohost / embedded scode engine]
+  Moss --> Homes[Durable owner and Agent storage homes]
+  Homes --> Box[Owner allocations on compute VM / gVisor]
+  Box --> Cohost[One native daemon per Pod / multiple scode Session engines]
   Cohost --> Model[Private model mount / owner SudoRouter Key]
-  Box --> Volume[Retained owner PVC]
+  Box --> Volume[Independent retained PVC per allocation]
 ```
 
 ## Engine and backend
@@ -25,10 +26,42 @@ owner's Pod; Moss does not execute it inside its server process. Desktop local
 execution remains an alternative placement for the same scode engine core.
 
 `UserPodService` from `@sudo/user-runtime` creates one gVisor Pod, retained PVC and private NodePort Service
-per owner. It uses a namespace-scoped Kubernetes identity. Each execution
+per owner allocation. `AgentRuntimeHomes` in the same package selects a durable
+storage home for an Agent; Moss supplies its SQL transaction adapter. Existing
+native Session bindings are adopted on primary before new Agents are placed.
+New Sessions, controller restarts and later capacity changes retain the same
+Agent home. The SQL row holds owner, Agent and allocation identities. Runtime
+addresses, Pod UIDs, credentials and process IDs remain transient.
+
+Session startup, authenticated file access, native Agent discovery and runtime
+upgrades use that assignment. Discovery reads every existing allocation without
+creating missing Pods. Identical process IDs from separate Pods retain their
+allocation context. Finding the same Agent in two allocations is a conflict;
+Moss cannot silently select another copy of its history. Each allocation has an
+independent PVC; ordinary file locks are insufficient to authorize concurrent
+native writers on a shared PVC across production gVisor sandboxes.
+
+The controller uses a namespace-scoped Kubernetes identity. Each execution
 controller proves its owner with a short-lived delegated certificate. The Pod
 receives its own runtime certificate and private configuration; it receives no
 Kubernetes service account token or issuer private key.
+
+## Skills and workspace
+
+The runtime reports the file-tool and native shell roots through ACP metadata.
+For a local reference-backed project, both roots address the same project bytes.
+File tools retain Nexus authorization and hooks. Bash runs in the Pod's native
+filesystem; its individual file operations do not make Nexus RPCs.
+
+Catalog skills include their instructions and assets. Preparation finishes before
+the engine discovers the project, with private file modes and executable scripts.
+The catalog remains the source of skill content. Project-local
+`.nexus/sudocode/.moss-skills.json` records only which skill directories Moss owns.
+Reconciliation can replace or remove those directories while retaining user-authored
+skills. Name collisions fail before any mutation. Old asset-only directories may
+be adopted only when every existing file matches the selected catalog payload and
+there are no user instructions. Ownership is published before copying, so a new
+controller can replace an interrupted installation without removing user files.
 
 ## Model credentials and billing
 
@@ -128,6 +161,11 @@ retain their recovery route until their histories are migrated.
 - `MOSS_WORKSPACE_URL=https://webui.sudoprivacy.com`: shared conversation entry.
 - `MOSS_RUNTIME=cohost`: install the native user runtime and its release manifest.
 - `MOSS_USER_RUNTIME_HOST`: private compute address for owner Services.
+- `MOSS_USER_RUNTIME_AGENTS_PER_ALLOCATION`: positive Agent capacity, default 16.
+  It packs newly assigned Agents and preserves existing homes. It counts Agent
+  homes, not active Sessions or CPU load. Moss creates allocations; Kubernetes
+  schedules their Pods on compute nodes. Changing the capacity does not move
+  existing Agent data. Program upgrades preserve this setting.
 - `MOSS_COHOST_NEXUS_*`: external mTLS credential issuer, independently of the
   main Nexus connection used by Moss storage.
 - `MOSS_COHOST_ALLOWED_USERS`: optional rollout cohort; the installer preserves

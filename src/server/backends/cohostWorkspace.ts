@@ -9,18 +9,7 @@ import type { SessionRecord } from '../types.js'
 import { ResourceAccessError } from '../catalog/resourceError.js'
 import { readLiveManagedExecution } from './liveManagedExecution.js'
 
-/** Validate both HTTP paths and daemon dirents before constructing an RPC path. */
-export function cohostWorkspacePath(root: string, relativePath: string): string {
-  const path = relativePath.replace(/\\/g, '/')
-  if (path.includes('\0') || path.startsWith('/') || /^[a-zA-Z]:/.test(path)) {
-    throw new ResourceAccessError(400, 'Path must be relative')
-  }
-  const normalized = posix.normalize(path)
-  if (normalized === '..' || normalized.startsWith('../')) {
-    throw new ResourceAccessError(400, 'Path escapes workspace root')
-  }
-  return posix.join(root, normalized)
-}
+import { assertCohostWorkspaceNoLinks, cohostWorkspaceEntryName, cohostWorkspacePath, writeCohostWorkspaceFile } from './cohostWorkspaceFiles.js'
 
 /** Use the owned execution daemon's workspace, including its authorization and hooks. */
 export function createCohostWorkspaceAccess(
@@ -30,11 +19,14 @@ export function createCohostWorkspaceAccess(
   const withWorkspace = async <T>(operation: (client: NexusVfsClient, token: string, root: string) => Promise<T>): Promise<T> => {
     const channel = await runtime.connectInternalChannel(session.sessionId)
     const { processId, binding } = await readLiveManagedExecution(channel, session.sessionId)
-    const { client, authToken } = await runtime.connectCohostRuntime(session.userId)
+    const expectedAgent = session.assistantName ? sessionAgentName(session.userId, session.assistantName) : undefined
+    if (!expectedAgent || binding.ownerId !== session.userId || binding.agentId !== expectedAgent) {
+      throw new ResourceAccessError(403, 'Cohost workspace owner does not match the session')
+    }
+    const { client, authToken } = await runtime.connectCohostRuntime(session.userId, expectedAgent)
     try {
       const descriptor = await new ManagedAgentClient(client, authToken).getSession(processId)
-      const expectedAgent = session.assistantName ? sessionAgentName(session.userId, session.assistantName) : undefined
-      if (!expectedAgent || binding.ownerId !== session.userId || binding.agentId !== expectedAgent || descriptor.owner_id !== session.userId || descriptor.agent_id !== expectedAgent ||
+      if (descriptor.owner_id !== session.userId || descriptor.agent_id !== expectedAgent ||
           descriptor.session_id !== processId || descriptor.durable_session_id !== binding.durableSessionId) {
         throw new ResourceAccessError(403, 'Cohost workspace owner does not match the session')
       }
@@ -59,12 +51,7 @@ export function createCohostWorkspaceAccess(
         const children = await client.readdir(directory, token)
         for (const child of children.slice(0, 500)) {
           if (entries.length >= 5000) break
-          // The VFS client returns absolute entry paths; older clients return basenames.
-          const name = child.name.startsWith(`${directory}/`)
-            ? child.name.slice(directory.length + 1) : child.name
-          if (!name || name === '.' || name === '..' || /[\\/\0]/.test(name)) {
-            throw new ResourceAccessError(503, 'Invalid cohost workspace entry')
-          }
+          const name = cohostWorkspaceEntryName(directory, child.name)
           const path = posix.join(relativePath, name)
           const info = await client.stat(cohostWorkspacePath(root, path), token)
           if (!info) continue
@@ -79,24 +66,10 @@ export function createCohostWorkspaceAccess(
     }),
     readFile: relativePath => withWorkspace(async (client, token, root) => {
       const path = cohostWorkspacePath(root, relativePath)
-      await rejectWorkspaceLinks(client, token, root, path)
+      await assertCohostWorkspaceNoLinks(client, token, root, path)
       return client.read(path, token)
     }),
-    writeFile: (relativePath, content, mode) => withWorkspace(async (client, token, root) => {
-      if (mode !== undefined) throw new ResourceAccessError(400, 'Cohost workspace file mode is managed by Nexus')
-      const path = cohostWorkspacePath(root, relativePath)
-      await rejectWorkspaceLinks(client, token, root, path)
-      await client.mkdir(posix.dirname(path), token, { parents: true, existOk: true })
-      await client.write(path, content, token)
-    }),
-  }
-}
-
-async function rejectWorkspaceLinks(client: NexusVfsClient, token: string, root: string, path: string): Promise<void> {
-  let current = root
-  for (const component of posix.relative(root, path).split('/').filter(Boolean)) {
-    current = posix.join(current, component)
-    const info = await client.stat(current, token)
-    if (info?.entryType === 6) throw new ResourceAccessError(400, 'Workspace files must not be symbolic links')
+    writeFile: (relativePath, content, mode) => withWorkspace((client, token, root) =>
+      writeCohostWorkspaceFile(client, token, root, relativePath, content, mode)),
   }
 }

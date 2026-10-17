@@ -57,6 +57,7 @@ void test('personal cloud Agents retain memory and receive pod instructions with
   const orgId = 'org-one'
   const userId = 'user-one'
   const checkpoint = new Error('stop before external model lookup')
+  let profileName = 'Fixture User'
   let created: SessionRecord
   const config = {
     runtimeDir: root,
@@ -85,7 +86,7 @@ void test('personal cloud Agents retain memory and receive pod instructions with
       getTokenLimits: async () => ({ userLimit: null, departmentLimit: null }),
       buildVisibilityFilter: async () => ({ isAdmin: true, userId }),
       issueWikiSession: () => ({ token: 'fixture-token' }),
-      getUserOrNull: async () => ({ id: userId, name: 'Fixture User', role: 'user' }),
+      getUserOrNull: async () => ({ id: userId, name: profileName, role: 'user' }),
       getUserDepartmentAncestorIds: async () => null,
       getOrganizationSystemSettings: async () => {
         throw checkpoint
@@ -141,6 +142,21 @@ void test('personal cloud Agents retain memory and receive pod instructions with
       assert.match(secret.data['AGENTS.md']!, /olive-fixture/)
       if (ref === userCreatedAgentName(own.id))
         assert.match(secret.data['AGENTS.md']!, /Project Assistant/)
+      const controllerInstructions = await readFile(join(session.cwd, 'AGENTS.md'), 'utf8')
+      profileName = 'Native Profile'
+      await withOrganizationResources({ orgId, userId, snapshot: { orgId, resources: [] } }, async () => {
+        await assert.rejects(runtime.spawnAttemptInResourceScope({ ...session,
+          runtime: { ...session.runtime, type: 'cohost' } }), error => error === checkpoint)
+      })
+      const nativeManifest = JSON.parse(await readFile(
+        join(root, 'sessions', session.sessionId, 'attempt-0001', 'manifest.json'), 'utf8'))
+      assert.equal(nativeManifest.session.sharedMemory, null)
+      assert.match(nativeManifest.session.agentInstructions, /Current user profile/)
+      assert.match(nativeManifest.session.agentInstructions, /Native Profile/)
+      assert(!nativeManifest.session.agentInstructions.includes('olive-fixture'), 'native memory has its own authoritative Agent store')
+      assert.equal(await readFile(join(session.cwd, 'AGENTS.md'), 'utf8'), controllerInstructions)
+      assert(!(await readSharedAgentMemory(home, ref))!.includes('Native Profile'))
+      profileName = 'Fixture User'
     }
     const other = await createUserAgent({ orgId, userId, displayName: 'Other Assistant' })
     assert.equal(

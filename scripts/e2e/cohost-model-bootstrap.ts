@@ -33,10 +33,12 @@ try {
       writeFileSync(join(frontDoor, name), content, { mode: 0o600 })
     }
   }
-  await new Promise<void>((resolve, reject) => vfs.setattr({
+  const mounted = await new Promise<any>((resolve, reject) => vfs.setattr({
     path: '/model', entry_type: 2, backend_type: 'anthropic', backend_name: 'controlled-model', zone_id: 'model',
     backend_params: { base_url: baseUrl.replace(/\/+$/, '').replace(/\/v1$/, ''), blob_root: storage },
-  }, new grpc.Metadata(), { deadline: Date.now() + 30_000 }, (error: Error | null) => error ? reject(error) : resolve()))
+  }, new grpc.Metadata(), { deadline: Date.now() + 30_000 }, (error: Error | null, result: any) => error ? reject(error) : resolve(result)))
+  assert.equal(mounted.is_error, false,
+    `Model mount failed: ${Buffer.from(mounted.error_payload).toString().slice(0, 4096)}`)
   console.log(JSON.stringify({ mounted: '/model', credentials_in_mount_parameters: false }))
 } finally {
   vfs.close()

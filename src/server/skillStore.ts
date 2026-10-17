@@ -18,6 +18,7 @@ import {
 } from '../utils/skills/localSkillDirectories.js'
 import { getHubApiBaseUrl, getHubAuthorization, getCosBaseUrl } from './hubConfig.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
+import { ResourceFilesError, copyResourceDirectory, readResourceArchive, writeResourceFiles } from '@sudo/resource-files'
 
 function getHubCategoriesUrl(): string {
   return `${getHubApiBaseUrl()}/categories`
@@ -226,31 +227,12 @@ async function verifyChecksum(
   return actualChecksum === expectedChecksum
 }
 
-function isUnsafeEntryPath(entryPath: string): boolean {
-  if (!entryPath || entryPath === '.') return false
-  if (/^[a-zA-Z]:[\\/]/.test(entryPath)) return true
-  if (entryPath.startsWith('/') || entryPath.startsWith('\\')) return true
-  const normalized = entryPath.replace(/\\/g, '/').replace(/^\.\/+/, '')
-  return normalized === '..' || normalized.startsWith('../')
-}
-
 function isPathInsideDir(rootDir: string, targetPath: string): boolean {
   const relativePath = path.relative(path.resolve(rootDir), targetPath)
   return (
     relativePath === '' ||
     (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
   )
-}
-
-function resolveSafeEntryPath(
-  targetDir: string,
-  entryPath: string,
-): string | null {
-  if (isUnsafeEntryPath(entryPath)) return null
-  const normalized = entryPath.replace(/\\/g, '/').replace(/^\.\/+/, '')
-  if (!normalized) return null
-  const fullPath = path.resolve(targetDir, normalized)
-  return isPathInsideDir(targetDir, fullPath) ? fullPath : null
 }
 
 export async function readSkillMeta(skillDir: string): Promise<SkillStoreMeta | null> {
@@ -513,21 +495,19 @@ async function extractSkillZip(
   buffer: Buffer,
   targetDir: string,
 ): Promise<void> {
-  const { default: JSZip } = await import('jszip')
-  const zip = await JSZip.loadAsync(buffer).catch(() => {
+  const files = await readResourceArchive(buffer).catch(() => {
     throw new ResourceAccessError(400, 'Invalid skill ZIP archive')
   })
-  const files = Object.values(zip.files)
 
   // Find root SKILL.md path
   const skillMdFiles = files.filter(
-    f => !f.dir && f.name.toLowerCase().endsWith('skill.md'),
+    f => !f.isDirectory && f.path.toLowerCase().endsWith('skill.md'),
   )
 
   let stripPrefix = ''
   if (
     skillMdFiles.some(f => {
-      const normalized = f.name.replace(/\\/g, '/').replace(/^\.\/+/, '')
+      const normalized = f.path
       return normalized === 'SKILL.md' || normalized === 'skill.md'
     })
   ) {
@@ -536,7 +516,7 @@ async function extractSkillZip(
     const rootPaths = [
       ...new Set(
         skillMdFiles.map(f =>
-          path.dirname(f.name.replace(/\\/g, '/').replace(/^\.\/+/, '')).split('/')[0],
+          path.posix.dirname(f.path).split('/')[0],
         ),
       ),
     ].filter(Boolean)
@@ -546,67 +526,21 @@ async function extractSkillZip(
     }
   }
 
-  for (const entry of files) {
-    // Skip directory entries (JSZip has entry.dir property)
-    if (entry.dir) continue
-
-    if (!resolveSafeEntryPath(targetDir, entry.unsafeOriginalName || entry.name)) {
-      throw new ResourceAccessError(400, 'Unsafe skill archive entry path')
-    }
-
-    let entryName = entry.name.replace(/\\/g, '/').replace(/^\.\/+/, '')
-    if (stripPrefix && entryName.startsWith(stripPrefix)) {
-      entryName = entryName.slice(stripPrefix.length)
-    }
-
-    const fullPath = resolveSafeEntryPath(targetDir, entryName)
-    if (!fullPath) throw new ResourceAccessError(400, 'Unsafe skill archive entry path')
-
-    await mkdir(path.dirname(fullPath), { recursive: true })
-    const content = await entry.async('nodebuffer')
-    await writeFile(fullPath, content)
-  }
+  await writeResourceFiles(targetDir, files
+    .filter(file => !file.isDirectory)
+    .map(file => ({ ...file, path: stripPrefix && file.path.startsWith(stripPrefix) ? file.path.slice(stripPrefix.length) : file.path })))
 }
 
 async function writeDirectoryEntries(
   targetDir: string,
   entries: ImportSkillDirectoryEntry[],
 ): Promise<void> {
-  for (const entry of entries) {
-    const fullPath = resolveSafeEntryPath(targetDir, entry.path)
-    if (!fullPath) throw new ResourceAccessError(400, 'Unsafe skill directory entry path')
-
-    await mkdir(path.dirname(fullPath), { recursive: true })
-    await writeFile(fullPath, Buffer.from(entry.contentBase64, 'base64'))
-  }
-}
-
-async function copyDirectoryRecursive(
-  sourceDir: string,
-  targetDir: string,
-): Promise<void> {
-  let entries
-  try {
-    entries = await readdir(sourceDir, { withFileTypes: true })
-  } catch {
-    return
-  }
-
-  await mkdir(targetDir, { recursive: true })
-  await Promise.all(
-    entries.map(async entry => {
-      const sourcePath = path.join(sourceDir, entry.name)
-      const targetPath = path.join(targetDir, entry.name)
-      if (entry.isDirectory()) {
-        await copyDirectoryRecursive(sourcePath, targetPath)
-        return
-      }
-      if (entry.isFile()) {
-        await mkdir(path.dirname(targetPath), { recursive: true })
-        await writeFile(targetPath, await readFile(sourcePath))
-      }
-    }),
-  )
+  await writeResourceFiles(targetDir, entries.map(entry => ({
+    path: entry.path, content: Buffer.from(entry.contentBase64, 'base64'), mode: 0o600,
+  }))).catch(error => {
+    if (error instanceof ResourceFilesError) throw new ResourceAccessError(400, 'Invalid skill directory entries')
+    throw error
+  })
 }
 
 function normalizeImportedSkillName(name: string): string {
@@ -659,7 +593,7 @@ async function installImportedSkillFromTemp(
   const targetDir = getOrganizationResourceScope() ? newPrivateResourcePath('skill', resourceId) : path.join(USER_SKILLS_DIR, skillName)
   await mkdir(USER_SKILLS_DIR, { recursive: true })
   await rm(targetDir, { recursive: true, force: true })
-  await copyDirectoryRecursive(skillDir, targetDir)
+  await copyResourceDirectory(skillDir, targetDir)
 
   const meta = buildSkillMetaFromFrontmatter(skillName, frontmatter, {
     source_type: 'upload',
@@ -1123,7 +1057,7 @@ export async function uploadCustomSkill(params: {
     const targetDir = getOrganizationResourceScope() ? newPrivateResourcePath('skill', resourceId) : path.join(MOSS_SKILLS_CUSTOM_DIR, skillName)
     await mkdir(MOSS_SKILLS_CUSTOM_DIR, { recursive: true })
     await rm(targetDir, { recursive: true, force: true })
-    await copyDirectoryRecursive(skillDir, targetDir)
+    await copyResourceDirectory(skillDir, targetDir)
 
     // Create metadata with visibility set to uploader only
     const version = params.version || frontmatter.version || '1.0.0'
@@ -1295,7 +1229,7 @@ async function installTenantSkillFromTemp(
   const targetDir = getOrganizationResourceScope() ? newPrivateResourcePath('skill', resourceId) : path.join(targetBaseDir, skillName)
   await mkdir(targetBaseDir, { recursive: true })
   await rm(targetDir, { recursive: true, force: true })
-  await copyDirectoryRecursive(skillDir, targetDir)
+  await copyResourceDirectory(skillDir, targetDir)
 
   // Build metadata with source_type = 'tenant'
   const meta = buildSkillMetaFromFrontmatter(skillName, frontmatter, {

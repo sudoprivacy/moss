@@ -12,6 +12,7 @@ import {
 } from './skillStore.js'
 import { getHubApiBaseUrl, getHubAuthorization, getCosBaseUrl } from './hubConfig.js'
 import type { VisibleTo } from './visibilityFilter.js'
+import { copyResourceDirectory, readResourceArchive, writeResourceFiles } from '@sudo/resource-files'
 
 // Support MOSS_HOME environment variable for Docker/container environments
 const MOSS_HOME = process.env.MOSS_HOME || path.join(os.homedir(), '.moss')
@@ -396,35 +397,12 @@ async function extractAssistantZip(
   buffer: Buffer,
   targetDir: string,
 ): Promise<void> {
-  const { unzipSync } = await import('fflate')
-  const zipEntries = unzipSync(new Uint8Array(buffer))
-  const stripPrefix = resolveZipStripPrefix(Object.keys(zipEntries))
-
-  await mkdir(targetDir, { recursive: true })
-
-  for (const [rawEntryName, content] of Object.entries(zipEntries)) {
-    if (rawEntryName.endsWith('/')) continue
-    if (isUnsafeZipEntryPath(rawEntryName)) {
-      throw new Error(`Unsafe zip entry path: ${rawEntryName}`)
-    }
-
-    let entryName = normalizeZipEntryPath(rawEntryName)
-    if (!entryName) continue
-    if (entryName.includes('__MACOSX') || entryName.endsWith('.DS_Store')) {
-      continue
-    }
-    if (stripPrefix) {
-      if (!entryName.startsWith(stripPrefix)) {
-        continue
-      }
-      entryName = entryName.slice(stripPrefix.length)
-      if (!entryName) continue
-    }
-
-    const fullPath = path.join(targetDir, entryName)
-    await mkdir(path.dirname(fullPath), { recursive: true })
-    await writeFile(fullPath, Buffer.from(content))
-  }
+  const files = await readResourceArchive(buffer)
+  const stripPrefix = resolveZipStripPrefix(files.filter(file => !file.isDirectory).map(file => file.path))
+  await writeResourceFiles(targetDir, files
+    .filter(file => !file.isDirectory && !file.path.includes('__MACOSX') && !file.path.endsWith('.DS_Store'))
+    .filter(file => !stripPrefix || file.path.startsWith(stripPrefix))
+    .map(file => ({ ...file, path: stripPrefix ? file.path.slice(stripPrefix.length) : file.path })))
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -1439,7 +1417,7 @@ export async function uploadCustomAssistant(params: {
     }
 
     // Copy to target directory
-    await copyDirectoryRecursive(assistantDir, targetDir)
+    await copyResourceDirectory(assistantDir, targetDir)
 
     // Create or update metadata with visibility set to uploader only
     const existingMeta = await readAssistantMeta(targetDir)
@@ -1519,24 +1497,6 @@ export async function packageAssistantZipByDir(assistantDir: string): Promise<Bu
   await addDirectoryToZip(zip, assistantDir, '')
 
   return zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' })
-}
-
-async function copyDirectoryRecursive(
-  sourceDir: string,
-  targetDir: string,
-): Promise<void> {
-  await mkdir(targetDir, { recursive: true })
-  const entries = await readdir(sourceDir, { withFileTypes: true })
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    const sourcePath = path.join(sourceDir, entry.name)
-    const targetPath = path.join(targetDir, entry.name)
-    if (entry.isDirectory()) {
-      await copyDirectoryRecursive(sourcePath, targetPath)
-    } else if (entry.isFile()) {
-      await mkdir(path.dirname(targetPath), { recursive: true })
-      await writeFile(targetPath, await readFile(sourcePath))
-    }
-  }
 }
 
 async function addDirectoryToZip(

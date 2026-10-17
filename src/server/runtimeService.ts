@@ -7,6 +7,7 @@ import {
   isUserCreatedAgentName,
   isUserOwnedAgentName,
   nexusAgentName,
+  sessionAgentName,
 } from './agentIdentity.js'
 import { requirePersonalAgent } from './personalAgentAccess.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
@@ -67,8 +68,10 @@ import {
   writeAssistantOverrideAgentsMd,
 } from './sharedAgentMemory.js'
 import { ensureDraftsDirectory } from './draftsCleanup.js'
+import { buildAgentInstructions } from './agentInstructions.js'
 import type { NexusClient } from './nexus/nexusClient.js'
 import { UserPodService } from '@sudo/user-runtime'
+import { CohostOwnerRuntime } from './runtime/cohostOwnerRuntime.js'
 import type { NexusSessionEndpoint } from '@nexus-ai-fs/vfs-client'
 import { assertRuntimePlacement } from './runtime/runtimePlacementPolicy.js'
 import { readRuntimeRelease } from '@sudo/user-runtime/release'
@@ -335,6 +338,7 @@ const USAGE_CACHE_TTL_MS = 15_000
 
 export class RuntimeService {
   private readonly userPods?: UserPodService
+  private readonly ownerRuntime?: CohostOwnerRuntime
   private readonly upgradingOwners = new Set<string>()
   readonly store: DirectConnectStore
   readonly authService: AuthService
@@ -387,6 +391,10 @@ export class RuntimeService {
         imagePullPolicy: k8s.imagePullPolicy, imagePullSecrets: k8s.imagePullSecrets,
         issuer: { endpoint: issuer.endpoint, tls: issuer.tls },
       }, undefined, waitForSessionRuntime)
+    }
+    if (this.userPods) {
+      this.ownerRuntime = new CohostOwnerRuntime(this.userPods, this.store.cohostAgentHomes,
+        k8s?.userRuntimeAgentsPerAllocation)
     }
     if (options.nexusClient) {
       this.mcpStore = new McpStore(this.store.driver)
@@ -582,6 +590,8 @@ export class RuntimeService {
         if (!namespace?.names.includes(existingAgent) || (!namespace.isOwnerConfined && !owned?.length)) {
           throw new ResourceAccessError(404, 'Agent not available')
         }
+        const allocation = namespace.agentAllocations?.[existingAgent]
+        if (this.ownerRuntime && allocation) await this.ownerRuntime.adopt(input.userId, existingAgent, allocation)
         if (!namespace.managedNames.includes(existingAgent) && !owned?.some(record => record.kind === 'managed')) {
           throw new ResourceAccessError(400, 'Agent does not support native conversations')
         }
@@ -616,23 +626,24 @@ export class RuntimeService {
   }
 
   /** Main-process placement shared by session runners and authenticated workspace I/O. */
-  async resolveCohostConnection(ownerId: string, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
-    return this.userPods ? this.userPods.resolve(ownerId, configuration) : externalCohostConnection()
+  async resolveCohostConnection(ownerId: string, agentId: string, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
+    return this.ownerRuntime ? this.ownerRuntime.connection(ownerId, agentId, configuration) : externalCohostConnection()
   }
 
   /** Connect with a fresh owner-delegated identity at the execution endpoint. */
-  async connectCohostRuntime(ownerId: string) {
-    return connectSessionRuntime(await this.resolveCohostConnection(ownerId), ownerId)
+  async connectCohostRuntime(ownerId: string, agentId: string) {
+    return connectSessionRuntime(await this.resolveCohostConnection(ownerId, agentId), ownerId)
   }
 
   /** List requests inspect existing boxes and never create another user's runtime. */
   async readAgentNamespace(ownerId: string) {
-    const config = this.userPods ? await this.userPods.find(ownerId) : externalCohostConnection()
+    if (this.ownerRuntime) return this.ownerRuntime.namespace(ownerId)
+    const config = externalCohostConnection()
     if (!config) return undefined
     const { client, authToken } = await connectSessionRuntime(config, ownerId)
     try {
       const { readAgentNamespace } = await import('./nexus/agentNamespace.js')
-      return await readAgentNamespace(client, authToken, ownerId, Boolean(this.userPods))
+      return await readAgentNamespace(client, authToken, ownerId, false)
     } finally { client.close() }
   }
 
@@ -643,7 +654,7 @@ export class RuntimeService {
 
   /** Inspect placement and release drift through the namespace-scoped controller identity. */
   async inspectUserRuntime(ownerId: string) {
-    return this.userPods ? this.userPods.inspect(ownerId) : { ownerId, isPresent: false, isDrifted: false, phase: 'legacy' }
+    return this.ownerRuntime ? this.ownerRuntime.inspect(ownerId) : { ownerId, isPresent: false, isDrifted: false, phase: 'legacy' }
   }
 
   /** Reject new traffic while this controller drains an owner's native runtime. */
@@ -653,7 +664,8 @@ export class RuntimeService {
 
   /** Drain only tracked idle native sessions, replace placement, then resume their durable histories. */
   async upgradeUserRuntime(ownerId: string, orgId: string, configuration?: Record<string, string>) {
-    if (!this.userPods) throw new ResourceAccessError(409, 'User runtime placement is not enabled')
+    const ownerRuntime = this.ownerRuntime
+    if (!ownerRuntime) throw new ResourceAccessError(409, 'User runtime placement is not enabled')
     this.assertCohostDeploymentAccess('cohost', ownerId)
     if (this.upgradingOwners.has(ownerId)) throw new ResourceAccessError(409, 'An owner upgrade is already in progress')
     if (await this.countLiveOtherInstances()) throw new ResourceAccessError(409, 'Drain peer Moss controllers before upgrading this owner')
@@ -671,43 +683,48 @@ export class RuntimeService {
       const sessions = (await this.store.listUserSessions(orgId, ownerId))
         .filter(session => session.runtime.type === 'cohost' && session.desiredState === 'active')
       const bindings = await Promise.all(sessions.map(async session => ({ session,
-        binding: await this.store.cohostSessions.get(session.sessionId) })))
-      await this.userPods.upgrade(ownerId, async previous => {
-        if (previous) {
-          const connection = await connectSessionRuntime(previous, ownerId)
-          const { readAgentNamespace } = await import('./nexus/agentNamespace.js')
-          const { ManagedAgentClient } = await import('./nexus/managedAgentClient.js')
-          const agent = new ManagedAgentClient(connection.client, connection.authToken)
-          try {
-            const namespace = await readAgentNamespace(connection.client, connection.authToken, ownerId, true)
-            const processes: Array<{ id: string; endpoint: NexusSessionEndpoint }> = []
-            for (const execution of namespace.executions.filter(record => record.state !== 'terminated')) {
-              if (execution.kind !== 'managed' || execution.state !== 'ready' || !execution.processId) {
-                throw new ResourceAccessError(409, 'Finish active Agent work before upgrading this owner')
+        binding: await this.store.cohostSessions.get(session.sessionId),
+        home: await ownerRuntime.resolveHome(ownerId, sessionAgentName(ownerId, session.assistantName)) })))
+      for (const placement of await ownerRuntime.placements(ownerId)) {
+        const allocationBindings = bindings.filter(({ home }) => home.allocationId === placement.allocationId)
+        const allocationSessions = allocationBindings.map(({ session }) => session)
+        await placement.service.upgrade(ownerId, async previous => {
+          if (previous) {
+            const connection = await connectSessionRuntime(previous, ownerId)
+            const { readAgentNamespace } = await import('./nexus/agentNamespace.js')
+            const { ManagedAgentClient } = await import('./nexus/managedAgentClient.js')
+            const agent = new ManagedAgentClient(connection.client, connection.authToken)
+            try {
+              const namespace = await readAgentNamespace(connection.client, connection.authToken, ownerId, true)
+              const processes: Array<{ id: string; endpoint: NexusSessionEndpoint }> = []
+              for (const execution of namespace.executions.filter(record => record.state !== 'terminated')) {
+                if (execution.kind !== 'managed' || execution.state !== 'ready' || !execution.processId) {
+                  throw new ResourceAccessError(409, 'Finish active Agent work before upgrading this owner')
+                }
+                const snapshot = await agent.getSession(execution.processId)
+                if (!snapshot.session_endpoint || snapshot.owner_id !== ownerId || !allocationBindings.some(({ binding }) => binding?.ownerId === ownerId &&
+                  binding.agentId === snapshot.agent_id && binding.durableSessionId === snapshot.durable_session_id)) {
+                  throw new ResourceAccessError(409, 'An external Agent session must drain before this upgrade')
+                }
+                processes.push({ id: execution.processId, endpoint: snapshot.session_endpoint })
               }
-              const snapshot = await agent.getSession(execution.processId)
-              if (!snapshot.session_endpoint || snapshot.owner_id !== ownerId || !bindings.some(({ binding }) => binding?.ownerId === ownerId &&
-                binding.agentId === snapshot.agent_id && binding.durableSessionId === snapshot.durable_session_id)) {
-                throw new ResourceAccessError(409, 'An external Agent session must drain before this upgrade')
+              for (const process of processes) await agent.cancel(process.id, process.endpoint)
+              for (const session of allocationSessions) {
+                await this.terminateSession(session.sessionId, true)
+                paused.add(session.sessionId)
               }
-              processes.push({ id: execution.processId, endpoint: snapshot.session_endpoint })
-            }
-            for (const process of processes) await agent.cancel(process.id, process.endpoint)
-            for (const session of sessions) {
+              const remaining = await readAgentNamespace(connection.client, connection.authToken, ownerId, true)
+              if (remaining.executions.some(record => record.state !== 'terminated')) throw new ResourceAccessError(409, 'User runtime still has live executions')
+            } finally { agent.close() }
+          } else {
+            for (const session of allocationSessions) {
               await this.terminateSession(session.sessionId, true)
               paused.add(session.sessionId)
             }
-            const remaining = await readAgentNamespace(connection.client, connection.authToken, ownerId, true)
-            if (remaining.executions.some(record => record.state !== 'terminated')) throw new ResourceAccessError(409, 'User runtime still has live executions')
-          } finally { agent.close() }
-        } else {
-          for (const session of sessions) {
-            await this.terminateSession(session.sessionId, true)
-            paused.add(session.sessionId)
           }
-        }
-      }, configuration)
-      return await this.userPods.inspect(ownerId)
+        }, configuration)
+      }
+      return await ownerRuntime.inspect(ownerId)
     } finally {
       this.upgradingOwners.delete(ownerId)
       for (const sessionId of paused) {
@@ -2058,6 +2075,8 @@ export class RuntimeService {
     let availableWikis: Array<{ id: string; name: string; description?: string | null }> | undefined
     let availableCorpApps: Array<{ id: string; name: string; type: string; key: string }> | undefined
     let sharedMemory: string | null = null
+    let agentInstructions: string | null = null
+    const isCohostRuntime = session.runtime.type === 'cohost'
     if (effectiveAssistantName) {
       try {
         const { findAssistantDir, readAssistantMeta } = await import('./agentStore.js')
@@ -2108,7 +2127,8 @@ export class RuntimeService {
           }
         }
 
-        if (isMemoryEnabled && session.runtime.configDir && session.userId) {
+        let userProfile: string | null = null
+        if (session.userId && (isCohostRuntime || isMemoryEnabled && session.runtime.configDir)) {
           const user = await this.authService.getUserOrNull(
             session.userId,
             session.orgId,
@@ -2125,7 +2145,9 @@ export class RuntimeService {
             departmentName,
             email: user?.email ?? null,
           })
-          if (userProfileMemory) {
+          if (isCohostRuntime) {
+            userProfile = userProfileMemory
+          } else if (userProfileMemory && session.runtime.configDir) {
             await appendSharedAgentMemory({
               configDir: session.runtime.configDir,
               assistantName: effectiveAssistantName,
@@ -2133,13 +2155,18 @@ export class RuntimeService {
               source: 'profile',
             }).catch(() => {})
           }
-          sharedMemory = await readSharedAgentMemory(
-            session.runtime.configDir,
-            effectiveAssistantName,
-          )
+          if (!isCohostRuntime && session.runtime.configDir) {
+            sharedMemory = await readSharedAgentMemory(session.runtime.configDir, effectiveAssistantName)
+          }
         }
 
-        if (session.runtime.configDir) {
+        const assistantRules = isUserOwnedAgentName(effectiveAssistantName)
+          ? null
+          : await import('./agentStore.js').then(m => m.getAssistantSystemPrompt(effectiveAssistantName!))
+        if (isCohostRuntime) {
+          agentInstructions = buildAgentInstructions({ assistantName: effectiveAssistantName,
+            assistantDisplayName, assistantRules, userProfile })
+        } else if (session.runtime.configDir) {
           await writeAssistantOverrideAgentsMd({
             configDir: session.runtime.configDir,
             // scode reads AGENTS.md from the workspace it runs in, not from configDir —
@@ -2147,11 +2174,7 @@ export class RuntimeService {
             workspace: session.cwd,
             assistantName: effectiveAssistantName,
             assistantDisplayName,
-            assistantRules: isUserOwnedAgentName(effectiveAssistantName)
-              ? null
-              : await import('./agentStore.js').then(m =>
-                m.getAssistantSystemPrompt(effectiveAssistantName!),
-              ),
+            assistantRules,
             sharedMemory,
           }).catch(err => {
             console.warn(
@@ -2161,6 +2184,7 @@ export class RuntimeService {
           })
         }
       } catch (err) {
+        if (isCohostRuntime) throw err
         console.warn(
           `[RuntimeService] failed to resolve availableWikis for ${effectiveAssistantName}:`,
           err,
@@ -2331,6 +2355,7 @@ export class RuntimeService {
         availableWikis,
         availableCorpApps,
         sharedMemory,
+        agentInstructions,
         enabledSkills: options.enabledSkills,
         resources: resourceSnapshot,
         visibilityFilter: visibilityFilter ? {
@@ -2397,6 +2422,7 @@ export class RuntimeService {
     if (session.runtime.type === 'cohost') {
       runnerEnv.MOSS_COHOST_CONNECTION = encodeCohostConnection(await this.resolveCohostConnection(
         session.userId,
+        sessionAgentName(session.userId, session.assistantName),
         buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || '', runnerEnv.MOSS_DEFAULT_MODEL!),
       ))
     }

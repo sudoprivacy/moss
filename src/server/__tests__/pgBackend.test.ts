@@ -32,7 +32,7 @@ import { DifyHttpAdapter } from "../dify/difyHttpAdapter.js";
 import { BillingRepository } from "../billing/billingRepository.js";
 import { WalletService } from "../billing/walletService.js";
 import { BillingCoordinator } from "../billing/billingCoordinator.js";
-import { SudorouterAccountService } from "../billing/sudorouterAccountService.js";
+import { SudorouterAccountError, SudorouterAccountService } from "../billing/sudorouterAccountService.js";
 import type { QuotaSnapshot, SudorouterAccountPort, SudorouterUserAccount } from "../billing/sudorouterAdapter.js";
 import { migrationCommandContext, onlineCommandContext } from "../application/commandContext.js";
 import { repairConfigAvailability } from "../configuration/configAvailabilitySchema.js";
@@ -294,7 +294,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
       await applyPgSchema(fix.driver);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -693,11 +693,17 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         await providerStarted;
         const second = serviceB.create("org-ha", { name: "HA Dataset" }, context)
           .then(value => ({ status: "fulfilled" as const, value }), reason => ({ status: "rejected" as const, reason }));
-        await new Promise(resolve => setTimeout(resolve, 100));
+        const concurrent = await second;
+        assert.equal(concurrent.status, "rejected");
+        if (concurrent.status === "rejected") assert.match(String(concurrent.reason), /is PROCESSING$/);
         releaseProvider();
-        const results = await Promise.all([first, second]);
+        const completed = await first;
+        assert.equal(completed.status, "fulfilled");
+        if (completed.status === "fulfilled") {
+          const replay = await serviceB.create("org-ha", { name: "HA Dataset" }, context);
+          assert.deepEqual(replay, completed.value);
+        }
         assert.equal(providerCalls, 1);
-        assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
       } finally {
         releaseProvider();
         await peer.pool.end();
@@ -749,11 +755,19 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         await providerStarted;
         const second = coordinatorB.adjustPoints(input, context)
           .then(value => ({ status: "fulfilled" as const, value }), reason => ({ status: "rejected" as const, reason }));
-        await new Promise(resolve => setTimeout(resolve, 100));
+        const concurrent = await second;
+        assert.equal(concurrent.status, "fulfilled");
+        if (concurrent.status === "fulfilled") assert.equal(concurrent.value.status, "PROCESSING");
         releaseProvider();
-        const results = await Promise.all([first, second]);
+        const completed = await first;
+        assert.equal(completed.status, "fulfilled");
+        if (completed.status === "fulfilled") {
+          assert.equal(completed.value.status, "SUCCEEDED");
+          const replay = await coordinatorB.adjustPoints(input, context);
+          assert.equal(replay.operationId, completed.value.operationId);
+          assert.equal(replay.status, "SUCCEEDED");
+        }
         assert.equal(changeCalls, 1);
-        assert.equal(results.filter(result => result.status === "fulfilled" && result.value.status === "SUCCEEDED").length, 1);
         assert.equal(await repoA.countLedgerEntries(`wallet:quota:${context.idempotencyKey}`), 1);
       } finally {
         releaseProvider();
@@ -824,10 +838,16 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         await providerStarted;
         const second = serviceB.ensureAccount(input, context)
           .then(value => ({ status: "fulfilled" as const, value }), reason => ({ status: "rejected" as const, reason }));
-        await new Promise(resolve => setTimeout(resolve, 100));
+        const concurrent = await second;
+        assert.equal(concurrent.status, "rejected");
+        if (concurrent.status === "rejected") assert(concurrent.reason instanceof SudorouterAccountError);
         releaseProvider();
-        const results = await Promise.all([first, second]);
-        assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+        const completed = await first;
+        assert.equal(completed.status, "fulfilled");
+        if (completed.status === "fulfilled") {
+          const replay = await serviceB.ensureAccount(input, context);
+          assert.deepEqual(replay, completed.value);
+        }
         assert.deepEqual({ createCalls, quotaCalls, tokenCalls }, { createCalls: 1, quotaCalls: 1, tokenCalls: 1 });
       } finally {
         releaseProvider();
@@ -1225,6 +1245,8 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
         assert.deepEqual(await driver.all('SELECT session_id FROM sessions'), [{ session_id: 'retained-session' }]);
         await driver.run('INSERT INTO cohost_sessions (session_id, owner_user_id, native_agent_id, durable_session_id, repository_path) VALUES (?, ?, ?, ?, ?)',
           ['retained-session', 'u1', 'retained-agent', 'retained-native-id', '/agents/retained-agent/workspaces/retained-session']);
+        await driver.run('INSERT INTO cohost_agent_homes (owner_user_id, native_agent_id, allocation_id) VALUES (?, ?, ?)',
+          ['u1', 'retained-agent', 'primary']);
         await assert.rejects(driver.run('INSERT INTO cohost_sessions (session_id, owner_user_id, native_agent_id, durable_session_id, repository_path) VALUES (?, ?, ?, ?, ?)',
           ['missing-session', 'u2', 'other-agent', 'other-native-id', '/agents/other-agent/workspaces/missing-session']),
           (error: unknown) => (error as { code?: string }).code === '23503');
@@ -1264,8 +1286,11 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
 
         // Re-run is a no-op: every migration remains applied exactly once.
         await applyPgSchema(driver);
+        assert.deepEqual(await driver.all('SELECT owner_user_id, native_agent_id, allocation_id FROM cohost_agent_homes'), [
+          { owner_user_id: 'u1', native_agent_id: 'retained-agent', allocation_id: 'primary' },
+        ]);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         const localGrants = await driver.all<{ id: string; local_execution_allowed: number }>('SELECT id, local_execution_allowed FROM users ORDER BY id');
         assert.deepEqual(localGrants.map(row => [row.id, Number(row.local_execution_allowed)]), [['local-allowed', 1], ['local-denied', 0]]);
         await driver.run('UPDATE users SET local_execution_allowed = 0 WHERE id = ?', ['local-allowed']);

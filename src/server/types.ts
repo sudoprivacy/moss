@@ -176,6 +176,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       image: z.string().optional(),
       userRuntimeImage: z.string().min(1).optional(),
       userRuntimeHost: z.string().min(1).optional(),
+      userRuntimeAgentsPerAllocation: z.number().int().positive().optional(),
       namespace: z.string().default('moss-sessions'),
       // Empty string → omit runtimeClassName (customer cluster without gvisor).
       runtimeClassName: z.string().default('gvisor'),
@@ -702,6 +703,7 @@ export type ServerConfig = {
     image?: string
     userRuntimeImage?: string
     userRuntimeHost?: string
+    userRuntimeAgentsPerAllocation?: number
     namespace: string
     runtimeClassName: string
     kubeconfig?: string
@@ -1025,6 +1027,8 @@ export type RunnerManifest = {
      */
     availableCorpApps?: Array<{ id: string; name: string; type: string; key: string }>
     sharedMemory?: string | null
+    /** Selected application context materialized in the native execution workspace. */
+    agentInstructions?: string | null
     /** Authorized resource metadata and immutable artifact references for the runner. */
     resources?: import('./catalog/organizationResources.js').OrganizationResourceSnapshot
     /** Enabled skill names (from client or agent config) */

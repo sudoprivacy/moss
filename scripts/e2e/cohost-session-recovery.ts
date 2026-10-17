@@ -22,6 +22,11 @@ import { SqliteDriver } from '../../src/server/db/driver.js'
 import { CohostSessionRepository } from '../../src/server/runtime/cohostSessionRepository.js'
 import { COHOST_SESSION_SCHEMA } from '../../src/server/storage/cohostSessionSchema.js'
 import { cohostRepositoryPath } from '../../src/server/backends/cohostSessionState.js'
+import { syncCohostSkills } from '../../src/server/backends/cohostSkills.js'
+import { writeCohostWorkspaceFile } from '../../src/server/backends/cohostWorkspaceFiles.js'
+import { WORKSPACE_SKILLS_DIRECTORY } from '../../src/utils/skills/localSkillDirectories.js'
+import { buildAgentInstructions, PROJECT_AGENT_INSTRUCTIONS_PATH } from '../../src/server/agentInstructions.js'
+import { acpInstructionsMetadata } from '../../src/server/backends/acpTransport.js'
 
 const binary = resolve(process.env.NEXUSD_COHOST_BIN ?? 'bin/cohost/nexusd-cohost')
 const artifacts = process.env.MOSS_COHOST_ARTIFACTS ?? join(tmpdir(), 'moss-cohost-evidence')
@@ -226,7 +231,7 @@ try {
       authToken: 'sk-deployment-token-must-not-override-the-user' }, owner)
     assert(identity, 'Moss must prove the session owner with a minted credential')
     clients.push(client)
-    return { agent: new ManagedAgentClient(client, authToken), client, identity }
+    return { agent: new ManagedAgentClient(client, authToken), client, identity, authToken }
   }
   const ownerA = `owner-a-${randomUUID()}`
   const ownerB = `owner-b-${randomUUID()}`
@@ -264,7 +269,26 @@ try {
     const agentId = `agent-${owner}`
     const mossSessionId = randomUUID()
     const repositoryPath = cohostRepositoryPath(agentId, mossSessionId)
-    await operator.mkdir(repositoryPath, '', { parents: true, existOk: true })
+    await current.client.mkdir(repositoryPath, current.authToken, { parents: true, existOk: true })
+    const roleMarker = `NATIVE_APPLICATION_ROLE_${owner}`
+    const userInstructions = `USER_PROJECT_INSTRUCTIONS_${owner}`
+    const nestedInstructions = `USER_NESTED_PROJECT_INSTRUCTIONS_${owner}`
+    await writeCohostWorkspaceFile(current.client, current.authToken, repositoryPath, 'AGENTS.md', Buffer.from(userInstructions), 0o600)
+    await writeCohostWorkspaceFile(current.client, current.authToken, repositoryPath, PROJECT_AGENT_INSTRUCTIONS_PATH, Buffer.from(nestedInstructions), 0o600)
+    const controllerWorkspace = join(work, `moss-workspace-${owner}`)
+    mkdirSync(controllerWorkspace, { recursive: true })
+    writeFileSync(join(controllerWorkspace, 'AGENTS.md'), 'CONTROLLER_ONLY_INSTRUCTIONS_MUST_NOT_LEAK')
+    const applicationInstructions = (revision: number) => buildAgentInstructions({ assistantName: agentId, assistantDisplayName: `Application ${owner}`,
+      assistantRules: `${roleMarker}_V${revision}`, userProfile: `Authenticated owner is ${owner}.` })
+    const localSkill = `${WORKSPACE_SKILLS_DIRECTORY}/local-recovery/SKILL.md`
+    const localInstructions = '---\nname: local-recovery\ndescription: User-authored recovery skill\n---\nKeep the original user instructions.\n'
+    const catalogSkill = `${WORKSPACE_SKILLS_DIRECTORY}/catalog-recovery/SKILL.md`
+    const catalogInstructions = (version: number) => Buffer.from(`---\nname: catalog-recovery\ndescription: Managed recovery skill\n---\nCatalog revision ${version}.\n`)
+    await writeCohostWorkspaceFile(current.client, current.authToken, repositoryPath, localSkill, Buffer.from(localInstructions), 0o600)
+    await syncCohostSkills(current.client, current.authToken, repositoryPath, [
+      { path: catalogSkill, content: catalogInstructions(1), mode: 0o600 },
+      { path: `${WORKSPACE_SKILLS_DIRECTORY}/catalog-recovery/obsolete.txt`, content: Buffer.from('old catalog asset'), mode: 0o600 },
+    ])
     const attemptId = randomUUID()
     await bindingDriver!.run('INSERT INTO sessions (session_id, user_id, runtime_type, current_attempt_id) VALUES (?, ?, ?, ?)',
       [mossSessionId, owner, 'cohost', attemptId])
@@ -300,7 +324,8 @@ try {
     let active: StartSessionResult = first
     try {
       await controller.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
-      assert.equal((await controller.rpc('session/new', { cwd: '/', mcpServers: [] })).sessionId, sid)
+      assert.equal((await controller.rpc('session/new', { cwd: '/', mcpServers: [],
+        ...acpInstructionsMetadata(applicationInstructions(1)) })).sessionId, sid)
       await controller.rpc('session/setPermissionMode', { sessionId: sid, permissionMode: 'prompt' })
       const initialRequestStart = requests.length
       assert.equal((await controller.rpc('session/prompt', { sessionId: sid,
@@ -311,6 +336,20 @@ try {
         { code: order.code, subtotal: order.subtotal }, 'procfs workspace alias reads the durable Moss repository bytes')
       assert(requests.slice(initialRequestStart).every(request => JSON.stringify(request.system).includes(memoryMarker)),
         'the real model system prompt must load this agent memory')
+      assert(requests.slice(initialRequestStart).every(request => JSON.stringify(request.system).includes(`${roleMarker}_V1`)),
+        'the real native model must receive the application role prepared by Moss')
+      assert(requests.slice(initialRequestStart).every(request => JSON.stringify(request.system).includes(`Authenticated owner is ${owner}.`)),
+        'the authenticated owner profile must reach the native system context')
+      assert(requests.slice(initialRequestStart).every(request => JSON.stringify(request.system).includes(userInstructions)),
+        'user-authored project instructions must remain in native context')
+      assert(requests.slice(initialRequestStart).every(request => JSON.stringify(request.system).includes(nestedInstructions)),
+        'application rules must coexist with user-owned nested project instructions')
+      assert(requests.slice(initialRequestStart).every(request => !JSON.stringify(request.system).includes('CONTROLLER_ONLY_INSTRUCTIONS_MUST_NOT_LEAK')),
+        'controller workspace instructions must not enter native context')
+      for (const skill of ['local-recovery', 'catalog-recovery']) {
+        assert(requests.slice(initialRequestStart).every(request => JSON.stringify(request.system).includes(skill)),
+          'native discovery must include both catalog and user-authored project skills')
+      }
       for (const [otherOwner, marker] of memoryMarkers) {
         if (otherOwner !== owner) assert(requests.slice(initialRequestStart).every(request => !JSON.stringify(request.system).includes(marker)),
           'another owner agent memory must not reach this model')
@@ -377,6 +416,15 @@ try {
       bindingStore = openBindings()
       const binding = await bindingStore.get(mossSessionId)
       assert.deepEqual(binding, { ownerId: owner, agentId, durableSessionId: sid, repositoryPath }, 'another Moss process can recover without a host locator')
+      const reconnected = await consumer(owner)
+      assert.equal((await reconnected.client.read(`${repositoryPath}/AGENTS.md`, reconnected.authToken)).toString(), userInstructions)
+      assert.equal((await reconnected.client.read(`${repositoryPath}/${PROJECT_AGENT_INSTRUCTIONS_PATH}`, reconnected.authToken)).toString(), nestedInstructions)
+      await syncCohostSkills(reconnected.client, reconnected.authToken, repositoryPath, [
+        { path: catalogSkill, content: catalogInstructions(2), mode: 0o600 },
+      ])
+      assert.equal((await reconnected.client.read(`${repositoryPath}/${localSkill}`, reconnected.authToken)).toString(), localInstructions)
+      assert.equal((await reconnected.client.read(`${repositoryPath}/${catalogSkill}`, reconnected.authToken)).toString(), catalogInstructions(2).toString())
+      assert.equal(await reconnected.client.stat(`${repositoryPath}/${WORKSPACE_SKILLS_DIRECTORY}/catalog-recovery/obsolete.txt`, reconnected.authToken), null)
       // PID values may be reused after a process or container restart. Check the old
       // view before starting a replacement; the fresh channel identifies its attachment.
       assert.equal(await operator.stat(`/proc/${first.sessionId}`, ''), null, 'old process view must disappear before recovery')
@@ -399,7 +447,8 @@ try {
       assert.notEqual(active.sessionEndpoint.channel_id, first.sessionEndpoint.channel_id)
       controller = connectController({ agent: current.agent, sessionEndpoint: active.sessionEndpoint, sessionId: active.sessionId }, allowed)
       await controller.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
-      await controller.rpc('session/load', { sessionId: sid, cwd: '/', mcpServers: [] })
+      await controller.rpc('session/load', { sessionId: sid, cwd: '/', mcpServers: [],
+        ...acpInstructionsMetadata(applicationInstructions(2)) })
       assert.deepEqual(await readSession(sid), before, 'loading must preserve exact previous messages')
       await controller.rpc('session/setPermissionMode', { sessionId: sid, permissionMode: 'prompt' })
       const requestStart = requests.length
@@ -413,6 +462,10 @@ try {
       assert(requests.slice(requestStart).every(request => JSON.stringify(request.messages).includes(order.code)), 'restored model requests must include the original order')
       assert(requests.slice(requestStart).every(request => JSON.stringify(request.system).includes(memoryMarker)),
         'agent memory must be loaded again after native recovery')
+      assert(requests.slice(requestStart).every(request => JSON.stringify(request.system).includes(`${roleMarker}_V2`)),
+        'application context must be rediscovered after daemon restart')
+      assert(requests.slice(requestStart).every(request => !JSON.stringify(request.system).includes(`${roleMarker}_V1`)),
+        'resumed application context must replace the prior role revision')
       const after = await readSession(sid)
       assert.deepEqual(after.slice(0, before.length), before, 'previous messages must remain an exact prefix')
       assert.equal(after.filter(m => m.role === 'user').length, 2, 'resume must add exactly one user turn')
@@ -433,6 +486,11 @@ try {
         }
       }, 90_000)
       assert.deepEqual(await readSession(sid), after, 'a refused owner must not alter native history')
+      await syncCohostSkills(reconnected.client, reconnected.authToken, repositoryPath, [])
+      assert.equal((await reconnected.client.read(`${repositoryPath}/AGENTS.md`, reconnected.authToken)).toString(), userInstructions)
+      assert.equal((await reconnected.client.read(`${repositoryPath}/${PROJECT_AGENT_INSTRUCTIONS_PATH}`, reconnected.authToken)).toString(), nestedInstructions)
+      assert.equal(await reconnected.client.stat(`${repositoryPath}/${WORKSPACE_SKILLS_DIRECTORY}/catalog-recovery`, reconnected.authToken), null)
+      assert.equal((await reconnected.client.read(`${repositoryPath}/${localSkill}`, reconnected.authToken)).toString(), localInstructions)
       proofs.push({ owner, durable: sid, oldPid: first.sessionId, newPid: active.sessionId, code: order.code,
         shutdownSignal, isActiveDaemonCrash: shutdownSignal === 'SIGKILL', memoryPath, memoryMarker, recoveryMs })
     } finally {
@@ -455,6 +513,14 @@ try {
     'same agent concurrent sessions share native memory', 'same owner different agents have separate native memory',
     'concurrent session transcripts remain independent',
     'Moss process restart restores shared native binding without host locator', 'durable binding has no PID or channel',
+    'native discovery includes catalog and user-authored skills before the first turn',
+    'owner-authenticated skill synchronization retains user instructions',
+    'catalog ownership survives daemon restart and a fresh delegated connection',
+    'catalog update and revocation remove only owned files',
+    'application role and authenticated profile reach the native system context',
+    'user project instructions survive application context reconciliation',
+    'controller-only instructions stay outside the native context',
+    'application context updates on resume preserve project instructions and prior history',
   ], proofs, modelRequests: requests.length }, null, 2))
   console.log(`PASS: two Moss owners recover exact conversations, files and memory after daemon stop/crash; evidence=${work}`)
 } catch (error) {

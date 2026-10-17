@@ -1,15 +1,105 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { EventEmitter } from 'node:events'
 import type { InternalSessionChannel } from '../internalSessionChannel.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
-import { createCohostWorkspaceAccess, cohostWorkspacePath } from './cohostWorkspace.js'
+import { createCohostWorkspaceAccess } from './cohostWorkspace.js'
+import { cohostWorkspacePath, writeCohostWorkspaceFile, writeCohostWorkspaceFiles } from './cohostWorkspaceFiles.js'
 import { cohostRepositoryPath, cohostSessionStatePath, readCohostSessionState, removeCohostSessionState } from './cohostSessionState.js'
 import { sessionAgentName } from '../agentIdentity.js'
 import type { SessionRecord } from '../types.js'
+import { syncCohostSkills } from './cohostSkills.js'
+
+void test('skill reconciliation removes disabled skills and obsolete files while retaining user work and executable intent', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'moss-cohost-skill-sync-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const pathFor = (path: string, token: string) => {
+    assert.equal(token, 'owner-token')
+    assert(path.startsWith('/project/'))
+    return join(root, path.slice('/project/'.length))
+  }
+  const client = {
+    async stat(path: string, token: string) {
+      const info = await lstat(pathFor(path, token)).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+      return info ? { isDirectory: info.isDirectory(), entryType: info.isSymbolicLink() ? 6 : 0, size: info.size } : null
+    },
+    async readdir(path: string, token: string) { return (await readdir(pathFor(path, token))).map(name => ({ name: `${path}/${name}` })) },
+    async read(path: string, token: string) { return readFile(pathFor(path, token)) },
+    async delete(path: string, token: string, options: { recursive?: boolean }) {
+      assert.equal(options.recursive, true)
+      await rm(pathFor(path, token), { recursive: true, force: true })
+    },
+    async mkdir(path: string, token: string) { await mkdir(pathFor(path, token), { recursive: true }) },
+    async write(path: string, content: Buffer, token: string) { await writeFile(pathFor(path, token), content) },
+    async chmod(path: string, mode: number, token: string) { await chmod(pathFor(path, token), mode) },
+  } as unknown as NexusVfsClient
+  const skills = join(root, '.nexus/sudocode/skills')
+  await mkdir(join(skills, 'personal'), { recursive: true })
+  await writeFile(join(skills, 'personal/SKILL.md'), 'user-authored instructions')
+  await writeFile(join(root, 'user-work.txt'), 'retained user bytes')
+  await syncCohostSkills(client, 'owner-token', '/project', [
+    { path: '.nexus/sudocode/skills/disabled/SKILL.md', content: Buffer.from('disabled instructions'), mode: 0o600 },
+    { path: '.nexus/sudocode/skills/current/obsolete.sh', content: Buffer.from('obsolete asset'), mode: 0o600 },
+  ])
+  await assert.rejects(syncCohostSkills(client, 'owner-token', '/project', [{
+    path: '.nexus/sudocode/skills/../../user-work.txt', content: Buffer.from('unsafe'), mode: 0o600,
+  }]), /escapes workspace/)
+  assert.equal(await readFile(join(skills, 'disabled/SKILL.md'), 'utf8'), 'disabled instructions', 'validate all input before clearing the prior catalog')
+  await syncCohostSkills(client, 'owner-token', '/project', [
+    { path: '.nexus/sudocode/skills/current/SKILL.md', content: Buffer.from('current instructions'), mode: 0o600 },
+    { path: '.nexus/sudocode/skills/current/run.sh', content: Buffer.from('#!/bin/sh\nprintf ready\n'), mode: 0o700 },
+  ])
+  assert.equal(await readFile(join(skills, 'personal/SKILL.md'), 'utf8'), 'user-authored instructions')
+  assert.deepEqual((await readdir(skills)).sort(), ['current', 'personal'])
+  assert.deepEqual((await readdir(join(skills, 'current'))).sort(), ['SKILL.md', 'run.sh'])
+  assert.equal(await readFile(join(root, 'user-work.txt'), 'utf8'), 'retained user bytes')
+  if (process.platform !== 'win32') assert.equal((await lstat(join(skills, 'current/run.sh'))).mode & 0o7777, 0o700)
+  await syncCohostSkills(client, 'owner-token', '/project', [])
+  assert.deepEqual(await readdir(skills), ['personal'])
+  await assert.rejects(syncCohostSkills(client, 'owner-token', '/project', [{
+    path: '.nexus/sudocode/skills/personal/SKILL.md', content: Buffer.from('catalog instructions'), mode: 0o600,
+  }]), /conflicts with user-owned/)
+  assert.equal(await readFile(join(skills, 'personal/SKILL.md'), 'utf8'), 'user-authored instructions')
+
+  // Adopt the exact asset-only layout produced by older cohosts, then recover a failed copy.
+  await mkdir(join(skills, 'legacy'), { recursive: true })
+  await writeFile(join(skills, 'legacy/run.sh'), 'legacy asset')
+  const migrated = [
+    { path: '.nexus/sudocode/skills/legacy/SKILL.md', content: Buffer.from('legacy instructions'), mode: 0o600 },
+    { path: '.nexus/sudocode/skills/legacy/run.sh', content: Buffer.from('legacy asset'), mode: 0o700 },
+  ]
+  await syncCohostSkills(client, 'owner-token', '/project', migrated)
+  const failed = { ...client, async write(path: string, content: Buffer, token: string) {
+    if (path.endsWith('/partial.txt')) throw new Error('copy interrupted')
+    await client.write(path, content, token)
+  } } as NexusVfsClient
+  await assert.rejects(syncCohostSkills(failed, 'owner-token', '/project', [
+    ...migrated, { path: '.nexus/sudocode/skills/legacy/partial.txt', content: Buffer.from('partial'), mode: 0o600 },
+  ]), /copy interrupted/)
+  const reconnected = { ...client } as NexusVfsClient
+  await syncCohostSkills(reconnected, 'owner-token', '/project', migrated)
+  assert.deepEqual((await readdir(join(skills, 'legacy'))).sort(), ['SKILL.md', 'run.sh'])
+  assert.equal(await readFile(join(skills, 'personal/SKILL.md'), 'utf8'), 'user-authored instructions')
+  await syncCohostSkills(reconnected, 'owner-token', '/project', [])
+  assert.deepEqual(await readdir(skills), ['personal'])
+
+  const ownership = join(root, '.nexus/sudocode/.moss-skills.json')
+  const valid = await readFile(ownership)
+  await writeFile(ownership, '{broken')
+  await assert.rejects(syncCohostSkills(reconnected, 'owner-token', '/project', []), /Invalid managed skill ownership/)
+  assert.equal(await readFile(join(skills, 'personal/SKILL.md'), 'utf8'), 'user-authored instructions')
+  await writeFile(ownership, valid)
+  await rm(skills, { recursive: true })
+  const outside = join(root, 'outside')
+  await mkdir(outside)
+  await writeFile(join(outside, 'keep.txt'), 'retained linked bytes')
+  await symlink(outside, skills, process.platform === 'win32' ? 'junction' : 'dir')
+  await assert.rejects(syncCohostSkills(client, 'owner-token', '/project', []), /symbolic links/)
+  assert.equal(await readFile(join(outside, 'keep.txt'), 'utf8'), 'retained linked bytes')
+})
 
 void test('cohost workspace paths reject traversal, absolute and drive paths', () => {
   for (const path of ['../private', 'a/../../private', '/etc/passwd', 'C:\\private', 'a\0b']) {
@@ -19,6 +109,111 @@ void test('cohost workspace paths reject traversal, absolute and drive paths', (
   for (const agent of ['../owner', 'agent\\other', 'agent\0other']) {
     assert.throws(() => cohostRepositoryPath(agent, 'session'))
   }
+})
+
+void test('skill synchronization bounds concurrency and drains in-flight writes before reporting failure', async () => {
+  let releaseBatch!: () => void
+  const batch = new Promise<void>(resolve => { releaseBatch = resolve })
+  let releaseWrites!: () => void
+  const writes = new Promise<void>(resolve => { releaseWrites = resolve })
+  let announceBatch!: () => void
+  const startedBatch = new Promise<void>(resolve => { announceBatch = resolve })
+  let started = 0
+  let active = 0
+  let maximum = 0
+  let isSettled = false
+  const failure = new Error('skill storage unavailable')
+  const client = {
+    async stat(path: string) { return path.endsWith('/.moss-skills.json') ? null : { isDirectory: true, entryType: 1 } },
+    async readdir() { return [] },
+    async delete() {},
+    async write(path: string) {
+      if (path.endsWith('/.moss-skills.json')) return
+      const index = started++
+      maximum = Math.max(maximum, ++active)
+      if (started === 8) { releaseBatch(); announceBatch() }
+      try {
+        await batch
+        if (index === 0) throw failure
+        await writes
+      } finally { active-- }
+    },
+    async chmod() {},
+  } as unknown as NexusVfsClient
+  const assets = Array.from({ length: 12 }, (_, index) => ({
+    path: `.nexus/sudocode/skills/current/file-${index}`, content: Buffer.from('skill'), mode: 0o600,
+  }))
+  const result = syncCohostSkills(client, 'owner', '/project', assets)
+  void result.then(() => { isSettled = true }, () => { isSettled = true })
+  try {
+    await startedBatch
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(isSettled, false, 'startup must wait until all outstanding writes finish')
+    assert.equal(started, 8, 'the first failure must prevent queued writes')
+  } finally { releaseWrites() }
+  await assert.rejects(result, error => error === failure)
+  assert.equal(active, 0)
+  assert.equal(maximum, 8)
+  assert.equal(started, 8)
+})
+
+void test('workspace writes inspect links without issuing mkdir for an existing parent', async () => {
+  const calls: string[] = []
+  const client = {
+    async stat(path: string) {
+      calls.push(`stat:${path}`)
+      return path.endsWith('/run.sh') ? null : { isDirectory: true, entryType: 1 }
+    },
+    async mkdir() { assert.fail('the parent directory already exists') },
+    async write() { calls.push('write') },
+    async chmod() { calls.push('chmod') },
+  } as unknown as NexusVfsClient
+  await writeCohostWorkspaceFile(client, 'owner', '/project', 'skills/current/run.sh', Buffer.from('script'), 0o700)
+  assert.deepEqual(calls, ['stat:/project/skills', 'stat:/project/skills/current', 'stat:/project/skills/current/run.sh', 'write', 'chmod'])
+})
+
+void test('directory preparation is shared only within the current write operation', async () => {
+  let reads = 0
+  let writes = 0
+  let isLink = false
+  const client = {
+    async stat(path: string) {
+      if (path !== '/project/skills') return null
+      reads++
+      return { isDirectory: true, entryType: isLink ? 6 : 1 }
+    },
+    async mkdir() { assert.fail('directory already exists') },
+    async write() { writes++ },
+  } as unknown as NexusVfsClient
+  await writeCohostWorkspaceFiles(client, 'owner', '/project/', ['a', 'b', 'c'].map(name => ({
+    path: `skills/${name}`, content: Buffer.from(name),
+  })))
+  assert.equal(reads, 1)
+  assert.equal(writes, 3)
+  await assert.rejects(writeCohostWorkspaceFile(client, 'owner', '/project/', '.', Buffer.from('invalid')), /must name a workspace file/)
+  assert.equal(reads, 1, 'invalid destinations must fail before inspecting or changing the workspace')
+  isLink = true
+  await assert.rejects(writeCohostWorkspaceFile(client, 'owner', '/project', 'skills/d', Buffer.from('d')), /symbolic links/)
+  assert.equal(reads, 2, 'another operation must inspect the current path')
+  assert.equal(writes, 3)
+})
+
+void test('native skill writes retain the authorization token and apply executable mode to the written file', async () => {
+  const calls: string[] = []
+  const client = {
+    async stat() { return undefined },
+    async mkdir(path: string, token: string) { assert.equal(token, 'owner'); calls.push(`mkdir:${path}`) },
+    async write(path: string, bytes: Buffer, token: string) { assert.equal(token, 'owner'); calls.push(`write:${path}:${bytes.toString()}`) },
+    async chmod(path: string, mode: number, token: string) { assert.equal(token, 'owner'); calls.push(`chmod:${path}:${mode}`) },
+  } as unknown as NexusVfsClient
+  await writeCohostWorkspaceFile(client, 'owner', '/project', 'skills/run.sh', Buffer.from('script'), 0o700)
+  assert.deepEqual(calls, ['mkdir:/project/skills', 'write:/project/skills/run.sh:script', 'chmod:/project/skills/run.sh:448'])
+  for (const mode of [-1, 0o4777, 1.5]) {
+    await assert.rejects(writeCohostWorkspaceFile(client, 'owner', '/project', 'bad', Buffer.from('bad'), mode), /Invalid workspace file mode/)
+  }
+  assert.equal(calls.length, 3, 'invalid modes must not write bytes before failing')
+  client.chmod = async () => { throw new Error('UNIMPLEMENTED') }
+  await assert.rejects(writeCohostWorkspaceFile(client, 'owner', '/project', 'bad', Buffer.from('script'), 0o700), /UNIMPLEMENTED/)
 })
 
 void test('cohost state preserves the durable ID and refuses corrupt recovery metadata', async () => {
@@ -57,8 +252,9 @@ void test('workspace requests routed to another Moss host do not require that ho
     close() { closes++ },
   } as unknown as NexusVfsClient
   const access = createCohostWorkspaceAccess(session, {
-    async connectCohostRuntime(owner) {
+    async connectCohostRuntime(owner, expectedAgent) {
       assert.equal(owner, session.userId)
+      assert.equal(expectedAgent, agentId)
       return { client, authToken: 'owner-token', identity: null }
     },
     async connectInternalChannel() {
@@ -91,7 +287,7 @@ void test('workspace I/O uses the verified execution descriptor and closes every
       assert.deepEqual(JSON.parse(raw), { session_id: descriptor.session_id })
       return JSON.stringify(descriptor)
     },
-    async stat(path: string) { return { size: 5, entryType: path.endsWith('/link') ? 6 : 0, isDirectory: false } },
+    async stat(path: string) { return path.endsWith('/reports') ? null : { size: 5, entryType: path.endsWith('/link') ? 6 : 0, isDirectory: false } },
     async readdir(path: string) { calls.push('list:'+path);return [{ name: entryName, entryType: 0 }] },
     async read(path: string) { calls.push('read:'+path);return Buffer.from('hello') },
     async mkdir(path: string) { calls.push('mkdir:'+path) },
@@ -100,8 +296,9 @@ void test('workspace I/O uses the verified execution descriptor and closes every
   } as unknown as NexusVfsClient
   try {
     const access = createCohostWorkspaceAccess(session, {
-      async connectCohostRuntime(owner) {
+      async connectCohostRuntime(owner, expectedAgent) {
         assert.equal(owner, session.userId)
+        assert.equal(expectedAgent, sessionAgentName(session.userId, session.assistantName))
         return { client, authToken: 'user-token', identity: null }
       },
       async connectInternalChannel(id) {
@@ -138,8 +335,8 @@ void test('workspace I/O uses the verified execution descriptor and closes every
     assert.equal((await access.listTree(2))[0]?.relativePath, 'persisted.txt')
     assert.equal((await access.readFile('persisted.txt')).toString(), 'hello')
     await access.writeFile('uploaded.txt', Buffer.from('durable'))
-    assert.deepEqual(calls.slice(-4), ['list:'+repositoryPath, 'read:'+repositoryPath+'/persisted.txt',
-      'mkdir:'+repositoryPath, 'write:'+repositoryPath+'/uploaded.txt:durable'])
+    assert.deepEqual(calls.slice(-3), ['list:'+repositoryPath, 'read:'+repositoryPath+'/persisted.txt',
+      'write:'+repositoryPath+'/uploaded.txt:durable'])
     descriptor.session_id = 'resumed-pid'
     descriptor.workspace_path = '/proc/resumed-pid/workspace'
     assert.equal((await access.readFile('persisted.txt')).toString(), 'hello')

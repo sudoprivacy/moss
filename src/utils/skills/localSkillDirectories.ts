@@ -15,6 +15,7 @@ export const MOSS_SKILLS_TENANT_DIR = path.join(MOSS_SKILLS_DIR, 'tenant')
 // MOVED into MOSS_SKILLS_TENANT_DIR.
 export const MOSS_SKILLS_TENANT_PENDING_DIR = path.join(MOSS_SKILLS_DIR, 'tenant-pending')
 export const SKILL_HUB_META_FILE = '_moss_meta.json'
+export const WORKSPACE_SKILLS_DIRECTORY = '.nexus/sudocode/skills'
 
 export const MANAGED_SKILL_SEARCH_DIRS = [
   USER_SKILLS_DIR,

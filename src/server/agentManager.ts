@@ -14,7 +14,8 @@ export interface RuntimeAgentNamespace {
   isOwnerConfined: boolean
   names: string[]
   managedNames: string[]
-  executions: Array<{ name: string; ownerId: string; state: string; kind: string; processId?: string }>
+  executions: Array<{ name: string; ownerId: string; state: string; kind: string; processId?: string; allocationId?: string }>
+  agentAllocations?: Record<string, string>
 }
 
 export interface ManagedAgentEntry {

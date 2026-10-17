@@ -29,3 +29,29 @@ void test('native discovery reads the durable names and filters live records to 
   assert.deepEqual((await readAgentNamespace(client, 'owner-token', 'alice', false)).managedNames, [])
   assert.deepEqual(calls, ['/agents'], 'legacy directory names never grant durable ownership')
 })
+
+void test('owner discovery bounds concurrent metadata requests and preserves the durable managed names', { timeout: 5_000 }, async () => {
+  const names = Array.from({ length: 24 }, (_, index) => `agent-${index}`)
+  let release!: () => void
+  const batch = new Promise<void>(resolve => { release = resolve })
+  let active = 0, maximum = 0, completed = 0
+  const client = {
+    async stat(path: string, token: string) {
+      assert.equal(token, 'owner-token')
+      if (path === '/agents') return { isDirectory: true }
+      maximum = Math.max(maximum, ++active)
+      if (active === 8) release()
+      try {
+        await batch
+        const name = path.split('/')[2]!
+        return Number(name.slice('agent-'.length)) % 2 ? null : { isDirectory: true }
+      } finally { active--; completed++ }
+    },
+    async readdir() { return names.map(name => ({ name })) },
+    async call() { return '[]' },
+  } as unknown as NexusVfsClient
+  const result = await readAgentNamespace(client, 'owner-token', 'alice', true)
+  assert(maximum > 1 && maximum <= 8)
+  assert.equal(completed, names.length)
+  assert.deepEqual(result.managedNames, names.filter((_, index) => index % 2 === 0))
+})

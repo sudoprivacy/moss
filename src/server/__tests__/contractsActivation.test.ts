@@ -185,8 +185,8 @@ describe('@sudo/contracts evaluation pin', () => {
     try {
       const packed = spawnSync(
         'npm',
-        ['pack', contractRoot, '--json', '--pack-destination', packDir],
-        { encoding: 'utf8', timeout: 30_000 },
+        ['pack', contractRoot, '--offline', '--ignore-scripts', '--json', '--pack-destination', packDir],
+        { encoding: 'utf8', timeout: 30_000, env: { ...process.env, npm_config_update_notifier: 'false' } },
       )
       if (packed.status !== 0) {
         throw new Error(`npm pack failed: ${packed.error?.message || packed.stderr || packed.stdout}`)

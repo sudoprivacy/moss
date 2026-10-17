@@ -1,10 +1,10 @@
 import { appendFile, mkdir, rm, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
-import type { BackendHandle, SessionRuntimeInfo } from '../sessionManager.js'
+import type { BackendAvailableSkill, BackendHandle, SessionRuntimeInfo } from '../sessionManager.js'
 import type { ChildProcess } from 'node:child_process'
 import type { SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
-import { StdioAcpTransport, type AcpMessageTransport } from './acpTransport.js'
+import { acpInstructionsMetadata, StdioAcpTransport, type AcpMessageTransport } from './acpTransport.js'
 import { prepareFirstMessageForScode } from '../../utils/scodeBridge.js'
 import {
   appendSharedAgentMemory,
@@ -13,6 +13,7 @@ import {
 import { ensureDraftsDirectory } from '../draftsCleanup.js'
 
 import { ArtifactTracker, artifactManifestPath } from '../artifacts.js'
+import { readAcpExecutionWorkspace, type ExecutionWorkspace } from './executionWorkspace.js'
 
 type AcpBridgeOptions = {
   child?: ChildProcess
@@ -20,7 +21,9 @@ type AcpBridgeOptions = {
   sessionId: string
   cwd: string
   /** Repository and working root seen by the engine's file tools. */
-  executionWorkspace?: { repository: string; workingRoot: string }
+  executionWorkspace?: ExecutionWorkspace
+  /** Authorized skills already installed in a remote project. */
+  workspaceSkills?: BackendAvailableSkill[]
   model: string
   /** Provider identity bound to this running scode process. */
   modelProviderId?: string
@@ -98,6 +101,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
   let rpcId = 1
   let acpSessionId: string | null = null
+  let executionWorkspace = options.executionWorkspace
   const pendingStdin: string[] = []
   const pendingStdout: string[] = []
   let currentAssistantText = ''
@@ -346,6 +350,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       cwd,
       // Scode ACP requires mcpServers even when no MCP servers are configured.
       mcpServers: options.mcpServers ?? [],
+      ...acpInstructionsMetadata(options.instructions),
     }
     process.stderr.write(`[AcpBridge] session/new params: cwd=${cwd}, mcpServers=${options.mcpServers?.length ?? 0}\n`)
     sendRpc('session/new', sessionParams, 'm-session-new')
@@ -571,7 +576,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     // 首次消息注入：注入技能和智能体信息
     let finalText = trimmedText
     try {
-      await ensureDraftsDirectory(cwd)
+      if (runtime.type === 'host') await ensureDraftsDirectory(cwd)
     } catch (err) {
       process.stderr.write(`[AcpBridge] Failed to ensure drafts directory: ${String(err)}\n`)
     }
@@ -581,7 +586,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           assistantName: options.assistantName,
           identityName: options.assistantDisplayName || options.assistantName,
           workspace: cwd,
-          executionWorkspace: options.executionWorkspace,
+          executionWorkspace,
+          workspaceSkills: options.workspaceSkills,
           enabledSkillNames: options.enabledSkillNames,
           sharedMemory: options.sharedMemory,
           availableWikis: options.availableWikis,
@@ -669,6 +675,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               cwd,
               // Scode ACP LoadSessionRequest also requires mcpServers.
               mcpServers: options.mcpServers ?? [],
+              ...acpInstructionsMetadata(options.instructions),
             }, 'm-session-load')
           } else {
             process.stderr.write(`[AcpBridge] Initialization complete, creating session...\n`)
@@ -681,6 +688,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           if (parsed.error || !parsed.result?.sessionId) throw new Error(`ACP session creation failed: ${JSON.stringify(parsed.error)}`)
           process.stderr.write(`[AcpBridge] session/new response: ${JSON.stringify(parsed)}\n`)
           acpSessionId = parsed.result?.sessionId || parsed.result?.id || parsed.result?.session_id
+          executionWorkspace = readAcpExecutionWorkspace(parsed.result, options.executionWorkspace?.repository) ?? options.executionWorkspace
           persistScodeSessionId(acpSessionId)
           process.stderr.write(`[AcpBridge] ACP Session Ready: ${acpSessionId}\n`)
           completeHandshake()
@@ -693,6 +701,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             throw new Error(`ACP session resume failed: ${JSON.stringify(parsed.error)}`)
           }
           acpSessionId = parsed.result?.sessionId || parsed.result?.id || parsed.result?.session_id || options.resumeSessionId || null
+          executionWorkspace = readAcpExecutionWorkspace(parsed.result, options.executionWorkspace?.repository) ?? options.executionWorkspace
           persistScodeSessionId(acpSessionId)
           process.stderr.write(`[AcpBridge] ACP Session Loaded: ${acpSessionId}\n`)
           completeHandshake()
