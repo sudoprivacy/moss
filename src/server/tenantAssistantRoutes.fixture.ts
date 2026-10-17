@@ -23,6 +23,23 @@ const { service: authService } = await createAuthService({
   tokenTtlSec: config.tokenTtlSec,
   bootstrapAdmin: config.bootstrapAdmin,
 })
+if (process.env.MOSS_TEST_SHARED_MODEL_BILLING === '1') {
+  const { OrganizationRouterAdapter } = await import('./billing/organizationRouterAdapter.js')
+  const { RouterMock } = await import('./billing/testing/routerMock.js')
+  const mock = new RouterMock({ adminToken: 'fixture-admin' })
+  const secrets = new Map<string, string>()
+  // This HTTP fixture exercises identity admission, not provider discovery.
+  Object.assign(authService, { updateOrganizationSystemSettings: async () => ({}) })
+  await authService.configureOrganizationBilling(new OrganizationRouterAdapter({
+    baseUrl: 'http://fixture-router', apiToken: 'fixture-admin', adminUserId: '1', fetch: mock.fetch,
+  }), {
+    putSecret: async (_namespace, key, value) => { secrets.set(key, value) },
+    getSecret: async (_namespace, key) => {
+      const value = secrets.get(key)
+      return value ? { value, status: 'enabled', version: 1 } : null
+    },
+  })
+}
 const runtime = new RuntimeService({
   config,
   store,

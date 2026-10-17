@@ -187,13 +187,20 @@ export class OrganizationBillingService {
     return { sudorouterUserId: String(account.router_user_id), sudorouterKey: await this.readKey(token) }
   }
 
-  /** Trusted provisioning adapter; pending identities are not yet eligible for client credential reads. */
-  async provisionMemberAccount(orgId: string, userId: string, limitUsd?: string | null) {
+  /** Validate or recover the shared account before creating another member identity. */
+  async prepareMemberProvisioning(orgId: string): Promise<ModelAccountRow> {
     let account = await this.requireAccount(orgId)
     if (account.status !== 'ready') {
       const organization = await this.db.get('SELECT name FROM organizations WHERE id = ?', [orgId])
       account = await this.retryOrganization(orgId, String(organization?.name ?? orgId))
     }
+    if (account.status !== 'ready') throw new OrganizationBillingError('ACCOUNT_PENDING', '组织模型账户尚未就绪', 409)
+    return account
+  }
+
+  /** Trusted provisioning adapter; pending identities are not yet eligible for client credential reads. */
+  async provisionMemberAccount(orgId: string, userId: string, limitUsd?: string | null) {
+    const account = await this.prepareMemberProvisioning(orgId)
     const token = await this.ensureMember(orgId, userId, limitUsd)
     return { externalUserId: String(account.router_user_id), token: await this.readKey(token), tokenSecretRef: `nexus://${SECRET_NAMESPACE}/${token.secret_ref}`,
       quotaUnits: token.initial_quota ?? 0, usedQuotaUnits: 0 }
