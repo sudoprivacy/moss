@@ -1,6 +1,7 @@
 import { lstat, readdir, readFile } from 'node:fs/promises'
 import { join, posix } from 'node:path'
 import { MAX_RESOURCE_BYTES, MAX_RESOURCE_ENTRIES, MAX_RESOURCE_FILE_BYTES, ownerFileMode } from '@sudo/resource-files'
+import { WORKSPACE_SKILLS_DIRECTORY } from '../../utils/skills/localSkillDirectories.js'
 
 interface SkillLink {
   name: string
@@ -52,7 +53,7 @@ export async function collectSkillAssets(
         }
       }
     }
-    await visit(link.sourcePath, posix.join('.nexus/sudocode/skills', link.name), 0)
+    await visit(link.sourcePath, posix.join(WORKSPACE_SKILLS_DIRECTORY, link.name), 0)
   }
   return assets
 }

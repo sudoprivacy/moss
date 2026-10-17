@@ -46,6 +46,23 @@ controller proves its owner with a short-lived delegated certificate. The Pod
 receives its own runtime certificate and private configuration; it receives no
 Kubernetes service account token or issuer private key.
 
+## Skills and workspace
+
+The runtime reports the file-tool and native shell roots through ACP metadata.
+For a local reference-backed project, both roots address the same project bytes.
+File tools retain Nexus authorization and hooks. Bash runs in the Pod's native
+filesystem; its individual file operations do not make Nexus RPCs.
+
+Catalog skills include their instructions and assets. Preparation finishes before
+the engine discovers the project, with private file modes and executable scripts.
+The catalog remains the source of skill content. Project-local
+`.nexus/sudocode/.moss-skills.json` records only which skill directories Moss owns.
+Reconciliation can replace or remove those directories while retaining user-authored
+skills. Name collisions fail before any mutation. Old asset-only directories may
+be adopted only when every existing file matches the selected catalog payload and
+there are no user instructions. Ownership is published before copying, so a new
+controller can replace an interrupted installation without removing user files.
+
 ## Model credentials and billing
 
 The existing SudoWork/Moss account, recharge and SudoRouter quota services remain

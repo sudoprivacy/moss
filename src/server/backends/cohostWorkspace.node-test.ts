@@ -23,9 +23,10 @@ void test('skill reconciliation removes disabled skills and obsolete files while
   const client = {
     async stat(path: string, token: string) {
       const info = await lstat(pathFor(path, token)).catch(error => { if (error.code === 'ENOENT') return null; throw error })
-      return info ? { isDirectory: info.isDirectory(), entryType: info.isSymbolicLink() ? 6 : 0 } : null
+      return info ? { isDirectory: info.isDirectory(), entryType: info.isSymbolicLink() ? 6 : 0, size: info.size } : null
     },
     async readdir(path: string, token: string) { return (await readdir(pathFor(path, token))).map(name => ({ name: `${path}/${name}` })) },
+    async read(path: string, token: string) { return readFile(pathFor(path, token)) },
     async delete(path: string, token: string, options: { recursive?: boolean }) {
       assert.equal(options.recursive, true)
       await rm(pathFor(path, token), { recursive: true, force: true })
@@ -35,11 +36,13 @@ void test('skill reconciliation removes disabled skills and obsolete files while
     async chmod(path: string, mode: number, token: string) { await chmod(pathFor(path, token), mode) },
   } as unknown as NexusVfsClient
   const skills = join(root, '.nexus/sudocode/skills')
-  await mkdir(join(skills, 'disabled'), { recursive: true })
-  await mkdir(join(skills, 'current'), { recursive: true })
-  await writeFile(join(skills, 'disabled/SKILL.md'), 'disabled instructions')
-  await writeFile(join(skills, 'current/obsolete.sh'), 'obsolete asset')
+  await mkdir(join(skills, 'personal'), { recursive: true })
+  await writeFile(join(skills, 'personal/SKILL.md'), 'user-authored instructions')
   await writeFile(join(root, 'user-work.txt'), 'retained user bytes')
+  await syncCohostSkills(client, 'owner-token', '/project', [
+    { path: '.nexus/sudocode/skills/disabled/SKILL.md', content: Buffer.from('disabled instructions'), mode: 0o600 },
+    { path: '.nexus/sudocode/skills/current/obsolete.sh', content: Buffer.from('obsolete asset'), mode: 0o600 },
+  ])
   await assert.rejects(syncCohostSkills(client, 'owner-token', '/project', [{
     path: '.nexus/sudocode/skills/../../user-work.txt', content: Buffer.from('unsafe'), mode: 0o600,
   }]), /escapes workspace/)
@@ -48,12 +51,47 @@ void test('skill reconciliation removes disabled skills and obsolete files while
     { path: '.nexus/sudocode/skills/current/SKILL.md', content: Buffer.from('current instructions'), mode: 0o600 },
     { path: '.nexus/sudocode/skills/current/run.sh', content: Buffer.from('#!/bin/sh\nprintf ready\n'), mode: 0o700 },
   ])
-  assert.deepEqual(await readdir(skills), ['current'])
+  assert.equal(await readFile(join(skills, 'personal/SKILL.md'), 'utf8'), 'user-authored instructions')
+  assert.deepEqual((await readdir(skills)).sort(), ['current', 'personal'])
   assert.deepEqual((await readdir(join(skills, 'current'))).sort(), ['SKILL.md', 'run.sh'])
   assert.equal(await readFile(join(root, 'user-work.txt'), 'utf8'), 'retained user bytes')
   if (process.platform !== 'win32') assert.equal((await lstat(join(skills, 'current/run.sh'))).mode & 0o7777, 0o700)
   await syncCohostSkills(client, 'owner-token', '/project', [])
-  await assert.rejects(lstat(skills), { code: 'ENOENT' })
+  assert.deepEqual(await readdir(skills), ['personal'])
+  await assert.rejects(syncCohostSkills(client, 'owner-token', '/project', [{
+    path: '.nexus/sudocode/skills/personal/SKILL.md', content: Buffer.from('catalog instructions'), mode: 0o600,
+  }]), /conflicts with user-owned/)
+  assert.equal(await readFile(join(skills, 'personal/SKILL.md'), 'utf8'), 'user-authored instructions')
+
+  // Adopt the exact asset-only layout produced by older cohosts, then recover a failed copy.
+  await mkdir(join(skills, 'legacy'), { recursive: true })
+  await writeFile(join(skills, 'legacy/run.sh'), 'legacy asset')
+  const migrated = [
+    { path: '.nexus/sudocode/skills/legacy/SKILL.md', content: Buffer.from('legacy instructions'), mode: 0o600 },
+    { path: '.nexus/sudocode/skills/legacy/run.sh', content: Buffer.from('legacy asset'), mode: 0o700 },
+  ]
+  await syncCohostSkills(client, 'owner-token', '/project', migrated)
+  const failed = { ...client, async write(path: string, content: Buffer, token: string) {
+    if (path.endsWith('/partial.txt')) throw new Error('copy interrupted')
+    await client.write(path, content, token)
+  } } as NexusVfsClient
+  await assert.rejects(syncCohostSkills(failed, 'owner-token', '/project', [
+    ...migrated, { path: '.nexus/sudocode/skills/legacy/partial.txt', content: Buffer.from('partial'), mode: 0o600 },
+  ]), /copy interrupted/)
+  const reconnected = { ...client } as NexusVfsClient
+  await syncCohostSkills(reconnected, 'owner-token', '/project', migrated)
+  assert.deepEqual((await readdir(join(skills, 'legacy'))).sort(), ['SKILL.md', 'run.sh'])
+  assert.equal(await readFile(join(skills, 'personal/SKILL.md'), 'utf8'), 'user-authored instructions')
+  await syncCohostSkills(reconnected, 'owner-token', '/project', [])
+  assert.deepEqual(await readdir(skills), ['personal'])
+
+  const ownership = join(root, '.nexus/sudocode/.moss-skills.json')
+  const valid = await readFile(ownership)
+  await writeFile(ownership, '{broken')
+  await assert.rejects(syncCohostSkills(reconnected, 'owner-token', '/project', []), /Invalid managed skill ownership/)
+  assert.equal(await readFile(join(skills, 'personal/SKILL.md'), 'utf8'), 'user-authored instructions')
+  await writeFile(ownership, valid)
+  await rm(skills, { recursive: true })
   const outside = join(root, 'outside')
   await mkdir(outside)
   await writeFile(join(outside, 'keep.txt'), 'retained linked bytes')
@@ -85,9 +123,11 @@ void test('skill synchronization bounds concurrency and drains in-flight writes 
   let isSettled = false
   const failure = new Error('skill storage unavailable')
   const client = {
-    async stat() { return { isDirectory: true, entryType: 1 } },
+    async stat(path: string) { return path.endsWith('/.moss-skills.json') ? null : { isDirectory: true, entryType: 1 } },
+    async readdir() { return [] },
     async delete() {},
-    async write() {
+    async write(path: string) {
+      if (path.endsWith('/.moss-skills.json')) return
       const index = started++
       maximum = Math.max(maximum, ++active)
       if (started === 8) { releaseBatch(); announceBatch() }

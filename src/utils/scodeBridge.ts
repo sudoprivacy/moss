@@ -12,6 +12,7 @@ import {
   MOSS_SKILLS_TENANT_DIR,
   USER_SKILLS_DIR,
   SKILL_HUB_META_FILE,
+  WORKSPACE_SKILLS_DIRECTORY,
 } from './skills/localSkillDirectories.js'
 import {
   ASSISTANT_HUB_DIR,
@@ -34,7 +35,7 @@ import type { ExecutionWorkspace } from '../server/backends/executionWorkspace.j
  * @returns 工作空间技能目录路径
  */
 export function resolveWorkspaceSkillsDir(workspace: string): string {
-  return path.join(workspace, '.nexus', 'sudocode', 'skills')
+  return path.join(workspace, WORKSPACE_SKILLS_DIRECTORY)
 }
 
 export type WorkspaceSkillLink = {
