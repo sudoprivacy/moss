@@ -19,6 +19,7 @@ import { cohostRepositoryPath, readCohostSessionState } from './cohostSessionSta
 import { startCohostExecution } from './cohostRecovery.js'
 import { collectSkillAssets } from './skillAssets.js'
 import { syncCohostSkills } from './cohostSkills.js'
+import { WORKSPACE_SKILLS_DIRECTORY } from '../../utils/skills/localSkillDirectories.js'
 
 /**
  * Session backend for a co-hosted sudocode runtime.
@@ -56,7 +57,7 @@ export class CohostBackend implements SessionBackend {
     // Keep the recorded repository identity when resuming existing native history.
     const repositoryPath = saved ? saved.repositoryPath ?? options.cwd : expectedRepository
     const availableSkills = await buildAvailableSkillSnapshot(skillSources.map(skill => ({ ...skill,
-      workspacePath: posix.join(repositoryPath, '.nexus/sudocode/skills', skill.name),
+      workspacePath: posix.join(repositoryPath, WORKSPACE_SKILLS_DIRECTORY, skill.name),
     })))
 
     const { identity, client, authToken } = await connectSessionRuntime(config, options.userId)

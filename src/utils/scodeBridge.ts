@@ -319,7 +319,7 @@ export async function prepareFirstMessageForScode(
   const skillsHint = config.workspaceSkills === undefined
     ? await buildWorkspaceSkillsHint(config.workspace, config.enabledSkillNames)
     : formatWorkspaceSkillsHint(
-      path.posix.join((config.executionWorkspace?.repository ?? config.workspace).replace(/\\/g, '/'), '.nexus/sudocode/skills'),
+      path.posix.join((config.executionWorkspace?.repository ?? config.workspace).replace(/\\/g, '/'), WORKSPACE_SKILLS_DIRECTORY),
       config.workspaceSkills,
     )
   if (skillsHint) {
