@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'crypto'
 import { mkdir, readFile, rename, writeFile } from 'fs/promises'
 import path from 'path'
-import { isDefaultAgentName, isUserOwnedAgentName } from './agentIdentity.js'
+import { isUserOwnedAgentName } from './agentIdentity.js'
+import { buildAgentInstructions, isManagedAgentInstructions, PROJECT_AGENT_INSTRUCTIONS_PATH, type AgentInstructionsInput } from './agentInstructions.js'
 
 export type SharedAgentMemoryEntry = {
   content: string
@@ -41,14 +42,8 @@ export function getSharedAgentMemoryFilePath(
   return path.join(getSharedAgentMemoryDir(configDir, assistantName), 'MEMORY.md')
 }
 
-/**
- * First line of every moss-generated AGENTS.md. Used to tell our own file apart from a
- * workspace's hand-written one so we never overwrite the latter.
- */
-const AGENTS_MD_HEADER = '# Moss Application Role'
-
 export function getAssistantOverrideAgentsMdPath(configDir: string): string {
-  return path.join(configDir, '.nexus', 'sudocode', 'AGENTS.md')
+  return path.join(configDir, PROJECT_AGENT_INSTRUCTIONS_PATH)
 }
 
 /**
@@ -215,64 +210,12 @@ export function buildUserProfileMemory(params: {
   return lines.join('\n')
 }
 
-export async function writeAssistantOverrideAgentsMd(params: {
+export async function writeAssistantOverrideAgentsMd(params: AgentInstructionsInput & {
   configDir?: string | null
-  /** Session workspace (cwd). This is the copy scode actually reads. */
   workspace?: string | null
-  assistantName: string
-  assistantDisplayName?: string | null
-  assistantRules?: string | null
-  sharedMemory?: string | null
 }): Promise<void> {
-  // Only a chosen assistant has a role to impose. A user's own agent has no
-  // persona — its name is derived from a user id, so naming it here would make
-  // the agent call itself `user-<uuid>`, which is worse than saying nothing. It
-  // still gets the memory section below: that is how its memory reaches it.
-  // The test is the agent's kind, not whether a display name happens to be
-  // supplied — a catalog assistant without one is still named by its own name.
-  // Only the implicit default has no persona. An agent the user made has a name
-  // they chose, and it should introduce itself by it.
-  const hasRole = !isDefaultAgentName(params.assistantName)
-  const identityName = params.assistantDisplayName?.trim() || params.assistantName
-  const lines = [AGENTS_MD_HEADER, '']
-
-  if (hasRole) {
-    lines.push(
-      '## Application role',
-      'Follow the role, identity, and response instructions defined in Assistant Rules below.',
-      `If those rules do not specify an identity, use ${identityName} as your assistant name.`,
-      'Explain this role and its responsibilities when asked about your role.',
-      'Keep the application role distinct from the underlying model and runtime. Answer questions about model identity truthfully; do not invent or deny it.',
-      '',
-    )
-  }
-
-  if (params.sharedMemory?.trim()) {
-    lines.push('## Shared User Memory')
-    lines.push(
-      'Use the following persisted cross-session user memory when the user asks who they are, what their name is, or asks you to recall known preferences. Prefer this memory over guessing from the local environment.',
-    )
-    lines.push('')
-    lines.push(params.sharedMemory.trim())
-    lines.push('')
-  }
-
-  if (params.assistantRules?.trim()) {
-    lines.push('## Assistant Rules')
-    lines.push('')
-    lines.push(params.assistantRules.trim())
-    lines.push('')
-  }
-
-  const body = `${lines.join('\n').trimEnd()}\n`
-
-  // Nothing to say: no role, no memory, no rules. Writing the header alone
-  // would plant a file that announces itself as an override and overrides
-  // nothing — and in a real user directory that is a file we created for no
-  // reason.
-  if (!hasRole && !params.sharedMemory?.trim() && !params.assistantRules?.trim()) {
-    return
-  }
+  const body = buildAgentInstructions(params)
+  if (!body) return
 
   // Legacy location. Nothing reads it today, but keep writing it so existing tooling
   // that inspects configDir keeps working.
@@ -306,7 +249,7 @@ export async function writeAssistantOverrideAgentsMd(params: {
 async function isMossGeneratedAgentsMd(filePath: string): Promise<boolean> {
   try {
     const existing = await readFile(filePath, 'utf8')
-    return existing.startsWith(AGENTS_MD_HEADER) || existing.startsWith('# Moss Assistant Override')
+    return isManagedAgentInstructions(existing)
   } catch {
     // Missing file: free to create.
     return true

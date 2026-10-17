@@ -68,6 +68,7 @@ import {
   writeAssistantOverrideAgentsMd,
 } from './sharedAgentMemory.js'
 import { ensureDraftsDirectory } from './draftsCleanup.js'
+import { buildAgentInstructions } from './agentInstructions.js'
 import type { NexusClient } from './nexus/nexusClient.js'
 import { UserPodService } from '@sudo/user-runtime'
 import { CohostOwnerRuntime } from './runtime/cohostOwnerRuntime.js'
@@ -2074,6 +2075,8 @@ export class RuntimeService {
     let availableWikis: Array<{ id: string; name: string; description?: string | null }> | undefined
     let availableCorpApps: Array<{ id: string; name: string; type: string; key: string }> | undefined
     let sharedMemory: string | null = null
+    let agentInstructions: string | null = null
+    const isCohostRuntime = session.runtime.type === 'cohost'
     if (effectiveAssistantName) {
       try {
         const { findAssistantDir, readAssistantMeta } = await import('./agentStore.js')
@@ -2124,7 +2127,8 @@ export class RuntimeService {
           }
         }
 
-        if (isMemoryEnabled && session.runtime.configDir && session.userId) {
+        let userProfile: string | null = null
+        if (session.userId && (isCohostRuntime || isMemoryEnabled && session.runtime.configDir)) {
           const user = await this.authService.getUserOrNull(
             session.userId,
             session.orgId,
@@ -2141,7 +2145,9 @@ export class RuntimeService {
             departmentName,
             email: user?.email ?? null,
           })
-          if (userProfileMemory) {
+          if (isCohostRuntime) {
+            userProfile = userProfileMemory
+          } else if (userProfileMemory && session.runtime.configDir) {
             await appendSharedAgentMemory({
               configDir: session.runtime.configDir,
               assistantName: effectiveAssistantName,
@@ -2149,13 +2155,18 @@ export class RuntimeService {
               source: 'profile',
             }).catch(() => {})
           }
-          sharedMemory = await readSharedAgentMemory(
-            session.runtime.configDir,
-            effectiveAssistantName,
-          )
+          if (!isCohostRuntime && session.runtime.configDir) {
+            sharedMemory = await readSharedAgentMemory(session.runtime.configDir, effectiveAssistantName)
+          }
         }
 
-        if (session.runtime.configDir) {
+        const assistantRules = isUserOwnedAgentName(effectiveAssistantName)
+          ? null
+          : await import('./agentStore.js').then(m => m.getAssistantSystemPrompt(effectiveAssistantName!))
+        if (isCohostRuntime) {
+          agentInstructions = buildAgentInstructions({ assistantName: effectiveAssistantName,
+            assistantDisplayName, assistantRules, userProfile })
+        } else if (session.runtime.configDir) {
           await writeAssistantOverrideAgentsMd({
             configDir: session.runtime.configDir,
             // scode reads AGENTS.md from the workspace it runs in, not from configDir —
@@ -2163,11 +2174,7 @@ export class RuntimeService {
             workspace: session.cwd,
             assistantName: effectiveAssistantName,
             assistantDisplayName,
-            assistantRules: isUserOwnedAgentName(effectiveAssistantName)
-              ? null
-              : await import('./agentStore.js').then(m =>
-                m.getAssistantSystemPrompt(effectiveAssistantName!),
-              ),
+            assistantRules,
             sharedMemory,
           }).catch(err => {
             console.warn(
@@ -2177,6 +2184,7 @@ export class RuntimeService {
           })
         }
       } catch (err) {
+        if (isCohostRuntime) throw err
         console.warn(
           `[RuntimeService] failed to resolve availableWikis for ${effectiveAssistantName}:`,
           err,
@@ -2347,6 +2355,7 @@ export class RuntimeService {
         availableWikis,
         availableCorpApps,
         sharedMemory,
+        agentInstructions,
         enabledSkills: options.enabledSkills,
         resources: resourceSnapshot,
         visibilityFilter: visibilityFilter ? {

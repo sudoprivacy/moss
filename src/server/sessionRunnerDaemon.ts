@@ -220,6 +220,7 @@ export class SessionRunnerDaemon {
         availableWikis: this.manifest.session.availableWikis,
         availableCorpApps: this.manifest.session.availableCorpApps,
         sharedMemory: this.manifest.session.sharedMemory,
+        agentInstructions: this.manifest.session.agentInstructions,
         enabledSkillNames: this.manifest.session.enabledSkills,
         visibilityFilter: this.manifest.session.visibilityFilter ? {
           isAdmin: this.manifest.session.visibilityFilter.isAdmin,

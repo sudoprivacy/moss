@@ -56,3 +56,10 @@ export class StdioAcpTransport implements AcpMessageTransport {
     this.isClosed = true
   }
 }
+/** Build the existing per-session ACP configuration for application context. */
+export function acpInstructionsMetadata(instructions?: string | null): {
+  _meta?: { sudocode: { appendSystemPrompt: string } }
+} {
+  return instructions?.trim() ? { _meta: { sudocode: { appendSystemPrompt: instructions } } } : {}
+}
+

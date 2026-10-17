@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto'
 import type { BackendAvailableSkill, BackendHandle, SessionRuntimeInfo } from '../sessionManager.js'
 import type { ChildProcess } from 'node:child_process'
 import type { SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
-import { StdioAcpTransport, type AcpMessageTransport } from './acpTransport.js'
+import { acpInstructionsMetadata, StdioAcpTransport, type AcpMessageTransport } from './acpTransport.js'
 import { prepareFirstMessageForScode } from '../../utils/scodeBridge.js'
 import {
   appendSharedAgentMemory,
@@ -350,6 +350,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       cwd,
       // Scode ACP requires mcpServers even when no MCP servers are configured.
       mcpServers: options.mcpServers ?? [],
+      ...acpInstructionsMetadata(options.instructions),
     }
     process.stderr.write(`[AcpBridge] session/new params: cwd=${cwd}, mcpServers=${options.mcpServers?.length ?? 0}\n`)
     sendRpc('session/new', sessionParams, 'm-session-new')
@@ -674,6 +675,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               cwd,
               // Scode ACP LoadSessionRequest also requires mcpServers.
               mcpServers: options.mcpServers ?? [],
+              ...acpInstructionsMetadata(options.instructions),
             }, 'm-session-load')
           } else {
             process.stderr.write(`[AcpBridge] Initialization complete, creating session...\n`)

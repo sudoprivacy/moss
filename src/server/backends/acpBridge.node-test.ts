@@ -41,12 +41,14 @@ for (const isResume of [false, true]) {
       runtime: { type: 'cohost', engine: 'scode' }, resumeSessionId: isResume ? 'native-session' : undefined,
       executionWorkspace: { repository: '/agents/helper/workspaces/session', workingRoot: '/proc/old/workspace' },
       workspaceSkills: [{ name: 'authorized-skill', description: 'An installed skill' }],
+      instructions: 'NATIVE_APPLICATION_ROLE_CONTEXT',
     })
     t.after(async () => { await handle.destroy(true); await rm(cwd, { recursive: true, force: true }) })
     await waitForSend('initialize')
     events.onMessage({ jsonrpc: '2.0', id: 'm-init', result: {} })
     const method = isResume ? 'session/load' : 'session/new'
     const request = await waitForSend(method)
+    assert.equal(request.params._meta.sudocode.appendSystemPrompt, 'NATIVE_APPLICATION_ROLE_CONTEXT')
     events.onMessage({ jsonrpc: '2.0', id: request.id, result: { sessionId: 'native-session',
       _meta: { sudocode: { workspace: { fileRoot: '/data/files/project', shellRoot: '/data/files/project' } } },
     } })
