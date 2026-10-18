@@ -10725,7 +10725,7 @@ export function startServer(
         if (body.client_metadata && typeof body.client_metadata === 'object' && !Array.isArray(body.client_metadata)) {
           const patch: Record<string, unknown> = {}
           for (const [key, value] of Object.entries(body.client_metadata as Record<string, unknown>)) {
-            if (key === 'implicit_task_id' || key === 'task_contract' || key === 'requested_execution' || key.startsWith('agent_manager_')) {
+            if (key === 'implicit_task_id' || key === 'task_contract' || key === 'requested_execution' || key === 'session_template_ref' || key.startsWith('agent_manager_')) {
               throw new HttpError(400, `Reserved client_metadata key: ${key}`)
             }
             patch[key] = value === null ? undefined : value
@@ -10740,6 +10740,9 @@ export function startServer(
       if (req.method === 'POST' && pathname === '/api/v1/sessions') {
         authService.requireScope(auth, 'sessions:create')
         const body = await readJsonBody(req)
+        if (body.template_ref !== undefined && (typeof body.template_ref !== 'string' || !body.template_ref.trim() || body.template_ref.length > 255)) {
+          throw new HttpError(400, 'Invalid template_ref')
+        }
         const normalizeCwd = (p: string) => p === '/' ? os.homedir() : p
         const requestedCwd =
           typeof body.cwd === 'string' && body.cwd.trim()
@@ -10771,6 +10774,7 @@ export function startServer(
           scopes: auth.scopes,
           runtime: runtimeOptions,
           assistantName: rawAssistantName,
+          templateRef: typeof body.template_ref === 'string' ? body.template_ref.trim() : undefined,
           // 新增: 从请求体获取 enabled_skills
           enabledSkills: Array.isArray(body.enabled_skills)
             ? body.enabled_skills.filter((s: unknown) => typeof s === 'string')

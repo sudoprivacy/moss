@@ -950,6 +950,8 @@ export type SessionSummary = {
 }
 
 export type SessionCreateInput = {
+  /** Installed task template; independent of the durable personal Agent. */
+  templateRef?: string
   /** Verified management actor; never accepted from a session request body. */
   managementActorId?: string
   managementAgent?: { name: string; displayName: string; ownerName: string }

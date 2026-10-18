@@ -18,13 +18,17 @@ import { readAgentNamespace } from '../../src/server/nexus/agentNamespace.js'
 assert.equal(process.env.MOSS_OWNER_KEY_E2E, '1', 'Explicit owner model acceptance selection is required')
 const binary = resolve(process.env.NEXUSD_COHOST_BIN!)
 const work = mkdtempSync(join(process.env.MOSS_COHOST_ARTIFACTS!, 'owner-keys-'))
-const model = 'moss-owner-key-fixture'
+const protocols = [
+  { model: 'claude-moss-owner-key-fixture', path: '/v1/messages' },
+  { model: 'gpt-4o-mini', path: '/v1/chat/completions' },
+  { model: 'gpt-5-codex', path: '/v1/responses' },
+]
 const processes: ChildProcess[] = []
 const logs: string[] = []
 const clients: NexusVfsClient[] = []
 const controllers: ReturnType<typeof connectController>[] = []
 const agents: ManagedAgentClient[] = []
-const requests: Array<{ key: string; prompt: string }> = []
+const requests: Array<{ key: string; prompt: string; path: string; model: string }> = []
 let node: any
 let issuer: NexusZoneApiClient | undefined
 async function freePort() {
@@ -54,11 +58,38 @@ const provider = createServer(async (request, response) => {
   let body = ''
   for await (const chunk of request) body += chunk
   const input = JSON.parse(body)
-  const prompt = JSON.stringify(input.messages)
-  requests.push({ key: String(request.headers['x-api-key'] ?? ''), prompt })
+  const prompt = JSON.stringify(input.messages ?? input.input)
+  const model = String(input.model)
+  requests.push({ key: String(request.headers['x-api-key'] ?? request.headers.authorization?.replace(/^Bearer /, '') ?? ''),
+    prompt, path: request.url ?? '', model })
   const marker = prompt.match(/OWNER_REPLY_[A-Za-z0-9_]+/)?.[0] ?? 'MISSING_OWNER_REPLY'
+  if (!protocols.some(protocol => protocol.path === request.url)) {
+    response.writeHead(400, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ error: 'Unsupported fixture protocol' }))
+    return
+  }
   response.writeHead(200, { 'content-type': 'text/event-stream' })
   const event = (name: string, value: unknown) => response.write(`event: ${name}\ndata: ${JSON.stringify(value)}\n\n`)
+  if (request.url === '/v1/chat/completions') {
+    const id = randomUUID()
+    const chunk = (delta: unknown, finishReason: string | null) => response.write(`data: ${JSON.stringify({
+      id, object: 'chat.completion.chunk', model, choices: [{ index: 0, delta, finish_reason: finishReason }],
+    })}\n\n`)
+    chunk({ role: 'assistant', content: marker }, null)
+    chunk({}, 'stop')
+    response.end('data: [DONE]\n\n')
+    return
+  }
+  if (request.url === '/v1/responses') {
+    event('response.created', { id: randomUUID(), model })
+    event('response.content_part.added', { output_index: 0 })
+    event('response.output_text.delta', { delta: marker })
+    event('response.output_text.done', {})
+    event('response.completed', { response: { usage: { input_tokens: 1, output_tokens: 1 } } })
+    response.end()
+    return
+  }
+  assert.equal(request.url, '/v1/messages')
   event('message_start', { type: 'message_start', message: { id: randomUUID(), type: 'message', role: 'assistant',
     model, content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } })
   event('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
@@ -107,10 +138,10 @@ try {
   const mossTls = { ca: join(frontDoor, 'ca.pem'), cert: join(frontDoor, 'agent.pem'), key: join(frontDoor, 'agent-key.pem') }
   issuer = NexusZoneApiClient.withMtls(endpoint, mossTls)
   const proofs: unknown[] = []
-  for (const lane of ['alice', 'bob']) {
+  for (const { model, path, lane } of protocols.flatMap(protocol => ['alice', 'bob'].map(lane => ({ ...protocol, lane })))) {
     const ownerId = `owner-${lane}-${randomUUID()}`
     const apiKey = `fixture-${randomUUID()}`
-    const directory = join(work, lane)
+    const directory = join(work, `${model}-${lane}`)
     const configRoot = join(directory, 'config')
     mkdirSync(configRoot, { recursive: true })
     const runtimeCredential = await issuer.mintUserRuntime(ownerId, { validitySecs: 300 })
@@ -118,7 +149,7 @@ try {
     for (const [name, value] of Object.entries({ ...bundle.files, [bundle.manifestName]: bundle.manifest })) {
       writeFileSync(join(directory, name), value, { mode: 0o600 })
     }
-    const configuration = buildCohostProxyConfig(providerUrl, apiKey, model)
+    const configuration = buildCohostProxyConfig(`${providerUrl}/v1`, apiKey, model)
     writeFileSync(join(configRoot, 'sudocode.json'), configuration['sudocode.json']!, { mode: 0o600 })
     const backend = JSON.parse(configuration['backend-config.json']!)
     backend.mounts[0].backend_params.blob_root = join(directory, 'model-cache')
@@ -147,6 +178,8 @@ try {
     const calls = requests.slice(before)
     assert(calls.length > 0, 'the real native engine must call the HTTP model')
     assert(calls.every(request => request.key === apiKey && request.prompt.includes(marker)), 'every model request uses its owner key')
+    assert(calls.every(request => request.path === path && request.model === model),
+      `the shared engine selects ${model} at ${path}; observed ${JSON.stringify(calls.map(request => ({ path: request.path, model: request.model })))}`)
     assert(controller.updates.some(update => update.content?.text?.includes(marker)))
     await agent.verifySessionEndpoint(session.sessionId, session.sessionEndpoint)
     await assert.rejects(agent.verifySessionEndpoint(session.sessionId,
@@ -169,7 +202,7 @@ try {
     await agent.cancel(session.sessionId, session.sessionEndpoint)
     await assert.rejects(agent.getSession(session.sessionId), /unknown session_id/)
     await assert.rejects(agent.verifySessionEndpoint(session.sessionId, session.sessionEndpoint), /execution disappeared/)
-    proofs.push({ lane, ownerId, durableSessionId: session.durableSessionId, modelRequests: calls.length,
+    proofs.push({ lane, model, path, ownerId, durableSessionId: session.durableSessionId, modelRequests: calls.length,
       isOwnerKeyVerified: true, isForeignOwnerRefused: true, isChannelCancellationVerified: true, isExecutionReadinessVerified: true })
   }
   assert.notEqual(requests[0]!.key, requests.at(-1)!.key)

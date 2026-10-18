@@ -582,6 +582,14 @@ export class RuntimeService {
         input = { ...input, assistantName: defaultAgentName(input.userId) }
       }
       await requirePersonalAgent(input.orgId, input.userId, input.assistantName!)
+      if (input.templateRef) {
+        if (!isUserOwnedAgentName(input.assistantName)) throw new ResourceAccessError(400, 'A template requires a personal Agent')
+        const template = await requireOrganizationResource('agent', input.templateRef)
+        if (template.meta.enabled === false) throw new ResourceAccessError(404, 'Template not available')
+        const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
+        const configuration = await getAssistantRuntimeConfig(template.id)
+        input = { ...input, templateRef: template.id, enabledSkills: input.enabledSkills ?? configuration.enabledSkills }
+      }
       const existingAgent = nexusAgentName(input.assistantName)
       if (existingAgent) {
         if ((input.runtime?.type || this.options.config.defaultRuntime) !== 'cohost') {
@@ -875,6 +883,10 @@ export class RuntimeService {
     }
 
     try {
+      if (input.templateRef) {
+        await this.store.updateSessionClientMetadata(sessionId, { session_template_ref: input.templateRef })
+        created.clientMetadata = { ...created.clientMetadata, session_template_ref: input.templateRef }
+      }
       await this.spawnAttempt(created, {
         dangerouslySkipPermissions: input.dangerouslySkipPermissions,
         assistantName: input.assistantName,
@@ -1890,6 +1902,11 @@ export class RuntimeService {
       await this.assertWithinTokenQuota(session.userId, session.orgId)
       this.assertCohostDeploymentAccess(session.runtime.type, session.userId)
       const effectiveAssistant = options.assistantName ?? session.assistantName
+      const templateRef = session.clientMetadata?.session_template_ref
+      if (typeof templateRef === 'string') {
+        const resource = await requireOrganizationResource('agent', templateRef)
+        if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Template not available')
+      }
       if (effectiveAssistant) {
         const { getAssistantRuntimeConfig } = await import('./backends/backendUtils.js')
         await getAssistantRuntimeConfig(effectiveAssistant)
@@ -2082,11 +2099,13 @@ export class RuntimeService {
     if (effectiveAssistantName) {
       try {
         const { findAssistantDir, readAssistantMeta } = await import('./agentStore.js')
-        const found = await findAssistantDir(effectiveAssistantName)
+        const templateRef = session.clientMetadata?.session_template_ref
+        const configurationReference = typeof templateRef === 'string' ? templateRef : effectiveAssistantName
+        const found = await findAssistantDir(configurationReference)
         let isMemoryEnabled = isUserOwnedAgentName(effectiveAssistantName)
         if (found) {
           const meta = await readAssistantMeta(found.dir)
-          isMemoryEnabled = meta?.memory_mode === 'user'
+          isMemoryEnabled = isMemoryEnabled || meta?.memory_mode === 'user'
           const ids = Array.isArray(meta?.enabledWikis)
             ? meta.enabledWikis.filter((v: unknown): v is string => typeof v === 'string')
             : []
@@ -2162,9 +2181,9 @@ export class RuntimeService {
           }
         }
 
-        const assistantRules = isUserOwnedAgentName(effectiveAssistantName)
+        const assistantRules = isUserOwnedAgentName(configurationReference)
           ? null
-          : await import('./agentStore.js').then(m => m.getAssistantSystemPrompt(effectiveAssistantName!))
+          : await import('./agentStore.js').then(m => m.getAssistantSystemPrompt(configurationReference))
         if (isCohostRuntime) {
           agentInstructions = buildAgentInstructions({ assistantName: effectiveAssistantName,
             assistantDisplayName, assistantRules, userProfile })
