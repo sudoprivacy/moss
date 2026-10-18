@@ -186,6 +186,7 @@ try {
       const variables = Object.entries(environment).filter(([key]) =>
         key.startsWith('NEXUS_') || key === 'SUDO_CODE_CONFIG_HOME' || key === 'SSL_CERT_FILE' || key === 'RUST_LOG' || key === 'ANTHROPIC_API_KEY')
       daemon = spawn('docker', ['run', '--rm', '--name', container,
+        '--user', `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, '--env', 'HOME=/fixture',
         '--publish', `127.0.0.1:${port}:${port}`, '--add-host', 'host.docker.internal:host-gateway',
         '--mount', `type=bind,source=${work},target=/fixture`,
         '--mount', `type=bind,source=${binary},target=/usr/local/bin/nexusd-cohost,readonly`,
