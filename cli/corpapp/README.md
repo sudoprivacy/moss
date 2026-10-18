@@ -195,6 +195,7 @@ So `send-group` checks before creating anything:
 | --- | --- |
 | `--cap-window calendar` | default; quota resets at provider midnight, evaluated in `Asia/Shanghai` — the provider's clock, not yours |
 | `--cap-window rolling24h` | stricter: a 23:50 send still blocks 00:10 next morning |
+| `--cap-lookback 72h` | how far back to look for **tasks** (default `72h`, range `24h`–`744h`); see below |
 | `--skip-capped` | drop over-quota targets, send to the rest |
 | `--no-cap-check` | skip the check (WeCom will still drop them) |
 
@@ -212,11 +213,34 @@ The second reason matters because **quota is consumed at confirmation, not at
 creation**, and a human may confirm hours later. Observed in production: a task
 created at 08:10 passed a delivered-only check, because the task that beat it
 was not confirmed until 10:18 — then settled as status 3, wasting a
-confirmation. Pending tasks are therefore blocked regardless of age: one created
-just before midnight consumes the *next* day's slot when confirmed.
+confirmation. Pending tasks therefore block however old they are (within
+`--cap-lookback`): one created just before midnight consumes the *next* day's
+slot when confirmed.
 
 `--skip-capped` drops targets blocked for either reason. For a pending block,
 cancelling the outstanding task frees the slot immediately.
+
+**`--cap-lookback` is not the quota window.** WeCom lists 群发 tasks by
+*creation* time, but a task spends the quota of the day it is *confirmed*. So
+the check has to look at tasks created before today too: one created yesterday
+evening and confirmed this morning has already used today's slot, and one
+created yesterday that is still waiting will use whichever day it is confirmed
+on. Until this flag existed the check listed only tasks created since today
+00:00 and missed both. Example (2026-10-15 → 16):
+
+> 10月15日 18:04 给群 wr_A 建了群发 msg_1，当天没人审批。10月16日 09:30 再给 wr_A
+> 发，旧检查只看「今天 0 点后创建」的任务，看不到 msg_1，放行建了 msg_2。管理员
+> 先批了 msg_1 → 群里收到周四的旧内容、今天名额被它用掉；msg_2 确认后 status 3，
+> 什么都没收到。
+
+The default `72h` covers the queue's default entry TTL — after it, `reap
+--cancel-wecom` withdraws unconfirmed tasks, so older ones should not exist.
+Widen it if tasks are also created outside the queue, or a withdrawal may have
+failed. The provider caps the listing at one month.
+
+Cost: each task created before today costs one extra `get_groupmsg_task` call;
+its send result is only read if someone has not confirmed yet or confirmed
+today. Tasks created today are checked exactly as before.
 
 Two limits worth knowing before relying on the guard:
 

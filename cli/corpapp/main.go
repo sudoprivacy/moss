@@ -69,7 +69,7 @@ Usage:
   corpapp groups --app <name> [--owner <userid,...>] [--cursor <c>] [--limit <n>]
   corpapp group --app <name> --chat-id <id> [--no-name]
   corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...] [--json]
-                     [--cap-window calendar|rolling24h] [--skip-capped] [--no-cap-check]
+                     [--cap-window calendar|rolling24h] [--cap-lookback 72h] [--skip-capped] [--no-cap-check]
   corpapp group-msgs --app <name> --start <ts> --end <ts> [--creator <userid>] [--cursor <c>] [--limit <n>]
   corpapp group-msg-result --app <name> --msgid <id> --userid <userid> [--cursor <c>]
   corpapp group-msg-summary --app <name> --msgid <id> --userid <userid> [--json]
@@ -145,6 +145,13 @@ Customer groups and 群发 (WeCom):
                              not yours
     --cap-window rolling24h  stricter: looks back a rolling 24h, so a 23:50
                              send still blocks 00:10 the next morning
+    --cap-lookback 72h       how far back to look for TASKS (default 72h,
+                             24h..744h). Not the quota window: a task created
+                             yesterday can be confirmed — and spend the quota —
+                             today, and the provider lists tasks by creation
+                             time. 72h covers the queue's default entry TTL
+                             (reap withdraws unconfirmed tasks after it); widen
+                             it for tasks created outside the queue
     --skip-capped            drop blocked targets, send to the rest
     --no-cap-check           skip the check entirely (the provider will still
                              silently drop over-quota targets)
@@ -157,9 +164,10 @@ Customer groups and 群发 (WeCom):
   unconfirmed task targets it. The second case matters because quota is spent at
   confirmation, not creation: a task created at 08:10 once passed a
   delivered-only check because the task ahead of it was not confirmed until
-  10:18 — then it settled as status 3, wasting a confirmation. Pending tasks
-  block regardless of age, since one confirmed after midnight spends the new
-  day's quota. Cancelling the outstanding task frees the slot.
+  10:18 — then it settled as status 3, wasting a confirmation. A pending task
+  blocks however old it is (within --cap-lookback), since one confirmed after
+  midnight spends the new day's quota. Cancelling the outstanding task frees
+  the slot.
 
   So a human spends a confirmation click on a message that goes nowhere.
   Always reconcile with:

@@ -1,10 +1,12 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +103,7 @@ func TestCheckDailyCapBlocksDeliveredTarget(t *testing.T) {
 	))
 	defer srv.Close()
 
-	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_blocked", "wr_free"}, CapWindowCalendar, now)
+	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_blocked", "wr_free"}, CapWindowCalendar, 0, now)
 	var v *DailyCapViolation
 	if !errors.As(err, &v) {
 		t.Fatalf("want DailyCapViolation, got %v", err)
@@ -127,7 +129,7 @@ func TestCheckDailyCapIgnoresUndeliveredTasks(t *testing.T) {
 	))
 	defer srv.Close()
 
-	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_x", "wr_y"}, CapWindowCalendar, now); err != nil {
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_x", "wr_y"}, CapWindowCalendar, 0, now); err != nil {
 		t.Fatalf("undelivered targets must not block: %v", err)
 	}
 }
@@ -135,14 +137,14 @@ func TestCheckDailyCapIgnoresUndeliveredTasks(t *testing.T) {
 func TestCheckDailyCapPassesWhenNoHistory(t *testing.T) {
 	c, srv := newTestClient(capStub(t, nil, nil, nil))
 	defer srv.Close()
-	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, time.Now()); err != nil {
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, 0, time.Now()); err != nil {
 		t.Errorf("want clear, got %v", err)
 	}
 }
 
 func TestCheckDailyCapRequiresSender(t *testing.T) {
 	c := New("http://unused", "t")
-	if _, err := c.InspectQuota("app1", "", CapWindowCalendar, time.Now()); err == nil {
+	if _, err := c.InspectQuota("app1", "", CapWindowCalendar, 0, time.Now()); err == nil {
 		t.Error("want error when sender is empty")
 	}
 }
@@ -158,7 +160,7 @@ func TestCheckDailyCapIgnoresOutsideWindow(t *testing.T) {
 	))
 	defer srv.Close()
 
-	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowRolling, now); err != nil {
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowRolling, 0, now); err != nil {
 		t.Errorf("a 3-day-old send must not block: %v", err)
 	}
 }
@@ -228,7 +230,7 @@ func TestCheckDailyCapBlocksOnPendingTask(t *testing.T) {
 	))
 	defer srv.Close()
 
-	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_target"}, CapWindowCalendar, now)
+	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_target"}, CapWindowCalendar, 0, now)
 	var v *DailyCapViolation
 	if !errors.As(err, &v) {
 		t.Fatalf("a pending task must block; got %v", err)
@@ -257,7 +259,7 @@ func TestCheckDailyCapPendingIgnoresWindow(t *testing.T) {
 	))
 	defer srv.Close()
 
-	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, now); err == nil {
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, 0, now); err == nil {
 		t.Error("a stale pending task still claims the next confirmed day's quota")
 	}
 }
@@ -275,7 +277,7 @@ func TestCheckDailyCapConfirmedTaskIsNotPending(t *testing.T) {
 	))
 	defer srv.Close()
 
-	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, now); err != nil {
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, 0, now); err != nil {
 		t.Errorf("confirmed-but-dropped consumes nothing and is not pending: %v", err)
 	}
 }
@@ -298,7 +300,7 @@ func TestCheckDailyCapDeliveredTakesPrecedence(t *testing.T) {
 	))
 	defer srv.Close()
 
-	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, now)
+	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, 0, now)
 	var v *DailyCapViolation
 	if !errors.As(err, &v) {
 		t.Fatalf("want violation, got %v", err)
@@ -344,7 +346,7 @@ func TestInspectQuotaReadsEachSummaryOnce(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, now); err == nil {
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, 0, now); err == nil {
 		t.Fatal("the pending task must still block")
 	}
 	for path, n := range reads {
@@ -383,7 +385,7 @@ func TestInspectQuotaFollowsListCursor(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_late"}, CapWindowCalendar, now)
+	err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_late"}, CapWindowCalendar, 0, now)
 	var v *DailyCapViolation
 	if !errors.As(err, &v) || v.Delivered["wr_late"].IsZero() {
 		t.Fatalf("delivery on page 2 must block; got %v", err)
@@ -404,7 +406,184 @@ func TestInspectQuotaBoundsRunawayCursor(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, time.Now()); err == nil {
+	if err := c.CheckDailyCap("app1", "linqinhui", []string{"wr_a"}, CapWindowCalendar, 0, time.Now()); err == nil {
 		t.Error("want an error when the listing never ends")
+	}
+}
+
+// filteringStub behaves like the provider where it matters: the broadcast list
+// returns only tasks CREATED inside [start, end]. The older capStub returns
+// every task regardless of the window, which is why the "pending ignores the
+// window" test passed while the real listing hid exactly those tasks.
+type stubTask struct {
+	msgid   string
+	created int64
+	task    string // raw get_groupmsg_task body
+	summary string // raw summary body; empty = 404 (cancelled / not visible)
+}
+
+func filteringStub(t *testing.T, tasks []stubTask, summaryReads map[string]int) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(r.URL.Path, "/")
+		msgid := ""
+		if len(parts) >= 2 {
+			msgid = parts[len(parts)-2]
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/resolve"):
+			_, _ = io.WriteString(w, `{"id":"app1","name":"x","type":"wecomapp"}`)
+		case strings.HasSuffix(r.URL.Path, "/group-messages"):
+			start, _ := strconv.ParseInt(r.URL.Query().Get("start"), 10, 64)
+			end, _ := strconv.ParseInt(r.URL.Query().Get("end"), 10, 64)
+			var list []map[string]any
+			for _, tk := range tasks {
+				if tk.created >= start && tk.created <= end {
+					list = append(list, map[string]any{"msgid": tk.msgid, "create_time": tk.created})
+				}
+			}
+			b, _ := json.Marshal(map[string]any{"group_msg_list": list})
+			_, _ = w.Write(b)
+		case strings.HasSuffix(r.URL.Path, "/task"):
+			for _, tk := range tasks {
+				if tk.msgid == msgid {
+					_, _ = io.WriteString(w, tk.task)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case strings.HasSuffix(r.URL.Path, "/summary"):
+			if summaryReads != nil {
+				summaryReads[msgid]++
+			}
+			for _, tk := range tasks {
+				if tk.msgid == msgid && tk.summary != "" {
+					_, _ = io.WriteString(w, tk.summary)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = io.WriteString(w, `{}`)
+		}
+	})
+}
+
+// 2026-10-16 09:30 Asia/Shanghai — the morning after the bad Thursday run.
+func capNow(t *testing.T) time.Time {
+	return time.Date(2026, 10, 16, 9, 30, 0, 0, shanghai(t))
+}
+
+// A task created yesterday and still awaiting confirmation must block today.
+// The listing used to start at today 00:00, so it never saw the task.
+func TestCheckDailyCapSeesPendingTaskCreatedYesterday(t *testing.T) {
+	now := capNow(t)
+	yesterday := now.Add(-15*time.Hour - 26*time.Minute).Unix() // 10-15 18:04
+	c, srv := newTestClient(filteringStub(t, []stubTask{{
+		msgid:   "msg_thu",
+		created: yesterday,
+		task:    `{"task_list":[{"userid":"wangguiyun","status":0}]}`,
+		summary: `{"entries":[{"chatId":"wr_a","status":0,"delivered":false}]}`,
+	}}, nil))
+	defer srv.Close()
+
+	err := c.CheckDailyCap("app1", "wangguiyun", []string{"wr_a"}, CapWindowCalendar, 0, now)
+	var v *DailyCapViolation
+	if !errors.As(err, &v) || v.Pending["wr_a"] != "msg_thu" {
+		t.Fatalf("yesterday's unconfirmed task must block today; got %v", err)
+	}
+}
+
+// A task created yesterday and confirmed this morning spent TODAY's quota.
+func TestCheckDailyCapSeesYesterdaysTaskConfirmedToday(t *testing.T) {
+	now := capNow(t)
+	created := now.Add(-15*time.Hour - 40*time.Minute).Unix() // 10-15 17:50
+	sentAt := now.Add(-50 * time.Minute).Unix()               // 10-16 08:40
+	c, srv := newTestClient(filteringStub(t, []stubTask{{
+		msgid:   "msg_mon",
+		created: created,
+		task:    `{"task_list":[{"userid":"wangguiyun","status":2,"send_time":` + itoa(sentAt) + `}]}`,
+		summary: `{"entries":[{"chatId":"wr_b","status":1,"delivered":true,"sendTime":` + itoa(sentAt) + `}]}`,
+	}}, nil))
+	defer srv.Close()
+
+	err := c.CheckDailyCap("app1", "wangguiyun", []string{"wr_b"}, CapWindowCalendar, 0, now)
+	var v *DailyCapViolation
+	if !errors.As(err, &v) || v.Delivered["wr_b"].IsZero() {
+		t.Fatalf("a delivery this morning spends today's quota, whenever the task was created; got %v", err)
+	}
+}
+
+// An older task that everyone confirmed before today is skipped without its
+// send result being read — that is what keeps the wider lookback cheap — and
+// it does not block.
+func TestCheckDailyCapSkipsOldConfirmedTaskCheaply(t *testing.T) {
+	now := capNow(t)
+	created := now.Add(-48 * time.Hour).Unix()
+	sentAt := now.Add(-47 * time.Hour).Unix()
+	reads := map[string]int{}
+	c, srv := newTestClient(filteringStub(t, []stubTask{{
+		msgid:   "msg_old",
+		created: created,
+		task:    `{"task_list":[{"userid":"wangguiyun","status":2,"send_time":` + itoa(sentAt) + `}]}`,
+		summary: `{"entries":[{"chatId":"wr_c","status":1,"delivered":true,"sendTime":` + itoa(sentAt) + `}]}`,
+	}}, reads))
+	defer srv.Close()
+
+	if err := c.CheckDailyCap("app1", "wangguiyun", []string{"wr_c"}, CapWindowCalendar, 0, now); err != nil {
+		t.Fatalf("a delivery two days ago does not block today: %v", err)
+	}
+	if reads["msg_old"] != 0 {
+		t.Errorf("send result of a task fully confirmed before the window should not be read; read %d times", reads["msg_old"])
+	}
+}
+
+// Beyond the lookback a task is not seen; a wider --cap-lookback reaches it.
+func TestCheckDailyCapLookbackIsConfigurable(t *testing.T) {
+	now := capNow(t)
+	old := now.Add(-5 * 24 * time.Hour).Unix()
+	tasks := []stubTask{{
+		msgid:   "msg_stale",
+		created: old,
+		task:    `{"task_list":[{"userid":"wangguiyun","status":0}]}`,
+		summary: `{"entries":[{"chatId":"wr_d","status":0,"delivered":false}]}`,
+	}}
+	c, srv := newTestClient(filteringStub(t, tasks, nil))
+	defer srv.Close()
+
+	if err := c.CheckDailyCap("app1", "wangguiyun", []string{"wr_d"}, CapWindowCalendar, 0, now); err != nil {
+		t.Errorf("a 5-day-old task is outside the default 72h lookback: %v", err)
+	}
+	if err := c.CheckDailyCap("app1", "wangguiyun", []string{"wr_d"}, CapWindowCalendar, 7*24*time.Hour, now); err == nil {
+		t.Error("a 7-day lookback must see the 5-day-old pending task")
+	}
+}
+
+// The task list pages too; an unconfirmed assignee on page 2 still counts.
+func TestReadGroupMsgTaskFollowsCursor(t *testing.T) {
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cursor") == "" {
+			_, _ = io.WriteString(w, `{"task_list":[{"userid":"a","status":2,"send_time":100}],"next_cursor":"p2"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"task_list":[{"userid":"b","status":0}],"next_cursor":""}`)
+	}))
+	defer srv.Close()
+
+	st, err := c.readGroupMsgTask("app1", "msg_x")
+	if err != nil || !st.unconfirmed {
+		t.Fatalf("assignee on page 2 is unconfirmed; got %+v %v", st, err)
+	}
+}
+
+func TestRunSendGroupRejectsBadLookback(t *testing.T) {
+	c := New("http://unused", "t")
+	var out, errOut bytes.Buffer
+	for _, v := range []string{"1h", "800h"} {
+		code := Run([]string{"send-group", "--app", "x", "--sender", "u", "--chat-id", "wr_a", "--text", "hi", "--cap-lookback", v},
+			c, RunOptions{Stdout: &out, Stderr: &errOut})
+		if code == 0 {
+			t.Errorf("--cap-lookback %s should be rejected", v)
+		}
 	}
 }
