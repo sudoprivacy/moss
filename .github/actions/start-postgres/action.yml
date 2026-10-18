@@ -1,0 +1,20 @@
+name: Start PostgreSQL for acceptance
+description: Use the PostgreSQL 16 installed on Ubuntu runners without a registry pull.
+runs:
+  using: composite
+  steps:
+    - name: Start and verify runner PostgreSQL 16
+      shell: bash
+      run: |
+        set -euo pipefail
+        PG_BIN=/usr/lib/postgresql/16/bin
+        test -x "$PG_BIN/psql"
+        sudo systemctl start postgresql@16-main.service
+        sudo -u postgres "$PG_BIN/psql" --port=5432 --dbname=postgres \
+          --set=ON_ERROR_STOP=1 --command="ALTER ROLE postgres PASSWORD 'postgres'"
+        VERSION="$(PGPASSWORD=postgres "$PG_BIN/psql" \
+          --host=127.0.0.1 --port=5432 --username=postgres --dbname=postgres \
+          --set=ON_ERROR_STOP=1 --tuples-only --no-align \
+          --command='SHOW server_version_num')"
+        [[ "$VERSION" =~ ^16[0-9]{4}$ ]]
+        echo "PostgreSQL $VERSION is accepting authenticated TCP connections."
