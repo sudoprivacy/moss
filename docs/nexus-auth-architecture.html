@@ -38,6 +38,7 @@
   p, li { margin: 10px 0; }
   code {
     background: var(--code-bg); padding: 2px 6px; border-radius: 4px;
+    overflow-wrap: anywhere;
     font: 13.5px/1.5 ui-monospace, "SF Mono", Consolas, monospace;
   }
   pre {
@@ -45,7 +46,7 @@
     overflow-x: auto; border: 1px solid var(--line);
   }
   pre code { background: none; padding: 0; font-size: 13px; }
-  table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 15px; }
+  table { display: block; overflow-x: auto; max-width: 100%; border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 15px; }
   th, td { border: 1px solid var(--line); padding: 9px 12px; text-align: left; vertical-align: top; }
   th { background: var(--code-bg); font-weight: 600; }
   .box { border-radius: 8px; padding: 14px 18px; margin: 20px 0; border-left: 4px solid; }
@@ -53,7 +54,7 @@
   .warn { background: var(--warn-bg); border-color: var(--warn-line); }
   .ok   { background: var(--ok-bg);   border-color: var(--ok-line); }
   .bad  { background: var(--bad-bg);  border-color: var(--bad-line); }
-  .mermaid { margin: 26px 0; text-align: center; }
+  .mermaid { margin: 26px 0; text-align: center; overflow-x: auto; }
   .tag {
     display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 20px;
     border: 1px solid var(--line); color: var(--muted); margin-left: 6px; vertical-align: middle;
@@ -74,33 +75,33 @@
 </header>
 
 <section id="cloud-runtime-current" data-shareone-anchor-id="auth/cloud-runtime-current">
-<h2>当前交接状态 · 2026-10-12</h2>
-<p>下方原有章节保留认证架构的演进记录。当前源码、已发布能力、线上部署和完整验收按本节区分；不能把早期的 loopback 拓扑当作今天所有 Cloud 路径的部署状态。</p>
+<h2>当前 Cloud 运行与权限核验 · 2026-10-19</h2>
+<p>下方保留认证架构的历史与跨组织设计。本节记录已经核验的生产边界；受限用户运行时通过，不代表企业跨 zone、跨 CA 的全部治理目标已经验收。当前控制器为 Moss <code>0.1.69</code>，计算运行清单保持 <code>server-v0.1.67</code>，cohost／scode <code>0.2.33</code>、Nexus <code>0.8.17</code>、ABI <code>7</code>。</p>
 <table>
-<tr><th>能力</th><th>已确认</th><th>剩余工作</th></tr>
-<tr><td>Nexus Node 客户端</td><td><code>@nexus-ai-fs/vfs-client</code> 0.7.0 已随 <a href="https://github.com/nexi-lab/nexus-vfs/releases/tag/v0.8.6">Nexus v0.8.6</a> 正式发布；COS 安装包已核对。Moss <a href="https://github.com/sudoprivacy/moss/pull/359">#359</a> 已引用正式包。</td><td>协调 Root Nexus 与 Moss 部署版本；不能把源码合并当作线上升级。</td></tr>
-<tr><td>用户委托与短期凭据</td><td>创建、读取、取消 Session 校验 owner；续期保留原 owner 与 actor，需旧私钥证明。客户端凭据在内存中维护，失败时终止连接，不能回退为操作员权限。</td><td>真实用户 Pod 的受限启动、服务端证书轮换与冷启动尚未完成线上验收。</td></tr>
-<tr><td>用户运行时服务端身份</td><td><code>MintUserRuntime</code> 签发固定 owner 的 ClientAuth / ServerAuth 凭据；有效期最多 300 秒。服务器 DNS 身份由 owner 的 SHA-256 派生。凭据不含 node 身份或 CA 私钥。</td><td>Root CA 私钥与签发权限留在控制平面。User Pod 只能持有本用户凭据；运行时入口需使用固定 owner 的权限边界。</td></tr>
-<tr><td>线上计算形态</td><td>2026-10-11 的真实账号核对仍为每 Session 一个 K8s Pod，Pod 中运行 scode CLI。旧跨会话记忆由 Moss 保存、读取并注入；这不是 Pod 内 Nexus 共享存储的验收。</td><td>用户 Pod 中一个 cohost daemon 承载多个 scode 执行实例，每个 Agent 有多个 Session。不同真实账号及 Pod 重建恢复仍需验收。</td></tr>
-<tr><td>持久事实</td><td>会话绑定保存 owner、Agent、原生 Session ID 与工作区路径。原生 <code>/sessions/&lt;sid&gt;/transcript.jsonl</code> 是主存储，Agent 目录的 Session 链接是索引；<code>/proc</code> 保存临时执行状态。</td><td>统一模板指令、技能、记忆的路径解析与权限，验收旧路径迁移、流式输出、工具、审批和取消。</td></tr>
+<tr><th>能力</th><th>已确认</th><th>验收边界与剩余工作</th></tr>
+<tr><td>客户端与共享运行平台</td><td>Moss 当前源码锁定 Nexus Node 客户端 <code>@nexus-ai-fs/vfs-client</code> <code>0.7.3</code>。公共用户运行平台包为 <code>@sudo/user-runtime</code>：Sudostack #75 全部 CI 通过后合入，<code>user-runtime-v0.1.7</code> 官方发布完成；Moss 新修复安装文件已与官方包逐一比对。</td><td>Node 客户端版本、Nexus daemon 版本与用户运行平台包分别记录。Moss #402 和 SudoWork #1268 的显式环境更新入口仍在正式 CI，尚未部署。</td></tr>
+<tr><td>owner 委托与底层执行授权</td><td>生产用户 Pod 使用固定 owner 的受限 cohost。B 的有效身份在自身运行环境有效，但读取 A 的项目文件、getSession 和 cancel 三项均由原生服务拒绝；A 的执行保持不变。</td><td>Moss 前置鉴权与界面筛选不能替代底层授权。当前验收证明用户运行时的 owner 边界；企业跨 zone／跨组织数据治理另行验收。</td></tr>
+<tr><td>服务端身份与自动轮换</td><td><code>MintUserRuntime</code> 签发绑定 owner 的 ClientAuth／ServerAuth 凭据，有效期最多 300 秒，服务端 DNS 身份由 owner 的 SHA-256 派生。真实 HTTPS mTLS 已观察到两张证书先后生效；两次 owner 文件授权均成功，Pod UID 不变。</td><td>控制平面更新该 owner 的凭据投影，cohost 加载新身份。用户授权持续存在，证书与密钥按短生命周期轮换。用户 Pod 不持有 CA 私钥、node 身份或跨 owner 的签发能力。</td></tr>
+<tr><td>用户、Agent 与计算归属</td><td>一个用户可以有多个 allocation；每份 allocation 使用独立 Pod、PVC、Service 与凭据投影，每 Pod 一个 daemon 承载多个 Agent／Session。真实用户 C 的 17 个 Agent 分布于两个 Pod／PVC，两侧各核对 19 个路径，另一 allocation 的目录不存在。</td><td>Moss 与 Sudostack 的 AgentRuntimeHomes 保存唯一 Agent 存储归属，K3s 调度声明的 Pod。当前不支持同 Agent 跨 Pod 并发写；Agent Move 和 Compute VM 按负载自动扩缩容仍待设计。</td></tr>
+<tr><td>持久事实与恢复</td><td>原生 <code>/sessions/&lt;native-session-id&gt;/transcript.jsonl</code> 是历史来源，Agent 下的 Session 链接仅作索引。Agent 记忆在 <code>/agents/&lt;agent&gt;/memory/MEMORY.md</code>，Session 项目位于该 Agent 的 workspaces 下。真实执行中 Pod 丢失后，相同 Session、历史字节前缀、文件与原 prompt snapshot 已恢复；中断工具未自动重放。</td><td>Moss 保存应用 Session、owner／Agent／allocation 绑定和投递记录；连接、Pod IP 与即时 busy／idle 不作为持久身份。新 Session 读取当时的记忆，普通 resume／compact 保持原快照。</td></tr>
+<tr><td>文件、技能与 Bash</td><td>正式 0.2.33 已用真实模型验证完整技能资产与 0700 脚本直接执行；文件工具和 Bash 双向读写同一项目目录。当前生产使用本地引用存储，没有 Nexus FUSE 挂载。</td><td>Bash 对本地项目目录直接使用 Pod 文件系统，不能宣称每次 I/O 都经过 Nexus 内容授权和审计。普通 PVC 文件及匿名 mmap 已成功，独立 FUSE 试验的 ENOSYS 不代表 gVisor 普遍不支持 mmap。</td></tr>
 </table>
 <h3>控制平面与用户运行时的权限位置</h3>
 <div class="mermaid" data-shareone-anchor-id="auth/cloud-runtime-target">flowchart TB
-  CLIENT["Desktop / WebUI"] --> MOSS["Moss 控制平面<br/>用户认证与业务协调"]
-  MOSS --> ISSUER["Root Nexus · 外部签发端<br/>CA 私钥与签发策略"]
+  CLIENT["Desktop / WebUI"] --> MOSS["Moss 控制平面<br/>用户认证 · Agent 归属与 Session 编排"]
+  MOSS --> ISSUER["控制面 nexusd-cluster<br/>CA 私钥 · owner 凭据签发 · secrets"]
   MOSS --> KUBE["k3s API<br/>Moss 服务账户 · 最小 RBAC"]
-  KUBE --> POD["用户 Pod · 目标部署<br/>本用户 PVC 与受限凭据"]
-  ISSUER -. "owner 绑定 · 最多 300 秒" .-> POD
-  MOSS -. "可信 placement + 用户委托" .-> POD
-  POD --> COHOST["一个 cohost daemon<br/>多个 scode 执行实例与 Session"]
-  COHOST --> STORE["Pod 内 Nexus Kernel / VFS<br/>用户数据与 Agent 记忆"]
+  KUBE --> POD["同一用户的 allocation Pod × 1..N<br/>每份独立 PVC · 本 owner 受限凭据"]
+  ISSUER -. "最多 300 秒的 owner 身份" .-> MOSS
+  MOSS ==>|"owner 委托 mTLS<br/>直接控制与事件流"| COHOST["每 Pod 一个 nexusd-cohost daemon<br/>进程内多个 Agent / Session"]
+  POD --- COHOST
+  COHOST --> STORE["本地 Nexus Kernel / VFS<br/>该 allocation 的历史 · 记忆 · 文件"]
 </div>
-<p>Pod、Secret、Service 与 NetworkPolicy 的编排权限属于 <strong>Moss 控制平面的服务账户</strong>，不授予用户 Pod。共享实现与部署组成放入 Sudostack；Cloud、Private、Edge 保留各自的入口与环境参数。Nexus 的认证、Kernel、存储契约和 scode 引擎各自保留一个实现来源。</p>
+<p>Pod、Secret、PVC、Service 与 NetworkPolicy 的编排权限属于 <strong>Moss 控制平面的服务账户</strong>，不授予用户 Pod。控制面 Nexus 负责签发与跨域能力，不充当当前 Session 控制链路的中转。Cloud、Private、Edge 的公共运行、资源、存储、权限和部署能力放入 Sudostack；各环境保留自身入口与参数。Nexus 的认证、Kernel、存储及 scode 引擎各自维持一个实现来源。</p>
 <h3>名称与身份</h3>
-<p>显示名称用于界面，授权使用已验证的身份。跨 CA 的同名 Agent 必须按签发信任域区分：现有外部身份为 <code>&lt;trust-domain&gt;/agent/&lt;name&gt;</code>，签发策略不能仅匹配裸名。Moss 的原生 Agent 名按 owner 与稳定 Agent／模板引用组成；IP 是可变路由地址，不应成为 Agent 身份的一部分。后续全局命名审计按 <strong>信任域、owner ID、稳定 Agent ID</strong> 核对，不能为改名称破坏现有路径或 kernel syscall ABI。</p>
-<p>用户授权持续存在；短期证书与密钥负责承载授权并轮换。组织管理员对业务目录的可见权限，与普通用户执行身份的隔离分别验收。界面过滤不能替代 Nexus 运行时与 zone 的授权。</p>
-<h3>持续追踪：一个用户多个 Pod</h3>
-<p>本轮 demo 先完成每用户默认一个 Pod 的完整链路。多个 Pod 需要明确 Agent／Session 的 placement、同一份持久数据来源、恢复时的租约与写入 fencing；k3s 负责调度已声明的 Pod，不能替代这些应用契约。此项保留为后续设计与验收任务，当前不标记为已支持。</p>
+<p>显示名称用于界面，授权使用已经验证的身份。跨 CA 同名 Agent 按签发信任域区分，外域身份呈现为 <code>&lt;trust-domain&gt;/agent/&lt;name&gt;</code>；本地签发策略同时核验其可信身份来源，不能仅按裸名继承本地签发权限。Moss 的原生 Agent 名使用稳定 owner 与 Agent 引用；任务模板与个人 Agent 分别保存。IP 是可变路由，不作为身份的一部分。全局命名按 <strong>信任域、owner ID、稳定 Agent ID</strong> 审核，不为改名字破坏已有路径或 kernel syscall ABI。</p>
+<p>普通用户的运行会话隔离和组织管理员对业务目录的可见权限是两个契约，分别检查。当前固定 Agent allocation 避免了同 Agent 的跨 Pod 并发写；真正迁移还需要明确共享状态源、有效租约和旧写者的写入栅栏，不能把普通 PVC 文件锁当作完成这些保证。</p>
+<p>当前仍未关闭的发布与真实验收项，以 <a href="https://s.shareone.vip/s/sudo-cloud-plan">Sudo Cloud 总体设计</a> 的最新核验表为准；不把本地测试或正式包发布写成生产已经切换。</p>
 </section>
 
 <div class="box bad">
@@ -656,7 +657,7 @@ Readdir("/secrets")                  → ['/secrets/org:acme:system']</code></pr
 </table>
 
 <footer>
-  <p>源文件:<code>moss/docs/nexus-auth-architecture.html</code> —— 这个页面通过 ShareOne 的 remote-URL 机制托管,<strong>改动合进 moss 就自动生效,不用重新发布</strong>。有异议直接在 moss 提 PR 改这个文件。</p>
+  <p>源文件:<code>moss/docs/nexus-auth-architecture.html</code> —— 这个页面通过 ShareOne 的 remote-URL 机制托管，绑定 <code>docs/nexus-auth-architecture</code> 源分支；改动合入该分支并刷新原分享后展示，原链接与评论保留。有异议直接向该源分支提交 PR。</p>
   <p>相关代码:<code>nexus-vfs</code> PR #141(身份地基)、#142(<code>sk-</code> 认证策略)。</p>
 </footer>
 
