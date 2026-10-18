@@ -1169,8 +1169,18 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     onClose(code, signal, error) {
       if (terminalExit) return
       terminalExit = { code, signal, error, isNotified: false }
+      const isTurnInterrupted = pendingPromptIds.size > 0 || pendingStdin.length > 0
       interruptPendingTools()
       persistPartialAssistant()
+      if (isTurnInterrupted) {
+        const resultEvent = {
+          type: 'result', session_id: sessionId, status: 'error', is_error: true,
+          errors: ['The execution connection closed. The outcome of the interrupted turn is unknown. Check existing effects before retrying.'],
+          uuid: randomUUID(), timestamp: new Date().toISOString(),
+        }
+        void writeTranscript(resultEvent)
+        emitStdout(JSON.stringify(resultEvent) + '\n')
+      }
       setBusy(false)
       const failure = error ?? new Error('ACP connection closed')
       for (const pending of pendingRpcRequests.values()) {

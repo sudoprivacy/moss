@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { DirectConnectStore } from '../db.js'
+import { isUninitializedCohostSession } from './cohostSessionState.js'
 import type { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { ManagedAgentClient, type ManagedSessionSnapshot, type StartSessionResult } from '../nexus/managedAgentClient.js'
 import { startCohostExecution } from './cohostRecovery.js'
@@ -10,6 +15,44 @@ const snapshot: ManagedSessionSnapshot = { session_id: '43210.7', agent_id: 'age
 const result: StartSessionResult = { sessionId: '43210.8', osPid: null, durableSessionId: 'native-session', sessionEndpoint: endpoint }
 const input = { agentId: 'agent', model: 'model' }
 const scope = { ownerId: 'owner', repositoryPath: '/agents/agent/workspaces/moss-id', controllerId: 'new-controller' }
+
+void test('a provision failure can initialize its original unpublished Session; any startup or history prevents reset', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'moss-cohost-initialization-'))
+  const store = new DirectConnectStore(':memory:')
+  t.after(async () => { await store.close(); await rm(root, { recursive: true, force: true }) })
+  await store.createSession({ sessionId: 'moss-session', transcriptSessionId: 'moss-session',
+    transcriptPath: join(root, 'transcript.jsonl'), cwd: root, userId: 'owner', orgId: 'org',
+    role: 'member', scopes: [], assistantName: 'helper', runtime: { type: 'cohost', engine: 'scode' },
+    status: 'active', desiredState: 'active' })
+  const original = (await store.getSession('moss-session'))!
+  const attempt = await store.createAttempt({ sessionId: original.sessionId, generation: 1,
+    backendType: 'cohost', resumeTranscriptSessionId: original.transcriptSessionId, serverInstanceId: 'controller' })
+  await store.setCurrentAttempt(original.sessionId, attempt.attemptId)
+  await store.markAttemptStopped(attempt.attemptId, { runtimeState: 'failed', stopReason: 'startup_failed', errorText: 'Pod is not ready' })
+  assert.equal(await isUninitializedCohostSession(store, original), true)
+  let starts = 0
+  const execution = await startCohostExecution({ findSession: async () => undefined, cancel: async () => {},
+    startSession: async options => { assert.equal(options.resumeSessionId, undefined); starts++; return result } },
+  input, scope, { isResumeRequired: true, isInitializationAllowed: await isUninitializedCohostSession(store, original) })
+  assert.equal(starts, 1)
+  assert.equal(execution.isResume, false)
+  assert.equal((await store.getSession(original.sessionId))!.transcriptSessionId, original.transcriptSessionId)
+  await writeFile(original.transcriptPath, JSON.stringify({ type: 'user', content: 'An existing request' }))
+  assert.equal(await isUninitializedCohostSession(store, original), false)
+  await writeFile(original.transcriptPath, '{')
+  assert.equal(await isUninitializedCohostSession(store, original), false)
+  await writeFile(original.transcriptPath, '')
+  assert.equal(await isUninitializedCohostSession(store, original), true)
+  await store.addEvent(original.sessionId, attempt.attemptId, 'attempt_spawned', {})
+  assert.equal(await isUninitializedCohostSession(store, original), false)
+})
+
+void test('a durable native binding alone prevents initialization even when its UI projection is absent', async () => {
+  assert.equal(await isUninitializedCohostSession({
+    cohostSessions: { get: async () => ({ durableSessionId: 'original-native-history' }) },
+    latestEvent: async () => assert.fail('binding is sufficient'),
+  } as never, { sessionId: 'moss-session', transcriptPath: 'absent-ui-projection' }), false)
+})
 
 void test('missing durable identity during resume cannot silently create replacement history', async () => {
   let starts = 0

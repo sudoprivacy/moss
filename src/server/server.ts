@@ -10526,6 +10526,16 @@ export function startServer(
         return
       }
 
+      const sessionActivityMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/activity$/)
+      if (req.method === 'GET' && sessionActivityMatch) {
+        const sessionId = sessionActivityMatch[1] || ''
+        const session = await runtime.getSession(sessionId)
+        if (!session) throw new HttpError(404, 'Session not found')
+        if (!canAccessSession(auth, session, 'sessions:attach:any')) throw new HttpError(403, 'Forbidden')
+        writeJson(res, 200, await runtime.getSessionActivity(sessionId))
+        return
+      }
+
       const sessionContextMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/context$/)
       if (req.method === 'GET' && sessionContextMatch) {
         const sessionId = sessionContextMatch[1] || ''

@@ -103,6 +103,8 @@ export type BackendSpawnOptions = {
   /** Cancel pending execution recovery when its runner stops. Never serialized. */
   signal?: AbortSignal
   resumeSessionId?: string
+  /** Proven absence of a completed native start, binding, and UI transcript. */
+  isUninitializedCohostSession?: boolean
   cohostSessionBinding?: CohostSessionBinding
   cwd: string
   transcriptPath?: string

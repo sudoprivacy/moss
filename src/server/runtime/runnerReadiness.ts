@@ -123,18 +123,26 @@ export async function probeRunnerReady(attachPath: string, timeoutMs: number): P
   return probeRunnerSocket(attachPath, timeoutMs, 'execution')
 }
 
-async function probeRunnerSocket(attachPath: string, timeoutMs: number, mode: 'listener' | 'execution'): Promise<boolean> {
+/** Read volatile turn state only from a ready execution in the expected attempt. */
+export async function probeRunnerActivity(attachPath: string, attemptId: string, timeoutMs: number): Promise<'idle' | 'busy' | 'unavailable'> {
+  return await probeRunnerSocket(attachPath, timeoutMs, 'activity', attemptId)
+}
+
+function probeRunnerSocket(attachPath: string, timeoutMs: number, mode: 'listener' | 'execution'): Promise<boolean>
+function probeRunnerSocket(attachPath: string, timeoutMs: number, mode: 'activity', attemptId: string): Promise<'idle' | 'busy' | 'unavailable'>
+async function probeRunnerSocket(attachPath: string, timeoutMs: number, mode: 'listener' | 'execution' | 'activity', attemptId?: string): Promise<boolean | 'idle' | 'busy' | 'unavailable'> {
+  const unavailable = mode === 'activity' ? 'unavailable' : false
   if (!isNamedPipePath(attachPath) && !existsSync(attachPath)) {
-    return false
+    return unavailable
   }
-  return await new Promise<boolean>(resolve => {
+  return await new Promise(resolve => {
     const socket = net.createConnection(attachPath)
-    const finish = (isReady: boolean) => {
+    const finish = (result: boolean | 'idle' | 'busy' | 'unavailable') => {
       clearTimeout(timer)
       socket.destroy()
-      resolve(isReady)
+      resolve(result)
     }
-    const timer = setTimeout(() => finish(false), timeoutMs)
+    const timer = setTimeout(() => finish(unavailable), timeoutMs)
     socket.once('connect', () => {
       if (mode === 'listener') finish(true)
       else socket.write(`${JSON.stringify({ type: 'ping' })}\n`)
@@ -142,20 +150,25 @@ async function probeRunnerSocket(attachPath: string, timeoutMs: number, mode: 'l
     let buffer = ''
     socket.on('data', chunk => {
       buffer += chunk.toString('utf8')
-      if (buffer.length > 1_048_576) { finish(false); return }
+      if (buffer.length > 1_048_576) { finish(unavailable); return }
       for (;;) {
         const index = buffer.indexOf('\n')
         if (index < 0) break
         const line = buffer.slice(0, index)
         buffer = buffer.slice(index + 1)
         try {
-          const message = JSON.parse(line) as { type?: unknown; isReady?: unknown }
-          if (message.type === 'pong') { finish(message.isReady === true); return }
-        } catch { finish(false); return }
+          const message = JSON.parse(line) as { type?: unknown; isReady?: unknown; attemptId?: unknown; isBusy?: unknown }
+          if (message.type === 'pong') {
+            if (mode === 'activity') finish(message.isReady === true && message.attemptId === attemptId && typeof message.isBusy === 'boolean'
+              ? message.isBusy ? 'busy' : 'idle' : unavailable)
+            else finish(message.isReady === true)
+            return
+          }
+        } catch { finish(unavailable); return }
       }
     })
-    socket.once('error', () => finish(false))
-    socket.once('close', () => finish(false))
+    socket.once('error', () => finish(unavailable))
+    socket.once('close', () => finish(unavailable))
   })
 }
 

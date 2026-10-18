@@ -39,6 +39,8 @@ export type RunnerServerMessage =
       type: 'pong'
       ts: number
       isReady: boolean
+      attemptId?: string
+      isBusy?: boolean
     }
   | {
       // Acknowledgement of a 'stdin' message, sent by the daemon right after

@@ -124,6 +124,13 @@ for (const ending of ['connection loss', 'prompt error', 'cancelled turn', 'forc
       assert.equal(completed[0].content, 'finished bytes')
       assert.equal(output.filter(record => record.type === 'tool_result' && record.tool_use_id === 'interrupted').length, 1)
       assert.equal(sent.filter(message => message.method === 'session/prompt').length, 1, 'recovery must not replay a side effect')
+      if (ending === 'connection loss') {
+        const terminal = output.filter(record => record.type === 'result')
+        assert.equal(terminal.length, 1, 'a lost transport must end the visible turn before its runner exits')
+        assert.equal(terminal[0].is_error, true)
+        assert.match(terminal[0].errors.join('\n'), /outcome.*unknown/i)
+        assert.equal(records.filter(record => record.type === 'result').length, 1)
+      }
     } finally { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) }
   })
 }

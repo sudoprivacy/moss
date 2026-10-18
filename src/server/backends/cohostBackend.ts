@@ -73,7 +73,8 @@ export class CohostBackend implements SessionBackend {
         repos: [{ hostPath: repositoryPath, alias: 'workspace' }],
         resumeSessionId: saved?.durableSessionId,
       }, { ownerId: options.userId!, repositoryPath, controllerId: identity?.subjectId },
-      { signal: options.signal, isResumeRequired: !!options.resumeSessionId || !!saved,
+      { signal: options.signal, isResumeRequired: !!saved || !!options.resumeSessionId,
+        isInitializationAllowed: !saved && options.isUninitializedCohostSession === true,
         prepareWorkspace: async () => {
           await client.mkdir(repositoryPath, authToken, { parents: true, existOk: true })
           await client.mkdir(posix.join(repositoryPath, '.drafts'), authToken, { parents: true, existOk: true })

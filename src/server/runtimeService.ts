@@ -1,5 +1,5 @@
 import { SessionStartupError } from './sessionStartup.js'
-import { probeAttachPath, probeRunnerReady, waitForBackendRunnerReady } from './runtime/runnerReadiness.js'
+import { probeAttachPath, probeRunnerActivity, probeRunnerReady, waitForBackendRunnerReady } from './runtime/runnerReadiness.js'
 import { withOrganizationResources, requireOrganizationResource, resolveOrganizationSkillIds, snapshotOrganizationResources, pinSessionResourceSnapshot } from './catalog/organizationResources.js'
 import {
   defaultAgentName,
@@ -452,6 +452,20 @@ export class RuntimeService {
 
   async getSession(sessionId: string): Promise<SessionRecord | null> {
     return this.store.getSession(sessionId)
+  }
+
+  /** Observe the current live turn without creating a runner or persisting its state. */
+  async getSessionActivity(sessionId: string): Promise<{ attemptId: string | null; state: 'idle' | 'busy' | 'unavailable' }> {
+    const session = await this.store.getSession(sessionId)
+    const attemptId = session?.currentAttemptId ?? null
+    const unavailable = { attemptId, state: 'unavailable' as const }
+    if (!attemptId || session?.desiredState !== 'active') return unavailable
+    const attempt = await this.store.getAttempt(attemptId)
+    if (!attempt?.attachPath || !['running', 'detached'].includes(attempt.runtimeState)) return unavailable
+    const state = await probeRunnerActivity(attempt.attachPath, attemptId, this.options.config.reattachProbeTimeoutMs)
+    const current = await this.store.getSession(sessionId)
+    if (current?.currentAttemptId !== attemptId || current.desiredState !== 'active') return unavailable
+    return { attemptId, state }
   }
 
   /**

@@ -12,7 +12,7 @@ export async function startCohostExecution(
   input: SessionStartInput,
   scope: { ownerId: string; repositoryPath?: string; controllerId?: string },
   recovery: { timeoutMs?: number; retryMs?: number; signal?: AbortSignal; isResumeRequired?: boolean;
-    prepareWorkspace?: () => Promise<void> } = {},
+    isInitializationAllowed?: boolean; prepareWorkspace?: () => Promise<void> } = {},
 ): Promise<{ session: StartSessionResult; isResume: boolean }> {
   let resumeSessionId = input.resumeSessionId
   const deadline = Date.now() + (recovery.timeoutMs ?? COHOST_RECOVERY_TIMEOUT_MS)
@@ -30,7 +30,7 @@ export async function startCohostExecution(
     try { await agent.cancel(existing.session_id, existing.session_endpoint) }
     catch (error) { if (!isUnknownManagedSession(error, existing.session_id)) throw error }
   }
-  if (recovery.isResumeRequired && !resumeSessionId) {
+  if (recovery.isResumeRequired && !resumeSessionId && !recovery.isInitializationAllowed) {
     throw new Error('Cohost resume has no durable binding or owned live execution; migrate the original session locator before retrying')
   }
   await recovery.prepareWorkspace?.()

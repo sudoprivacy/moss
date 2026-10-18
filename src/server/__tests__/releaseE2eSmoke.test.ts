@@ -167,6 +167,7 @@ function expectRollbackResult(result: RollbackResult, scenario: RollbackScenario
 
 describe("packaged Server E2E smoke", () => {
   const placementOriginal = [
+    'MOSS_DEFAULT_RUNTIME="cohost"',
     'MOSS_USER_RUNTIME_IMAGE="runtime:old"',
     'MOSS_RUNTIME_MANIFEST_PATH="/releases/old/runtime-release.json"',
     'MOSS_USER_RUNTIME_HOST=10.0.0.2',
