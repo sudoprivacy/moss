@@ -1,24 +1,90 @@
 # Co-host production acceptance
 
-The shared-runtime candidate pins Nexus VFS 0.8.10, Vault 0.5.68 and paired
-scode/nexusd-cohost 0.2.28. The recorded production runs below used earlier
-versions and do not establish acceptance of this candidate.
 Ordinary scode keeps its direct model connection. Controlled co-host sessions
 use the native Nexus model mount for parent, child and compaction requests.
 
+## Production verification on 2026-10-18
+
+The observed SudoCloud server runs
+[Moss 0.1.68](https://github.com/sudoprivacy/moss/releases/tag/server-v0.1.68)
+with the verified 0.1.67 owner-runtime manifest: paired scode/nexusd-cohost
+0.2.33, Nexus 0.8.17 and plugin ABI 7. A server update does not establish that
+the owner-runtime image changed; inspect the effective manifest and image.
+
+The running process sets `MOSS_DEFAULT_RUNTIME=cohost`. Its `server.json`
+still contains `runtimeDefaults.type=k8s`, which the environment overrides.
+Verify the process environment before reporting or changing the default.
+An ordinary production WebUI login, New task and visible Send click created a
+co-host session without a runtime override. The real model returned a fresh
+marker, and the server's session record independently confirmed co-host placement.
+
+An isolated shared-billing organization passed these production checks:
+
+- On Moss 0.1.67, with its model account disabled, member creation returned 409 before writing
+  an identity. Restoring the account allowed creation only after a real
+  SudoRouter key was ready. Repeating the same idempotent request returned the
+  same user and key. The extra regression member and key were disabled afterward.
+- The deployed session API passed three real GPT-6 Luna turns, a WebSocket
+  reattachment and persisted HTTP history. The native `/model` backend used the
+  member's key; the scode proxy pointed to `nexus:///model` with no provider key.
+- A separate Sonnet 4.6 request through that same native mount returned 23 input
+  and 16 output tokens. The member key and organization were charged USD
+  0.000272; the service key was unchanged. This is the positive billing proof.
+
+The organization began with USD 0.10, a USD 0.05 member limit and a USD 0.02
+service limit. No limits were increased. After acceptance, the sessions, member
+identity, member key, service key and parent model account were stopped or
+disabled. The temporary organization login override was restored to inheritance;
+the platform login policy was unchanged. Private receipts retain the evidence.
+
+### Upstream GPT usage limitation
+
+The three GPT requests reached the correct member key, but their unmodified
+gateway replies reported zero `prompt_tokens` and `completion_tokens` alongside
+nonzero `total_tokens` (6,695, 6,751 and 6,804). The stored outbound requests
+included `stream_options.include_usage=true`. The gateway recorded zero cost for
+those requests. Do not count them as positive billing acceptance, infer an input
+and output split from the total, or substitute estimated charges. The Sonnet
+request above establishes that native routing and member billing work when the
+provider supplies valid usage; the GPT gateway conversion remains unresolved.
+
+### Browser and capacity boundaries
+
+The production WebUI browser handoff passed with a separate Chromium touch
+context on 2026-10-17: Take control, Unicode input, Return to AI, exact model
+readback, one trusted form submission, the same browser/profile/cookie, and
+history after reload. This is not an iPhone Safari result. Physical iPhone
+Safari acceptance remains pending; see the
+[SudoWork browser design](https://github.com/sudoprivacy/sudowork/blob/dev/docs/sudowork-browser-sessions.md).
+
+A fresh owner initially failed with 503 `RUNTIME_START_FAILED`. Its actual Pod
+condition was `Unschedulable: Insufficient cpu`; no model request had run.
+Parking two completed acceptance runtimes, with exact owner/UID checks and no
+unfinished sessions, released 200m of CPU requests. Their PVCs, Secrets and
+Services were retained. The subsequent live workflow passed. Monitor owner Pod
+capacity; successful runtime reuse does not prove a new owner can be scheduled.
+
 ## Deployment scope
 
-Keep the current k8s default while validating co-host accounts. Set
-`MOSS_COHOST_ALLOWED_USERS` to comma-separated Moss user UUIDs. An empty value
+Use the effective co-host default for this deployment. Set
+`MOSS_COHOST_ALLOWED_USERS` for a restricted rollout with comma-separated Moss
+user UUIDs. An empty value
 denies every co-host account; an unset value keeps the private deployment's
 existing behavior. The guard applies to creation and subsequent spawn attempts.
 Creation rejects an unlisted account before writing a session record.
 
-The owner-Pod candidate supplies each session owner's SudoRouter credential to
+The owner-Pod deployment supplies each session owner's SudoRouter credential to
 that Pod's private model backend. Metered accounts without an owner credential
-fail startup. The earlier external co-host deployment used a deployment-level
-credential; do not migrate its users until owner billing and runtime recovery
-have passed live acceptance. See [shared Agent runtime](shared-agent-runtime.md).
+fail startup. Keep the owner model configuration in its private runtime Secret.
+The earlier external co-host deployment used a deployment-level credential and
+does not provide per-member billing. See
+[shared Agent runtime](shared-agent-runtime.md).
+
+### Legacy external acceptance fixture
+
+The external-daemon instructions below describe the historical isolated fixture,
+not the current metered owner-Pod deployment. Use a dedicated provider credential
+and keep this fixture separate from customer billing.
 
 Configure `MOSS_COHOST_NEXUS_MODE=external`, endpoint and TLS CA/cert/key for the
 execution daemon. The primary `MOSS_NEXUS_*` connection continues to serve the
@@ -67,13 +133,16 @@ Use an isolated acceptance account. Its private credentials file contains
 ```sh
 MOSS_COHOST_LIVE=1 bun scripts/e2e/server-session-live.ts \
   https://agent.sudoprivacy.com /private/acceptance-login.json \
-  /private/evidence/deployed cohost k8s
+  /private/evidence/deployed cohost
 ```
 
 This checks real login, model selection, session creation, dependent model
 turns, WebSocket reattachment, the persisted HTTP transcript and termination.
 Set `MOSS_SESSION_LEGACY_RUNTIME=1` to exercise the legacy `runtime_type` request
 field as well. Both request formats must select the requested runtime.
+Pass `k8s` only for a separate deployment that deliberately supports the legacy
+runtime. The production owner-Pod deployment with a co-host default rejects new
+non-native runtime requests before persisting a session.
 The account's model preference is set to gpt-6-luna. Use a fresh account and
 disable it after acceptance. Evidence may contain conversation data and belongs
 in private storage.
