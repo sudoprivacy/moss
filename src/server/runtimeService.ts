@@ -909,7 +909,9 @@ export class RuntimeService {
       })
     } catch (error) {
       await this.store.markSessionEnded(created.sessionId, 'failed', 'active')
-      throw error
+      // Creation committed before compute startup. Return that durable identity;
+      // readiness and its recorded startup failure belong to resume/attach.
+      if (!(error instanceof SessionStartupError)) throw error
     }
     return (await this.store.getSession(created.sessionId)) ?? created
   }

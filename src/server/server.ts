@@ -10790,9 +10790,8 @@ export function startServer(
             ? body.enabled_skills.filter((s: unknown) => typeof s === 'string')
             : undefined,
         })
-        // createSession awaits spawnAttempt internally (runtimeService.ts
-        // createSession), so the attempt exists and is owned by THIS instance
-        // here — deterministic routing to self, no pool round-trip 409.
+        // Creation returns the committed identity even if compute startup failed.
+        // A spawned attempt routes to its owner; attach owns readiness recovery.
         const owner = created.currentAttemptId
           ? await runtime.store.getAttemptOwnerStatus(created.currentAttemptId, config.heartbeatTimeoutMs)
           : { ownerInstanceId: null, ownerLive: false }

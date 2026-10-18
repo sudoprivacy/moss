@@ -10,6 +10,7 @@ import { appendSharedAgentMemory, readSharedAgentMemory, writeAssistantOverrideA
 import { SessionStartupError } from './sessionStartup.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { RuntimeService } from './runtimeService.js'
+import { DirectConnectStore } from './db.js'
 import { DatabaseSync } from 'node:sqlite'
 import { SqliteDriver } from './db/driver.js'
 import { createCatalogTestRepository } from './testing/compatibilityRepositories.js'
@@ -228,10 +229,63 @@ void test('startup failures are actionable, safe, and distinct for new attempts'
   assert.match(first.message, /organization administrator/)
   assert.notEqual(first.failure.attemptId, second.failure.attemptId)
   const attemptId = '00000000-0000-4000-8000-000000000001'
-  const runner = new SessionStartupError(new Error('secret internal path /private/key'), 's', attemptId)
+  const cause = new Error('secret internal path /private/key')
+  const runner = new SessionStartupError(cause, 's', attemptId)
+  assert.equal(runner.cause, cause)
   assert.equal(runner.failure.attemptId, attemptId)
   assert.equal(runner.failure.isRetryable, true)
   assert.doesNotMatch(runner.message, /private|secret/)
+  assert.doesNotMatch(JSON.stringify(runner.failure), /private|secret/)
+})
+
+void test('a committed Session survives compute startup failure and resumes under its original identity', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'moss-created-session-'))
+  const store = new DirectConnectStore(':memory:')
+  createCatalogTestRepository(store.requireSqliteDb())
+  t.after(async () => { await store.close(); await rm(root, { recursive: true, force: true }) })
+  const service = new RuntimeService({
+    config: { runtimeDir: root, rootDir: root, defaultRuntime: 'host', engine: 'scode',
+      maxSessions: 0, resumeOnMissingRuntime: true, heartbeatTimeoutMs: 30_000 } as ServerConfig,
+    store, serverInstanceId: 'fixture',
+    authService: {
+      getTokenLimits: async () => ({ userLimit: null, departmentLimit: null }),
+      buildVisibilityFilter: async () => ({ isAdmin: false, userId: 'owner' }),
+    } as never,
+  })
+  let launches = 0
+  const mutable = service as unknown as { spawnAttempt(session: SessionRecord): Promise<AttemptRecord> }
+  mutable.spawnAttempt = async session => {
+    launches++
+    if (launches === 1) {
+      const failure = new SessionStartupError(new Error('compute unavailable'), session.sessionId)
+      await store.addEvent(session.sessionId, null, 'startup_failed', failure.failure as unknown as Record<string, unknown>)
+      throw failure
+    }
+    const attempt = await store.createAttempt({ sessionId: session.sessionId, generation: 1,
+      backendType: 'host', resumeTranscriptSessionId: session.transcriptSessionId,
+      serverInstanceId: 'fixture', attachPath: join(root, 'fixture.sock') })
+    await store.setCurrentAttempt(session.sessionId, attempt.attemptId)
+    await store.setSessionLifecycle(session.sessionId, 'active', 'active')
+    return attempt
+  }
+  const created = await service.createSession({ userId: 'owner', orgId: 'org', role: 'user',
+    scopes: [], dangerouslySkipPermissions: false })
+  assert.equal(created.status, 'failed')
+  assert.equal(created.desiredState, 'active')
+  assert.equal(created.assistantName, defaultAgentName('owner'))
+  assert.equal((await store.listSessions({ orgId: 'org', userId: 'owner' })).length, 1)
+  assert.equal((await store.latestEvent(created.sessionId, 'startup_failed'))?.payload.sessionId, created.sessionId)
+  const resumed = await service.ensureSessionReady(created.sessionId)
+  assert.equal(resumed.session.sessionId, created.sessionId)
+  assert.equal(resumed.session.taskId, created.taskId)
+  assert.equal(resumed.session.status, 'active')
+  assert.equal(launches, 2)
+  assert.equal((await store.listSessions({ orgId: 'org', userId: 'owner' })).length, 1)
+  await assert.rejects(service.createSession({ userId: 'owner', orgId: 'org', role: 'user',
+    scopes: [], assistantName: defaultAgentName('foreign-owner'), dangerouslySkipPermissions: false }),
+  error => error instanceof SessionStartupError && !error.failure.sessionId)
+  assert.equal((await store.listSessions({ orgId: 'org', userId: 'owner' })).length, 1,
+    'authorization and resource validation must still refuse before creation')
 })
 
 void test('artifact MCP protocol rejects invalid JSON and accepts valid declarations', async () => {
