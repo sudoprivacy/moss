@@ -195,6 +195,7 @@ So `send-group` checks before creating anything:
 | --- | --- |
 | `--cap-window calendar` | default; quota resets at provider midnight, evaluated in `Asia/Shanghai` — the provider's clock, not yours |
 | `--cap-window rolling24h` | stricter: a 23:50 send still blocks 00:10 next morning |
+| `--cap-lookback 72h` | how far back to look for **tasks** (default `72h`, range `24h`–`744h`); see below |
 | `--skip-capped` | drop over-quota targets, send to the rest |
 | `--no-cap-check` | skip the check (WeCom will still drop them) |
 
@@ -212,11 +213,34 @@ The second reason matters because **quota is consumed at confirmation, not at
 creation**, and a human may confirm hours later. Observed in production: a task
 created at 08:10 passed a delivered-only check, because the task that beat it
 was not confirmed until 10:18 — then settled as status 3, wasting a
-confirmation. Pending tasks are therefore blocked regardless of age: one created
-just before midnight consumes the *next* day's slot when confirmed.
+confirmation. Pending tasks therefore block however old they are (within
+`--cap-lookback`): one created just before midnight consumes the *next* day's
+slot when confirmed.
 
 `--skip-capped` drops targets blocked for either reason. For a pending block,
 cancelling the outstanding task frees the slot immediately.
+
+**`--cap-lookback` is not the quota window.** WeCom lists 群发 tasks by
+*creation* time, but a task spends the quota of the day it is *confirmed*. So
+the check has to look at tasks created before today too: one created yesterday
+evening and confirmed this morning has already used today's slot, and one
+created yesterday that is still waiting will use whichever day it is confirmed
+on. Until this flag existed the check listed only tasks created since today
+00:00 and missed both. Example (2026-10-15 → 16):
+
+> 10月15日 18:04 给群 wr_A 建了群发 msg_1，当天没人审批。10月16日 09:30 再给 wr_A
+> 发，旧检查只看「今天 0 点后创建」的任务，看不到 msg_1，放行建了 msg_2。管理员
+> 先批了 msg_1 → 群里收到周四的旧内容、今天名额被它用掉；msg_2 确认后 status 3，
+> 什么都没收到。
+
+The default `72h` covers the queue's default entry TTL — after it, `reap
+--cancel-wecom` withdraws unconfirmed tasks, so older ones should not exist.
+Widen it if tasks are also created outside the queue, or a withdrawal may have
+failed. The provider caps the listing at one month.
+
+Cost: each task created before today costs one extra `get_groupmsg_task` call;
+its send result is only read if someone has not confirmed yet or confirmed
+today. Tasks created today are checked exactly as before.
 
 Two limits worth knowing before relying on the guard:
 
@@ -249,6 +273,19 @@ Status codes: `0` 未发送 · `1` 已发送 · `2` 客户不是好友 · `3` �
 If a task sits unconfirmed, `group-msg-remind` re-triggers the sender's
 prompt (WeCom allows 3 reminders per task per 24h; the API does not report
 how many remain, so track your own count).
+
+### Errors worth telling apart
+
+| errcode | Meaning | What to do |
+|---|---|---|
+| `45009` | Rate limited | Transient. moss-server already retries twice (1s, 3s) before surfacing it; if it still reaches you, release the entry and let a later round retry. Never cancel on it. |
+| `41048` | `no customer to send` — WeCom found no recipient for this sender in that group | Not transient: retrying the same sender/group will not help. Check that the 发送人 is actually in that group before re-queuing. |
+| daily cap | `send-group` refused: the group already received, or has a pending, 群发 | Expected on a second same-day send. Not a failure of the message. |
+
+The access_token behind every call is cached process-wide in moss-server, so
+issuing many `corpapp` calls in a row no longer costs a `gettoken` each. Still
+send serially: the provider's per-app rate limits are not documented, and a
+burst of parallel `send-group` calls is the easiest way to meet them.
 
 ### No @-mentions
 
@@ -322,7 +359,9 @@ corpapp internal-group --app 数牍 --chatid chase001
 
 # 改群：加人 / 减人 / 改名 / 换群主（WeCom 无法解散 appchat 群，所以建错了只能改）
 corpapp update-internal-group --app 数牍 --chatid chase001 --add zhaoliu,sunqi
+corpapp update-internal-group --app 数牍 --chatid chase001 --del sunqi
 corpapp update-internal-group --app 数牍 --chatid chase001 --name '追货内部群(新)'
+# --members 是「整体替换」成员名单，不是追加；只想加减人用 --add / --del
 
 # 发消息 / 发文件（文件会先上传再发，可重复 --file）
 corpapp send-internal-group --app 数牍 --chatid chase001 \
@@ -370,13 +409,19 @@ corpapp group-msg-queue --app $APP --action next
 
 # 5. 逐条：占位 → 组装 → 发送 → 标记
 corpapp group-msg-queue --app $APP --action claim --chat-id wr_xxx --entry-id q_...
-corpapp send-group --app $APP --sender linqinhui --chat-id wr_xxx --text "..." --file ./x.xlsx
+# --json 输出 {"ok":true,"msgId":"msg_..."}；mark-sent 只收这个裸 msgId
+corpapp send-group --app $APP --sender linqinhui --chat-id wr_xxx --text "..." --file ./x.xlsx --json
 corpapp group-msg-queue --app $APP --action mark-sent --chat-id wr_xxx \
   --entry-id q_... --msgid msg_... --sender linqinhui
 # 发送失败则归还名额，否则名额空烧一天：
 corpapp group-msg-queue --app $APP --action release --chat-id wr_xxx \
   --entry-id q_... --reason "send-group 失败"
 ```
+
+**`--msgid` 必须是裸 msgid**（`msg_` 开头、无空格），从 `send-group --json` 的 `msgId`
+读。脚本若去截取 `send-group` 的文字输出，会把「group message task created  msgid=…」
+整句存成 msgid —— 这样的条目永远对不上账，一直占着名额直到过期被回收。服务端现在
+会拒绝含空白的 msgid。
 
 **前两步必须跑在 `next` 之前** —— 它们都会释放名额。放到后面，被占住的名额当天不会
 释放，那个群就白白锁死一天。

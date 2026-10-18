@@ -69,8 +69,8 @@ Usage:
   corpapp groups --app <name> [--owner <userid,...>] [--cursor <c>] [--limit <n>]
   corpapp group --app <name> --chat-id <id> [--no-name]
   corpapp send-group --app <name> --sender <userid> --chat-id <id> [--chat-id <id>...] [--text <msg>] [--file <path>...] [--media-id <id>...] [--json]
-                     [--cap-window calendar|rolling24h] [--skip-capped] [--no-cap-check]
-  corpapp group-msgs --app <name> --start <ts> --end <ts> [--creator <userid>]
+                     [--cap-window calendar|rolling24h] [--cap-lookback 72h] [--skip-capped] [--no-cap-check]
+  corpapp group-msgs --app <name> --start <ts> --end <ts> [--creator <userid>] [--cursor <c>] [--limit <n>]
   corpapp group-msg-result --app <name> --msgid <id> --userid <userid> [--cursor <c>]
   corpapp group-msg-summary --app <name> --msgid <id> --userid <userid> [--json]
   corpapp group-msg-task --app <name> --msgid <id> [--cursor <c>]
@@ -78,14 +78,18 @@ Usage:
   corpapp group-msg-queue --app <name> --action <verb> [--chat-id <id>] [--entry-id <id>] ...
                      verbs: enqueue|next|claim|release|mark-sent|cancel|reap|list
                             reconcile (diagnostic only — the loop never needs it)
+                     [--meta <json>] [--idempotency-key <k>] [--expires-at <RFC3339>]
+                     [--msgid <id>] [--sender <userid>] [--reason <text>]
+                     [--state <state>] [--limit <n>] [--cancel-wecom] [--json]
   corpapp create-internal-group --app <name> --name <群名> --owner <userid>
-                     [--members <a,b,c>] [--chatid <id>]
+                     [--members <a,b,c>] [--chatid <id>] [--json]
   corpapp internal-group --app <name> --chatid <id>
   corpapp update-internal-group --app <name> --chatid <id> [--name <群名>]
                                 [--owner <userid>] [--add <a,b>] [--del <c>]
+                                [--members <a,b,c>  (REPLACES the roster)] [--json]
   corpapp send-internal-group --app <name> --chatid <id> [--text <msg>]
                      [--format text|markdown] [--file <path>...]
-                     [--mention <userid,...>] [--mention-all]
+                     [--mention <userid,...>] [--mention-all] [--json]
 
 Colored / styled messages:
   --format markdown enables styling. --format text (the default) has no
@@ -141,6 +145,13 @@ Customer groups and 群发 (WeCom):
                              not yours
     --cap-window rolling24h  stricter: looks back a rolling 24h, so a 23:50
                              send still blocks 00:10 the next morning
+    --cap-lookback 72h       how far back to look for TASKS (default 72h,
+                             24h..744h). Not the quota window: a task created
+                             yesterday can be confirmed — and spend the quota —
+                             today, and the provider lists tasks by creation
+                             time. 72h covers the queue's default entry TTL
+                             (reap withdraws unconfirmed tasks after it); widen
+                             it for tasks created outside the queue
     --skip-capped            drop blocked targets, send to the rest
     --no-cap-check           skip the check entirely (the provider will still
                              silently drop over-quota targets)
@@ -153,9 +164,10 @@ Customer groups and 群发 (WeCom):
   unconfirmed task targets it. The second case matters because quota is spent at
   confirmation, not creation: a task created at 08:10 once passed a
   delivered-only check because the task ahead of it was not confirmed until
-  10:18 — then it settled as status 3, wasting a confirmation. Pending tasks
-  block regardless of age, since one confirmed after midnight spends the new
-  day's quota. Cancelling the outstanding task frees the slot.
+  10:18 — then it settled as status 3, wasting a confirmation. A pending task
+  blocks however old it is (within --cap-lookback), since one confirmed after
+  midnight spends the new day's quota. Cancelling the outstanding task frees
+  the slot.
 
   So a human spends a confirmation click on a message that goes nowhere.
   Always reconcile with:
@@ -201,6 +213,10 @@ The message queue (group-msg-queue):
                              as "reconciled"
     5. per entry: claim -> compose -> send-group -> mark-sent
                   (on failure: release, so the slot is not burned)
+                  mark-sent --msgid takes the BARE id: run send-group --json
+                  and pass its msgId. Scraping the text output stores a
+                  sentence as the msgid, and such an entry can never be
+                  reconciled (the server now rejects a msgid with spaces).
                   merged send: if one group has several intents due the same
                   day, compose ONE message and mark-sent them together —
                   --entry-id takes a comma-separated list, all bound to the one

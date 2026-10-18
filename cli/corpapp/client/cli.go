@@ -730,6 +730,8 @@ func runSendGroup(args []string, c *Client, opts RunOptions) error {
 	fs.Var(&mediaIDs, "media-id", "attach an already-uploaded media id; repeatable")
 	capWindow := fs.String("cap-window", string(CapWindowCalendar),
 		"daily-cap boundary: calendar (resets at provider midnight) | rolling24h (stricter)")
+	capLookback := fs.Duration("cap-lookback", DefaultCapLookback,
+		"how far back to look for tasks that may spend today's quota (a task created earlier can be confirmed today); 24h..744h")
 	noCapCheck := fs.Bool("no-cap-check", false, "skip the daily-cap pre-check (the provider will still drop over-quota targets)")
 	skipCapped := fs.Bool("skip-capped", false, "drop targets blocked by the cap (delivered or awaiting confirmation), send to the rest")
 	asJSON := fs.Bool("json", false, "emit {ok,msgId,failList} as JSON — scripts must read msgId from this, not scrape the text")
@@ -749,6 +751,9 @@ func runSendGroup(args []string, c *Client, opts RunOptions) error {
 	if err != nil {
 		return err
 	}
+	if *capLookback < 24*time.Hour || *capLookback > MaxCapLookback {
+		return fmt.Errorf("send-group: --cap-lookback must be between 24h and %s (the provider's listing limit)", MaxCapLookback)
+	}
 	resolved, err := resolveApp(c, *app)
 	if err != nil {
 		return err
@@ -759,7 +764,7 @@ func runSendGroup(args []string, c *Client, opts RunOptions) error {
 	// confirmed it, so catching it here is the only way to avoid wasting that.
 	targets := []string(chatIDs)
 	if !*noCapCheck {
-		capErr := c.CheckDailyCap(resolved.ID, *sender, targets, window, time.Now())
+		capErr := c.CheckDailyCap(resolved.ID, *sender, targets, window, *capLookback, time.Now())
 		var violation *DailyCapViolation
 		if errors.As(capErr, &violation) {
 			if !*skipCapped {

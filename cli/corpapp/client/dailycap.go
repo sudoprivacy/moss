@@ -186,6 +186,23 @@ func (c *Client) ListGroupMsgs(id string, start, end int64, creator, cursor stri
 	return raw, nil
 }
 
+// DefaultCapLookback is how far back InspectQuota looks for tasks. It is NOT the
+// quota window: a task created before the window can still spend the window's
+// quota, because the quota goes when a human confirms, not when the task is
+// created — and the broadcast list filters by creation time. Listing only from
+// the window start (today 00:00) missed both a task created yesterday and
+// confirmed this morning, and a task created yesterday still awaiting
+// confirmation.
+//
+// 72h covers the queue's default entry TTL (72h when 保留时长 is empty), after
+// which reap withdraws unconfirmed tasks. A task older than this is one whose
+// withdrawal failed or that was created outside the queue; widen --cap-lookback
+// for those (the provider caps the list at one month).
+const DefaultCapLookback = 72 * time.Hour
+
+// MaxCapLookback is the provider's limit on a broadcast listing's time range.
+const MaxCapLookback = 31 * 24 * time.Hour
+
 // QuotaState is what the provider currently says about each group's daily slot.
 type QuotaState struct {
 	// Delivered: group -> when it received a broadcast inside the window. The
@@ -216,12 +233,23 @@ type QuotaState struct {
 // takes only a msgid, so it reveals every assignee, while send results require a
 // userid and therefore only cover `sender`. A colleague's pending task is
 // visible; their delivered one is not.
-func (c *Client) InspectQuota(appID, sender string, w CapWindow, now time.Time) (*QuotaState, error) {
+//
+// Tasks are listed over `lookback`, not over the window (see DefaultCapLookback).
+// To keep that affordable, the task list is read first: a task whose every
+// assignee confirmed before the window cannot have spent this window's quota,
+// so its send result is not fetched. Tasks created inside the window are always
+// read in full, exactly as before.
+func (c *Client) InspectQuota(appID, sender string, w CapWindow, lookback time.Duration, now time.Time) (*QuotaState, error) {
 	if sender == "" {
 		return nil, errors.New("sender is required to check the daily cap")
 	}
 	from := capWindowStart(now, w)
-	msgs, err := c.listGroupMsgsAll(appID, from.Unix(), now.Unix())
+	listFrom := now.Add(-lookback)
+	if lookback <= 0 || from.Before(listFrom) {
+		// Never list less than the window itself.
+		listFrom = from
+	}
+	msgs, err := c.listGroupMsgsAll(appID, listFrom.Unix(), now.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("list recent broadcasts: %w", err)
 	}
@@ -232,16 +260,25 @@ func (c *Client) InspectQuota(appID, sender string, w CapWindow, now time.Time) 
 			continue
 		}
 
+		// Is anyone still sitting on this task? get_groupmsg_task needs no
+		// userid, so this sees every assignee regardless of `sender`.
+		task, terr := c.readGroupMsgTask(appID, m.MsgID)
+		unconfirmed := terr == nil && task.unconfirmed
+
+		// An older task that everyone confirmed before the window began spent an
+		// earlier day's quota (or none); it says nothing about this window.
+		if terr == nil && !unconfirmed && m.CreateTime < from.Unix() &&
+			!task.lastSent.IsZero() && task.lastSent.Before(from) {
+			continue
+		}
+
 		// One send-result read per task serves both checks below. It used to be
 		// read twice (once inside targetsOf, once here), and each read is a
 		// provider call; with a day's worth of tasks that doubling is what
 		// tipped busy send loops into 45009.
 		sum, sumErr := c.GroupMessageSummary(appID, m.MsgID, sender)
 
-		// Is anyone still sitting on this task? get_groupmsg_task needs no
-		// userid, so this sees every assignee regardless of `sender`.
-		unconfirmed, terr := c.hasUnconfirmedTask(appID, m.MsgID)
-		if terr == nil && unconfirmed && sumErr == nil {
+		if unconfirmed && sumErr == nil {
 			for _, e := range sum.Entries {
 				if e.ChatID == "" {
 					continue
@@ -277,7 +314,7 @@ func (c *Client) InspectQuota(appID, sender string, w CapWindow, now time.Time) 
 }
 
 // maxBroadcastPages bounds the listing walk: 100 per page is far beyond a
-// day's broadcasts, and a cursor that never ends must not spin forever.
+// few days' broadcasts, and a cursor that never ends must not spin forever.
 const maxBroadcastPages = 20
 
 // listGroupMsgsAll reads every 群发 record in the window, following the cursor.
@@ -308,33 +345,64 @@ func (c *Client) listGroupMsgsAll(appID string, start, end int64) ([]groupMsgLis
 	return nil, fmt.Errorf("broadcast list did not end within %d pages", maxBroadcastPages)
 }
 
-// hasUnconfirmedTask reports whether any assignee still has this task at
-// status 0 (未发送).
-func (c *Client) hasUnconfirmedTask(appID, msgID string) (bool, error) {
-	raw, err := c.GroupMessageTask(appID, msgID, "")
-	if err != nil {
-		return false, err
-	}
-	var resp struct {
-		TaskList []struct {
-			Status int `json:"status"`
-		} `json:"task_list"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return false, err
-	}
-	for _, t := range resp.TaskList {
-		if t.Status == 0 {
-			return true, nil
+// groupMsgTaskState is what get_groupmsg_task says about a 群发 as a whole.
+type groupMsgTaskState struct {
+	// unconfirmed: some assignee is still at status 0 (未发送).
+	unconfirmed bool
+	// lastSent: the latest send_time among assignees who confirmed. Zero when
+	// nobody has, or when the provider omitted it.
+	lastSent time.Time
+}
+
+// readGroupMsgTask reads every page of a task's assignee list. A cursor that
+// does not end is reported as unconfirmed, so the caller falls back to the
+// full check instead of skipping the task.
+func (c *Client) readGroupMsgTask(appID, msgID string) (groupMsgTaskState, error) {
+	var st groupMsgTaskState
+	cursor := ""
+	for page := 0; page < maxBroadcastPages; page++ {
+		raw, err := c.GroupMessageTask(appID, msgID, cursor)
+		if err != nil {
+			return st, err
 		}
+		var resp struct {
+			TaskList []struct {
+				Status   int   `json:"status"`
+				SendTime int64 `json:"send_time"`
+			} `json:"task_list"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return st, err
+		}
+		for _, t := range resp.TaskList {
+			if t.Status == 0 {
+				st.unconfirmed = true
+				continue
+			}
+			if t.SendTime > 0 {
+				if at := time.Unix(t.SendTime, 0); at.After(st.lastSent) {
+					st.lastSent = at
+				}
+			}
+		}
+		if resp.NextCursor == "" || resp.NextCursor == cursor {
+			return st, nil
+		}
+		cursor = resp.NextCursor
 	}
-	return false, nil
+	st.unconfirmed = true
+	return st, nil
 }
 
 // CheckDailyCap returns a *DailyCapViolation when any target already used its
-// quota. A nil error means every target is clear.
-func (c *Client) CheckDailyCap(appID, sender string, chatIDs []string, w CapWindow, now time.Time) error {
-	state, err := c.InspectQuota(appID, sender, w, now)
+// quota. A nil error means every target is clear. lookback is how far back to
+// look for tasks (DefaultCapLookback when zero); see DefaultCapLookback.
+func (c *Client) CheckDailyCap(appID, sender string, chatIDs []string, w CapWindow, lookback time.Duration, now time.Time) error {
+	if lookback == 0 {
+		lookback = DefaultCapLookback
+	}
+	state, err := c.InspectQuota(appID, sender, w, lookback, now)
 	if err != nil {
 		return err
 	}
