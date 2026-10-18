@@ -447,10 +447,18 @@ async function main() {
     for (const body of [{ runtime: { type: "k8s" } }, { runtime_type: "k8s" }]) {
       const failed = await request("/api/v1/sessions", {
         method: "POST", headers: authorization(token), body: JSON.stringify(body),
-      }, 503);
-      const sessionId = failed.startup?.sessionId;
-      assert(sessionId, "unavailable k8s must return its failed session id");
+      });
+      const sessionId = failed.session_id;
+      assert(sessionId, "unavailable k8s must retain its created session id");
+      assert(failed.execution?.session_status === "failed", "creation must report failed runtime startup");
+      assert(failed.startup?.sessionId === sessionId, "creation must carry the saved public startup failure");
+      assert(failed.startup?.code === "RUNTIME_START_FAILED", "unavailable k8s must preserve its startup failure code");
       try {
+        const resumed = await request(`/api/v1/sessions/${sessionId}/resume`, {
+          method: "POST", headers: authorization(token), body: "{}",
+        }, 503);
+        assert(resumed.startup?.sessionId === sessionId, "resume failure must identify the existing session");
+        assert(resumed.startup?.isRetryable === true, "unavailable compute must remain a retryable startup failure");
         const detail = await request("/api/v1/sessions", { headers: authorization(token) });
         const session = detail.sessions?.find(row => row.sessionId === sessionId);
         assert(session?.runtime?.type === "k8s", "explicit k8s request fell back to another runtime");

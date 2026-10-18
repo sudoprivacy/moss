@@ -8,6 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { appendSharedAgentMemory, readSharedAgentMemory, writeAssistantOverrideAgentsMd } from './sharedAgentMemory.js'
 import { SessionStartupError } from './sessionStartup.js'
+import { UserRuntimeUpdateRequiredError } from '@sudo/user-runtime'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { RuntimeService } from './runtimeService.js'
 import { DirectConnectStore } from './db.js'
@@ -236,6 +237,17 @@ void test('startup failures are actionable, safe, and distinct for new attempts'
   assert.equal(runner.failure.isRetryable, true)
   assert.doesNotMatch(runner.message, /private|secret/)
   assert.doesNotMatch(JSON.stringify(runner.failure), /private|secret/)
+  for (const reason of ['runtime', 'model-backend'] as const) {
+    const cause = new UserRuntimeUpdateRequiredError(reason)
+    const update = new SessionStartupError(cause, 'existing-session', attemptId)
+    assert.equal(update.cause, cause)
+    assert.equal(update.statusCode, 503)
+    assert.equal(update.failure.code, 'RUNTIME_UPDATE_REQUIRED')
+    assert.equal(update.failure.isRetryable, false)
+    assert.equal(update.failure.sessionId, 'existing-session')
+    assert.match(update.message, /Update the runtime/)
+    assert.doesNotMatch(JSON.stringify(update.failure), /model-backend|User Pod/)
+  }
 })
 
 void test('a committed Session survives compute startup failure and resumes under its original identity', async t => {
