@@ -11,7 +11,7 @@ import { jsonParse, jsonStringify } from '../utils/slowOperations.js'
 import type { RunnerClientMessage, RunnerServerMessage } from './runnerProtocol.js'
 import type { RunnerManifest } from './types.js'
 import type { BackendHandle } from './sessionManager.js'
-import { removeCohostSessionState } from './backends/cohostSessionState.js'
+import { isUninitializedCohostSession, removeCohostSessionState } from './backends/cohostSessionState.js'
 import type { SessionAttemptFence } from './storage/sessionAttemptFence.js'
 
 type SocketWithBuffer = net.Socket & {
@@ -199,10 +199,13 @@ export class SessionRunnerDaemon {
       const handle = await withOrganizationResources({
         orgId: this.manifest.session.orgId, userId: this.manifest.session.userId,
         snapshot: this.manifest.session.resources ?? { orgId: this.manifest.session.orgId, resources: [] },
-      }, () => this.#backend.spawn({
+      }, async () => this.#backend.spawn({
         sessionId: this.manifest.session.sessionId,
         signal: this.#spawnController.signal,
         cohostSessionBinding,
+        isUninitializedCohostSession: this.manifest.session.runtime.type === 'cohost' &&
+          this.manifest.session.resumeFromTranscript && !cohostSessionBinding &&
+          await isUninitializedCohostSession(this.#store, this.manifest.session),
         resumeSessionId: this.manifest.session.resumeFromTranscript
           ? this.manifest.session.transcriptSessionId
           : undefined,
@@ -538,7 +541,8 @@ export class SessionRunnerDaemon {
     process.stderr.write(`[SessionRunnerDaemon] Parsed message type: ${parsed.type}\n`)
     if (parsed.type === 'ping') {
       void this.#checkReady().then(isReady => {
-        this.#send(socket, { type: 'pong', ts: Date.now(), isReady })
+        this.#send(socket, { type: 'pong', ts: Date.now(), isReady,
+          attemptId: this.manifest.attempt.attemptId, isBusy: this.#handle?.isBusy?.() })
       })
       return
     }

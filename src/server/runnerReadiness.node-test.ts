@@ -7,7 +7,8 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { test, type TestContext } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { probeRunnerReady, waitForBackendRunnerReady, waitForRunnerReady } from './runtime/runnerReadiness.js'
+import { probeRunnerActivity, probeRunnerReady, waitForBackendRunnerReady, waitForRunnerReady } from './runtime/runnerReadiness.js'
+import { RuntimeService } from './runtimeService.js'
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'moss-runner-ready-'))
@@ -79,6 +80,39 @@ void test('legacy liveness acknowledgements do not claim execution readiness', {
     socket.on('data', () => socket.write(`${JSON.stringify({ type: 'pong', ts: Date.now() })}\n`))
   })
   assert.equal(await probeRunnerReady(f.attach, 1000), false)
+})
+
+for (const [reply, expected] of [
+  [{ isReady: true, attemptId: 'current', isBusy: false }, 'idle'],
+  [{ isReady: true, attemptId: 'current', isBusy: true }, 'busy'],
+  [{ isReady: false, attemptId: 'current', isBusy: false }, 'unavailable'],
+  [{ isReady: true, attemptId: 'old', isBusy: false }, 'unavailable'],
+  [{ isReady: true, isBusy: false }, 'unavailable'],
+  [{ isReady: true, attemptId: 'current' }, 'unavailable'],
+] as const) {
+  void test(`turn activity requires current ready execution: ${JSON.stringify(reply)}`, async t => {
+    const f = await fixture(t)
+    f.server.on('connection', socket => {
+      socket.write(`${JSON.stringify({ type: 'hello', state: 'running' })}\n`)
+      socket.on('data', () => socket.write(`${JSON.stringify({ type: 'pong', ...reply })}\n`))
+    })
+    assert.equal(await probeRunnerActivity(f.attach, 'current', 1000), expected)
+  })
+}
+
+void test('live activity rejects an attempt replaced during its probe without spawning work', async t => {
+  const f = await fixture(t)
+  let attemptId = 'current'
+  f.server.on('connection', socket => socket.on('data', () => {
+    attemptId = 'replacement'
+    socket.write(`${JSON.stringify({ type: 'pong', isReady: true, attemptId: 'current', isBusy: false })}\n`)
+  }))
+  const runtime = { options: { config: { reattachProbeTimeoutMs: 1000 } }, store: {
+    getSession: async () => ({ currentAttemptId: attemptId, desiredState: 'active' }),
+    getAttempt: async () => ({ attachPath: f.attach, runtimeState: 'running' }),
+  } } as unknown as RuntimeService
+  assert.deepEqual(await RuntimeService.prototype.getSessionActivity.call(runtime, 'session'),
+    { attemptId: 'current', state: 'unavailable' })
 })
 
 void test('an unresponsive or closed execution probe is bounded', { timeout: 10_000 }, async t => {

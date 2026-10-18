@@ -111,6 +111,18 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
     assert.equal((await request('PATCH', `/api/v1/sessions/${created.data.sessionId}`, a.user,
       { client_metadata: { agent_manager_actor_id: b.userId } })).status, 400)
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, b.admin)).status, 403)
+    await t.test('live activity uses the same current owner and management authorization as session attach', async () => {
+      const path = `/api/v1/sessions/${created.data.sessionId}/activity`
+      assert.equal((await request('GET', path)).status, 401)
+      for (const token of [a.user, a.admin]) {
+        const activity = await ok('GET', path, token)
+        assert.equal(activity.state, 'unavailable')
+        assert(activity.attemptId === null || typeof activity.attemptId === 'string')
+      }
+      assert.equal((await request('GET', path, b.user)).status, 403)
+      assert.equal((await request('GET', path, b.admin)).status, 403)
+      assert.equal((await request('GET', '/api/v1/sessions/missing-session/activity', a.user)).status, 404)
+    })
     const managementSocket = new WebSocket(`ws://127.0.0.1:${port}/ws/sessions/${created.data.sessionId}`,
       { headers: { Authorization: `Bearer ${a.admin}` } })
     t.after(() => managementSocket.terminate())
@@ -128,6 +140,7 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
       'a role change immediately invalidates the previous management token')
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, a.admin)).status, 401)
     const downgraded = await login('a-admin')
+    assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}/activity`, downgraded)).status, 403)
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, downgraded)).status, 403,
       'the persisted management actor metadata cannot replace current permission')
     assert((await ok('GET', '/api/v1/agents', downgraded)).agents.every((agent: any) => agent.ownerId === adminId))

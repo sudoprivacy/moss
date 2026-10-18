@@ -1,9 +1,32 @@
-import { readFile, unlink } from 'node:fs/promises'
+import { readFile, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { DirectConnectStore } from '../db.js'
+import type { SessionRecord } from '../types.js'
 
 export interface CohostSessionState {
   durableSessionId: string
   repositoryPath?: string
+}
+
+/**
+ * Provisioning can fail before a runner ever starts. Binding is committed before
+ * the runner accepts input; completed startup and the UI transcript independently
+ * rule out treating an existing conversation as an uninitialized one.
+ */
+export async function isUninitializedCohostSession(
+  store: Pick<DirectConnectStore, 'cohostSessions' | 'latestEvent'>,
+  session: Pick<SessionRecord, 'sessionId' | 'transcriptPath'>,
+): Promise<boolean> {
+  if (!session.transcriptPath) return false
+  if (await store.cohostSessions.get(session.sessionId) ||
+      await store.latestEvent(session.sessionId, 'attempt_spawned')) return false
+  try {
+    const metadata = await stat(session.transcriptPath)
+    return metadata.isFile() && metadata.size === 0
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
+    throw error
+  }
 }
 
 /** A session's repository outlives the ManagedAgentService process ID. */
