@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { ResourceAccessError } from './catalog/resourceError.js'
+import { UserRuntimeUpdateRequiredError } from '@sudo/user-runtime'
 
 export interface StartupFailure {
   sessionId?: string
@@ -13,12 +14,15 @@ export class SessionStartupError extends Error {
   readonly failure: StartupFailure
   constructor(error: unknown, sessionId?: string, attemptId = randomUUID()) {
     const isResource = error instanceof ResourceAccessError
-    const message = isResource
+    const isUpdateRequired = error instanceof UserRuntimeUpdateRequiredError
+    const message = isUpdateRequired
+      ? 'Cloud runtime configuration changed. Update the runtime, then send a new message.'
+      : isResource
       ? (error.message === 'Bound skill not available' ? 'Bound skill not available. Check the assistant configuration or contact your organization administrator.' : 'Assistant or skill unavailable. Check the configuration or contact your organization administrator.')
       : 'Cloud runtime failed to start. Please retry.'
-    super(message)
+    super(message, { cause: error })
     this.name = 'SessionStartupError'
     this.statusCode = isResource ? error.statusCode : 503
-    this.failure = { sessionId, attemptId, code: isResource ? 'RESOURCE_UNAVAILABLE' : 'RUNTIME_START_FAILED', isRetryable: !isResource, message }
+    this.failure = { sessionId, attemptId, code: isUpdateRequired ? 'RUNTIME_UPDATE_REQUIRED' : isResource ? 'RESOURCE_UNAVAILABLE' : 'RUNTIME_START_FAILED', isRetryable: !isResource && !isUpdateRequired, message }
   }
 }

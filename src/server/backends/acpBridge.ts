@@ -1174,7 +1174,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       persistPartialAssistant()
       if (isTurnInterrupted) {
         const resultEvent = {
-          type: 'result', session_id: sessionId, status: 'error', is_error: true,
+          type: 'result', subtype: 'error_interrupted', session_id: sessionId, status: 'error', is_error: true,
           errors: ['The execution connection closed. The outcome of the interrupted turn is unknown. Check existing effects before retrying.'],
           uuid: randomUUID(), timestamp: new Date().toISOString(),
         }

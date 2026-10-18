@@ -128,8 +128,10 @@ for (const ending of ['connection loss', 'prompt error', 'cancelled turn', 'forc
         const terminal = output.filter(record => record.type === 'result')
         assert.equal(terminal.length, 1, 'a lost transport must end the visible turn before its runner exits')
         assert.equal(terminal[0].is_error, true)
+        assert.equal(terminal[0].subtype, 'error_interrupted')
         assert.match(terminal[0].errors.join('\n'), /outcome.*unknown/i)
-        assert.equal(records.filter(record => record.type === 'result').length, 1)
+        assert.deepEqual(records.filter(record => record.type === 'result'), terminal,
+          'history and the live stream must carry the same classified terminal result')
       }
     } finally { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) }
   })
