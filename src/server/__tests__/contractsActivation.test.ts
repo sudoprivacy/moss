@@ -12,18 +12,24 @@ import { runFixtureProcess } from '../testing/fixtureProcess.js'
 const root = resolve(import.meta.dir, '../../..')
 const candidateVersion = '0.2.1'
 const baselineVersion = '0.2.0'
-const contentSha = '273fd4097cbc33c1c049c39bb1fb60cef2663e2b'
+// Pin target: sudostack feat/contract-zone 68371480fddb7912cfa3b406039f235e15f9e6df ("rebuild the zone-v1
+// release bundle at the 50bc372d anchor" — the derivation-pinned rebuild of
+// 364ce40's candidate; the derived contract artifacts are byte-identical, only
+// the pack tarball and the git anchor move). The 0.2.1 candidate content
+// is the C-era lineage plus the restored zone-v1 family; digests below are the
+// measured values at this revision.
+const contentSha = '68371480fddb7912cfa3b406039f235e15f9e6df'
 const contentShortSha = contentSha.slice(0, 7)
 const mergeSha = 'dc9cf01acf61dff586d292d15710332d35a5f811'
 const previousCandidateContentSha = '30da0ddd953268ff8a9a0f0980276300ab153003'
 const previousActivationSha = '60bd8dda6fb2d348ec8571b9b1a4eaa535e36dc5'
 const retiredPinSha = '45304cf15d1e8d02814e46b7b2fe0b3c30c1709c'
 const dependencySpec = `github:sudoprivacy/sudostack#${contentSha}`
-const lockIntegrity = 'sha512-Z/cwfFmCElZxS0Dik5cH8ThmRAwireEYV1fNqzhSln+twc9RBVGBfZvCHSiUXQMKpAFIovsSm0F1ueF998foIg=='
-const candidateManifestSha256 = '956a19cbc6b42ebc3c4e1c9ebe93e0842e1c295d1f6465e0d42d532d45785a9b'
-const compatibilitySha256 = 'a27553991ab8bd57d66bc12aaca4b08f52cd8def13a1f971d698fa3f435b35ad'
-const baselineSha256 = '9ec2cffbcb19f3e728a6691176ed739bab6de52a56b60abe4217420d2ce0c17c'
-const tarballSha256 = '1c6b2794de3572bffb59e3dd3f0a504c68a23fd2531c7838773bf78d01469c5e'
+const lockIntegrity = 'sha512-WpXuLr5N6ELHfbJSlSM5WJXoXvCriAKMyEcQDnnK1qy6dP12kBN+Xf2VTG3SAlOFbvsYIs2ekgqmRNiB5kpzxw=='
+const candidateManifestSha256 = '515d49b0d240d8796d2081e103bf25df222fac50e0714e8af423ff5a657fac02'
+const compatibilitySha256 = '8ba808dff0954db2a9a29f9c89cf6c446404d57f62d6a71be8c99f0ddbef4145'
+const baselineSha256 = 'e265062e742d6f4713db73b15d851c8aaa7e12895ab267ed429f226dce1b008c'
+const tarballSha256 = 'f24cda788d46ebbb5d165220d2726f55fcfb8e85e7443406efe83d33fbee3983'
 const serverNodeVersion = '22.22.1'
 
 function readJson<T>(path: string): T {
@@ -196,10 +202,10 @@ describe('@sudo/contracts evaluation pin', () => {
       const [metadata] = JSON.parse(packed.stdout) as PackMetadata[]
       expect(metadata).toEqual(expect.objectContaining({
         files: expect.any(Array),
-        shasum: '5774dcb821d483bf8848ba0bda511ec728ae6cf9',
-        size: 39_541,
+        shasum: '5293713805ebeaf813298782bc82e6440f8e37cf',
+        size: 67_436,
       }))
-      expect(metadata.files).toHaveLength(43)
+      expect(metadata.files).toHaveLength(64)
       expect(sha256(resolve(packDir, metadata.filename))).toBe(tarballSha256)
     } finally {
       rmSync(packDir, { recursive: true, force: true })
@@ -249,6 +255,60 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
     expect(installer.lastIndexOf('assert_nexus_zone_id_upgrade_safe')).toBeLessThan(
       installer.indexOf('systemctl stop "$SERVICE_NAME.service"'),
     )
+
+    const upgradeGuard = installer.match(/assert_nexus_zone_id_upgrade_safe\(\) \{[\s\S]*?\n\}/)?.[0]
+    expect(upgradeGuard).toBeDefined()
+    const guardDir = mkdtempSync(resolve(tmpdir(), 'moss-zone-upgrade-'))
+    const envPath = resolve(guardDir, 'moss-server.env')
+    const lockPath = resolve(guardDir, 'nexus', 'data.zone-id.lock.json')
+    const runUpgradeGuard = (existingInstall: '0' | '1', explicitDeclaration: '0' | '1') =>
+      spawnSync('bash', ['-c', [
+        upgradeGuard,
+        'die() { return 1; }',
+        'assert_nexus_zone_id_upgrade_safe "$EXISTING_INSTALL" "$ENV_PATH" "$LOCK_PATH" "$EXPLICIT_DECLARATION"',
+      ].join('\n')], {
+        env: {
+          ...process.env,
+          EXISTING_INSTALL: existingInstall,
+          EXPLICIT_DECLARATION: explicitDeclaration,
+          ENV_PATH: envPath,
+          LOCK_PATH: lockPath,
+        },
+      })
+    try {
+      expect(runUpgradeGuard('1', '1').status).not.toBe(0)
+      writeFileSync(envPath, 'MOSS_NEXUS_ZONE_ID=existing-zone\n')
+      expect(runUpgradeGuard('1', '0').status).not.toBe(0)
+      mkdirSync(resolve(guardDir, 'nexus'))
+      writeFileSync(lockPath, '{}')
+      expect(runUpgradeGuard('1', '0').status).toBe(0)
+      rmSync(lockPath)
+      expect(runUpgradeGuard('0', '1').status).toBe(0)
+    } finally {
+      rmSync(guardDir, { recursive: true, force: true })
+    }
+
+    const assignmentExtractor = installer.match(
+      /MOSS_NEXUS_ZONE_ID_LINE="\$\(awk '([\s\S]*?)' "\$ENV_PATH"\)"/,
+    )?.[1]
+    expect(assignmentExtractor).toBeDefined()
+    const awkDir = mkdtempSync(resolve(tmpdir(), 'moss-zone-extractor-'))
+    try {
+      const program = resolve(awkDir, 'preserve-zone.awk')
+      // A file preserves regex backslashes through Windows/MSYS argument parsing.
+      writeFileSync(program, assignmentExtractor!, 'utf8')
+      for (const [source, preserved] of [
+        ['MOSS_NEXUS_ZONE_ID="customer-a"\n', 'MOSS_NEXUS_ZONE_ID="customer-a"'],
+        ['MOSS_NEXUS_ZONE_ID=old-zone\nMOSS_NEXUS_ZONE_ID=new-zone\n', 'MOSS_NEXUS_ZONE_ID=new-zone'],
+        ['MOSS_NEXUS_ZONE_ID=customer-\\\na\nOTHER=value\n', 'MOSS_NEXUS_ZONE_ID=customer-\\\na'],
+      ] as const) {
+        const result = spawnSync('awk', ['-f', program], { input: source, encoding: 'utf8' })
+        expect(result.status).toBe(0)
+        expect(result.stdout).toBe(preserved)
+      }
+    } finally {
+      rmSync(awkDir, { recursive: true, force: true })
+    }
 
     expect(deploymentDocs).toContain('data.zone-id.lock.json')
     expect(deploymentDocs).toContain('整个 Nexus 目录作为一个单元')

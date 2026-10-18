@@ -30,6 +30,10 @@ if (!configPath) {
 
 const { config } = await readServerConfig(configPath)
 await ensureServerDirectories(config)
+const bootstrapPassword = config.bootstrapAdmin.password
+if (!bootstrapPassword) {
+  throw new Error('bootstrapAdmin.password is required by the LB lifecycle fixture')
+}
 
 const store = new DirectConnectStore(config.dbPath)
 const sqliteDb = store.requireSqliteDb()
@@ -50,9 +54,12 @@ const { service: authService } = await createAuthService({
 // entry carries usage 100+50=150 total tokens; the summary entry must be
 // filtered out by the transcript guard; the user entry passes the guard but
 // carries no usage and is skipped by the usage parser.
-const { username, password } = config.bootstrapAdmin
-if (!username || !password) throw new Error('Lifecycle fixture requires bootstrap credentials')
-const issued = await authService.issueTokenFromPassword({ username, password })
+const { username } = config.bootstrapAdmin
+if (!username) throw new Error('Lifecycle fixture requires bootstrap credentials')
+const issued = await authService.issueTokenFromPassword({
+  username,
+  password: bootstrapPassword,
+})
 // ServerConfig is flat (readServerConfig unfolds the server.json nesting):
 // transcriptDir/dbPath/runtimeDir are top-level, there is no config.storage.
 const transcriptDir = join(config.transcriptDir, 'lb-e2e-transcripts')

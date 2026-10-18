@@ -37,13 +37,13 @@ import { COHOST_AGENT_HOME_SCHEMA } from '../storage/cohostAgentHomeSchema.js'
  */
 import type { DbDriver } from './driver.js'
 import { ORGANIZATION_MODEL_SETTINGS_SCHEMA } from '../configuration/organizationModelSettingsRepository.js'
+import { ZONE_BINDING_TABLES_DDL } from '../zones/binding/schema.js'
 
 /** Initial full schema (all stores, migrated-final shape). */
 const MIGRATION_0001_INITIAL_SCHEMA = `
 -- ============ DirectConnectStore: sessions & runtime lifecycle ============
 
 ${SESSION_SCHEMA}
-
 CREATE INDEX IF NOT EXISTS sessions_user_idx
   ON sessions (org_id, user_id, last_active_at DESC);
 CREATE INDEX IF NOT EXISTS sessions_state_idx
@@ -589,6 +589,7 @@ CREATE TABLE IF NOT EXISTS users (
   department_id TEXT REFERENCES departments(id),
   role TEXT NOT NULL DEFAULT 'user',
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  membership_revision BIGINT NOT NULL DEFAULT 0,
   password_hash TEXT,
   password_updated_at BIGINT,
   last_login_at BIGINT,
@@ -1935,7 +1936,47 @@ interface PgMigration {
   sql: string
 }
 
-const MIGRATIONS: PgMigration[] = [
+/** §8.7 zone binding 三表：DDL 与 SQLite 侧同源（zones/binding/schema.ts，
+ *  双方言兼容文本），不在本文件复制第二份。 */
+const MIGRATION_0005_ZONE_BINDING = ZONE_BINDING_TABLES_DDL
+
+/** P1a expand-only（§8.10）：home Zone 投影 + runner generation execution zone。 */
+const MIGRATION_0006_SESSION_ZONE = `
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_id TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_observed_at TEXT;
+ALTER TABLE session_attempts ADD COLUMN IF NOT EXISTS execution_zone_id TEXT;
+`
+
+const MIGRATION_0007_SESSION_ZONE_REVISION = `
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_observed_revision TEXT;
+`
+
+/** H-2 + branch audit expand-only columns (membership, outbox idempotency, session sync). */
+const MIGRATION_0008_ZONE_MEMBERSHIP = `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE zone_binding_outbox ADD COLUMN IF NOT EXISTS grant_source_id TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS home_zone_sync_error TEXT;
+`
+
+/** B-3 expand-only：org_zone_bindings 的 observed 快照列（老 PG 库补齐；
+ *  fresh install 由 MIGRATION_0005 的双方言 DDL 直接带列）。 */
+const MIGRATION_0009_ZONE_BINDING_OBSERVED = `
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_display_name TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_zone_status TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_revision TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_grant_status TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_grant_source TEXT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS grant_expires_at BIGINT;
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS observed_at BIGINT;
+`
+
+/** M-5 expand-only：session_attempts 的 Nexus run 生命周期对账标记
+ *  （老 PG 库补齐；fresh install 由 CREATE TABLE 直接带列）。 */
+const MIGRATION_0010_SESSION_ATTEMPT_RUN_END = `
+ALTER TABLE session_attempts ADD COLUMN IF NOT EXISTS nexus_run_ended_at BIGINT;
+`
+
+export const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
   { version: 3, name: 'audit-fixes-2026-09', sql: MIGRATION_0003_FIXES },
@@ -1973,6 +2014,12 @@ const MIGRATIONS: PgMigration[] = [
       data_url TEXT NOT NULL
     );
   ` },
+  { version: 15, name: 'zone-binding-2026-09', sql: MIGRATION_0005_ZONE_BINDING },
+  { version: 16, name: 'session-zone-p1a', sql: MIGRATION_0006_SESSION_ZONE },
+  { version: 17, name: 'session-zone-observed-revision-p1a', sql: MIGRATION_0007_SESSION_ZONE_REVISION },
+  { version: 18, name: 'zone-membership-h2', sql: MIGRATION_0008_ZONE_MEMBERSHIP },
+  { version: 19, name: 'zone-binding-observed', sql: MIGRATION_0009_ZONE_BINDING_OBSERVED },
+  { version: 20, name: 'session-attempt-run-end', sql: MIGRATION_0010_SESSION_ATTEMPT_RUN_END },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

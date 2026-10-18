@@ -171,6 +171,51 @@ void describe('organization identity service', () => {
     db.close()
   })
 
+  void test('fires membership revoke hooks on role/status changes but not profile-only writes (高②)', async () => {
+    const { db, authDb, repository, unified } = setup()
+    const orgChanged: Array<[string, string]> = []
+    const membershipChanged: Array<[string, string]> = []
+    const service = new OrganizationIdentityService(
+      authDb, repository, unified,
+      undefined, undefined,
+      (fromOrgId, userId) => { orgChanged.push([fromOrgId, userId]) },
+      (orgId, userId) => { membershipChanged.push([orgId, userId]) },
+    )
+    const first = await service.createOrganization({ name: 'Hooks A', code: 'HOOK-A' }, onlineCommandContext('hooks-org-a'))
+    const second = await service.createOrganization({ name: 'Hooks B', code: 'HOOK-B' }, onlineCommandContext('hooks-org-b'))
+    const actor = { userId: 'root', orgId: first.organization.id, role: 'super_admin' }
+    const created = await service.createUser({
+      orgId: first.organization.id, username: '13800000001', password: 'StrongPass123',
+    }, onlineCommandContext('hooks-user'), actor)
+    const initialRole = (await authDb.getUserById(created.userId))!.role as 'user' | 'admin' | 'dept_admin'
+
+    // profile-only 写入：不触发任何钩子（revision 也不 bump）
+    await service.updateUser(created.userId, { displayName: '仅改名' }, actor)
+    assert.equal(membershipChanged.length, 0)
+    assert.equal(orgChanged.length, 0)
+
+    // role 相同值重写（无实际变化）：不触发——与 db 层 CASE WHEN bump 条件同构
+    await service.updateUser(created.userId, { role: initialRole }, actor)
+    assert.equal(membershipChanged.length, 0)
+
+    // role 实际变化：触发 membership 钩子；org 钩子不动
+    await service.updateUser(created.userId, { role: 'admin' }, actor)
+    assert.deepEqual(membershipChanged, [[first.organization.id, created.userId]])
+    assert.equal(orgChanged.length, 0)
+
+    // status 实际变化：再次触发
+    await service.updateUser(created.userId, { status: 'disabled' }, actor)
+    assert.equal(membershipChanged.length, 2)
+
+    // 跨 org 移动 + role 变化并发：两个钩子各触发一次（revokeForUser 按
+    // userId 幂等匹配，双触发无害）
+    await service.updateUser(created.userId, { orgId: second.organization.id, role: 'user' }, actor)
+    assert.equal(membershipChanged.length, 3)
+    assert.deepEqual(orgChanged, [[first.organization.id, created.userId]])
+
+    db.close()
+  })
+
   void test('deletes users and empty organizations without orphaning identity records', async () => {
     const { db, authDb, repository, service } = setup()
     const first = await service.createOrganization(
@@ -192,7 +237,21 @@ void describe('organization identity service', () => {
     assert.equal(await authDb.getUserById(created.userId), null)
     assert.equal(await repository.getNumericAlias('user', created.userId), null)
     assert.equal(await repository.findAuthIdentity('phone', 'sudowork', '13800000000'), null)
+    // N-1（低-4）：identity 路径删除 org 必须把 binding 翻为 detached 并写
+    // detach outbox（此前该路径不触碰 org_zone_bindings——僵尸 bound + grant 泄漏）。
+    const firstBinding = db.prepare(
+      `SELECT binding_id FROM org_zone_bindings WHERE org_id = ? LIMIT 1`,
+    ).get(first.organization.id) as { binding_id: string } | undefined
+    assert.ok(firstBinding, 'identity createOrganization writes the default binding intent')
     await service.deleteOrganization(first.organization.id, actor)
+    const afterDelete = db.prepare(
+      `SELECT desired_state FROM org_zone_bindings WHERE binding_id = ?`,
+    ).get(firstBinding.binding_id) as { desired_state: string }
+    assert.equal(afterDelete.desired_state, 'detached')
+    const detachOutbox = db.prepare(
+      `SELECT COUNT(*) AS n FROM zone_binding_outbox WHERE binding_id = ? AND action = 'detach' AND status = 'pending'`,
+    ).get(firstBinding.binding_id) as { n: number }
+    assert.equal(detachOutbox.n, 1, 'outbox-backed revoke path exists (低-4)')
     await service.deleteOrganization(second.organization.id, actor)
     assert.equal(await authDb.getOrganization(first.organization.id), null)
     assert.equal(await repository.getOrganizationProfile(second.organization.id), null)
