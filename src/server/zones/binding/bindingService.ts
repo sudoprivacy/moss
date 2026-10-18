@@ -169,7 +169,12 @@ export class ZoneBindingReconciler {
           // backfill 写入的碰撞行）时，不得视为合法收敛——继续 createGrant 会
           // 在无管理操作的情况下把 Zone 自动共享给第二个 org。与
           // migrateFromJson 的迁移预判（isZoneIdOccupiedByOtherOrg 单点）同源。
-          const zoneOccupied = await isZoneIdOccupiedByOtherOrg(this.driver, {
+          // 1A 收窄：兜底仅对 policy 派生 default binding（org 创建/backfill，
+          // zone_id 由 policy 生成，跨 org 同 ID 即碰撞异常）生效；managed 绑定
+          // 是 super admin 显式指定 zone_id 的管理决策（§11.3 场景 6/13），
+          // ZONE_ALREADY_EXISTS 是预期收敛，跨 org 共享的把关在管理面预检
+          // （confirm_cross_org）完成。
+          const zoneOccupied = binding.origin === 'policy' && await isZoneIdOccupiedByOtherOrg(this.driver, {
             zoneId: binding.zone_id,
             nexusDeploymentId: this.config.nexusDeploymentId,
             orgId: binding.org_id,

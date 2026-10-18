@@ -259,6 +259,11 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
     const read = await nexusApi(nexus!, 'GET', `/api/v2/files/read?path=${encodeURIComponent(vfsPath)}&zone=${encodeURIComponent(zoneA)}`, undefined, { Authorization: `Bearer ${nexusKeyA}` })
     assert.equal(read.status, 200, JSON.stringify(read.json))
     assert.equal((read.json as { content?: string }).content, recordBody.data)
+    // 3A 回归守卫：delegation 读与 key 直读同为 python 鉴权 + node 凭证执行
+    // （kernel 只认 channel node key——用户 bearer 一律 403 invalid credentials）。
+    const delegatedRead = await nexusApi(nexus!, 'GET', `/api/v2/files/read?path=${encodeURIComponent(vfsPath)}&zone=${encodeURIComponent(zoneA)}`, undefined, { Authorization: `Bearer ${nexusKeyA}`, 'X-Nexus-Zone-Delegation': delegationA })
+    assert.equal(delegatedRead.status, 200, JSON.stringify(delegatedRead.json))
+    assert.equal((delegatedRead.json as { content?: string }).content, recordBody.data)
     const foreignWrite = await nexusApi(nexus!, 'POST', recordPath, recordBody, { Authorization: `Bearer ${nexusKeyB}`, 'X-Nexus-Zone-Delegation': delegationB })
     assert.ok([403, 404].includes(foreignWrite.status), JSON.stringify(foreignWrite.json))
     const foreignRead = await nexusApi(nexus!, 'GET', `/api/v2/files/read?path=${encodeURIComponent(vfsPath)}&zone=${encodeURIComponent(zoneA)}`, undefined, { Authorization: `Bearer ${nexusKeyBOwnZone}` })
@@ -414,7 +419,7 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
   })
 
   it('scenario 6: one zone can grant a second org without disturbing the first', async () => {
-    const added = await mossApi(moss, adminToken, 'POST', '/api/v1/zones/bindings', { org_id: orgB, zone_id: zoneA, purpose: 'shared' })
+    const added = await mossApi(moss, adminToken, 'POST', '/api/v1/zones/bindings', { org_id: orgB, zone_id: zoneA, purpose: 'shared', confirm_cross_org: true })
     assert.equal(added.status, 201, JSON.stringify(added.json))
     const bindingId = (added.json as { binding_id: string }).binding_id
     const deadline = Date.now() + 120_000
@@ -677,6 +682,9 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
     }
     assert.equal(officeRow?.sync_status, 'sync_failed', JSON.stringify(officeRow))
     assert.ok(officeRow.last_error_code)
+    // 1A：挂起期的失败必须来自挂起语义本身——ZONE_ID_COLLISION 代表占用
+    // 兜底误伤（本 org 是 zone 属主），曾以错误根因空洞通过此断言（10-18 实证）。
+    assert.notEqual(officeRow.last_error_code, 'ZONE_ID_COLLISION')
 
     nexusProxy!.failOperationLookup(suspendOperationId)
     const injected = await mossApi(moss, adminToken, 'GET', `/api/v1/zones/operations/${suspendOperationId}`)
@@ -718,7 +726,8 @@ describe('P0 real-process E2E (moss-side scenarios)', { skip: e2eEnv.ok ? false 
     assert.equal(switched.status, 200, JSON.stringify(switched.json))
     const unboundToken = (switched.json as { access_token: string }).access_token
     const created = await mossApi(moss, unboundToken, 'POST', '/api/v1/sessions', {})
-    assert.equal(created.status, 200, JSON.stringify(created.json))
+    if (created.status !== 200) await sleep(2_000) // 让 server 侧 stderr 冲刷完再取证
+    assert.equal(created.status, 200, `${JSON.stringify(created.json)}; moss log tail:\n${moss.bootLog().slice(-3000)}`)
     assert.equal((created.json as { home_zone_id?: string | null }).home_zone_id, null)
     const createdSessionId = (created.json as { session_id: string }).session_id
 

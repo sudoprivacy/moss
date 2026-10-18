@@ -27,6 +27,7 @@ export interface OrgZoneBindingRow {
   resource_prefixes: string | null
   desired_state: 'bound' | 'detached'
   sync_status: 'pending' | 'syncing' | 'active' | 'detaching' | 'detached' | 'sync_failed' | 'unknown'
+  origin: 'policy' | 'managed'
   nexus_grant_id: string | null
   nexus_operation_id: string | null
   generation: number
@@ -72,6 +73,7 @@ function mapBinding(row: SqlRow): OrgZoneBindingRow {
     resource_prefixes: row.resource_prefixes == null ? null : String(row.resource_prefixes),
     desired_state: String(row.desired_state) as OrgZoneBindingRow['desired_state'],
     sync_status: String(row.sync_status) as OrgZoneBindingRow['sync_status'],
+    origin: String(row.origin) as OrgZoneBindingRow['origin'],
     nexus_grant_id: row.nexus_grant_id == null ? null : String(row.nexus_grant_id),
     nexus_operation_id: row.nexus_operation_id == null ? null : String(row.nexus_operation_id),
     generation: Number(row.generation),
@@ -107,6 +109,8 @@ function mapOutbox(row: SqlRow): ZoneBindingOutboxRow {
  * 高①碰撞判定单点（migrateFromJson 迁移预判与 reconciler 收敛兜底共用）：
  * 不区分 desired_state/purpose——detached/显式共享的 zone 数据仍在 Nexus
  * 侧，挂载即共享，一律视为占用。同 org 的占用（幂等重试/revive）不算。
+ * sync_failed 死行不计占用：终态失败的 binding 从未成功授权（grant 不存在），
+ * 残行永久阻塞属主/其他 org 的后续绑定是连锁缺陷（10-18 实证）。
  */
 export async function isZoneIdOccupiedByOtherOrg(
   driver: DbDriver,
@@ -114,7 +118,9 @@ export async function isZoneIdOccupiedByOtherOrg(
 ): Promise<boolean> {
   const row = await driver.get(
     `SELECT 1 AS occupied FROM org_zone_bindings
-     WHERE zone_id = ? AND nexus_deployment_id = ? AND org_id != ? LIMIT 1`,
+     WHERE zone_id = ? AND nexus_deployment_id = ? AND org_id != ?
+       AND sync_status != 'sync_failed'
+     LIMIT 1`,
     [input.zoneId, input.nexusDeploymentId, input.orgId],
   )
   return row != null
@@ -142,8 +148,8 @@ export async function insertDefaultBindingIntent(
   await driver.run(
     `INSERT INTO org_zone_bindings (
        binding_id, org_id, nexus_deployment_id, zone_id, purpose, is_default,
-       desired_capabilities, desired_state, sync_status, generation, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, 'default', 1, ?, 'bound', 'pending', 1, ?, ?)`,
+       desired_capabilities, desired_state, sync_status, origin, generation, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, 'default', 1, ?, 'bound', 'pending', 'policy', 1, ?, ?)`,
     [
       bindingId,
       input.orgId,
@@ -455,8 +461,8 @@ export async function insertManagedBindingIntent(
     await driver.run(
       `INSERT INTO org_zone_bindings (
          binding_id, org_id, nexus_deployment_id, zone_id, purpose, is_default,
-         desired_capabilities, desired_state, sync_status, generation, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'bound', 'pending', 1, ?, ?)`,
+         desired_capabilities, desired_state, sync_status, origin, generation, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'bound', 'pending', 'managed', 1, ?, ?)`,
       [
         bindingId,
         input.orgId,

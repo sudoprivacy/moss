@@ -236,7 +236,9 @@ export async function startNexus(
 
   const ready = await waitForLine(child, 'Application startup complete', 120_000)
   if (!ready) {
-    child.kill('SIGKILL')
+    // Windows 上 kill() 只杀 python 父进程，不连带 armed nexusd——必须走
+    // stopChild 的进程树清理（3.4，10-18 19:37 轮泄漏路径）
+    await stopChild(child)
     throw new Error('nexus server did not become ready in 120s')
   }
   const baseUrl = `http://127.0.0.1:${port}`
@@ -285,11 +287,33 @@ export async function startNexus(
 }
 
 /** 停止子进程（Windows 上父进程终止不连带子进程——embedded nexusd 会
- * 滞留持有端口与文件句柄，必须 taskkill /T /F 杀整棵进程树）。 */
-function stopChild(child: { kill: (signal?: NodeJS.Signals) => boolean; pid?: number; exitCode: number | null; on: (event: string, cb: () => void) => void }): Promise<void> {
+ * 滞留持有端口与文件句柄，必须 taskkill /T /F 杀整棵进程树）。
+ * 杀失败不得静默 resolve：存活的子进程句柄（等待 exit）与开放管道会 hold
+ * 住 node:test 事件循环（10-18 P1a 挂死 2h16m 的物证根因）——taskkill 校验
+ * 失败重试一次，仍失败则 unref + 销毁管道解除引用并显式告警。 */
+function stopChild(
+  child: {
+    kill: (signal?: NodeJS.Signals) => boolean
+    pid?: number
+    exitCode: number | null
+    on: (event: string, cb: () => void) => void
+    unref?: () => void
+    stdout?: { destroy: () => void } | null
+    stderr?: { destroy: () => void } | null
+  },
+): Promise<void> {
   if (child.exitCode !== null) return Promise.resolve()
   if (process.platform === 'win32' && child.pid) {
-    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { shell: true })
+    const killTree = () => spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { shell: true })
+    let killed = killTree().status === 0
+    if (!killed) killed = killTree().status === 0
+    if (!killed) {
+      process.stderr.write(`[p0Harness] taskkill failed for pid ${child.pid}; unreferencing the child — manual cleanup may be needed (taskkill /PID ${child.pid} /T /F)\n`)
+      try { child.stdout?.destroy() } catch { /* already closed */ }
+      try { child.stderr?.destroy() } catch { /* already closed */ }
+      child.unref?.()
+      return Promise.resolve()
+    }
     return new Promise<void>((resolve) => {
       child.on('exit', () => resolve())
       setTimeout(resolve, 10_000).unref?.()
@@ -400,15 +424,23 @@ function waitForLine(child: { stderr?: NodeJS.ReadableStream | null; stdout?: No
   return new Promise((resolve) => {
     let buffer = ''
     let settled = false
+    // data 监听器必须在 settle 时移除：残留监听挂住管道，是进程不退出的
+    // 次级持有者（10-18 P1a 挂死加固项）
+    const handlers: Array<[NodeJS.ReadableStream, (chunk: Buffer) => void]> = []
     const done = (ok: boolean) => {
-      if (!settled) { settled = true; resolve(ok) }
+      if (settled) return
+      settled = true
+      for (const [stream, handler] of handlers) stream.off('data', handler)
+      resolve(ok)
     }
     const collect = (stream?: NodeJS.ReadableStream | null) => {
       if (!stream) return
-      stream.on('data', (chunk: Buffer) => {
+      const handler = (chunk: Buffer) => {
         buffer += chunk.toString('utf8')
         if (buffer.includes(needle)) done(true)
-      })
+      }
+      handlers.push([stream, handler])
+      stream.on('data', handler)
     }
     collect(child.stderr)
     collect(child.stdout)

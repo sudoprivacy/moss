@@ -111,8 +111,10 @@ describe('P1a session zone bridge (real nexus)', { skip: e2eEnv.ok ? false : `zo
   })
 
   after(async () => {
-    raw.close()
-    await nexus.stop()
+    // 守卫：before() 中途失败时 nexus 可能未赋值（未守卫会抛 TypeError 导致
+    // 零清理——10-18 19:37 轮挂死路径）
+    raw?.close()
+    await nexus?.stop()
   })
 
   it('R5.8/R5.1: home zone comes from the active binding (never the org_id string) and lands authoritatively in nexus', async () => {

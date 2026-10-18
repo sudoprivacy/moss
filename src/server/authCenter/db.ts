@@ -769,6 +769,10 @@ export class AuthCenterDb {
       ['observed_grant_source', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_grant_source TEXT'],
       ['grant_expires_at', 'ALTER TABLE org_zone_bindings ADD COLUMN grant_expires_at BIGINT'],
       ['observed_at', 'ALTER TABLE org_zone_bindings ADD COLUMN observed_at BIGINT'],
+      // 1A expand-only：binding 写入方（policy 派生 default / 管理面显式）——
+      // 收敛器的跨 org 占用兜底仅对 policy 生效（managed 是显式管理决策）。
+      // 存量行落 DEFAULT 'policy'（保持修复前的守护语义，无回退风险）。
+      ['origin', "ALTER TABLE org_zone_bindings ADD COLUMN origin TEXT NOT NULL DEFAULT 'policy' CHECK (origin IN ('policy', 'managed'))"],
     ] as const) {
       this.ensureColumn('org_zone_bindings', column, ddl)
     }

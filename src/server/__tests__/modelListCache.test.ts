@@ -272,12 +272,50 @@ describe('provider model discovery', () => {
   })
 
   it('keeps an unconfigured legacy installation on the historical default endpoint', () => {
-    const [provider] = normalizeModelProviders([], '')
-    expect(provider).toMatchObject({
-      id: 'legacy-default',
-      baseUrl: 'https://hk.sudorouter.ai/v1',
-      discoveryUrl: 'https://hk.sudorouter.ai/v1/models',
+    // createLegacyProvider 会读 ANTHROPIC_BASE_URL（modelProviders.ts:66）——
+    // 外部环境（如本机分流代理）设置的值会污染断言，用例内隔离（发现 6）。
+    const savedBase = process.env.ANTHROPIC_BASE_URL
+    delete process.env.ANTHROPIC_BASE_URL
+    try {
+      const [provider] = normalizeModelProviders([], '')
+      expect(provider).toMatchObject({
+        id: 'legacy-default',
+        baseUrl: 'https://hk.sudorouter.ai/v1',
+        discoveryUrl: 'https://hk.sudorouter.ai/v1/models',
+      })
+    } finally {
+      if (savedBase !== undefined) process.env.ANTHROPIC_BASE_URL = savedBase
+    }
+  })
+
+  it('passes an unverified legacy selection through when discovery fails and allowUnverified is set (4A)', async () => {
+    globalThis.fetch = (async (_input: unknown, _init?: unknown) => new Response('unauthorized', { status: 401 })) as typeof fetch
+    const settings = { apiKey: '', modelProviders: normalizeModelProviders([], '') } as never
+    await expect(getModelsForSelection('gemini-3-flash-preview', { settings, allowUnverified: true })).resolves.toMatchObject({
+      selection: { provider: { id: 'legacy-default' }, modelId: 'gemini-3-flash-preview' },
+      models: [],
+      unverified: true,
     })
+  })
+
+  it('still throws on legacy discovery failure when allowUnverified is not set (4A default off)', async () => {
+    globalThis.fetch = (async (_input: unknown, _init?: unknown) => new Response('unauthorized', { status: 401 })) as typeof fetch
+    const settings = { apiKey: '', modelProviders: normalizeModelProviders([], '') } as never
+    await expect(getModelsForSelection('gemini-3-flash-preview', { settings })).rejects.toThrow()
+    await expect(getModelsForSelection('gemini-3-flash-preview', { settings, allowUnverified: false })).rejects.toThrow()
+  })
+
+  it('never applies the unverified fallback to a configured provider (routing boundary intact, 4A)', async () => {
+    globalThis.fetch = (async (_input: unknown, _init?: unknown) => new Response('unauthorized', { status: 401 })) as typeof fetch
+    const settings = {
+      apiKey: '',
+      modelProviders: [{
+        id: 'sudorouter', name: 'Sudorouter', kind: 'openai-compatible',
+        baseUrl: 'https://model.example.invalid/v1', discoveryUrl: 'https://model.example.invalid/v1/models',
+        protocol: 'openai-responses', enabled: true,
+      }],
+    } as never
+    await expect(getModelsForSelection('sudorouter:qwen3', { settings, allowUnverified: true })).rejects.toThrow()
   })
 })
 

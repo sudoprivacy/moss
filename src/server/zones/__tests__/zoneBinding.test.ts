@@ -340,6 +340,65 @@ describe('reconciler', () => {
     assert.equal(binding.sync_status, 'active')
   })
 
+  it('managed bindings treat ZONE_ALREADY_EXISTS as legal convergence even when another org holds the zone (1A)', async () => {
+    // holder 的 policy default 先收敛（zone 落地）；第二个 org 经管理面显式
+    // 绑同一 zone（§11.3 场景 6）——占用兜底只属于 policy 路径
+    const holderId = 'cccccccc-0000-4000-8000-000000000001'
+    await db.createOrganization(holderId, 'ManagedHolder', Date.now())
+    const first = await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    assert.equal(first.completed, 1)
+    const zoneId = (raw.prepare(`SELECT zone_id FROM org_zone_bindings WHERE org_id = ?`).get(holderId) as { zone_id: string }).zone_id
+    const otherOrg = 'cccccccc-0000-4000-8000-000000000002'
+    await db.createOrganization(otherOrg, 'ManagedSharer', Date.now())
+    // 先收敛 other 自己的 default（避免 reconcileOnce 批次顺序影响断言）
+    await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    const { bindingId } = await insertManagedBindingIntent(db.driver, {
+      orgId: otherOrg,
+      nexusDeploymentId: CONFIG.nexusDeploymentId,
+      zoneId,
+      purpose: 'shared',
+      isDefault: false,
+      now: Date.now(),
+    })
+    const fake = new FakeZoneClient()
+    fake.script = ['already-exists']
+    const result = await makeReconciler(fake).reconcileOnce()
+    assert.equal(result.claimed, 1)
+    assert.equal(result.completed, 1)
+    const shared = raw.prepare(
+      `SELECT sync_status, last_error_code FROM org_zone_bindings WHERE binding_id = ?`,
+    ).get(bindingId) as Record<string, unknown>
+    assert.equal(shared.sync_status, 'active')
+    assert.equal(shared.last_error_code, null)
+    // 跨 org grant 已发出（grantee 为第二个 org）——这正是场景 6 的诉求
+    assert.equal(fake.grantCalls.some((call) => call.zoneId === zoneId && call.grantee === otherOrg), true)
+  })
+
+  it('a sync_failed dead row does not occupy the candidate, but a detached row still does (1A)', async () => {
+    const holderId = 'eeeeeeee-0000-4000-8000-000000000001'
+    await db.createOrganization(holderId, 'DeadHolder', Date.now())
+    const first = await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    assert.equal(first.completed, 1)
+    const zoneId = (raw.prepare(`SELECT zone_id FROM org_zone_bindings WHERE org_id = ?`).get(holderId) as { zone_id: string }).zone_id
+    const colliderId = 'eeeeeeee000040008000000000000001'
+    await db.createOrganization(colliderId, 'DeadCollider', Date.now())
+    // 占用行是终态失败的死行（从未成功授权，grant 不存在）——policy 碰撞
+    // 兜底不应被残行永久阻塞（10-18 实证的连锁缺陷）
+    raw.prepare(`UPDATE org_zone_bindings SET sync_status = 'sync_failed', last_error_code = 'ZONE_OUT_OF_TOKEN_SCOPE' WHERE org_id = ?`).run(holderId)
+    assert.equal(await isZoneIdOccupiedByOtherOrg(db.driver, { zoneId, nexusDeploymentId: CONFIG.nexusDeploymentId, orgId: colliderId }), false)
+    const fake = new FakeZoneClient()
+    fake.script = ['already-exists']
+    const result = await makeReconciler(fake).reconcileOnce()
+    assert.equal(result.completed, 1)
+    const collider = raw.prepare(
+      `SELECT sync_status FROM org_zone_bindings WHERE org_id = ?`,
+    ).get(colliderId) as Record<string, unknown>
+    assert.equal(collider.sync_status, 'active')
+    // detached 占用行仍算占用——862caaaa 明示语义（挂载即共享）
+    raw.prepare(`UPDATE org_zone_bindings SET sync_status = 'detached', desired_state = 'detached' WHERE org_id = ? AND org_id != ?`).run(holderId, colliderId)
+    assert.equal(await isZoneIdOccupiedByOtherOrg(db.driver, { zoneId, nexusDeploymentId: CONFIG.nexusDeploymentId, orgId: colliderId }), true)
+  })
+
   it('unknown network outcome marks the binding unknown and keeps the row retryable', async () => {
     await db.createOrganization('88888888-8888-4888-8888-888888888888', 'Theta', Date.now())
     const fake = new FakeZoneClient()
@@ -1152,6 +1211,38 @@ describe('ZoneManagementService (§8.8 permissions & confirmations)', () => {
       svc.deprovisionZone('org-somezone', 'wrong-input'),
       (error: unknown) => error instanceof ZoneManagementError && error.code === 'CONFIRM_MISMATCH',
     )
+  })
+
+  it('requires confirm_cross_org for the first cross-org binding of an occupied zone (1A)', async () => {
+    const ownerOrg = 'dddddddd-0000-4000-8000-000000000011'
+    await db.createOrganization(ownerOrg, 'Owner', Date.now())
+    const first = await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    assert.equal(first.completed, 1)
+    const zoneId = (raw.prepare(`SELECT zone_id FROM org_zone_bindings WHERE org_id = ?`).get(ownerOrg) as { zone_id: string }).zone_id
+    const sharerOrg = 'dddddddd-0000-4000-8000-000000000012'
+    await db.createOrganization(sharerOrg, 'Sharer', Date.now())
+    await makeReconciler(new FakeZoneClient()).reconcileOnce()
+    const svc = new ZoneManagementService({
+      driver: db.driver,
+      client: new FakeZoneClient() as unknown as NexusZoneClient,
+      config: CONFIG,
+    })
+    // 不带 confirm → 409，错误码与占用详情结构化返回
+    await assert.rejects(
+      svc.addBinding({ orgId: sharerOrg, zoneId, purpose: 'shared' }),
+      (error: unknown) => error instanceof ZoneManagementError
+        && error.status === 409
+        && error.code === 'CROSS_ORG_BINDING_CONFIRM_REQUIRED'
+        && (error.details as { occupied_org_count: number }).occupied_org_count >= 1,
+    )
+    // 带 confirm → 201 语义（返回 BindingView）
+    const view = await svc.addBinding({ orgId: sharerOrg, zoneId, purpose: 'shared', confirmCrossOrg: true })
+    assert.equal(view.zone_id, zoneId)
+    assert.equal(view.org_id, sharerOrg)
+    // 属主 org 追加 purpose 绑定（已有 active default）不触发 confirm——
+    // 同 org 已有访问，非跨 org 新授权
+    const extra = await svc.addBinding({ orgId: ownerOrg, zoneId, purpose: 'office' })
+    assert.equal(extra.org_id, ownerOrg)
   })
 
   it('preserves structured Nexus deprovision errors', async () => {

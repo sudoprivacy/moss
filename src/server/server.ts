@@ -3161,11 +3161,14 @@ export function startServer(
         // H-2 default 转移：透传 is_default（true 时 service 层事务内置既有
         // default 降级）；默认 false 维持既有行为。
         const isDefault = body.is_default === true
+        // 1A 跨 org 绑定确认：请求 org 在该 zone 无 active binding 且 zone 已被
+        // 其他 org 有效占用时，须显式携带 confirm_cross_org（§11.3 场景 6）。
+        const confirmCrossOrg = body.confirm_cross_org === true
         if (!orgId || !zoneId) {
           throw new HttpError(400, 'Missing org_id or zone_id')
         }
         try {
-          writeJson(res, 201, await zoneManagement.addBinding({ orgId, zoneId, purpose, isDefault }))
+          writeJson(res, 201, await zoneManagement.addBinding({ orgId, zoneId, purpose, isDefault, confirmCrossOrg }))
         } catch (error) {
           if (error instanceof ZoneManagementError) {
             writeJson(res, error.status, { error: { code: error.code, message: error.message, retryable: error.retryable, ...(error.details !== undefined ? { details: error.details } : {}) } })

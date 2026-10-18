@@ -1976,6 +1976,14 @@ const MIGRATION_0010_SESSION_ATTEMPT_RUN_END = `
 ALTER TABLE session_attempts ADD COLUMN IF NOT EXISTS nexus_run_ended_at BIGINT;
 `
 
+/** 1A expand-only：org_zone_bindings 的写入方标记——收敛器的跨 org 占用兜底
+ *  仅对 policy（org 创建/backfill 的 policy 派生 default）生效；managed 为
+ *  管理面显式绑定（ZONE_ALREADY_EXISTS 是预期收敛）。存量行落 DEFAULT
+ *  'policy'（保持修复前的守护语义，无行为回退）。 */
+const MIGRATION_0011_ZONE_BINDING_ORIGIN = `
+ALTER TABLE org_zone_bindings ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'policy' CHECK (origin IN ('policy', 'managed'));
+`
+
 export const MIGRATIONS: PgMigration[] = [
   { version: 1, name: 'initial-schema', sql: MIGRATION_0001_INITIAL_SCHEMA },
   { version: 2, name: 'align-2026-09', sql: MIGRATION_0002_ALIGN },
@@ -2008,6 +2016,7 @@ export const MIGRATIONS: PgMigration[] = [
     ALTER TABLE tenant_assistants ADD CONSTRAINT tenant_assistants_provider_type_check CHECK (provider_type IN ('local', 'moss_runtime', 'dify', 'custom_http'));
   ` },
   { version: 13, name: 'cohost-agent-storage-homes', sql: COHOST_AGENT_HOME_SCHEMA },
+
   { version: 14, name: 'account-profile-avatars', sql: `
     CREATE TABLE IF NOT EXISTS user_profile_avatars (
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -2020,6 +2029,7 @@ export const MIGRATIONS: PgMigration[] = [
   { version: 18, name: 'zone-membership-h2', sql: MIGRATION_0008_ZONE_MEMBERSHIP },
   { version: 19, name: 'zone-binding-observed', sql: MIGRATION_0009_ZONE_BINDING_OBSERVED },
   { version: 20, name: 'session-attempt-run-end', sql: MIGRATION_0010_SESSION_ATTEMPT_RUN_END },
+  { version: 21, name: 'zone-binding-origin', sql: MIGRATION_0011_ZONE_BINDING_ORIGIN },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

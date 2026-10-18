@@ -24,6 +24,7 @@ import {
   demoteExistingDefaultBinding,
   insertDetachIntent,
   insertManagedBindingIntent,
+  isZoneIdOccupiedByOtherOrg,
   listBindingsByOrg,
   reviveBindingIntent,
 } from './bindingRepository.js'
@@ -453,6 +454,9 @@ export class ZoneManagementService {
     zoneId: string
     purpose: string
     isDefault?: boolean
+    /** 跨 org 绑定确认（§11.3 场景 6 管理面把关）：请求 org 在该 zone 无
+     * active binding 且该 zone 已被其他 org 有效占有时，必须显式携带。 */
+    confirmCrossOrg?: boolean
   }): Promise<BindingView> {
     const org = await this.driver.get(
       `SELECT id FROM organizations WHERE id = ? LIMIT 1`,
@@ -461,6 +465,39 @@ export class ZoneManagementService {
     if (!org) throw new ZoneManagementError(`组织不存在：${input.orgId}`, 'ORG_NOT_FOUND', 404)
     const refusal = validateZoneId(input.zoneId)
     if (refusal) throw new ZoneManagementError(`zone_id 不合法：${describeRefusal(refusal)}`, 'INVALID_ZONE_ID', 400)
+    // 1A confirm 预检：触发条件 = 请求 org 在该 zone 无"在绑意图"的行（含
+    // detached 复活路径——detached 行不算已有访问；挂起期被观测降级的属主
+    // 行仍算——sync_status 是暂态，desired_state 才是归属意图）且单点占用
+    // 判定为真。与 reconciler 守护复用同一函数（sync_failed 过滤后语义自动同步）。
+    const ownActive = await this.driver.get(
+      `SELECT 1 AS has_own FROM org_zone_bindings
+       WHERE zone_id = ? AND nexus_deployment_id = ? AND org_id = ?
+         AND desired_state = 'bound'
+       LIMIT 1`,
+      [input.zoneId, this.config.nexusDeploymentId, input.orgId],
+    )
+    if (!ownActive) {
+      const zoneOccupied = await isZoneIdOccupiedByOtherOrg(this.driver, {
+        zoneId: input.zoneId,
+        nexusDeploymentId: this.config.nexusDeploymentId,
+        orgId: input.orgId,
+      })
+      if (zoneOccupied && input.confirmCrossOrg !== true) {
+        const occupiedOrgs = await this.driver.get(
+          `SELECT COUNT(DISTINCT org_id) AS n FROM org_zone_bindings
+           WHERE zone_id = ? AND nexus_deployment_id = ? AND org_id != ?
+             AND sync_status != 'sync_failed'`,
+          [input.zoneId, this.config.nexusDeploymentId, input.orgId],
+        )
+        throw new ZoneManagementError(
+          `zone 已被其他组织绑定，绑定给新组织需显式确认（confirm_cross_org: true）`,
+          'CROSS_ORG_BINDING_CONFIRM_REQUIRED',
+          409,
+          false,
+          { zone_id: input.zoneId, occupied_org_count: Number(occupiedOrgs?.n ?? 0) },
+        )
+      }
+    }
     const isDefault = input.isDefault ?? false
     let bindingId: string
     try {

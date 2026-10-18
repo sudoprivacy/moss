@@ -1930,6 +1930,10 @@ export class RuntimeService {
         settings: systemSettings,
         orgId: session.orgId,
         userApiKey: userModelKey,
+        // 4A/4B：部署级开关（默认关）。开启后仅"零自定义 Provider +
+        // legacy-default"的发现失败降级为 requestedModel 原样透传（unverified），
+        // 已配置 Provider 的路由边界语义不变。
+        allowUnverified: process.env.MOSS_ALLOW_UNVERIFIED_MODEL === '1',
       })
       : null
     const defaultModel = providerCatalog?.selection.modelId || requestedModel
@@ -1943,6 +1947,12 @@ export class RuntimeService {
     const runnerEnv: Record<string, string> = {
       ...process.env as Record<string, string>,
       MOSS_DEFAULT_MODEL: defaultModel,
+    }
+    if (providerCatalog?.unverified) {
+      // 4A：发现失败被降级透传的会话显式可辨（stderr + runner 环境），便于
+      // 部署方审计降级流量；真实 LLM 调用失败仍会在调用点原样暴露。
+      runnerEnv.MOSS_MODEL_UNVERIFIED = '1'
+      process.stderr.write(`  - model unverified: discovery failed, passing through '${defaultModel}' (MOSS_ALLOW_UNVERIFIED_MODEL)\n`)
     }
     for (const key of ['MOSS_BROWSER_GATEWAY_URL', 'MOSS_BROWSER_GATEWAY_TOKEN', 'MOSS_BROWSER_GATEWAY_AI_TOKEN', 'MOSS_BROWSER_SECRET', 'MOSS_BROWSER_ALLOWED_OWNERS']) delete runnerEnv[key]
     if (providerCatalog) {

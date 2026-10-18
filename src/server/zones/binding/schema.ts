@@ -25,6 +25,7 @@ export const ZONE_BINDING_TABLES_DDL = `
     resource_prefixes TEXT,
     desired_state TEXT NOT NULL DEFAULT 'bound' CHECK (desired_state IN ('bound', 'detached')),
     sync_status TEXT NOT NULL DEFAULT 'pending' CHECK (sync_status IN ('pending', 'syncing', 'active', 'detaching', 'detached', 'sync_failed', 'unknown')),
+    origin TEXT NOT NULL DEFAULT 'policy' CHECK (origin IN ('policy', 'managed')),
     nexus_grant_id TEXT,
     nexus_operation_id TEXT,
     generation INTEGER NOT NULL DEFAULT 1,
