@@ -1,11 +1,14 @@
 import { readFile, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { DirectConnectStore } from '../db.js'
-import type { SessionRecord } from '../types.js'
 
 export interface CohostSessionState {
   durableSessionId: string
   repositoryPath?: string
+}
+
+interface CohostInitializationStore {
+  cohostSessions: { get(sessionId: string): Promise<CohostSessionState | null | undefined> }
+  latestEvent(sessionId: string, eventType: string): Promise<{ eventId: string } | null>
 }
 
 /**
@@ -14,8 +17,8 @@ export interface CohostSessionState {
  * rule out treating an existing conversation as an uninitialized one.
  */
 export async function isUninitializedCohostSession(
-  store: Pick<DirectConnectStore, 'cohostSessions' | 'latestEvent'>,
-  session: Pick<SessionRecord, 'sessionId' | 'transcriptPath'>,
+  store: CohostInitializationStore,
+  session: { sessionId: string; transcriptPath: string },
 ): Promise<boolean> {
   if (!session.transcriptPath) return false
   if (await store.cohostSessions.get(session.sessionId) ||
