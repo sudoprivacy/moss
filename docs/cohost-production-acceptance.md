@@ -1,8 +1,8 @@
 # Co-host production acceptance
 
-The shared-runtime candidate pins Nexus VFS 0.8.10, Vault 0.5.68 and paired
-scode/nexusd-cohost 0.2.28. The recorded production runs below used earlier
-versions and do not establish acceptance of this candidate.
+The shared-runtime candidate follows the shared
+[runtime release pins](../src/server/nexus/runtime-versions.json). The dated
+production runs below establish acceptance only of the versions they record.
 Ordinary scode keeps its direct model connection. Controlled co-host sessions
 use the native Nexus model mount for parent, child and compaction requests.
 
@@ -101,7 +101,31 @@ co-host CI exercises two owners, actual daemon process restarts, the model
 startup bootstrap and restoration of exact conversation history. Run the real model
 scripts locally before committing changes to their workflow.
 
+The real-daemon CI also runs the recovery workflow in fresh Linux containers
+with `MOSS_COHOST_PID_NAMESPACE=1`. The released daemon runs as native PID 1.
+Two restarts deliberately reuse the exact `1.1` runtime PID while preserving
+the same durable session. The workflow respects the existing crashed-writer
+lease before allocating a replacement; it never force-unlocks it. The old
+connected Moss client must reject its retired channel, and cancelling through
+that old reference must leave the replacement able to load exact history and
+complete a dependent model/file turn. This test uses the real credential,
+storage and transport paths with a scripted model endpoint.
+
 ## Recorded live acceptance
+
+### Read-only deployment snapshot, 2026-10-18 10:54 UTC
+
+The running Moss release link points to `server-v0.1.68`. In the configured
+`moss-sessions` namespace, twelve running non-fixture owner pods share the
+`my-moss-runtime:0.1.67-amd64` image and the same image digest. Direct
+`nexusd-cohost --version` queries in three of them report co-host `v0.2.33`,
+engine `33ffea1`, Nexus VFS `v0.8.17` and plugin ABI 7. The four older pods
+all have `user-pod-e2e-*` owner annotations; they retain two earlier acceptance
+images. These observations verify image adoption and the sampled binaries.
+They do not establish a fresh complete product recovery journey for every
+owner. No service, pod or stored user data was changed during inspection.
+
+### Earlier real model workflows
 
 On 2026-10-10, the actual SudoCloud VM passed the real provider workflow:
 16 native Nexus model requests, 9 approvals and 3 persisted results. Compaction

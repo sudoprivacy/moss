@@ -1,6 +1,6 @@
 /** Real released daemon, Moss credentials/controller, native storage and durable recovery. */
 import assert from 'node:assert/strict'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -8,6 +8,7 @@ import { createServer as reservePort } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, posix, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { promisify } from 'node:util'
 
 import grpc from '@grpc/grpc-js'
 import protoLoader from '@grpc/proto-loader'
@@ -17,7 +18,7 @@ import { ManagedAgentClient, type StartSessionResult } from '../../src/server/ne
 import { ownerField } from '../../src/server/nexus/sessionIdentity.js'
 import { connectSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
 import { connectController } from './cohost-controller-live.js'
-import { startCohostExecution } from '../../src/server/backends/cohostRecovery.js'
+import { COHOST_RECOVERY_TIMEOUT_MS, startCohostExecution } from '../../src/server/backends/cohostRecovery.js'
 import { SqliteDriver } from '../../src/server/db/driver.js'
 import { CohostSessionRepository } from '../../src/server/runtime/cohostSessionRepository.js'
 import { COHOST_SESSION_SCHEMA } from '../../src/server/storage/cohostSessionSchema.js'
@@ -32,6 +33,9 @@ const binary = resolve(process.env.NEXUSD_COHOST_BIN ?? 'bin/cohost/nexusd-cohos
 const artifacts = process.env.MOSS_COHOST_ARTIFACTS ?? join(tmpdir(), 'moss-cohost-evidence')
 mkdirSync(artifacts, { recursive: true })
 const work = mkdtempSync(join(artifacts, 'recovery-'))
+const isPidNamespace = process.env.MOSS_COHOST_PID_NAMESPACE === '1'
+const container = `moss-pid-reuse-${randomUUID()}`
+const execute = promisify(execFile)
 const model = 'moss-recovery-fixture'
 const modelMount = '/model'
 const zone = 'moss-recovery'
@@ -146,10 +150,10 @@ async function readSession(id: string): Promise<any[]> {
 }
 
 try {
-  await new Promise<void>(resolve => provider.listen(0, '127.0.0.1', resolve))
+  await new Promise<void>(resolve => provider.listen(0, isPidNamespace ? '0.0.0.0' : '127.0.0.1', resolve))
   const address = provider.address()
   assert(address && typeof address !== 'string')
-  const providerUrl = `http://127.0.0.1:${address.port}`
+  const providerUrl = `http://${isPidNamespace ? 'host.docker.internal' : '127.0.0.1'}:${address.port}`
   const reservation = reservePort()
   await new Promise<void>(resolve => reservation.listen(0, '127.0.0.1', resolve))
   const reserved = reservation.address()
@@ -172,7 +176,25 @@ try {
   }
   async function bootDaemon() {
     const offset = daemonLog.length
-    daemon = spawn(binary, ['--bind-addr', `127.0.0.1:${port}`], { env: daemonEnv, windowsHide: true })
+    if (isPidNamespace) {
+      // Each container has a fresh native PID namespace. The actual daemon is
+      // PID 1, so restart deterministically exercises OS PID reuse without
+      // changing the host's allocator or fabricating a registry PID.
+      const environment = { ...daemonEnv, SUDO_CODE_CONFIG_HOME: '/fixture/config',
+        NEXUS_DATA_DIR: '/fixture/data', NEXUS_IDENTITY_DIR: '/fixture/identity',
+        SSL_CERT_FILE: '/fixture/data/tls/ca.pem' }
+      const variables = Object.entries(environment).filter(([key]) =>
+        key.startsWith('NEXUS_') || key === 'SUDO_CODE_CONFIG_HOME' || key === 'SSL_CERT_FILE' || key === 'RUST_LOG' || key === 'ANTHROPIC_API_KEY')
+      daemon = spawn('docker', ['run', '--rm', '--name', container,
+        '--publish', `127.0.0.1:${port}:${port}`, '--add-host', 'host.docker.internal:host-gateway',
+        '--mount', `type=bind,source=${work},target=/fixture`,
+        '--mount', `type=bind,source=${binary},target=/usr/local/bin/nexusd-cohost,readonly`,
+        ...variables.flatMap(([key, value]) => ['--env', `${key}=${value}`]),
+        'ubuntu:22.04', '/usr/local/bin/nexusd-cohost', '--bind-addr', `0.0.0.0:${port}`],
+      { windowsHide: true })
+    } else {
+      daemon = spawn(binary, ['--bind-addr', `127.0.0.1:${port}`], { env: daemonEnv, windowsHide: true })
+    }
     daemon.stdout!.on('data', data => { daemonLog += data.toString() })
     daemon.stderr!.on('data', data => { daemonLog += data.toString() })
     daemon.once('error', error => { daemonLog += String(error) })
@@ -183,14 +205,19 @@ try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { running.kill('SIGKILL'); reject(new Error('Daemon shutdown timed out')) }, 20_000)
       running.once('exit', () => { clearTimeout(timer); resolve() })
-      running.kill(signal)
+      if (isPidNamespace) {
+        void execute('docker', ['kill', '--signal', signal, container], { timeout: 10_000, windowsHide: true }).catch(reject)
+      } else {
+        running.kill(signal)
+      }
     })
   }
   async function mountModel() {
     const bootstrap = process.env.MOSS_COHOST_MODEL_BOOTSTRAP
     assert(bootstrap, 'The real startup bootstrap bundle is required')
     await new Promise<void>((resolve, reject) => {
-      const hook = spawn(process.execPath, [bootstrap, endpoint, tls, providerUrl, join(work, 'model')], { windowsHide: true })
+      const hook = spawn(process.execPath, [bootstrap, endpoint, tls, providerUrl,
+        isPidNamespace ? '/fixture/model' : join(work, 'model')], { windowsHide: true })
       let output = ''
       hook.stdout!.on('data', data => { output += data.toString() })
       hook.stderr!.on('data', data => { output += data.toString() })
@@ -302,7 +329,7 @@ try {
     assert(first.durableSessionId)
     assert.notEqual(first.sessionId, first.durableSessionId)
     assert.match(first.sessionId, /^\d+\.\d+$/, 'cohost runtime uses native OS PID.local_id')
-    assert.equal(Number(first.sessionId.split('.')[0]), daemon!.pid, 'runtime PID decodes to the execution daemon')
+    assert.equal(Number(first.sessionId.split('.')[0]), isPidNamespace ? 1 : daemon!.pid, 'runtime PID decodes to the execution daemon')
     await operator.mkdir(`/proc/${first.sessionId}/tasks/recovery-check/nested`, '', { parents: true, existOk: true })
     const sid = first.durableSessionId
     assert.equal(await bindingStore.bind(mossSessionId, attemptId,
@@ -437,7 +464,7 @@ try {
       const recoveryMs = Date.now() - recoveryStarted
       assert.equal(recovered.isResume, true)
       assert.match(active.sessionId, /^\d+\.\d+$/)
-      assert.equal(Number(active.sessionId.split('.')[0]), daemon!.pid)
+      assert.equal(Number(active.sessionId.split('.')[0]), isPidNamespace ? 1 : daemon!.pid)
       assert.equal(active.durableSessionId, sid)
       await operator.mkdir(`/proc/${active.sessionId}/tasks/recovery-check/nested`, '', { parents: true, existOk: true })
       assert.equal(await bindingStore.bind(mossSessionId, attemptId,
@@ -491,15 +518,77 @@ try {
       assert.equal((await reconnected.client.read(`${repositoryPath}/${PROJECT_AGENT_INSTRUCTIONS_PATH}`, reconnected.authToken)).toString(), nestedInstructions)
       assert.equal(await reconnected.client.stat(`${repositoryPath}/${WORKSPACE_SKILLS_DIRECTORY}/catalog-recovery`, reconnected.authToken), null)
       assert.equal((await reconnected.client.read(`${repositoryPath}/${localSkill}`, reconnected.authToken)).toString(), localInstructions)
-      proofs.push({ owner, durable: sid, oldPid: first.sessionId, newPid: active.sessionId, code: order.code,
+      proofs.push({ owner, agentId, repositoryPath, final, total: order.subtotal + 13,
+        durable: sid, oldPid: first.sessionId, newPid: active.sessionId, code: order.code,
         shutdownSignal, isActiveDaemonCrash: shutdownSignal === 'SIGKILL', memoryPath, memoryMarker, recoveryMs })
     } finally {
       await controller.close()
-      try { await current.agent.cancel(active.sessionId) }
+      try { await current.agent.cancel(active.sessionId, active.sessionEndpoint) }
       catch (error) { if (!/unknown session_id/.test(String(error))) throw error }
     }
   }
   assert.notEqual(proofs[0].durable, proofs[1].durable)
+  let pidReuseProof: Record<string, unknown> | undefined
+  if (isPidNamespace) {
+    const previous = proofs[0]
+    const input = { agentId: previous.agentId, model, resumeSessionId: previous.durable,
+      repos: [{ hostPath: previous.repositoryPath, alias: 'workspace' }] }
+    async function waitForRetiredWriter() {
+      // Respect the existing crash lease before allocating a runtime. Failed
+      // starts consume local IDs and would prevent an exact PID reuse check.
+      const path = `/sessions/${previous.durable}`
+      await waitFor('retired transcript writer', async () => {
+        const claim = await operator!.lock(path, '', { timeoutMs: 5000 })
+        if (!claim.acquired) return undefined
+        assert.equal(await operator!.unlock(path, '', { lockId: claim.lockId }), true)
+        return true
+      }, COHOST_RECOVERY_TIMEOUT_MS)
+    }
+    await stopDaemon('SIGKILL')
+    await bootDaemon()
+    await mountModel()
+    await waitForRetiredWriter()
+    const retired = await consumer(ownerA)
+    const old = await retired.agent.startSession(input)
+    assert.equal(old.sessionId, '1.1', 'the first runtime uses the real daemon PID and first local counter')
+    await retired.agent.verifySessionEndpoint(old.sessionId, old.sessionEndpoint)
+    const before = await readSession(previous.durable)
+    await stopDaemon('SIGKILL')
+    await bootDaemon()
+    await mountModel()
+    await waitForRetiredWriter()
+    const replacement = await consumer(ownerA)
+    const active = await replacement.agent.startSession(input)
+    assert.equal(active.sessionId, old.sessionId, 'a new native PID namespace reuses the exact runtime PID')
+    assert.notEqual(active.sessionEndpoint.channel_id, old.sessionEndpoint.channel_id)
+    assert.equal(active.durableSessionId, old.durableSessionId)
+    await assert.rejects(retired.agent.verifySessionEndpoint(old.sessionId, old.sessionEndpoint), /channel changed/)
+    await retired.agent.cancel(old.sessionId, old.sessionEndpoint)
+    await replacement.agent.verifySessionEndpoint(active.sessionId, active.sessionEndpoint)
+    const controller = connectController({ agent: replacement.agent, ...active }, new Set<string>([previous.final]))
+    try {
+      await controller.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
+      await controller.rpc('session/load', { sessionId: previous.durable, cwd: '/', mcpServers: [] })
+      assert.deepEqual(await readSession(previous.durable), before, 'PID reuse preserves exact durable history')
+      await controller.rpc('session/setPermissionMode', { sessionId: previous.durable, permissionMode: 'prompt' })
+      const requestStart = requests.length
+      const reply = await controller.rpc('session/prompt', { sessionId: previous.durable,
+        prompt: [{ type: 'text', text: `MOSS_RECOVERY_FEE ${JSON.stringify({ output: previous.final })}\nWrite the total from the saved order.` }] })
+      assert.equal(reply.stopReason, 'end_turn')
+      controller.assertHealthy()
+      assert(controller.approvals > 0)
+      assert.deepEqual(JSON.parse((await operator!.read(previous.final, '')).toString()),
+        { code: previous.code, total: previous.total })
+      assert(requests.slice(requestStart).every(request => JSON.stringify(request.messages).includes(previous.code)))
+      pidReuseProof = { oldPid: old.sessionId, newPid: active.sessionId,
+        oldChannel: old.sessionEndpoint.channel_id, newChannel: active.sessionEndpoint.channel_id,
+        durableSessionId: active.durableSessionId, staleReconnectRejected: true,
+        staleCancellationPreservesReplacement: true, resumedModelTurn: true }
+    } finally {
+      await controller.close()
+      await replacement.agent.cancel(active.sessionId, active.sessionEndpoint)
+    }
+  }
   writeFileSync(join(work, 'acceptance.json'), JSON.stringify({ binary, checks: [
     'mTLS owner credentials', 'production connection proves the owner with a configured deployment token',
     'real controller approval', 'native transcript stream', 'second writer refusal',
@@ -521,7 +610,7 @@ try {
     'user project instructions survive application context reconciliation',
     'controller-only instructions stay outside the native context',
     'application context updates on resume preserve project instructions and prior history',
-  ], proofs, modelRequests: requests.length }, null, 2))
+  ], proofs, pidReuseProof, modelRequests: requests.length }, null, 2))
   console.log(`PASS: two Moss owners recover exact conversations, files and memory after daemon stop/crash; evidence=${work}`)
 } catch (error) {
   console.error(`Recovery acceptance failed; evidence=${work}`, error)
@@ -534,9 +623,13 @@ try {
   node?.close()
   vfs?.close()
   if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
-    const exited = new Promise<void>(resolve => daemon!.once('exit', () => resolve()))
-    daemon.kill('SIGTERM')
-    await exited
+    if (isPidNamespace) {
+      await execute('docker', ['rm', '--force', container], { timeout: 20_000, windowsHide: true })
+    } else {
+      const exited = new Promise<void>(resolve => daemon!.once('exit', () => resolve()))
+      daemon.kill('SIGTERM')
+      await exited
+    }
   }
   await new Promise<void>(resolve => provider.close(() => resolve()))
 }
