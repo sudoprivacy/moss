@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
@@ -13,7 +13,7 @@ import { RuntimeService } from './runtimeService.js'
 import { DatabaseSync } from 'node:sqlite'
 import { SqliteDriver } from './db/driver.js'
 import { createCatalogTestRepository } from './testing/compatibilityRepositories.js'
-import { withOrganizationResources } from './catalog/organizationResources.js'
+import { withOrganizationResources, registerOrganizationCustom, updateOrganizationResource } from './catalog/organizationResources.js'
 import { createUserAgent, resetUserAgentStoreForTests } from './userAgentStore.js'
 import { defaultAgentName, userCreatedAgentName } from './agentIdentity.js'
 import { getSessionConfigDir } from './runtimePaths.js'
@@ -78,6 +78,10 @@ void test('personal cloud Agents retain memory and receive pod instructions with
         return created
       },
       getSession: async () => created,
+      addEvent: async () => {},
+      updateSessionClientMetadata: async (_id: string, patch: Record<string, unknown>) => {
+        created.clientMetadata = { ...created.clientMetadata, ...patch }
+      },
       getNextGeneration: async () => 1,
       createAttempt: async (input: AttemptRecord) => ({ ...input, attemptId: 'test-attempt' }),
       setCurrentAttempt: async () => {},
@@ -94,9 +98,10 @@ void test('personal cloud Agents retain memory and receive pod instructions with
     } as never,
   })
   const runtime = service as unknown as {
-    spawnAttempt: () => Promise<AttemptRecord>
+    spawnAttempt: (session: SessionRecord) => Promise<AttemptRecord>
     spawnAttemptInResourceScope: (session: SessionRecord) => Promise<AttemptRecord>
   }
+  const spawnAttempt = runtime.spawnAttempt.bind(service)
   runtime.spawnAttempt = async () => ({}) as AttemptRecord
   try {
     const own = await createUserAgent({ orgId, userId, displayName: 'Project Assistant' })
@@ -157,6 +162,32 @@ void test('personal cloud Agents retain memory and receive pod instructions with
       assert.equal(await readFile(join(session.cwd, 'AGENTS.md'), 'utf8'), controllerInstructions)
       assert(!(await readSharedAgentMemory(home, ref))!.includes('Native Profile'))
       profileName = 'Fixture User'
+    }
+    const templateDir = join(root, 'recruiter-template')
+    await mkdir(templateDir)
+    await writeFile(join(templateDir, '_moss_meta.json'), '{}')
+    const scope = { orgId, userId, driver: new SqliteDriver(db) }
+    await withOrganizationResources(scope, () => registerOrganizationCustom('agent', templateDir, {
+      id: 'recruiter-template', name: 'Recruiter', visible_to: { user_ids: [userId] }, enabled: true, rules: 'Evaluate recruitment candidates.', enabledSkills: [], memory_mode: 'session',
+    }))
+    const personalRef = userCreatedAgentName(own.id)
+    const composed = await service.createSession({ orgId, userId, role: 'user', scopes: [], assistantName: personalRef, templateRef: 'recruiter-template', dangerouslySkipPermissions: false })
+    assert.equal(composed.assistantName, personalRef)
+    assert.equal(composed.clientMetadata?.session_template_ref, 'recruiter-template')
+    assert.equal(composed.runtime.configDir, getSessionConfigDir(config, 'any-session', userId, 'user', orgId))
+    await withOrganizationResources(scope, async () => {
+      await assert.rejects(runtime.spawnAttemptInResourceScope({ ...composed, runtime: { ...composed.runtime, type: 'cohost' } }), error => error === checkpoint)
+    })
+    const composedManifest = JSON.parse(await readFile(join(root, 'sessions', composed.sessionId, 'attempt-0001', 'manifest.json'), 'utf8'))
+    assert.match(composedManifest.session.agentInstructions, /Evaluate recruitment candidates/)
+    assert.match(composedManifest.session.agentInstructions, /Project Assistant/)
+    assert.equal(composedManifest.session.assistantName, personalRef)
+    assert.match((await readSharedAgentMemory(composed.runtime.configDir!, personalRef))!, /olive-fixture/)
+    await assert.rejects(service.createSession({ orgId, userId: 'other-user', role: 'user', scopes: [], assistantName: personalRef, templateRef: 'recruiter-template', dangerouslySkipPermissions: false }), SessionStartupError)
+    await withOrganizationResources(scope, () => updateOrganizationResource('agent', 'recruiter-template', { enabled: false }))
+    await assert.rejects(spawnAttempt(composed), (error: unknown) => error instanceof SessionStartupError && error.statusCode === 404 && error.failure.code === 'RESOURCE_UNAVAILABLE')
+    for (const templateRef of ['recruiter-template', 'removed-template']) {
+      await assert.rejects(service.createSession({ orgId, userId, role: 'user', scopes: [], assistantName: personalRef, templateRef, dangerouslySkipPermissions: false }), SessionStartupError)
     }
     const other = await createUserAgent({ orgId, userId, displayName: 'Other Assistant' })
     assert.equal(
