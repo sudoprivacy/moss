@@ -666,13 +666,24 @@ export class WeComAppConnector implements CorpAppConnector {
    * (not `stop_groupmsg_send`, which 404s). Afterwards `get_groupmsg_task`
    * reports `41093 group message canceled`, which callers should treat as
    * "gone", not as an error.
+   *
+   * Cancelling the same task twice must not read as a failure: callers retry
+   * withdrawals until they stick, so a 41093 here means the goal is already
+   * met and comes back as `{ ok: true, alreadyCancelled: true }`.
    */
-  async cancelGroupMsgSend(msgId: string): Promise<{ ok: boolean }> {
-    const json = await this.requireClient().post(
-      '/cgi-bin/externalcontact/cancel_groupmsg_send',
-      { msgid: msgId },
-    )
-    return { ok: Number(json.errcode ?? 0) === 0 }
+  async cancelGroupMsgSend(msgId: string): Promise<{ ok: boolean; alreadyCancelled?: boolean }> {
+    try {
+      const json = await this.requireClient().post(
+        '/cgi-bin/externalcontact/cancel_groupmsg_send',
+        { msgid: msgId },
+      )
+      return { ok: Number(json.errcode ?? 0) === 0 }
+    } catch (err) {
+      if (/errcode=41093\b/.test(err instanceof Error ? err.message : String(err))) {
+        return { ok: true, alreadyCancelled: true }
+      }
+      throw err
+    }
   }
 
   /**
