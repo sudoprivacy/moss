@@ -4,7 +4,15 @@ This process owns its database and calls a configured SudoRouter model directly.
 
 ## Build and configure
 
-From the Moss repository root, run `bun run scripts/build-http-agent-provider.ts`, hash the generated `.mjs`, and build with `docker build -f deploy/http-agent-provider/Dockerfile -t sudo-http-agent:<artifact-tag> .`. Record the image ID, executable SHA-256, source commit, configuration definition and manifest revision in the deployment evidence.
+From a committed Moss checkout, install the locked dependencies, then run:
+
+```sh
+bun run scripts/build-http-agent-provider.ts
+node scripts/http-agent-artifact.mjs --directory dist/http-agent-provider --revision <full-source-sha>
+docker build -f deploy/http-agent-provider/Dockerfile --build-arg SOURCE_REVISION=<full-source-sha> -t sudo-http-agent:<artifact-tag> .
+```
+
+Select the full source SHA from the candidate release lock. The build refuses tracked edits and records the source commit/tree, dependency lock digest, Bun build environment and executable digest/size in `dist/http-agent-provider/artifact-manifest.json`. Docker checks the manifest and actual executable against the supplied SHA before producing an image and records the revision in OCI labels. A missing manifest, stale source selection or modified executable fails the build. Keep the manifest and record the resulting image ID, configuration definition and runtime manifest revision in deployment evidence. The build record provides local integrity checks; it is not a signature, remote provenance attestation, reproducible-build proof or a published release. Runtime execution revisions continue to hash the actual executable bytes and immutable definition.
 
 Copy `compose.yaml` and `provider.example.json` to a deployment directory; rename the latter to `provider.json`. Create `data` and `secrets` owned by UID/GID 10001, mode 0700. Supply a unique random client token (at least 32 characters) in `secrets/client.token` and only the authorized SudoRouter credential in `secrets/router.json`, mode 0600. Router JSON uses the existing configuration shape `auth_modes.proxy.sudorouter` with `baseUrl` and `apiKey`. Do not copy other personal configuration or commit these files. Set `PROVIDER_IMAGE` to the artifact-specific image tag before `docker compose up -d`.
 
@@ -26,8 +34,8 @@ Completed run payloads expire after 30 days; retained idempotency tombstones pre
 
 ## Moss Pilot migration
 
-This change transactionally adopts `external_pilot_sessions/tasks/attempts/events` into canonical `sessions/tasks/session_attempts/session_events`, verifies task and event bytes, clears copied payloads, and seals old tables against inserted/changed rows. Provider context and attempt leases are adjuncts; they are not duplicate identities. Native runtime recovery excludes external sessions.
+Ordinary Moss startup never migrates legacy Pilot tasks. If legacy task tables exist without the canonical migration marker, startup refuses with `EXTERNAL_TASK_MIGRATION_REQUIRED`, including when those tables are empty. Use the [explicit task migration command](../../docs/external-task-migration.md): stop all old and new writers, isolate database access, take and verify a protected backup, execute the command once, then inspect its receipt and the database before starting the new service.
 
-Stop all old Moss writers and take a database backup before first startup with this schema. Use a maintenance window: the migration takes write locks and is not an old/new binary rolling upgrade. On failure, its transaction rolls back and the old facts remain. Before admitting any new traffic after cutover, rollback can restore the pre-cutover backup with all new writers stopped. This returns to the backup point. If new Tasks have already been accepted, first preserve and reconcile their Task/Attempt/provider-run and idempotency facts and design a separate recovery procedure; blindly restoring the old snapshot would lose those facts while the independent provider may have continued executing. Starting the old binary against the migrated database is unsupported.
+Only that maintenance command transactionally copies and verifies `external_pilot_sessions/tasks/attempts/events`, clears copied payloads, and fences legacy writers. It is not an old/new binary rolling upgrade. On failure, its transaction rolls back and the old facts remain. Before admitting any new traffic after cutover, rollback can restore the pre-cutover backup with all new writers stopped. This returns to the backup point. If new Tasks have already been accepted, first preserve and reconcile their Task/Attempt/provider-run and idempotency facts and design a separate recovery procedure; blindly restoring the old snapshot would lose those facts while the independent provider may have continued executing. Starting the old binary against the migrated database is unsupported. Registry enrollment is a separate, additive [publication migration](../../docs/product-agent-registry.md); it does not replace the canonical task migration.
 
 Moss owner loss waits for the 30-second database lease before another controller takes over. Durable HTTP resumes observation of the same invocation. Dify and legacy HTTP have no query/replay guarantee and remain unknown when prior execution is uncertain. Do not automatically resend them.

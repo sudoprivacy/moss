@@ -1,0 +1,11 @@
+**
+!dist/
+!dist/http-agent-provider/
+!dist/http-agent-provider/http-agent-provider.mjs
+!dist/http-agent-provider/artifact-manifest.json
+!scripts/
+!scripts/http-agent-artifact.mjs
+!deploy/
+!deploy/http-agent-provider/
+!deploy/http-agent-provider/Dockerfile
+!deploy/http-agent-provider/Dockerfile.dockerignore
