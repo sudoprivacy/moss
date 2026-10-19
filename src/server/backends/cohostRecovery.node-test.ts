@@ -173,3 +173,31 @@ void test('live discovery skips a process reaped between registry enumeration an
   } } as unknown as NexusVfsClient, '')
   assert.equal(await client.findSession({ ownerId: 'owner', agentId: 'agent', durableSessionId: 'native-session' }), undefined)
 })
+
+void test('live discovery ignores retained terminated executions in the same workspace', async () => {
+  let isLivePresent = false
+  const client = new ManagedAgentClient({ call: async (method: string, raw: string) => {
+    if (method === 'agent_list') {
+      const pids = ['pid-stopped', ...(isLivePresent ? ['pid-current'] : [])]
+      return JSON.stringify({ result: pids.map(pid => ({ pid, name: 'agent', owner_id: 'owner',
+        repos: [{ alias: 'workspace', mount_path: scope.repositoryPath }] })) })
+    }
+    const { session_id: id } = JSON.parse(raw) as { session_id: string }
+    return JSON.stringify(id === 'pid-stopped'
+      ? { session_id: id, agent_id: 'agent', owner_id: 'owner', workspace_path: '/proc/pid-stopped/workspace/', state: 'terminated' }
+      : { ...snapshot, session_id: id, state: 'ready' })
+  } } as unknown as NexusVfsClient, '')
+  assert.equal(await client.findSession({ ...scope, agentId: 'agent' }), undefined)
+  isLivePresent = true
+  assert.equal((await client.findSession({ ...scope, agentId: 'agent' }))?.session_id, 'pid-current')
+  assert.equal((await client.findSession({ ...scope, agentId: 'agent', durableSessionId: 'native-session' }))?.session_id, 'pid-current')
+})
+
+void test('terminated execution snapshots still require matching registry ownership', async () => {
+  const client = new ManagedAgentClient({ call: async (method: string) => {
+    if (method === 'agent_list') return JSON.stringify({ result: [{ pid: 'pid-stopped', name: 'agent', owner_id: 'owner',
+      repos: [{ alias: 'workspace', mount_path: scope.repositoryPath }] }] })
+    return JSON.stringify({ ...snapshot, session_id: 'pid-stopped', state: 'terminated', owner_id: 'different-owner' })
+  } } as unknown as NexusVfsClient, '')
+  await assert.rejects(client.findSession({ ...scope, agentId: 'agent' }), /does not belong/)
+})

@@ -24,8 +24,9 @@ import { WORKSPACE_SKILLS_DIRECTORY } from '../../utils/skills/localSkillDirecto
 /**
  * Session backend for a co-hosted sudocode runtime.
  *
- * Moss remains the WebUI/session API and transcript owner. Nexus owns the
- * ManagedAgentService record and the in-process scode loop; ACP messages travel
+ * Moss provides the WebUI/session API and its ACP display projection. Native
+ * SudoCode owns durable model history. Nexus owns the ManagedAgentService
+ * record and the in-process scode loop; ACP messages travel
  * over the authenticated session mailbox. There is deliberately no local
  * scode child and no `spawn_spec` in this backend.
  */

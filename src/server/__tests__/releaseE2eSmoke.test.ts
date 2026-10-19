@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
 import { shellPathEnvironment, toShellPath } from "../testing/shellPaths.js";
+import { runFixtureProcess } from "../testing/fixtureProcess.js";
 
 const root = resolve(import.meta.dir, "../../..");
 
@@ -269,7 +270,7 @@ describe("packaged Server E2E smoke", () => {
       try {
         const address = server.address();
         if (!address || typeof address === "string") throw new Error("Missing download fixture address");
-        const child = spawn("bash", [toShellPath(resolve(root, "deploy/legacy/install-host.sh")), "--download", toShellPath(downloadDir)], {
+        const result = await runFixtureProcess("bash", [toShellPath(resolve(root, "deploy/legacy/install-host.sh")), "--download", toShellPath(downloadDir)], {
           env: {
             ...process.env,
             MOSS_RELEASE_TAG: "server-vtest",
@@ -277,15 +278,10 @@ describe("packaged Server E2E smoke", () => {
             MOSS_DOWNLOAD_BASE: "http://127.0.0.1:" + address.port,
             MOSS_RUNTIME: scenario === "missing cohost manifest" ? "cohost" : "",
           },
-          signal: AbortSignal.timeout(20_000),
+          timeoutMs: 20_000,
         });
-        let output = "";
-        child.stdout.on("data", chunk => { output += chunk.toString(); });
-        child.stderr.on("data", chunk => { output += chunk.toString(); });
-        const status = await new Promise<number | null>((resolveExit, reject) => {
-          child.once("error", reject);
-          child.once("close", resolveExit);
-        });
+        const status = result.status;
+        const output = result.stdout + result.stderr;
         if (scenario === "corrupt manifest" || scenario === "missing cohost manifest") {
           expect(status).not.toBe(0);
           expect(output).not.toContain("Offline files are ready");

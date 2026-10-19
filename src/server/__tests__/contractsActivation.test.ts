@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'bun:test'
 import { buildNexusArgs } from '../nexus/nexusManager.js'
 import { shellPathEnvironment } from '../testing/shellPaths.js'
+import { runFixtureProcess } from '../testing/fixtureProcess.js'
 
 const root = resolve(import.meta.dir, '../../..')
 const candidateVersion = '0.2.1'
@@ -95,7 +96,7 @@ type ZoneVector = {
 }
 
 describe('@sudo/contracts evaluation pin', () => {
-  it(`pins Candidate2 and verifies the installed unfrozen ${candidateVersion} package identity`, () => {
+  it(`pins Candidate2 and verifies the installed unfrozen ${candidateVersion} package identity`, async () => {
     const appPackage = readJson<{ dependencies: Record<string, string> }>(resolve(root, 'package.json'))
     const lockfile = readFileSync(resolve(root, 'bun.lock'), 'utf8')
     const candidateManifestPath = resolve(
@@ -183,14 +184,14 @@ describe('@sudo/contracts evaluation pin', () => {
 
     const packDir = mkdtempSync(resolve(tmpdir(), 'moss-contracts-pack-'))
     try {
-      const packed = spawnSync(
+      const packed = await runFixtureProcess(
         'npm',
         ['pack', contractRoot, '--offline', '--ignore-scripts', '--json', '--pack-destination', packDir],
-        { encoding: 'utf8', timeout: 30_000, shell: process.platform === 'win32',
+        { timeoutMs: 30_000, shell: process.platform === 'win32',
           env: { ...process.env, npm_config_update_notifier: 'false' } },
       )
       if (packed.status !== 0) {
-        throw new Error(`npm pack failed: ${packed.error?.message || packed.stderr || packed.stdout}`)
+        throw new Error(`npm pack failed: ${packed.stderr || packed.stdout}`)
       }
       const [metadata] = JSON.parse(packed.stdout) as PackMetadata[]
       expect(metadata).toEqual(expect.objectContaining({
@@ -249,59 +250,6 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
       installer.indexOf('systemctl stop "$SERVICE_NAME.service"'),
     )
 
-    const upgradeGuard = installer.match(/assert_nexus_zone_id_upgrade_safe\(\) \{[\s\S]*?\n\}/)?.[0]
-    expect(upgradeGuard).toBeDefined()
-    const guardDir = mkdtempSync(resolve(tmpdir(), 'moss-zone-upgrade-'))
-    const envPath = resolve(guardDir, 'moss-server.env')
-    const lockPath = resolve(guardDir, 'nexus', 'data.zone-id.lock.json')
-    const runUpgradeGuard = (existingInstall: '0' | '1', explicitDeclaration: '0' | '1') =>
-      spawnSync('bash', ['-c', [
-        upgradeGuard,
-        'die() { return 1; }',
-        'assert_nexus_zone_id_upgrade_safe "$EXISTING_INSTALL" "$ENV_PATH" "$LOCK_PATH" "$EXPLICIT_DECLARATION"',
-      ].join('\n')], {
-        env: {
-          ...process.env,
-          EXISTING_INSTALL: existingInstall,
-          EXPLICIT_DECLARATION: explicitDeclaration,
-          ...shellPathEnvironment({ ENV_PATH: envPath, LOCK_PATH: lockPath }),
-        },
-      })
-    try {
-      expect(runUpgradeGuard('1', '1').status).not.toBe(0)
-      writeFileSync(envPath, 'MOSS_NEXUS_ZONE_ID=existing-zone\n')
-      expect(runUpgradeGuard('1', '0').status).not.toBe(0)
-      mkdirSync(resolve(guardDir, 'nexus'))
-      writeFileSync(lockPath, '{}')
-      expect(runUpgradeGuard('1', '0').status).toBe(0)
-      rmSync(lockPath)
-      expect(runUpgradeGuard('0', '1').status).toBe(0)
-    } finally {
-      rmSync(guardDir, { recursive: true, force: true })
-    }
-
-    const assignmentExtractor = installer.match(
-      /MOSS_NEXUS_ZONE_ID_LINE="\$\(awk '([\s\S]*?)' "\$ENV_PATH"\)"/,
-    )?.[1]
-    expect(assignmentExtractor).toBeDefined()
-    const awkDir = mkdtempSync(resolve(tmpdir(), 'moss-zone-extractor-'))
-    try {
-      const program = resolve(awkDir, 'preserve-zone.awk')
-      // A file preserves regex backslashes through Windows/MSYS argument parsing.
-      writeFileSync(program, assignmentExtractor!, 'utf8')
-      for (const [source, preserved] of [
-        ['MOSS_NEXUS_ZONE_ID="customer-a"\n', 'MOSS_NEXUS_ZONE_ID="customer-a"'],
-        ['MOSS_NEXUS_ZONE_ID=old-zone\nMOSS_NEXUS_ZONE_ID=new-zone\n', 'MOSS_NEXUS_ZONE_ID=new-zone'],
-        ['MOSS_NEXUS_ZONE_ID=customer-\\\na\nOTHER=value\n', 'MOSS_NEXUS_ZONE_ID=customer-\\\na'],
-      ] as const) {
-        const result = spawnSync('awk', ['-f', program], { input: source, encoding: 'utf8' })
-        expect(result.status).toBe(0)
-        expect(result.stdout).toBe(preserved)
-      }
-    } finally {
-      rmSync(awkDir, { recursive: true, force: true })
-    }
-
     expect(deploymentDocs).toContain('data.zone-id.lock.json')
     expect(deploymentDocs).toContain('整个 Nexus 目录作为一个单元')
     expect(deploymentDocs).toContain('不得只恢复')
@@ -318,6 +266,60 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
       expect(readFileSync(resolve(root, externalManifest), 'utf8')).not.toContain('MOSS_NEXUS_ZONE_ID')
     }
   })
+
+  for (const scenario of [
+    { name: 'rejects an explicit zone on an existing install without its lock', existingInstall: '1', declaration: '1', isEnvPresent: false, isLockPresent: false, isAllowed: false },
+    { name: 'rejects an existing zone declaration without its lock', existingInstall: '1', declaration: '0', isEnvPresent: true, isLockPresent: false, isAllowed: false },
+    { name: 'retains an existing zone together with its persisted lock', existingInstall: '1', declaration: '0', isEnvPresent: true, isLockPresent: true, isAllowed: true },
+    { name: 'permits a zone declaration for an initial install', existingInstall: '0', declaration: '1', isEnvPresent: true, isLockPresent: false, isAllowed: true },
+  ]) {
+    it(scenario.name, () => {
+      const installer = readFileSync(resolve(root, 'deploy/legacy/install-host.sh'), 'utf8')
+      const upgradeGuard = installer.match(/assert_nexus_zone_id_upgrade_safe\(\) \{[\s\S]*?\n\}/)?.[0]
+      expect(upgradeGuard).toBeDefined()
+      const guardDir = mkdtempSync(resolve(tmpdir(), 'moss-zone-upgrade-'))
+      const envPath = resolve(guardDir, 'moss-server.env')
+      const lockPath = resolve(guardDir, 'nexus', 'data.zone-id.lock.json')
+      try {
+        if (scenario.isEnvPresent) writeFileSync(envPath, 'MOSS_NEXUS_ZONE_ID=existing-zone\n')
+        if (scenario.isLockPresent) {
+          mkdirSync(resolve(guardDir, 'nexus'))
+          writeFileSync(lockPath, '{}')
+        }
+        const result = spawnSync('bash', ['-c', [upgradeGuard, 'die() { return 1; }',
+          'assert_nexus_zone_id_upgrade_safe "$EXISTING_INSTALL" "$ENV_PATH" "$LOCK_PATH" "$EXPLICIT_DECLARATION"',
+        ].join('\n')], { timeout: 4_000, env: { ...process.env,
+          EXISTING_INSTALL: scenario.existingInstall, EXPLICIT_DECLARATION: scenario.declaration,
+          ...shellPathEnvironment({ ENV_PATH: envPath, LOCK_PATH: lockPath }),
+        } })
+        expect(result.error).toBeUndefined()
+        if (scenario.isAllowed) expect(result.status).toBe(0)
+        else expect(result.status).not.toBe(0)
+      } finally { rmSync(guardDir, { recursive: true, force: true }) }
+    })
+  }
+
+  for (const [name, input, expected] of [
+    ['quoted declaration', 'MOSS_NEXUS_ZONE_ID="customer-a"\n', 'MOSS_NEXUS_ZONE_ID="customer-a"'],
+    ['last declaration', 'MOSS_NEXUS_ZONE_ID=old-zone\nMOSS_NEXUS_ZONE_ID=new-zone\n', 'MOSS_NEXUS_ZONE_ID=new-zone'],
+    ['continued declaration', 'MOSS_NEXUS_ZONE_ID=customer-\\\na\nOTHER=value\n', 'MOSS_NEXUS_ZONE_ID=customer-\\\na'],
+  ]) {
+    it(`preserves the ${name} while upgrading`, () => {
+      const installer = readFileSync(resolve(root, 'deploy/legacy/install-host.sh'), 'utf8')
+      const extractor = installer.match(/MOSS_NEXUS_ZONE_ID_LINE="\$\(awk '([\s\S]*?)' "\$ENV_PATH"\)"/)?.[1]
+      expect(extractor).toBeDefined()
+      const awkDir = mkdtempSync(resolve(tmpdir(), 'moss-zone-extractor-'))
+      try {
+        const program = resolve(awkDir, 'preserve-zone.awk')
+        writeFileSync(program, extractor!, 'utf8')
+        const result = spawnSync('awk', ['-f', program], { input, encoding: 'utf8', timeout: 4_000 })
+        expect(result.error).toBeUndefined()
+        expect(result.status).toBe(0)
+        expect(result.stdout).toBe(expected)
+      } finally { rmSync(awkDir, { recursive: true, force: true }) }
+    })
+  }
+
 })
 
 describe('contracts Node runtime floor', () => {

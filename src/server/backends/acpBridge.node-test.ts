@@ -10,6 +10,21 @@ import { createAcpBridgeHandle } from './acpBridge.js'
 import { readSharedAgentMemory } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
 import { readAcpExecutionWorkspace } from './executionWorkspace.js'
+import { parseSessionTranscriptMessages } from '../transcriptMessages.js'
+
+void test('context projection retains durable terminal facts and excludes live observations', () => {
+  const failure = { type: 'result', uuid: 'failure', timestamp: '2026-10-19T00:00:02Z',
+    subtype: 'error_interrupted', is_error: true, errors: ['Execution outcome is unknown'] }
+  const success = { type: 'result', uuid: 'success', timestamp: '2026-10-19T00:00:03Z',
+    subtype: 'success', is_error: false, usage: { output_tokens: 7 } }
+  const records = [success, { ...failure, uuid: 'sidechain', isSidechain: true },
+    { type: 'progress', uuid: 'progress' }, { type: 'hello', uuid: 'hello' }, failure,
+    { type: 'user', uuid: 'user', timestamp: '2026-10-19T00:00:01Z', message: { content: 'Run' } }]
+  const messages = parseSessionTranscriptMessages(records.map(record => JSON.stringify(record)).join('\n') + '\nmalformed\n')
+  assert.deepEqual(messages.map(message => message.uuid), ['user', 'failure', 'success'])
+  assert.deepEqual(messages.slice(1), [failure, success])
+  assert.equal(messages[0]?.content, 'Run')
+})
 
 void test('runtime workspace metadata is additive but malformed roots fail explicitly', () => {
   assert.equal(readAcpExecutionWorkspace({ sessionId: 'old-runtime' }), undefined)
@@ -132,6 +147,10 @@ for (const ending of ['connection loss', 'prompt error', 'cancelled turn', 'forc
         assert.match(terminal[0].errors.join('\n'), /outcome.*unknown/i)
         assert.deepEqual(records.filter(record => record.type === 'result'), terminal,
           'history and the live stream must carry the same classified terminal result')
+        const messages = parseSessionTranscriptMessages(await readFile(transcriptPath, 'utf8'))
+        assert.deepEqual(messages.filter(record => record.type === 'result'), terminal,
+          'the context API must retain the exact persisted interruption for a page reload')
+        assert.equal(messages.filter(record => record.type === 'tool_result' && record.tool_use_id === 'interrupted').length, 1)
       }
     } finally { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) }
   })
