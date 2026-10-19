@@ -1,5 +1,5 @@
 /** Managed session control plane and the shared conversation transport. */
-import { NexusSessionTransport, type NexusVfsClient, type NexusSessionEndpoint, type SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
+import { NexusSessionTransport, isRetryableSessionReadError, type NexusVfsClient, type NexusSessionEndpoint, type SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
 import { z } from 'zod'
 
 const IDLE_EXECUTION_CHECK_MS = 5_000
@@ -239,8 +239,7 @@ export class ManagedAgentClient {
           return result
         }
         catch (error) {
-          const code = (error as { code?: unknown })?.code
-          if (![4, 8, 10, 14, 'DEADLINE_EXCEEDED', 'RESOURCE_EXHAUSTED', 'ABORTED', 'UNAVAILABLE'].includes(code as string | number)) throw error
+          if (!isRetryableSessionReadError(error)) throw error
           unavailableSince ??= performance.now()
           if (performance.now() - unavailableSince >= EXECUTION_RECONNECT_TIMEOUT_MS) {
             throw new Error('Managed execution remained unavailable; resume the durable session', { cause: error })

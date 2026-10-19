@@ -530,6 +530,7 @@ try {
   }
   assert.notEqual(proofs[0].durable, proofs[1].durable)
   let pidReuseProof: Record<string, unknown> | undefined
+  let rawCleanupProof: Record<string, unknown> | undefined
   if (isPidNamespace) {
     const previous = proofs[0]
     const input = { agentId: previous.agentId, model, resumeSessionId: previous.durable,
@@ -589,6 +590,53 @@ try {
       await controller.close()
       await replacement.agent.cancel(active.sessionId, active.sessionEndpoint)
     }
+
+    // Cancellation reaps the native child while inherited stdout remains open.
+    // Register a controlled replacement in that interval: the retired supervisor
+    // must retain its instance reference rather than act on the current PID.
+    const rawAgent = new ManagedAgentClient(operator, '')
+    const raw = await rawAgent.startSession({ agentId: 'raw-instance-cleanup', ownerId: ownerA,
+      spawnSpec: { cmd: '/bin/sh', args: ['-c',
+        "sleep 8 & printf '{\"jsonrpc\":\"2.0\",\"method\":\"fixture/ready\"}\\n'; wait"],
+        env: { PATH: '/usr/bin:/bin', HOME: '/fixture' }, cwd: '/fixture' } })
+    assert(raw.osPid)
+    let isReady = false
+    const transport = rawAgent.openSession(raw.sessionEndpoint, {
+      onMessage(message) { if (message.method === 'fixture/ready') isReady = true },
+      onClose() {},
+    })
+    try {
+      transport.start()
+      await waitFor('raw child ready', async () => isReady ? true : undefined, 10_000)
+      await rawAgent.cancel(raw.sessionId, raw.sessionEndpoint)
+      await waitFor('native child exit', async () => {
+        try {
+          await execute('docker', ['exec', container, '/bin/sh', '-c', `test ! -e /proc/${raw.osPid}`], { windowsHide: true })
+          return true
+        } catch { return undefined }
+      }, 3000)
+      const decode = (text: string) => {
+        const value = JSON.parse(text)
+        return value && typeof value === 'object' && 'result' in value ? value.result : value
+      }
+      const replacementRecord = decode(await operator.call('agent_register_external', JSON.stringify({
+        name: 'raw-instance-replacement', owner_id: ownerA, zone_id: 'root',
+        connection_id: randomUUID(), host_pid: raw.osPid, protocol: 'controlled-registry-reuse',
+      }), ''))
+      assert.equal(replacementRecord.pid, raw.sessionId)
+      const deadline = Date.now() + 7000
+      while (Date.now() < deadline) {
+        const current = decode(await operator.call('agent_get', JSON.stringify({ pid: raw.sessionId }), ''))
+        assert.equal(current?.name, 'raw-instance-replacement',
+          'retired raw-child cleanup must preserve the replacement registry instance')
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      rawCleanupProof = { nativeChildPid: raw.osPid, oldChildExited: true,
+        registryReuse: 'controlled registration after native child exit; native allocator reuse is simulated',
+        replacementSurvivesOldCleanup: true }
+    } finally {
+      await transport.close()
+    }
   }
   writeFileSync(join(work, 'acceptance.json'), JSON.stringify({ binary, checks: [
     'mTLS owner credentials', 'production connection proves the owner with a configured deployment token',
@@ -611,7 +659,8 @@ try {
     'user project instructions survive application context reconciliation',
     'controller-only instructions stay outside the native context',
     'application context updates on resume preserve project instructions and prior history',
-  ], proofs, pidReuseProof, modelRequests: requests.length }, null, 2))
+    ...(rawCleanupProof ? ['retired raw-child supervisor preserves a controlled same-PID replacement'] : []),
+  ], proofs, pidReuseProof, rawCleanupProof, modelRequests: requests.length }, null, 2))
   console.log(`PASS: two Moss owners recover exact conversations, files and memory after daemon stop/crash; evidence=${work}`)
 } catch (error) {
   console.error(`Recovery acceptance failed; evidence=${work}`, error)
