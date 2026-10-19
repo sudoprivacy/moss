@@ -541,6 +541,7 @@ async function finishStandaloneServerStartup(
     { fetch: mossOperationsApp.fetch, clientReporting: systemConfiguration },
     platformConfig,
     cas,
+    smsSender,
   )
   const platformVersionTimer = setInterval(() => { void platformConfig.reportVersions().catch(() => {}) }, 30_000)
   platformVersionTimer.unref()
@@ -737,7 +738,10 @@ function buildSmsSender(
   config: ServerConfig,
   nexus: NexusClientType,
 ): ((phone: string, code: string) => Promise<void>) | undefined {
-  if (!config.phoneAuth.enabled || config.phoneAuth.delivery === 'log') return undefined
+  if (!config.phoneAuth.enabled) return undefined
+  if (config.phoneAuth.delivery === 'log') {
+    return async (phone, code) => logPhoneVerificationCode(phone, code)
+  }
 
   const tencent = config.phoneAuth.tencent
   if (!tencent) {

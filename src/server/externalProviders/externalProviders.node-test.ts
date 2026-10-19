@@ -4,7 +4,7 @@ import { queryOnlyDefinition } from '../testing/externalProviderDefinitionFixtur
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { crashFixture } from '../testing/externalProviderCrashFixture.js'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
@@ -574,7 +574,14 @@ void test('SIGKILL before and after vault writes leaves recoverable onboarding a
   for (const kind of ['onboard', 'rotate']) for (const stage of ['before-write', 'after-write']) {
     const directory = await mkdtemp(join(tmpdir(), 'moss-external-kill-'))
     try {
-      assert.throws(() => execFileSync(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('../testing/externalProviderCrashFixture.ts', import.meta.url)), directory, kind, stage], { stdio: 'pipe', timeout: 10000 }), error => (error as { signal: string }).signal === 'SIGKILL')
+      assert.throws(() => execFileSync(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('../testing/externalProviderCrashFixture.ts', import.meta.url)), directory, kind, stage], { stdio: 'pipe', timeout: 10000 }), error => {
+        const crash = error as { signal: string | null; status: number | null; stderr: Buffer }
+        assert.doesNotMatch(crash.stderr.toString(), /Expected crash did not occur|(?:^|\n)\s*(?:Error|TypeError|ReferenceError):/)
+        return process.platform === 'win32'
+          ? crash.signal === null && crash.status === 1
+          : crash.signal === 'SIGKILL'
+      })
+      assert.equal(await readFile(join(directory, 'crash-marker'), 'utf8'), stage)
       const f = await crashFixture(directory)
       try {
         await f.service.maintain()

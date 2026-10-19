@@ -1,6 +1,13 @@
 import { dispatchExternalProvider, isExternalProviderRoute } from './externalProviders/routes.js'
 import { ExternalProviderError } from './externalProviders/policy.js'
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
+import { ParkStore } from './park/store.js'
+import { handlePublicParkRoute } from './park/publicRoutes.js'
+import { handleInternalParkRoute, recordParkAudit } from './park/internalRoutes.js'
+import { ParkPhoneVerification, type ParkSmsSender } from './park/phoneVerification.js'
+import { ParkCaptcha } from './park/captcha.js'
+import { boxOperationsFromEnvironment } from './park/boxOperations.js'
+import { createParkAnswerer } from './park/answer.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { AgentManager, canUpgradeAgentRuntime, managedSessionAgentName } from './agentManager.js'
 import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
@@ -2020,6 +2027,7 @@ export function startServer(
   },
   platformConfig?: PlatformConfigService,
   cas?: SudoworkCasService,
+  parkSmsSender?: ParkSmsSender,
 ): {
   port: number | null
   ready: Promise<number | null>
@@ -2029,6 +2037,18 @@ export function startServer(
   /** Live connection count (idle keepalive conns included) — drain bookkeeping. */
   getConnections: () => Promise<number>
 } {
+  const parkStore = new ParkStore(runtime.store.driver)
+  const parkPhoneVerification = new ParkPhoneVerification(parkStore, parkSmsSender, process.env.PARK_SMS_HMAC_KEY)
+  const parkCaptcha = new ParkCaptcha(parkStore, process.env.PARK_CAPTCHA_HMAC_KEY)
+  const parkBoxOperations = boxOperationsFromEnvironment(config.rootDir)
+  const parkAnswerer = createParkAnswerer(authService)
+  const parkOrgId = process.env.PARK_ORG_ID?.trim() || null
+  let parkReady: Promise<void> | null = null
+  const ensureParkReady = () => (parkReady ??= parkStore.init())
+  const parkLeadTimer = setInterval(() => {
+    if (parkReady) void parkStore.processLeadJobs().catch(error => logger.error(String(error)))
+  }, 10_000)
+  parkLeadTimer.unref()
   const browserWorkers = new BrowserWorkerRegistry(id => runtime.getSession(id))
   const adminDistDir = resolveAdminDistDir()
   const agentManager = new AgentManager({
@@ -2529,6 +2549,11 @@ export function startServer(
       // Set CORS headers for all API routes (non-preflight)
       if (pathname.startsWith('/api/') || pathname.startsWith('/v1/')) {
         setCorsHeaders(req, res)
+      }
+
+      if (pathname.startsWith('/public/consult/') || pathname.startsWith('/public/sessions/')) {
+        await ensureParkReady()
+        if (await handlePublicParkRoute(req, res, pathname, { store: parkStore, orgId: parkOrgId, readBody: readJsonBody, phoneVerification: parkPhoneVerification, captcha: parkCaptcha, answerer: parkAnswerer })) return
       }
 
       if (cabinApi && await cabinApi.handle(req, res, pathname)) {
@@ -3621,7 +3646,23 @@ export function startServer(
         }
       }
       if (!auth) {
+        if (pathname.startsWith('/api/v1/parks/') && parkOrgId) {
+          await ensureParkReady()
+          await recordParkAudit(parkStore, parkOrgId, pathname, req.method ?? 'GET', 401, null, 'Unauthorized')
+        }
         throw new HttpError(401, 'Unauthorized')
+      }
+
+      if (pathname.startsWith('/api/v1/parks/')) {
+        await ensureParkReady()
+        try {
+          if (await handleInternalParkRoute(req, res, pathname, auth, { store: parkStore, orgId: parkOrgId, authService, readBody: readJsonBody, boxOperations: parkBoxOperations })) return
+        } catch (error) {
+          if (parkOrgId && error instanceof HttpError && error.statusCode >= 400) {
+            await recordParkAudit(parkStore, parkOrgId, pathname, req.method ?? 'GET', error.statusCode, auth.userId, error.message)
+          }
+          throw error
+        }
       }
 
       if (isExternalProviderRoute(pathname)) {
@@ -11309,6 +11350,7 @@ export function startServer(
     ready,
     stop: async () => {
       isStopped = true
+      clearInterval(parkLeadTimer)
       await externalProviders?.close()
       wikiJobExecutor.stop()
       sourceSyncWorker.stop()

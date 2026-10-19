@@ -15,7 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
-import { shellPathEnvironment, toShellPath } from "../testing/shellPaths.js";
+import { shellPathEnvironment, shellTestCommand, toShellPath } from "../testing/shellPaths.js";
 
 const root = resolve(import.meta.dir, "../../..");
 
@@ -104,7 +104,7 @@ trap rollback_on_error ERR
 bash -c 'exit "$1"' _ "$FAILURE_STATUS"
 exit 99
 `;
-    const execution = spawnSync("bash", ["-c", script], {
+    const execution = spawnSync(shellTestCommand('bash'), ["-c", script], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -191,7 +191,7 @@ describe("packaged Server E2E smoke", () => {
       try {
         const address = server.address();
         if (!address || typeof address === "string") throw new Error("Missing download fixture address");
-        const child = spawn("bash", [toShellPath(resolve(root, "deploy/legacy/install-host.sh")), "--download", toShellPath(downloadDir)], {
+        const child = spawn(shellTestCommand('bash'), [toShellPath(resolve(root, "deploy/legacy/install-host.sh")), "--download", toShellPath(downloadDir)], {
           env: {
             ...process.env,
             MOSS_RELEASE_TAG: "server-vtest",

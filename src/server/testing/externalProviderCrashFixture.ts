@@ -24,9 +24,15 @@ export async function crashFixture(directory: string) {
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
     },
     async putSecret(namespace: string, key: string, value: string) {
-      if (control.crash === 'before-write') process.kill(process.pid, 'SIGKILL')
+      if (control.crash === 'before-write') {
+        await writeFile(join(directory, 'crash-marker'), control.crash)
+        process.kill(process.pid, 'SIGKILL')
+      }
       await writeFile(file(namespace, key), JSON.stringify({ value, status: 'enabled', version: 1 }))
-      if (control.crash === 'after-write') process.kill(process.pid, 'SIGKILL')
+      if (control.crash === 'after-write') {
+        await writeFile(join(directory, 'crash-marker'), control.crash)
+        process.kill(process.pid, 'SIGKILL')
+      }
     },
     async deleteSecret(namespace: string, key: string) { await rm(file(namespace, key), { force: true }) },
   }

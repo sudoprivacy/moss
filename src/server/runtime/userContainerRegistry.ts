@@ -589,7 +589,7 @@ export async function reconcile(config: ServerConfig): Promise<void> {
     '--filter', 'label=moss.kind=user-container',
     '--filter', `label=moss.instance=${config.instanceId ?? 'default'}`,
     '--format', '{{.ID}}\t{{.Names}}\t{{.Labels}}',
-  ])
+  ], 2_000)
   if (result.code !== 0) return
 
   for (const line of result.stdout.split('\n')) {

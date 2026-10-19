@@ -6,7 +6,7 @@ import { dirname, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'bun:test'
 import { buildNexusArgs } from '../nexus/nexusManager.js'
-import { shellPathEnvironment } from '../testing/shellPaths.js'
+import { shellPathEnvironment, shellTestCommand } from '../testing/shellPaths.js'
 
 const root = resolve(import.meta.dir, '../../..')
 const candidateVersion = '0.2.1'
@@ -254,7 +254,7 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
     const envPath = resolve(guardDir, 'moss-server.env')
     const lockPath = resolve(guardDir, 'nexus', 'data.zone-id.lock.json')
     const runUpgradeGuard = (existingInstall: '0' | '1', explicitDeclaration: '0' | '1') =>
-      spawnSync('bash', ['-c', [
+      spawnSync(shellTestCommand('bash'), ['-c', [
         upgradeGuard,
         'die() { return 1; }',
         'assert_nexus_zone_id_upgrade_safe "$EXISTING_INSTALL" "$ENV_PATH" "$LOCK_PATH" "$EXPLICIT_DECLARATION"',
@@ -293,7 +293,7 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
         ['MOSS_NEXUS_ZONE_ID=old-zone\nMOSS_NEXUS_ZONE_ID=new-zone\n', 'MOSS_NEXUS_ZONE_ID=new-zone'],
         ['MOSS_NEXUS_ZONE_ID=customer-\\\na\nOTHER=value\n', 'MOSS_NEXUS_ZONE_ID=customer-\\\na'],
       ] as const) {
-        const result = spawnSync('awk', ['-f', program], { input: source, encoding: 'utf8' })
+        const result = spawnSync(shellTestCommand('awk'), ['-f', program], { input: source, encoding: 'utf8' })
         expect(result.status).toBe(0)
         expect(result.stdout).toBe(preserved)
       }
