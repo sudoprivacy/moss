@@ -97,6 +97,13 @@ export type QueueEntry = {
   /** The quota day this entry claimed, so a release knows what to undo. */
   quotaDate?: string | null
   reason?: string | null
+  /**
+   * The entry was cancelled with a WeCom withdrawal requested, but the
+   * withdrawal failed. Its task may still be waiting for confirmation, and
+   * WeCom never expires such tasks, so the sweeper keeps retrying until the
+   * withdrawal sticks and then clears this.
+   */
+  wecomCancelPending?: boolean | null
 }
 
 export type GroupQueue = {
@@ -523,9 +530,21 @@ export type ReapedEntry = {
  */
 export async function reap(
   corpAppId: string,
-  opts: { chatId?: string; now?: Date } = {},
+  opts: {
+    chatId?: string
+    now?: Date
+    /**
+     * Entries to leave alone this pass even if expired: their settlement just
+     * failed transiently, so they may in fact have been delivered, and reaping
+     * would record a delivery as cancelled. Honoured only within `skipGraceMs`
+     * of expiry, so a provider that never answers cannot hold a group forever.
+     */
+    skipEntryIds?: Set<string>
+    skipGraceMs?: number
+  } = {},
 ): Promise<ReapedEntry[]> {
   const now = opts.now ?? new Date()
+  const grace = opts.skipGraceMs ?? 0
   const chatIds = opts.chatId ? [opts.chatId] : await listGroupChatIds(corpAppId)
   const reaped: ReapedEntry[] = []
   for (const chatId of chatIds) {
@@ -533,7 +552,9 @@ export async function reap(
       const out: ReapedEntry[] = []
       for (const e of q.entries) {
         if (!isBlocking(e) || !e.expiresAt) continue
-        if (new Date(e.expiresAt).getTime() > now.getTime()) continue
+        const expiresMs = new Date(e.expiresAt).getTime()
+        if (expiresMs > now.getTime()) continue
+        if (opts.skipEntryIds?.has(e.entryId) && now.getTime() - expiresMs < grace) continue
         out.push({ chatId, entryId: e.entryId, msgid: e.msgid ?? null, expiresAt: e.expiresAt })
         e.state = 'cancelled'
         e.reason = 'expired'
@@ -545,6 +566,47 @@ export async function reap(
     reaped.push(...found)
   }
   return reaped
+}
+
+/** Record whether an entry still owes a WeCom withdrawal (see `wecomCancelPending`). */
+export async function setWecomCancelPending(
+  corpAppId: string,
+  chatId: string,
+  entryId: string,
+  pending: boolean,
+): Promise<void> {
+  await mutate(corpAppId, chatId, (q) => {
+    const entry = q.entries.find((e) => e.entryId === entryId)
+    if (!entry) return
+    if (pending) entry.wecomCancelPending = true
+    else delete entry.wecomCancelPending
+  })
+}
+
+/** Entries whose WeCom withdrawal failed and should be retried. */
+export async function listWecomCancelPending(
+  corpAppId: string,
+): Promise<{ chatId: string; entryId: string; msgid: string }[]> {
+  const out: { chatId: string; entryId: string; msgid: string }[] = []
+  for (const chatId of await listGroupChatIds(corpAppId)) {
+    const q = await readGroupQueue(corpAppId, chatId)
+    for (const e of q.entries) {
+      if (e.wecomCancelPending && e.msgid && !isBlocking(e)) {
+        out.push({ chatId, entryId: e.entryId, msgid: e.msgid })
+      }
+    }
+  }
+  return out
+}
+
+/** Corp apps that have a queue on disk — the sweeper's work list. */
+export async function listQueueCorpAppIds(): Promise<string[]> {
+  try {
+    const names = await readdir(MOSS_WECOM_QUEUE_DIR, { withFileTypes: true })
+    return names.filter((d) => d.isDirectory()).map((d) => d.name)
+  } catch {
+    return []
+  }
 }
 
 export type ReconcileOutcome = {

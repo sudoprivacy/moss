@@ -57,6 +57,7 @@ const BUN = [
   'msgauditRoomList.test.ts',
   'msgauditSnapshotWorker.test.ts',
   'wecomCancelGroupMsg.test.ts',
+  'queueSweep.test.ts',
   'wecomClientToken.test.ts',
   'wikiAccess.test.ts',
 ]
