@@ -76,15 +76,26 @@ describe("A2: setSessionLifecycle onlyWhenDesiredActive", () => {
     store.requireSqliteDb().close();
   });
 
-  it("without the flag the write stays unconditional (existing callers unchanged)", async () => {
+  it("also preserves terminate against recovery writes without the optional flag", async () => {
     const store = newStore();
     await seedSession(store, "s-a2-3", "active");
     await store.setSessionLifecycle("s-a2-3", "terminated", "terminated");
-    // Legacy call sites (terminate, lost-marking, daemon detach...) rely on the
-    // unconditional overwrite semantics — the flag must not leak into them.
     await store.setSessionLifecycle("s-a2-3", "active", "active");
     const row = await store.getSession("s-a2-3");
-    assert.equal(row!.status, "active");
+    assert.equal(row!.status, "terminated");
+    assert.equal(row!.desiredState, "terminated");
+    store.requireSqliteDb().close();
+  });
+
+  it("reactivates an idle session but never a terminated session", async () => {
+    const store = newStore();
+    await seedSession(store, "s-reactivate", "active");
+    await store.markSessionEnded("s-reactivate", "ended", "active");
+    await store.reactivateSession("s-reactivate");
+    assert.equal((await store.getSession("s-reactivate"))!.status, "active");
+    await store.setSessionLifecycle("s-reactivate", "terminated", "terminated");
+    await store.reactivateSession("s-reactivate");
+    assert.equal((await store.getSession("s-reactivate"))!.desiredState, "terminated");
     store.requireSqliteDb().close();
   });
 });
