@@ -309,6 +309,30 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: deploy/package-server.sh "$VERSION" "$ARCH" dist
 
+      - name: Resolve pinned shared image tools
+        id: shared-images
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          lock = json.loads(Path('deploy/k3s/sudostack-images.lock.json').read_text())
+          assert lock['repository'] == 'sudoprivacy/sudostack'
+          assert re.fullmatch(r'[a-f0-9]{40}', lock['revision'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('revision=' + lock['revision'] + '\n')
+          PY
+
+      - uses: actions/checkout@v4
+        with:
+          repository: sudoprivacy/sudostack
+          ref: ${{ steps.shared-images.outputs.revision }}
+          path: .moss-image-tools
+          sparse-checkout: |
+            tools/deploy/images.py
+            tools/deploy/artifacts.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Build separate Server and Nexus images
         run: deploy/package-control-images.sh '${{ steps.release.outputs.version }}' '${{ matrix.arch }}' dist
 

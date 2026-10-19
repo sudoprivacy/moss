@@ -151,6 +151,38 @@ provision_compute_node() {''' + function + '\nprovision_compute_node\n')
             self.render("2.0")
 
     @unittest.skipIf(os.name == "nt", "POSIX installer")
+    def test_image_retention_failure_precedes_existing_installation_changes(self):
+        previous = self.installed_fixture()
+        before = {name: (self.root / name).read_bytes() for name in ["server.json", "data/moss.db", ".moss/nexus/data/vault/master.key"]}
+        work = self.base / "retention-work"
+        (work / "bundle").mkdir(parents=True)
+        shutil.copy(HERE / "control.py", work / "bundle/control.py")
+        fake_bin = self.base / "retention-bin"
+        fake_bin.mkdir()
+        calls = self.base / "retention-calls.log"
+        binary = fake_bin / "k3s"
+        binary.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$FIXTURE_CALLS"\n')
+        binary.chmod(0o755)
+        env = {**os.environ, "PATH": str(fake_bin) + os.pathsep + os.defpath + os.pathsep + str(Path(shutil.which("python3")).parent),
+               "FIXTURE_CALLS": str(calls), "INSTALL_DIR": str(self.root), "WORK_DIR": str(work),
+               "ROLE": "control-plane", "ARCH": "amd64", "VERSION": "2.0", "RELEASE_TAG": "server-v2.0",
+               "SOURCE_DIR": str(self.base), "SERVER_IMAGE_ARCHIVE": "server.tar.gz",
+               "NEXUS_IMAGE_ARCHIVE": "nexus.tar.gz", "RUNTIME_ARCHIVE": "runtime.tar.gz"}
+        script = '\n'.join([
+            'log() { :; }; warn() { echo "$*" >&2; }; die() { echo "$*" >&2; exit 1; }',
+            'acquire_asset() { :; }',
+            'retain_release_image() { printf "retain %s\\n" "$1" >> "$FIXTURE_CALLS"; return 27; }',
+            'source "$1"',
+        ])
+        result = subprocess.run(["bash", "-c", script, "fixture", str(HERE / "install-control.sh")], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 27, result.stdout + result.stderr)
+        self.assertEqual(calls.read_text().splitlines(), ['kubectl get nodes', 'retain server.tar.gz'])
+        for name, content in before.items():
+            self.assertEqual((self.root / name).read_bytes(), content)
+        self.assertEqual((self.root / "current").resolve(), previous)
+        self.assertFalse((self.root / "backups").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX installer")
     def test_failed_rollout_restores_quiescent_snapshot_and_previous_manifest(self):
         previous = self.installed_fixture()
         original_config = (self.root / "server.json").read_bytes()
@@ -207,6 +239,7 @@ elif 'rollout' in args:
         script = '\n'.join([
             'log() { :; }; warn() { echo "$*" >&2; }; die() { echo "$*" >&2; exit 1; }',
             'acquire_asset() { :; }',
+            'retain_release_image() { printf "retained %s\\n" "$1" >> "$FIXTURE_ROOT/../calls.log"; }',
             'source "$1"',
         ])
         result = subprocess.run(["bash", "-c", script, "fixture", str(HERE / "install-control.sh")], env=env, capture_output=True, text=True)
@@ -218,6 +251,7 @@ elif 'rollout' in args:
         self.assertEqual(control.read_json(self.root / "k8s-install.json")["version"], "1.0")
         self.assertTrue(list(self.root.glob("backups/*/failed/data/moss.db")))
         calls = (self.base / "calls.log").read_text()
+        self.assertEqual(calls.count('retained '), 3)
         self.assertIn("--replicas=0", calls)
         self.assertIn("backups/", calls)
 

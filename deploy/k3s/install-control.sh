@@ -35,16 +35,14 @@ for archive in "$SERVER_IMAGE_ARCHIVE" "$NEXUS_IMAGE_ARCHIVE" "$RUNTIME_ARCHIVE"
   acquire_asset "$archive"
 done
 if [ "$ROLE" = all-in-one ] && [ ! -f "$PREVIOUS_STATE" ]; then
-  # This function provisions the cluster only. Image import below always uses
-  # this release's verified archive, never the helper's latest-version fallback.
-  IMPORT_RUNTIME_IMAGE=0 provision_compute_node
+  provision_compute_node
 elif ! command -v k3s >/dev/null 2>&1; then
   die "--role control-plane requires a running local k3s server; use --role all-in-one to install it"
 fi
 k3s kubectl get nodes >/dev/null
 for pair in "server:$SERVER_IMAGE_ARCHIVE" "nexus:$NEXUS_IMAGE_ARCHIVE" "runtime:$RUNTIME_ARCHIVE"; do
-  log "Importing ${pair%%:*} image"
-  gzip -dc "$SOURCE_DIR/${pair#*:}" | k3s ctr images import - >/dev/null
+  log "Retaining ${pair%%:*} image"
+  retain_release_image "${pair#*:}"
 done
 for ref in "moss-server:$VERSION-$ARCH" "moss-nexus:$VERSION-$ARCH" "my-moss-runtime:$VERSION-$ARCH"; do
   k3s ctr images check "name==docker.io/library/$ref" >/dev/null

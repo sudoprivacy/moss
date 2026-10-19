@@ -25,5 +25,6 @@ for component in server nexus; do
 done
 docker buildx build --platform "linux/$ARCH" --target nexus-bootstrap-bundle \
   --output "type=local,dest=$OUTPUT_DIR" -f "$ROOT_DIR/deploy/server.Dockerfile.local" "$ROOT_DIR"
-tar -C "$ROOT_DIR/deploy/k3s" -czf "$OUTPUT_DIR/moss-deploy-$VERSION-linux-$ARCH.tar.gz" control.py install-control.sh fetch-offline-deps.sh \
-  -C "$ROOT_DIR/deploy" server.json
+python3 "$ROOT_DIR/deploy/k3s/package_deployment.py" \
+  --shared-source "${MOSS_SHARED_IMAGE_SOURCE:-$ROOT_DIR/.moss-image-tools}" \
+  --output "$OUTPUT_DIR/moss-deploy-$VERSION-linux-$ARCH.tar.gz"

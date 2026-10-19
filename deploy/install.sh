@@ -126,20 +126,30 @@ download_file() {
     -o "$SOURCE_DIR/$name.part" "$DOWNLOAD_BASE/$name"
   mv "$SOURCE_DIR/$name.part" "$SOURCE_DIR/$name"
 }
+release_asset_checksum() {
+  python3 - "$SOURCE_DIR/SHA256SUMS" "$1" <<'PY'
+import pathlib, re, sys
+matches = [line.split()[0] for line in pathlib.Path(sys.argv[1]).read_text().splitlines()
+           if len(line.split()) == 2 and line.split()[1].lstrip('*') == sys.argv[2]]
+if len(matches) != 1 or not re.fullmatch(r'[a-f0-9]{64}', matches[0]):
+    sys.exit('Missing or ambiguous asset checksum: ' + sys.argv[2])
+print(matches[0])
+PY
+}
 verify_asset() {
-  python3 - "$SOURCE_DIR" "$1" <<'PY'
+  local expected
+  expected="$(release_asset_checksum "$1")" || return 1
+  python3 - "$SOURCE_DIR/$1" "$expected" <<'PY'
 import hashlib, pathlib, sys
-root, name = pathlib.Path(sys.argv[1]), sys.argv[2]
-matches = [line.split()[0] for line in (root / 'SHA256SUMS').read_text().splitlines()
-           if len(line.split()) == 2 and line.split()[1].lstrip('*') == name]
-if len(matches) != 1 or not (root / name).is_file():
-    sys.exit('Missing asset or checksum: ' + name)
+path = pathlib.Path(sys.argv[1])
+if not path.is_file():
+    sys.exit('Missing asset: ' + path.name)
 digest = hashlib.sha256()
-with (root / name).open('rb') as stream:
+with path.open('rb') as stream:
     for block in iter(lambda: stream.read(1024 * 1024), b''):
         digest.update(block)
-if digest.hexdigest() != matches[0]:
-    sys.exit('Checksum mismatch: ' + name)
+if digest.hexdigest() != sys.argv[2]:
+    sys.exit('Checksum mismatch: ' + path.name)
 PY
 }
 acquire_asset() {
@@ -235,10 +245,18 @@ python3 - "$SOURCE_DIR/$DEPLOY_ARCHIVE" "$WORK_DIR/bundle" <<'PY'
 import sys, tarfile
 with tarfile.open(sys.argv[1]) as bundle:
     members = bundle.getmembers()
-    if len(members) != 4 or {m.name for m in members} != {'control.py', 'install-control.sh', 'fetch-offline-deps.sh', 'server.json'} or any(not m.isfile() for m in members):
+    expected = {'control.py', 'install-control.sh', 'fetch-offline-deps.sh', 'server.json',
+                'images.py', 'artifacts.py', 'sudostack-images.lock.json'}
+    if len(members) != len(expected) or {m.name for m in members} != expected or any(not m.isfile() for m in members):
         sys.exit('Unsafe deployment bundle')
     bundle.extractall(sys.argv[2], members=members)
 PY
+
+retain_release_image() {
+  local expected
+  expected="$(release_asset_checksum "$1")" || die "missing image identity: $1"
+  python3 "$WORK_DIR/bundle/images.py" --archive "$SOURCE_DIR/$1" --sha256 "$expected"
+}
 
 read_masked_value() {
   local label="$1" value='' char='' tty_state=''
@@ -304,19 +322,16 @@ prompt_value() {
 }
 
 # ---------------------------------------------------------------------------
-# Compute node: k3s + gvisor + the moss-runtime image
+# Compute-node infrastructure: k3s, gvisor and scoped Kubernetes access
 #
 # Everything the K8sBackend needs on the machine that runs session pods:
 #   - k3s server (bundled containerd) + kubectl
 #   - gvisor (runsc) and a RuntimeClass pointing at it
 #   - namespace + ServiceAccount + least-privilege RBAC for scode pods
-#   - the moss-runtime image imported into containerd (scode ships inside it,
-#     so nothing is staged on the node and nothing drifts out of sync)
 #   - an SA-scoped kubeconfig, written beside server.json
 #
-# No container engine of its own: k3s brings containerd, and images are
-# imported with `ctr`. Idempotent — safe to re-run. Every knob is an env var,
-# so the same code provisions any Ubuntu/Debian/RHEL-family host.
+# The release-bound caller retains business images through the shared image
+# tool after the node is ready. Configuration uses environment variables.
 # ---------------------------------------------------------------------------
 provision_compute_node() {
   local NAMESPACE="${MOSS_K8S_NAMESPACE:-moss-sessions}"
@@ -329,9 +344,6 @@ provision_compute_node() {
   local K3S_VERSION="${INSTALL_K3S_VERSION:-}"
   local NODE_IP="${NODE_IP:-}"
   local OUTPUT_DIR="${MOSS_K8S_OUTPUT_DIR:-$INSTALL_DIR}"
-  local RUNTIME_VERSION="${MOSS_RUNTIME_VERSION:-}"
-  local IMPORT_RUNTIME_IMAGE="${IMPORT_RUNTIME_IMAGE:-1}"
-  local SCODE_IMAGE=""
 
   # A join URL turns this node into a k3s agent that grows an existing cluster;
   # otherwise it is the seed that starts a fresh single-node server. Agents run
@@ -369,8 +381,6 @@ provision_compute_node() {
   fi
   local OFF_RUNSC="$OFFLINE_DIR/runsc-$KARCH"
   local OFF_SHIM="$OFFLINE_DIR/containerd-shim-runsc-v1-$KARCH"
-  local OFF_SCODE_IMAGE_REF="$OFFLINE_DIR/scode-image.ref"
-  [ ! -s "$OFFLINE_DIR/scode-image-$KARCH.ref" ] || OFF_SCODE_IMAGE_REF="$OFFLINE_DIR/scode-image-$KARCH.ref"
 
   kc() { k3s kubectl "$@"; }
   ctr_import() {
@@ -380,7 +390,6 @@ provision_compute_node() {
       *)              k3s ctr images import "$1" ;;
     esac
   }
-  image_in_containerd() { k3s ctr images ls -q 2>/dev/null | grep -qF "$1"; }
 
   # A server is Ready when the API reports its node Ready; an agent has no local
   # kubeconfig, so we settle for its containerd answering (that is all the image
@@ -441,7 +450,6 @@ provision_compute_node() {
     [ -n "$NODE_IP" ] || die "could not detect the node IP; set NODE_IP=<ip>"
     prompt_value NAMESPACE 'Kubernetes namespace for session pods' "$NAMESPACE"
   fi
-  prompt_value RUNTIME_VERSION 'moss-runtime image version (blank uses the latest release)' "$RUNTIME_VERSION"
   local KUBECONFIG_OUT="$OUTPUT_DIR/moss-k3s-kubeconfig.yaml"
   log "Compute node: role=$K3S_ROLE ip=$NODE_IP arch=$KARCH namespace=$NAMESPACE offline=$OFFLINE_MODE"
 
@@ -569,102 +577,17 @@ EOF
 
   if [ -d "$OFFLINE_DIR/images" ]; then
     # Unmatched globs stay literal, so every loop below tests for the file.
-    local img out ref
+    local img
     for img in "$OFFLINE_DIR"/images/*.tar "$OFFLINE_DIR"/images/*.tar.gz "$OFFLINE_DIR"/images/*.tar.zst; do
       [ -e "$img" ] || continue
       case "$(basename "$img")" in
-        moss-runtime-*-linux-*.tar.gz) [[ "$img" == *-linux-"$KARCH".tar.gz ]] || continue ;;
+        moss-runtime-*-linux-*.tar.gz) continue ;;
       esac
       log "Importing $(basename "$img") into containerd"
-      out="$(ctr_import "$img" 2>&1)" || warn "could not import $img"
-      # grep exits 1 when a tarball carries some other image; `|| true` keeps
-      # `set -e` from aborting the whole run on that.
-      ref="$(printf '%s\n' "$out" | grep -oE 'my-moss-runtime:[^ )]+' | head -1 || true)"
-      [ -n "$ref" ] && SCODE_IMAGE="docker.io/library/$ref"
+      ctr_import "$img" >/dev/null 2>&1 || die "could not import $img"
     done
   fi
 
-  if [ "$IMPORT_RUNTIME_IMAGE" = 1 ]; then
-    local MRV="${RUNTIME_VERSION#server-v}" t
-    MRV="${MRV#v}"
-    if [ -z "$MRV" ] && [ -s "$OFF_SCODE_IMAGE_REF" ]; then
-      MRV="$(grep -oE 'my-moss-runtime:[^ )]+' "$OFF_SCODE_IMAGE_REF" | head -1 | sed "s/^my-moss-runtime://; s/-${KARCH}$//" || true)"
-    fi
-    # An --offline run, or a previous install, already has the tarball on disk;
-    # importing that beats a second 160 MB download of the same bytes.
-    local STAGED_TARBALL="" d
-    for d in "$SOURCE_DIR" "$OFFLINE_DIR/images" "$SCRIPT_DIR" "$INSTALL_DIR/packages/$RELEASE_TAG"; do
-      [ -d "$d" ] || continue
-      for t in "$d"/moss-runtime-*-linux-${KARCH}.tar.gz; do
-        [ -e "$t" ] || continue
-        [ -z "$MRV" ] || [ "$(basename "$t")" = "moss-runtime-$MRV-linux-${KARCH}.tar.gz" ] || continue
-        STAGED_TARBALL="$t"
-        [ -n "$MRV" ] || MRV="$(basename "$t" | sed "s/^moss-runtime-//; s/-linux-${KARCH}\.tar\.gz$//")"
-        break
-      done
-      [ -n "$STAGED_TARBALL" ] && break
-    done
-    # Pin the runtime image to this installer's release when stamped. Match on the
-    # server-v* shape rather than comparing against the literal placeholder: CI
-    # stamps with a global `sed s/@@MOSS_RELEASE_TAG@@/<tag>/g`, which would also
-    # rewrite a literal sentinel here and make the guard always false — leaving MRV
-    # unset so every pinned installer wrongly pulls the COS-latest runtime (version
-    # skew). An unstamped RELEASE_TAG stays "@@…@@", which never matches server-v*.
-    if [ -z "$MRV" ]; then
-      case "$RELEASE_TAG" in server-v*) MRV="${RELEASE_TAG#server-v}" ;; esac
-    fi
-    [ -z "$SCODE_IMAGE" ] && [ -n "$MRV" ] && SCODE_IMAGE="docker.io/library/my-moss-runtime:${MRV}-${KARCH}"
-
-    if [ -n "$SCODE_IMAGE" ] && image_in_containerd "my-moss-runtime:${MRV}-${KARCH}"; then
-      log "Runtime image already in containerd: $SCODE_IMAGE"
-    elif [ -n "$STAGED_TARBALL" ]; then
-      log "Importing the runtime image from $STAGED_TARBALL"
-      ctr_import "$STAGED_TARBALL" >/dev/null 2>&1 || die "could not import $STAGED_TARBALL"
-      SCODE_IMAGE="docker.io/library/my-moss-runtime:${MRV}-${KARCH}"
-      image_in_containerd "my-moss-runtime:${MRV}-${KARCH}" \
-        || warn "$SCODE_IMAGE is not in containerd after the import"
-    elif [ "$OFFLINE_MODE" = on ]; then
-      warn "OFFLINE_MODE=on and the runtime image is neither in containerd nor staged in $OFFLINE_DIR/images; set MOSS_SCODE_IMAGE by hand"
-      SCODE_IMAGE=""
-    else
-      local rel tar tmp want got latest_sh
-      if [ -z "$MRV" ]; then
-        # Capture the whole response first: `curl | grep -m1` closes the pipe
-        # early, curl dies of SIGPIPE, and pipefail aborts the run.
-        latest_sh="$(curl -fsSL "${MOSS_COS_BASE:-https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server}/latest/install.sh" 2>/dev/null || true)"
-        MRV="$(printf '%s\n' "$latest_sh" | grep 'RELEASE_TAG=' | head -1 | sed 's/.*server-v//; s/[}"].*//' || true)"
-      fi
-      [ -n "$MRV" ] || die "could not resolve the moss-runtime version; set MOSS_RUNTIME_VERSION=<x.y.z>"
-      rel="${MOSS_COS_BASE:-https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server}/releases/server-v${MRV}"
-      tar="moss-runtime-${MRV}-linux-${KARCH}.tar.gz"
-      tmp="$(mktemp -d)"
-      log "Downloading runtime image $tar"
-      curl -fL --retry 3 -m 900 "$rel/$tar" -o "$tmp/$tar" || die "could not download $rel/$tar"
-      if curl -fsSL "$rel/SHA256SUMS" -o "$tmp/SHA256SUMS" 2>/dev/null; then
-        want="$(awk -v f="$tar" '$2==f || $2=="*"f {print $1}' "$tmp/SHA256SUMS" | head -1)"
-        if [ -n "$want" ]; then
-          got="$(sha256sum "$tmp/$tar" | awk '{print $1}')"
-          [ "$want" = "$got" ] || die "checksum mismatch for $tar"
-        fi
-      fi
-      log "Importing the runtime image into containerd"
-      ctr_import "$tmp/$tar" >/dev/null 2>&1 || die "could not import the runtime image"
-      rm -rf "$tmp"
-      SCODE_IMAGE="docker.io/library/my-moss-runtime:${MRV}-${KARCH}"
-      image_in_containerd "my-moss-runtime:${MRV}-${KARCH}" \
-        || warn "$SCODE_IMAGE is not in containerd after the import"
-    fi
-
-    # Stable alias, so server.json can pin a version-independent ref and no
-    # release needs a config edit.
-    if [ -n "$SCODE_IMAGE" ]; then
-      if k3s ctr images tag --force "$SCODE_IMAGE" docker.io/library/moss-runtime:latest >/dev/null 2>&1; then
-        SCODE_IMAGE=docker.io/library/moss-runtime:latest
-      else
-        warn "could not tag moss-runtime:latest, which server.json expects; set MOSS_SCODE_IMAGE to $SCODE_IMAGE"
-      fi
-    fi
-  fi
 
   install_staged_gvisor() {
     local stage="$1"
@@ -729,7 +652,6 @@ EOF
     COMPUTE_KUBECONFIG=""
     COMPUTE_NAMESPACE="$NAMESPACE"
     COMPUTE_RUNTIME_CLASS="$RUNTIME_CLASS"
-    COMPUTE_SCODE_IMAGE="$SCODE_IMAGE"
     COMPUTE_NODE_IP="$NODE_IP"
     COMPUTE_K3S_ROLE="agent"
     COMPUTE_JOIN_URL="$K3S_URL_JOIN"
@@ -842,7 +764,6 @@ EOF
   COMPUTE_KUBECONFIG="$KUBECONFIG_OUT"
   COMPUTE_NAMESPACE="$NAMESPACE"
   COMPUTE_RUNTIME_CLASS="$RUNTIME_CLASS"
-  COMPUTE_SCODE_IMAGE="$SCODE_IMAGE"
   COMPUTE_NODE_IP="$NODE_IP"
   COMPUTE_K3S_ROLE="server"
   # The node-token lets a later `--role compute --join` attach an agent. It is a
@@ -855,8 +776,14 @@ EOF
 if [ "$ROLE" = compute ]; then
   # Keep worker provisioning independent of the business-service lifecycle.
   acquire_asset "$RUNTIME_ARCHIVE"
-  MOSS_RUNTIME_VERSION="$VERSION" provision_compute_node
-  log "Compute node ready; session image: $COMPUTE_SCODE_IMAGE"
+  provision_compute_node
+  if [ "${IMPORT_RUNTIME_IMAGE:-1}" = 1 ]; then
+    retain_release_image "$RUNTIME_ARCHIVE"
+    COMPUTE_SCODE_IMAGE="docker.io/library/my-moss-runtime:$VERSION-$ARCH"
+    log "Compute node ready; session image: $COMPUTE_SCODE_IMAGE"
+  else
+    log 'Compute node ready'
+  fi
   exit 0
 fi
 source "$WORK_DIR/bundle/install-control.sh"
