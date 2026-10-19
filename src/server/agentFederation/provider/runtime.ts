@@ -1,6 +1,7 @@
 import { DURABLE_HTTP_CAPABILITIES, DURABLE_AGENT_HTTP_API, type SubmitAgentRun } from '../../../../contracts/agent-http/v1alpha2/contract.js'
 import { AgentProtocolError, contentDigest, parseSubmitAgentRun } from './protocol.js'
 import { AgentRunStore, type ClaimedRun, type ModelMessage } from './store.js'
+import { routerTransport, type RouterRequest } from './routerTransport.js'
 
 export interface AgentDefinition {
   external_agent_id: string
@@ -63,11 +64,11 @@ export async function boundedJson(response: Response, limit: number): Promise<un
 }
 
 /** All model traffic uses a deployment-authorized SudoRouter endpoint. No tools or arbitrary URLs. */
-export function routerExecutor(key: string, request: (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch> = fetch): ModelExecutor {
+export function routerExecutor(key: string, request?: RouterRequest): ModelExecutor {
   if (!key || key.length > 4096 || /[\r\n]/.test(key)) throw new AgentProtocolError(400, 'INVALID_ROUTER_CREDENTIAL')
   return async (agent, history, query, signal) => {
     const d = agent.definition
-    const response = await request(`${d.router_endpoint}/chat/completions`, {
+    const response = await (request ?? routerTransport(d.router_endpoint))(`${d.router_endpoint}/chat/completions`, {
       method: 'POST', redirect: 'error', signal,
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ model: d.model, stream: false, max_tokens: d.max_output_tokens,
@@ -157,7 +158,7 @@ export class HttpAgentRuntime {
       await this.store.finish(claim, answer, 'succeeded')
     } catch (error) {
       const code = error instanceof AgentProtocolError ? error.code : 'MODEL_EXECUTION_UNCONFIRMED'
-      const confirmedFailure = ['MODEL_REQUEST_REJECTED', 'MODEL_OUTPUT_INVALID', 'EXECUTION_REVISION_UNAVAILABLE'].includes(code)
+      const confirmedFailure = ['MODEL_REQUEST_REJECTED', 'MODEL_OUTPUT_INVALID', 'EXECUTION_REVISION_UNAVAILABLE', 'MODEL_EGRESS_DENIED', 'MODEL_EGRESS_UNAVAILABLE'].includes(code)
       await this.store.finish(claim, '', confirmedFailure ? 'failed' : 'unknown', confirmedFailure ? code : 'MODEL_EXECUTION_UNCONFIRMED')
     } finally { clearInterval(timer); await heartbeat }
   }

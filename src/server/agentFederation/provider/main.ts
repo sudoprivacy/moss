@@ -7,6 +7,7 @@ import { SqliteDriver, PgDriver, type DbDriver, type PgPoolLike } from '../../db
 import { AgentRunStore } from './store.js'
 import { HttpAgentRuntime, immutableAgent, routerExecutor, type AgentDefinition } from './runtime.js'
 import { providerServer } from './server.js'
+import { routerTransport } from './routerTransport.js'
 
 /** Build this entry as one immutable .mjs artifact before running; no Moss server dependency. */
 async function main() {
@@ -15,7 +16,7 @@ async function main() {
   const config = JSON.parse(await readFile(path, 'utf8')) as {
     host: string; port: number; database_file?: string; database_url_file?: string;
     router_config_file: string; clients: { id: string; token_file: string; agent_ids: string[] }[];
-    definitions: AgentDefinition[]; allowed_router_endpoints: string[]; concurrency?: number;
+    definitions: AgentDefinition[]; allowed_router_endpoints: string[]; router_allowed_addresses?: string[]; concurrency?: number;
   }
   if (!Number.isInteger(config.port) || config.port < 1024 || config.port > 65535 || !config.host
     || Boolean(config.database_file) === Boolean(config.database_url_file)) throw new Error('Invalid provider configuration')
@@ -23,6 +24,7 @@ async function main() {
   const router = routerConfig.auth_modes?.proxy?.sudorouter
   if (!router?.baseUrl || !router?.apiKey || !config.allowed_router_endpoints.includes(router.baseUrl)
     || config.definitions.some(d => d.router_endpoint !== router.baseUrl)) throw new Error('SudoRouter configuration does not match deployment allowlist')
+  const modelRequest = routerTransport(router.baseUrl, { allowedAddresses: config.router_allowed_addresses })
   const artifactDigest = `sha256:${createHash('sha256').update(await readFile(import.meta.filename)).digest('hex')}`
   const agents = config.definitions.map(d => immutableAgent(d, artifactDigest, config.allowed_router_endpoints))
   let db: DbDriver
@@ -38,7 +40,7 @@ async function main() {
     db = new SqliteDriver(sqlite)
   }
   const store = new AgentRunStore(db); await store.ready
-  const runtime = new HttpAgentRuntime(store, agents, routerExecutor(router.apiKey), config.concurrency ?? 4)
+  const runtime = new HttpAgentRuntime(store, agents, routerExecutor(router.apiKey, modelRequest), config.concurrency ?? 4)
   const clients = await Promise.all(config.clients.map(async c => ({ id: c.id, token: (await readFile(c.token_file, 'utf8')).trim(), agentIds: c.agent_ids })))
   const server = providerServer(runtime, clients)
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve) })

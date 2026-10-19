@@ -18,6 +18,18 @@ Copy `compose.yaml` and `provider.example.json` to a deployment directory; renam
 
 The private test endpoint is port 8093. A production deployment needs its own TLS ingress and network policy. The process has no tool runtime; its only model endpoint is the configured SudoRouter allowlist. This is not a general DLP or downstream model compliance guarantee.
 
+### Model request network boundary
+
+The provider's default executor uses a native HTTP transport bound to its configured Router `/chat/completions` URL. It does not use environment proxies, reuse connections or follow redirects. HTTPS verifies the certificate chain and original hostname with TLS 1.2 or later. Each model request resolves the hostname again, checks **all** returned addresses, and pins the actual connection to one checked address without a second OS lookup.
+
+Without `router_allowed_addresses`, DNS names require HTTPS and public unicast IPs. A private HTTPS Router requires an operator-reviewed exact-IP list in `provider.json`, for example `"router_allowed_addresses": ["10.0.1.158"]`; this list applies to the one Router endpoint whose credentials and definitions were already matched at startup. An optional list also pins a public Router to specific addresses. CIDRs, hostnames, empty lists, metadata/link-local, multicast and IPv4-mapped/translation addresses are rejected. Every DNS answer must match the list. Changes to DNS outside it fail closed until the operator reviews the deployment policy. Invocation input cannot change these pins.
+
+Explicit literal-IP HTTP endpoints remain supported for the existing synthetic LAN test profile, without a TLS claim. They cannot target metadata/link-local, unspecified or multicast ranges. This does not expand Moss's existing fixed-IP `/v1` registration policy or enable Internal data. TLS/domain support described here is for **Provider → Router**, not a new Moss → Dify endpoint profile.
+
+DNS/policy refusal before HTTP dispatch persists `MODEL_EGRESS_DENIED` or `MODEL_EGRESS_UNAVAILABLE` as a failed run. Repeating the invocation returns that same run without retrying. A redirect or transport interruption after the POST may have reached the Router stays unknown; no automatic follow-up request is made. Errors omit upstream response bodies, credentials and raw DNS/TLS diagnostics. Response size remains bounded at 2 MiB.
+
+This is the network part of G04. Nexus content classification/redaction, invocation-bound delegation, durable policy/audit evidence and G03 network enforcement against a compromised provider are still pending. Do not interpret these network checks as completed content governance or bypass prevention. Current data admission remains synthetic-only.
+
 ## Register and use
 
 Retrieve the authenticated `GET /v1/agents/review-assistant/manifest`. In Moss, open 智能体管理 → 专属智能体 → 外部托管 → 接入外部智能体, select Custom HTTP, upload that manifest, use the `/v1` endpoint and the **client token**, authorize users, then test and approve. The SudoRouter model key remains only at the provider.
