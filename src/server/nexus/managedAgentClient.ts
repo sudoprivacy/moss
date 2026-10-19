@@ -208,6 +208,7 @@ export class ManagedAgentClient {
         if (snapshot.session_id !== record.pid || snapshot.agent_id !== input.agentId || snapshot.owner_id !== input.ownerId) {
           throw new Error('Managed execution does not belong to the requested owner and agent')
         }
+        if (snapshot.state === 'terminated') return undefined
         return !input.durableSessionId || snapshot.durable_session_id === input.durableSessionId ? snapshot : undefined
       } catch (error) {
         if (isUnknownManagedSession(error, record.pid)) return undefined
