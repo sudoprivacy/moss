@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
+  'scripts/contracts/registry-source.test.mjs',
   'scripts/e2e/workspace-proof.test.mjs',
   'scripts/e2e/fetch-nexus-runtime.test.mjs',
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',
@@ -21,6 +22,8 @@ const nodeTestFiles = [
   'src/server/agentFederation/agentFederation.node-test.ts',
   'src/server/agentFederation/provider/provider.node-test.ts',
   'src/server/agentFederation/releases.node-test.ts',
+  'src/server/agentFederation/registryClient.node-test.ts',
+  'src/server/agentFederation/registryReleases.node-test.ts',
   'src/server/agentFederation/taskPersistence.node-test.ts',
   'src/server/agentFederation/taskMigrationCli.node-test.ts',
   'src/server/agentFederation/taskIngress.node-test.ts',
@@ -213,6 +216,7 @@ function collectNodeTests(directory) {
 const discovered = [
   ...collectNodeTests(join(repoRoot, 'src', 'server')),
   ...collectNodeTests(join(repoRoot, 'scripts', 'e2e')),
+  ...collectNodeTests(join(repoRoot, 'scripts', 'contracts')),
 ].sort()
 const listed = [...nodeTestFiles].sort()
 const unlisted = discovered.filter(file => !listed.includes(file))
@@ -227,7 +231,7 @@ const selectors = process.argv.slice(2).map(value => value.replaceAll('\\', '/')
 const selected = selectors.length === 0
   ? nodeTestFiles
   : nodeTestFiles.filter(file => selectors.some((selector) => {
-      const prefix = selector.startsWith('src/server/') || selector.startsWith('scripts/e2e/') ? selector : `src/server/${selector}`
+      const prefix = selector.startsWith('src/server/') || selector.startsWith('scripts/') ? selector : `src/server/${selector}`
       return file === prefix || file.startsWith(`${prefix}/`) || file.split('/').includes(selector)
     }))
 

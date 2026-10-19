@@ -72,8 +72,8 @@ export async function admitExternalTask(store: ExternalTaskStore, actor: Externa
     if (input.constraints.max_cost_units !== undefined) deny('BUDGET_ENFORCEMENT_UNAVAILABLE', '此平台尚不支持可验证的费用预算限制。')
     if (input.constraints.max_attempts !== undefined && input.constraints.max_attempts !== 1) deny('RETRY_UNSUPPORTED', '此接入只允许一次执行，不会自动重试外部任务。')
     if (input.output_contract && Object.keys(input.output_contract).length) deny('OUTPUT_VERIFICATION_UNAVAILABLE', '此接入尚未实现输出契约验证。')
-    const principal = catalogPrincipal(input.agent.catalog_id)
-    const snapshot = { profile: 'external-query-only/v1', organization: actor.orgId, policy, binding_revision: binding?.revision ?? null, source_digest: binding?.source_digest ?? null, release_digest: release?.manifest.spec_digest ?? null, version: release?.manifest.version ?? null, channel: release?.channel ?? null, source_identity_evidence: 'unverified', claimed_app_id: binding?.app_id ?? null, claimed_workspace_id: binding?.workspace_id ?? null }
+    const principal = release?.manifest.principal ?? catalogPrincipal(input.agent.catalog_id)
+    const snapshot = { registry: release?.manifest.registry ?? null, profile: 'external-query-only/v1', organization: actor.orgId, policy, binding_revision: binding?.revision ?? null, source_digest: binding?.source_digest ?? null, release_digest: release?.manifest.spec_digest ?? null, version: release?.manifest.version ?? null, channel: release?.channel ?? null, source_identity_evidence: 'unverified', claimed_app_id: binding?.app_id ?? null, claimed_workspace_id: binding?.workspace_id ?? null }
     const policyVersion = `${snapshot.profile}:revision-${policy.revision}`
     // An unresolved selector is preserved as a rejected task without inventing source or provider facts.
     const selected: Binding = binding ?? { id: input.agent.catalog_id, orgId: actor.orgId, name: input.agent.catalog_id, source_digest: 'unresolved', revision: 1 } as Binding
@@ -92,6 +92,7 @@ export async function admitExternalTask(store: ExternalTaskStore, actor: Externa
             principal, version: release?.manifest.version ?? snapshotVersion(selected.source_digest), source_digest: selected.source_digest,
             version_evidence: selected.sourceManifest?.execution_revision ? 'provider_revision_fenced' : 'source_snapshot_only',
             ...(release ? { release_digest: release.manifest.spec_digest } : {}),
+            ...(release?.manifest.registry ? { registry: release.manifest.registry } : {}),
             ...(release?.channel ? { resolved_from_channel: release.channel.name, channel_revision: release.channel.revision } : {}),
             ...(selected.sourceManifest?.execution_revision ? { execution_revision: selected.sourceManifest.execution_revision } : {}),
             source_identity_evidence: 'unverified', claimed_app_id: selected.app_id, claimed_workspace_id: selected.workspace_id,

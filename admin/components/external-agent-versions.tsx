@@ -1,3 +1,4 @@
+import { ExternalAgentRegistryStatus } from './external-agent-registry-status'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -43,8 +44,9 @@ export function ExternalAgentVersions({ agent, onClose }: { agent: ExternalAgent
     <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
       <DialogHeader>
         <DialogTitle>{agent.name} · 版本与频道</DialogTitle>
-        <DialogDescription>发布固定来源版本，再将 stable 或 canary 指向该版本。频道切换和回滚只影响新任务，已有任务保持原版本。</DialogDescription>
+        <DialogDescription>发布固定来源版本，再将 stable 或 canary 指向该版本。新会话默认使用当前频道；已有会话保持首次使用的版本，切换版本需新建会话。</DialogDescription>
       </DialogHeader>
+      <ExternalAgentRegistryStatus agentId={agent.id} onMigrated={() => { void run(() => reload(), '迁移已完成，版本目录已刷新。') }} />
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       {notice && <p role="status" className="text-sm">{notice}</p>}
       {!page ? error ? <Button variant="outline" disabled={isBusy} onClick={() => void run(() => reload(), '', false)}>重新加载</Button> : <p role="status" className="text-sm text-muted-foreground">正在加载版本…</p> : <>
@@ -72,8 +74,13 @@ export function ExternalAgentVersions({ agent, onClose }: { agent: ExternalAgent
             const revoked = version.decisions.some(d => d.decision === 'revoked')
             const approved = !revoked && version.decisions.some(d => d.decision === 'approved' && d.expires_at > Date.now())
             return <article key={version.version} className="space-y-2 rounded-md border p-3">
-              <div className="flex flex-wrap items-center gap-2"><strong className="break-all text-sm">{version.version}</strong><Badge variant="outline">{revoked ? '已撤销' : approved ? '已批准' : '审批已过期'}</Badge><Badge variant="secondary">{version.snapshot.sourceManifest?.execution_revision ? '执行版本锁定' : '来源快照'}</Badge></div>
+              <div className="flex flex-wrap items-center gap-2"><strong className="break-all text-sm">{version.version}</strong><Badge variant="outline">{revoked ? '已撤销' : version.decisions[0]?.decision === 'withdrawn' ? '已撤回批准' : approved ? '已批准' : '未批准或已过期'}</Badge><Badge variant="secondary">{version.snapshot.sourceManifest?.execution_revision ? '执行版本锁定' : '来源快照'}</Badge></div>
               <p className="break-all text-xs text-muted-foreground">来源：{version.snapshot.source_digest}</p>
+              {version.registry && <div className="space-y-1 text-xs text-muted-foreground">
+                <Badge variant="outline">Nexus 登记签名已验证</Badge>
+                <p className="break-all">登记摘要：{version.registry.registration_digest}</p>
+                <p>登记签名证明版本登记信息；远端执行版本保证仍取决于 Provider。</p>
+              </div>}
               <p className="text-xs text-muted-foreground">发布于 {new Date(version.created_at).toLocaleString()} · {version.created_by}</p>
               {!version.snapshot.sourceManifest?.execution_revision && <p className="text-xs text-muted-foreground">此来源未提供远端不可变执行保证；运行前仍需核对来源。</p>}
               <div className="flex flex-wrap gap-2">

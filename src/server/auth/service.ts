@@ -1,3 +1,4 @@
+import { registryFromEnvironment } from '../agentFederation/registryConfiguration.js'
 import { ExternalProviderService } from '../externalProviders/service.js'
 import { ExternalTaskStore } from '../externalProviders/store.js'
 import { pilotPolicyFromEnvironment } from '../externalProviders/policy.js'
@@ -696,6 +697,9 @@ export class AuthService {
     return new ExternalProviderService(new ExternalTaskStore(this.db.driver), {
       catalog: new CatalogRepository(this.db.driver), identities: this.identityRepository, secrets,
       policy: pilotPolicyFromEnvironment(),
+      registry: registryFromEnvironment(),
+      registryMaintenance: process.env.MOSS_AGENT_REGISTRY_MAINTENANCE === '1',
+      registryBackupDirectory: process.env.MOSS_AGENT_REGISTRY_BACKUP_DIR,
       members: async orgId => (await this.db.listUsersByOrg(orgId)).filter(user => user.status === 'active').map(user => ({ id: user.id, name: user.displayName || user.name || user.email })),
       membersPage: (orgId, after, search, limit) => this.db.externalMembersPage(orgId, after, search, limit),
       isActorActive: async actor => {

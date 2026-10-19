@@ -17,6 +17,7 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
     if (!service) throw new ExternalProviderError(503, 'EXTERNAL_PROVIDER_UNAVAILABLE')
     await service.authorize(actor)
     const path = url.pathname, base = '/api/v1'
+    if (service.isRegistryMaintenance && method === 'POST' && !path.endsWith('/registry-migrate')) throw new ExternalProviderError(503, 'REGISTRY_MAINTENANCE_REQUIRED')
     const after = url.searchParams.get('after') ?? ''
     if (after.length > 200 || (after && !/^[\w.-]+$/.test(after))) throw new ExternalProviderError(400, 'INVALID_CURSOR')
     let data: unknown, status = 200
@@ -36,12 +37,21 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
         data = await service.store.reconcileUnknown(actor, input.task_id, input.note.trim())
       }
       else if (action === 'inspect' && method === 'POST') data = await admin.inspect(actor, body)
-      else if (action === 'onboard' && method === 'POST') { data = await admin.onboard(actor, body); status = 201 }
+      else if (action === 'onboard' && method === 'POST') { data = await service.onboard(actor, body); status = 201 }
       else {
-        const release = /^([\w-]+)\/(versions|channels|revoke-version)$/.exec(action)
+        const release = /^([\w-]+)\/(versions|channels|revoke-version|registry-status|registry-plan|registry-migrate)$/.exec(action)
         if (release) {
           await service.store.binding(actor, release[1])
-          if (release[2] === 'versions' && method === 'GET') data = await service.releases.list(actor, release[1], after)
+          if (release[2] === 'registry-status' && method === 'GET') data = await service.registryMigration.status(actor, release[1])
+          else if (release[2] === 'registry-plan' && method === 'GET') {
+            const plan = await service.registryMigration.plan(actor, release[1])
+            data = { plan_digest: plan.plan_digest, version_count: plan.source.items.length, active_tasks: plan.active_tasks, principal: plan.source.principal }
+          } else if (release[2] === 'registry-migrate' && method === 'POST') {
+            const input = body as { plan_digest?: unknown; old_writers_stopped?: unknown }
+            if (!input || typeof input.plan_digest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(input.plan_digest) || input.old_writers_stopped !== true
+              || Object.keys(input).some(key => !['plan_digest', 'old_writers_stopped'].includes(key))) throw new ExternalProviderError(400, 'INVALID_REGISTRY_MIGRATION')
+            data = await service.registryMigration.apply(actor, release[1], { plan_digest: input.plan_digest, old_writers_stopped: true })
+          } else if (release[2] === 'versions' && method === 'GET') data = await service.releases.list(actor, release[1], after)
           else if (release[2] === 'versions' && method === 'POST') { data = await service.publishVersion(actor, release[1], body); status = 201 }
           else if (release[2] === 'channels' && method === 'POST') {
             const input = body as { name?: unknown; version?: unknown; revision?: unknown }

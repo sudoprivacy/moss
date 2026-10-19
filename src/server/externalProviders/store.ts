@@ -20,7 +20,7 @@ export interface TaskAdmission {
 }
 
 export interface ExternalActor { orgId: string; userId: string }
-export interface Binding extends RegisterExternalAgent { sourceManifest?: import('../../../contracts/agent-federation/v1alpha1/contract.js').CustomAgentManifest; id: string; orgId: string; connectionId: string; approved: boolean; parametersDigest: string | null; reviewedBy: string | null; reviewedAt?: number | null; revision?: number; definitionProfileVersion?: number; archived?: boolean; credentialUpdating?: boolean; credentialVersion?: number; credentialRecoveryRequired?: boolean; credentialOperationId?: string; registrationMode?: 'onboarding' | 'reference_compat' }
+export interface Binding extends RegisterExternalAgent { registryRequired?: boolean; sourceManifest?: import('../../../contracts/agent-federation/v1alpha1/contract.js').CustomAgentManifest; id: string; orgId: string; connectionId: string; approved: boolean; parametersDigest: string | null; reviewedBy: string | null; reviewedAt?: number | null; revision?: number; definitionProfileVersion?: number; archived?: boolean; credentialUpdating?: boolean; credentialVersion?: number; credentialRecoveryRequired?: boolean; credentialOperationId?: string; registrationMode?: 'onboarding' | 'reference_compat' }
 type Checkpoint = ExternalTask & { _checkpoint_sequence?: number }
 type TaskRow = SqlRow & { document: string; sequence: number; request_hash: string }
 type SessionRow = SqlRow & { id: string; agent_id: string; agent_name: string; title: string; active_task_id: string | null; conversation_id: string | null; created_at: number; updated_at: number }
@@ -166,10 +166,12 @@ export class ExternalTaskStore {
     const row = await this.db.get('SELECT document, policy_snapshot FROM product_task_records WHERE task_id = ? AND org_id = ? AND user_id = ?', [taskId, actor.orgId, actor.userId])
     if (!row) return null
     const record = parseTaskRecord(JSON.parse(String(row.document))), resolution = record.resolution
+    const policySnapshot = JSON.parse(String(row.policy_snapshot))
     if (record.spec.task_id !== task.id || record.spec.session_id !== task.session_id || record.spec.requested_by.subject_id !== actor.userId
-      || resolution.policy_snapshot_digest !== digest(canonicalTaskJson(JSON.parse(String(row.policy_snapshot))))
+      || resolution.policy_snapshot_digest !== digest(canonicalTaskJson(policySnapshot))
       || (resolution.status === 'accepted' && (resolution.attempt_id !== task.attempt_id || resolution.governance_org_id !== actor.orgId
-        || resolution.binding_id !== task.agent_id || resolution.agent.source_digest !== task.source_digest))) throw new ExternalProviderError(500, 'TASK_RECORD_MISMATCH')
+        || resolution.binding_id !== task.agent_id || resolution.agent.source_digest !== task.source_digest
+        || canonicalTaskJson(resolution.agent.registry ?? null) !== canonicalTaskJson(policySnapshot.registry ?? null)))) throw new ExternalProviderError(500, 'TASK_RECORD_MISMATCH')
     return record
   }
 

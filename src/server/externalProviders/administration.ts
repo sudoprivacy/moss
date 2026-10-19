@@ -1,3 +1,4 @@
+import type { ProductRegistryClient } from '../agentFederation/registryClient.js'
 import { describeExternalAgent } from './description.js'
 import { randomUUID } from 'node:crypto'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
@@ -26,6 +27,9 @@ export interface AdministrationOptions {
   membersPage?: (orgId: string, after: string, search: string, limit: number) => Promise<ExternalProviderMember[]>
   transport?: DifyPilotTransport
   httpRequest?: ProviderRequest
+  registry?: ProductRegistryClient
+  registryMaintenance?: boolean
+  registryBackupDirectory?: string
 }
 const fail = (code: string, status = 400): never => { throw new ExternalProviderError(status, code) }
 export function object(value: unknown, keys: string[]): Record<string, unknown> {
@@ -117,7 +121,7 @@ export class ExternalProviderAdministration {
     const { review_expires_at: _expiry, credential_ref: _ref, ...stableDefinition } = definition
     const credentialFingerprint = digest(JSON.stringify([actor.orgId, requestId, apiKey]))
     const hash = digest(JSON.stringify({ ...stableDefinition, review_days: body.review_days, credentialFingerprint }))
-    const binding: Binding = { ...definition, ...source, id, orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'onboarding' }
+    const binding: Binding = { ...definition, ...source, ...(this.options.registry ? { registryRequired: true } : {}), id, orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'onboarding' }
     const operation: CredentialOperation = { id: operationId, actor, kind: 'onboard', binding, targetRef: credential_ref }
     if (!await this.operations.reserve(operation, requestId, hash)) {
       const existing = await this.store.db.get('SELECT * FROM external_pilot_operations WHERE org_id = ? AND kind = ? AND request_id = ?', [actor.orgId, 'onboard', requestId])

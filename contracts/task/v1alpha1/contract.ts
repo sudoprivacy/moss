@@ -47,7 +47,7 @@ export type TaskExecutionResolution = ResolutionBase & (
     resolved_runtime: 'external_provider'
     resolution_mode: 'default'
     governance_org_id: string
-    agent: { principal: AgentPrincipalRef; version: string; source_digest: string; version_evidence: 'source_snapshot_only' | 'provider_revision_fenced'; release_digest?: string; execution_revision?: string; resolved_from_channel?: string; channel_revision?: number; source_identity_evidence?: 'unverified'; claimed_app_id?: string; claimed_workspace_id?: string }
+    agent: { principal: AgentPrincipalRef; version: string; source_digest: string; version_evidence: 'source_snapshot_only' | 'provider_revision_fenced'; registry?: { authority: 'nexus_registry'; principal: AgentPrincipalRef; registration_digest: string; signing_key_id: string; evidence: 'signed_registration_only' }; release_digest?: string; execution_revision?: string; resolved_from_channel?: string; channel_revision?: number; source_identity_evidence?: 'unverified'; claimed_app_id?: string; claimed_workspace_id?: string }
     binding_id: string
     configuration_revision: number
     provider_kind: 'dify' | 'custom_http'

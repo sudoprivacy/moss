@@ -73,6 +73,14 @@ export interface ExternalTaskEvidence {
     channel_revision?: number
     execution_revision?: string
     version_evidence: 'source_snapshot_only' | 'provider_revision_fenced'
+    /** Registration provenance, separate from remote execution guarantees. */
+    registry?: {
+      authority: 'nexus_registry'
+      principal: { trust_domain: string; agent_name: string }
+      registration_digest: string
+      signing_key_id: string
+      evidence: 'signed_registration_only'
+    }
   }
   execution?: {
     provider_run_id: string

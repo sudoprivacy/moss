@@ -22,6 +22,20 @@ export type {
   OnboardExternalAgent,
 } from '../../../contracts/external-provider/v1/contract'
 
+export interface RegistryStatus {
+  authority: 'nexus_registry' | 'moss_legacy'
+  state: 'legacy' | 'preparing' | 'active'
+  configured: boolean
+  maintenance: boolean
+  principal: { trust_domain: string; agent_name: string } | null
+}
+export interface RegistryMigrationPlan {
+  plan_digest: string
+  version_count: number
+  active_tasks: number
+  principal: { trust_domain: string; agent_name: string }
+}
+
 interface ExternalHttpClient {
   get<T>(path: string, options?: Partial<RequestInit>): Promise<T>
   post<T>(path: string, body?: unknown, options?: Partial<RequestInit>): Promise<T>
@@ -49,6 +63,9 @@ export function createExternalAgentsApi(
   const base = '/api/v1/external-agents'
   const agentPath = (id: string, action: string) => `${base}/admin/${encodeURIComponent(id)}/${action}`
   return {
+    registryStatus: (id: string) => get<RegistryStatus>(agentPath(id, 'registry-status')),
+    registryPlan: (id: string) => get<RegistryMigrationPlan>(agentPath(id, 'registry-plan')),
+    migrateRegistry: (id: string, planDigest: string) => post<{ state: string; plan_digest: string }>(agentPath(id, 'registry-migrate'), { plan_digest: planDigest, old_writers_stopped: true }),
     access: () => get<ExternalProviderAccess>(`${base}/access`),
     list: () => get<ExternalAgentAdmin[]>(`${base}/admin/agents`),
     listPage: (after = '') => get<{ items: ExternalAgentAdmin[]; next_cursor: string | null }>(`${base}/admin/agents?paged=1&after=${encodeURIComponent(after)}`),

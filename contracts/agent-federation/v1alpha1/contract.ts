@@ -104,6 +104,13 @@ export interface AgentExecutionSnapshot {
   decoder: 'text' | 'reply_actions_v1'
   definitionProfileVersion?: number
 }
+export interface AgentRegistryEvidence {
+  authority: 'nexus_registry'
+  principal: { trust_domain: string; agent_name: string }
+  registration_digest: string
+  signing_key_id: string
+  evidence: 'signed_registration_only'
+}
 export interface AgentVersionManifest {
   api_version: typeof AGENT_FEDERATION_API
   kind: 'AgentVersionManifest'
@@ -111,6 +118,7 @@ export interface AgentVersionManifest {
   version: string
   spec_digest: string
   snapshot: AgentExecutionSnapshot
+  registry?: AgentRegistryEvidence
   created_by: string
   created_at: number
 }
@@ -123,7 +131,7 @@ export interface AgentChannel {
 }
 export interface AgentVersionDecision {
   id: string
-  decision: 'approved' | 'revoked'
+  decision: 'approved' | 'withdrawn' | 'revoked'
   actor_id: string
   note: string
   expires_at: number
@@ -150,6 +158,7 @@ export interface AgentReleaseOptions {
     spec_digest: string
     execution_revision?: string
     approval_expires_at: number
+    registry?: AgentRegistryEvidence
   }[]
   channels: AgentChannel[]
   next_cursor: string | null
