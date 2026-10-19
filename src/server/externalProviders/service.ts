@@ -66,7 +66,7 @@ export class ExternalProviderService {
   }
 
   async authorize(actor: ExternalActor): Promise<void> {
-    if (!await this.options.isActive(actor)) throw new ExternalProviderError(401, 'USER_NOT_ACTIVE')
+    if (!await this.options.isActorActive(actor)) throw new ExternalProviderError(401, 'USER_NOT_ACTIVE')
   }
 
   async register(actor: ExternalActor, input: unknown): Promise<ExternalAgent> {
@@ -78,7 +78,11 @@ export class ExternalProviderService {
     const sourceDigest = source.source_digest
     if (registration.source_digest !== sourceDigest) throw new ExternalProviderError(400, 'DEFINITION_DIGEST_MISMATCH')
     const definition = parseRegistration(registration, actor.orgId, await this.administration.effectivePolicy(actor))
-    for (const userId of definition.allowed_user_ids) await this.authorize({ orgId: actor.orgId, userId })
+    for (const userId of definition.allowed_user_ids) {
+      if (!await this.options.isMemberActive({ orgId: actor.orgId, userId })) {
+        throw new ExternalProviderError(400, 'INVALID_MEMBER')
+      }
+    }
     const binding: Binding = { ...definition, ...source, id: randomUUID(), orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'reference_compat' }
     await this.store.ready
     const requestHash = digest(JSON.stringify(definition, Object.keys(definition).sort()))

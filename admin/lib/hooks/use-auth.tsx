@@ -1,9 +1,9 @@
 'use client'
 
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import { getMe, login as apiLogin, loginWithApiKey, logout as apiLogout, isAuthenticated, switchOrg } from '@/lib/api/auth'
-import { UNAUTHORIZED_EVENT, removeToken, getPreferredOrgId, setPreferredOrgId } from '@/lib/api/client'
-import type { AuthUser } from '@/lib/api/types'
+import { getMe, login as apiLogin, loginWithApiKey, logout as apiLogout, isAuthenticated as hasStoredSession, switchOrg } from '@/lib/api/auth'
+import { AUTH_REFRESHED_EVENT, UNAUTHORIZED_EVENT, getPreferredOrgId } from '@/lib/api/client'
+import type { AuthUser, LoginResponse } from '@/lib/api/types'
 
 interface AuthContextType {
   user: AuthUser | null
@@ -13,7 +13,9 @@ interface AuthContextType {
    *  the actor's home org). For everyone else it equals user.orgId. */
   activeOrgId: string | null
   isLoading: boolean
+  authError: string | null
   isAuthenticated: boolean
+  retryAuth: () => Promise<void>
   login: (username: string, password: string) => Promise<void>
   loginWithKey: (apiKey: string) => Promise<void>
   logout: () => Promise<void>
@@ -26,9 +28,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [scopes, setScopes] = useState<string[]>([])
   const [activeOrgId, setActiveOrgId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [authError, setAuthError] = useState<string | null>(null)
 
   const checkAuth = useCallback(async () => {
-    if (!isAuthenticated()) {
+    setAuthError(null)
+    if (!hasStoredSession()) {
       setUser(null)
       setScopes([])
       setActiveOrgId(null)
@@ -52,6 +56,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           await switchOrg(preferred)
           response = await getMe()
         } catch {
+          if (!hasStoredSession()) throw new Error('Session was rejected while restoring organization')
           // Preferred org no longer exists/accessible — fall back to current.
         }
       }
@@ -59,10 +64,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setScopes(response.scopes)
       setActiveOrgId(response.organization?.id ?? response.user?.orgId ?? null)
     } catch {
-      removeToken()
-      setUser(null)
-      setScopes([])
-      setActiveOrgId(null)
+      if (!hasStoredSession()) {
+        setUser(null)
+        setScopes([])
+        setActiveOrgId(null)
+      } else {
+        setAuthError('暂时无法验证登录状态，请检查网络或服务状态后重试。')
+      }
     } finally {
       setIsLoading(false)
     }
@@ -76,11 +84,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const handleUnauthorized = () => {
       setUser(null)
       setScopes([])
+      setActiveOrgId(null)
+      setAuthError(null)
       setIsLoading(false)
     }
 
+    const handleAuthRefreshed = (event: Event) => {
+      const detail = (event as CustomEvent<LoginResponse>).detail
+      if (!detail?.user) return
+      setUser(detail.user)
+      setScopes(detail.scopes ?? [])
+      setActiveOrgId(detail.organization?.id ?? detail.user.orgId ?? null)
+      setAuthError(null)
+    }
+
     window.addEventListener(UNAUTHORIZED_EVENT, handleUnauthorized)
-    return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized)
+    window.addEventListener(AUTH_REFRESHED_EVENT, handleAuthRefreshed)
+    return () => {
+      window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized)
+      window.removeEventListener(AUTH_REFRESHED_EVENT, handleAuthRefreshed)
+    }
   }, [])
 
   const login = async (username: string, password: string) => {
@@ -108,7 +131,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         scopes,
         activeOrgId,
         isLoading,
-        isAuthenticated: !!user,
+        authError,
+        isAuthenticated: Boolean(user) || hasStoredSession(),
+        retryAuth: checkAuth,
         login,
         loginWithKey,
         logout,

@@ -68,6 +68,7 @@ const nodeTestFiles = [
   'src/server/api/cron.node-test.ts',
   'src/server/api/eventTriggers.node-test.ts',
   'src/server/api/mcpAdmin.node-test.ts',
+  'src/server/auth/externalProviderAuthorization.node-test.ts',
   'src/server/auth/tokenLimitInput.node-test.ts',
   'src/server/auth/sudorouterCredentials.node-test.ts',
   'src/server/auth/localExecution.node-test.ts',

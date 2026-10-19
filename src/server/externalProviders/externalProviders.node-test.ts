@@ -156,7 +156,7 @@ async function setup(options: { events?: unknown[]; status?: number; parameters?
     return new Response(frames(options.events ?? successful()), { status: options.status ?? 200, headers: { 'Content-Type': 'text/event-stream' } })
   }) as typeof fetch)
   const store = new ExternalTaskStore(driver)
-  const service = new ExternalProviderService(store, { catalog, identities, policy, transport, isActive: async () => true, secrets: { getSecret: async (namespace, key, subject) => {
+  const service = new ExternalProviderService(store, { catalog, identities, policy, transport, isActorActive: async () => true, isMemberActive: async () => true, secrets: { getSecret: async (namespace, key, subject) => {
     assert.equal(namespace, 'org:org-a:system:dify'); assert.equal(key, 'app-key'); assert.equal(subject, 'org:org-a')
     return { value: 'private-app-key', status: 'enabled', version: 1 }
   } } })
@@ -311,7 +311,7 @@ void test('transport abort deadline marks unknown without pretending remote canc
     if (String(url).endsWith('/parameters')) return Response.json({ user_input_form: [], file_upload: { enabled: false } })
     return new Response(new ReadableStream({ start(controller) { init?.signal?.addEventListener('abort', () => controller.error(new Error('aborted'))) } }), { headers: { 'content-type': 'text/event-stream' } })
   }) as typeof fetch)
-  const service = new ExternalProviderService(f.store, { catalog: f.catalog, identities: f.identities, policy: { ...policy, timeoutMs: 200 }, transport, isActive: async () => true, secrets: { getSecret: async () => ({ value: 'private-app-key', status: 'enabled', version: 1 }) } })
+  const service = new ExternalProviderService(f.store, { catalog: f.catalog, identities: f.identities, policy: { ...policy, timeoutMs: 200 }, transport, isActorActive: async () => true, isMemberActive: async () => true, secrets: { getSecret: async () => ({ value: 'private-app-key', status: 'enabled', version: 1 }) } })
   cleanups.unshift(async () => service.close())
   const task = await service.create(actor, syntheticTaskSubmission({ ...f.request(), agent_id: binding.id })); await service.waitForTask(task.id)
   const final = await f.store.task(actor, task.id)
@@ -358,7 +358,8 @@ async function administrationSetup() {
     return new Response(frames(successful()), { headers: { 'Content-Type': 'text/event-stream' } })
   }) as typeof fetch)
   const store = new ExternalTaskStore(driver)
-  const service = new ExternalProviderService(store, { catalog, identities, secrets, transport, policy: { ...policy, orgIds: [], endpoints: [] }, isActive: async member => member.orgId === actor.orgId && ['u', 'v'].includes(member.userId), members: async () => [{ id: 'u', name: 'User' }, { id: 'v', name: 'Other' }] })
+  const isActive = async (member: typeof actor) => member.orgId === actor.orgId && ['u', 'v'].includes(member.userId)
+  const service = new ExternalProviderService(store, { catalog, identities, secrets, transport, policy: { ...policy, orgIds: [], endpoints: [] }, isActorActive: isActive, isMemberActive: isActive, members: async () => [{ id: 'u', name: 'User' }, { id: 'v', name: 'Other' }] })
   cleanups.push(async () => { await service.close(); await driver.close() })
   const admin = service.administration
   const body = () => ({ request_id: randomUUID(), name: 'Pilot', endpoint: policy.endpoints[0], api_key: 'private-ui-key', app_id: 'app-1', workspace_id: 'workspace-1', source_definition: JSON.stringify(queryOnlyDefinition()), decoder: 'reply_actions_v1', allowed_user_ids: ['u'], review_days: 7, review_note: 'Synthetic reviewed definition' })
@@ -520,7 +521,7 @@ void test('the same onboarding UUID can complete independently in two organizati
   const f = await administrationSetup(); await f.enable()
   const other = { orgId: 'org-b', userId: 'u' }
   await new AuthCenterDb(f.db).createOrganization(other.orgId, 'Second', Date.now())
-  const second = new ExternalProviderService(f.store, { catalog: f.catalog, identities: f.identities, secrets: f.secrets, transport: f.transport, policy: { ...policy, orgIds: ['org-b'] }, isActive: async () => true })
+  const second = new ExternalProviderService(f.store, { catalog: f.catalog, identities: f.identities, secrets: f.secrets, transport: f.transport, policy: { ...policy, orgIds: ['org-b'] }, isActorActive: async () => true, isMemberActive: async () => true })
   cleanups.unshift(() => second.close())
   const input = f.body()
   const a = await f.admin.onboard(actor, input), b = await second.administration.onboard(other, input)
@@ -542,7 +543,7 @@ void test('expired rotation recovers an immutable written Secret as an unapprove
   const operation = JSON.parse(String(row!.document))
   f.values.set(operation.targetRef.slice(8), 'replacement-key')
   await f.driver.run('UPDATE external_pilot_operations SET lease_until = 0 WHERE id = ?', [operation.id])
-  const restarted = new CredentialOperations(new ExternalTaskStore(f.driver), { catalog: f.catalog, identities: f.identities, secrets: f.secrets, policy, isActive: async () => true })
+  const restarted = new CredentialOperations(new ExternalTaskStore(f.driver), { catalog: f.catalog, identities: f.identities, secrets: f.secrets, policy, isActorActive: async () => true, isMemberActive: async () => true })
   await restarted.reconcile()
   const recovered = await f.store.binding(actor, agent.id)
   assert.equal(recovered.approved, false); assert.equal(recovered.credentialUpdating, false)
