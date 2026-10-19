@@ -4,7 +4,7 @@
   "nexus-vault": "0.5.68",
   "scode": "v0.2.34",
   "scode-linux-x64-bundle-sha256": "153a38dc599a7a491d4167ff452ec0490744b8274f4dc66e333e2d02d859ecf7",
-  "scode-linux-arm64-sha256": "4b06fc7403ec3fb82f00ecd63bd27a17dab49f5af088b5bec6b27f072e500fd2",
+  "scode-linux-arm64-sha256": "1a930bf3ad322160edc8996a1648be274a11cbc54e51800c2aa2f4f7ace7d21d",
   "artifact-sha256": {
     "nexusd-cohost-linux-arm64.tar.gz": "0736924d4f1c49c8c44447cc6ce9d128e87d497cda1eb4295b2dba9e203ba336",
     "nexusd-cohost-linux-x64.tar.gz": "e9abf3ccb61fc3949995d175b2497d8c4116c854ec68e41f2ca920fe854cf3e5",
