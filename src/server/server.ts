@@ -6636,6 +6636,28 @@ export function startServer(
         return
       }
 
+      // Withdraw a pending 群发 task by msgid. The queue's cancel/reap can only
+      // withdraw a task whose entry still holds its msgid; this is the way out
+      // for a task the queue lost track of (msgid never recorded, or a reap
+      // whose withdrawal failed and left the entry already cancelled).
+      const agentCorpAppCancelMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/group-messages\/([^/]+)\/cancel$/)
+      if (req.method === 'POST' && agentCorpAppCancelMatch) {
+        const row = await resolveAgentCorpAppRow(agentCorpAppCancelMatch[1] || '')
+        if (!row) return
+        const msgId = decodeURIComponent(agentCorpAppCancelMatch[2] || '')
+        try {
+          const connector = await initCorpAppConnector(row)
+          if (!connector.cancelGroupMsgSend) {
+            writeJson(res, 501, { error: { code: 'unsupported', message: 'this corp app type cannot cancel group messages' } })
+            return
+          }
+          writeJson(res, 200, await connector.cancelGroupMsgSend(msgId))
+        } catch (err) {
+          writeJson(res, 502, { error: { code: 'provider_error', message: err instanceof Error ? err.message : String(err) } })
+        }
+        return
+      }
+
       const agentCorpAppRemindMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/group-messages\/([^/]+)\/remind$/)
       if (req.method === 'POST' && agentCorpAppRemindMatch) {
         const row = await resolveAgentCorpAppRow(agentCorpAppRemindMatch[1] || '')

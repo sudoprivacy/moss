@@ -533,6 +533,28 @@ func (c *Client) RemindGroupMessage(id, msgID string) (*SendResp, error) {
 	return &resp, nil
 }
 
+// CancelGroupMsgResp is the outcome of withdrawing a 群发 task.
+// AlreadyCancelled is true when the task had been withdrawn before; the
+// goal (task gone) is met either way, so it is not an error.
+type CancelGroupMsgResp struct {
+	OK               bool `json:"ok"`
+	AlreadyCancelled bool `json:"alreadyCancelled,omitempty"`
+}
+
+// CancelGroupMessage withdraws a pending 群发 task by msgid, so nobody can
+// confirm it later. It stops only the senders who have not confirmed yet;
+// anything already delivered stays delivered.
+func (c *Client) CancelGroupMessage(id, msgID string) (*CancelGroupMsgResp, error) {
+	if msgID == "" {
+		return nil, errors.New("msgid is required")
+	}
+	var resp CancelGroupMsgResp
+	if err := c.post(c.PathPrefix+"/"+url.PathEscape(id)+"/group-messages/"+url.PathEscape(msgID)+"/cancel", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // UploadMedia uploads bytes and returns a provider media id for use as a
 // group-message attachment. Unlike SendFile this does not send anything.
 func (c *Client) UploadMedia(id, mediaType, fileName string, body []byte) (*UploadMediaResp, error) {

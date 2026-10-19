@@ -29,6 +29,7 @@
 //	corpapp group-msg-result --app <name> --msgid <id> --userid <userid>
 //	                                                          # per-group delivery status
 //	corpapp group-msg-remind --app <name> --msgid <id>        # nudge the sender to confirm
+//	corpapp group-msg-cancel --app <name> --msgid <id>        # withdraw an unconfirmed task
 //
 // The CLI is generic across corp-app types; capabilities are per-type
 // (returned by the server), so a `send`/`receive` against a type that
@@ -75,6 +76,7 @@ Usage:
   corpapp group-msg-summary --app <name> --msgid <id> --userid <userid> [--json]
   corpapp group-msg-task --app <name> --msgid <id> [--cursor <c>]
   corpapp group-msg-remind --app <name> --msgid <id>
+  corpapp group-msg-cancel --app <name> --msgid <id> [--json]
   corpapp group-msg-queue --app <name> --action <verb> [--chat-id <id>] [--entry-id <id>] ...
                      verbs: enqueue|next|claim|release|mark-sent|cancel|reap|list
                             reconcile (diagnostic only — the loop never needs it)

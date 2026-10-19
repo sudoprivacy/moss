@@ -411,9 +411,10 @@ export interface CorpAppConnector {
   /**
    * Optional: cancel a pending 群发 task (`cancel_groupmsg_send`). Removes it
    * from the approver's and sender's queues so a stale task cannot be
-   * confirmed days later and consume that day's quota.
+   * confirmed days later and consume that day's quota. Cancelling a task that
+   * is already cancelled resolves `{ ok: true, alreadyCancelled: true }`.
    */
-  cancelGroupMsgSend?(msgId: string): Promise<{ ok: boolean }>
+  cancelGroupMsgSend?(msgId: string): Promise<{ ok: boolean; alreadyCancelled?: boolean }>
 
   /**
    * Optional: re-trigger the confirmation prompt for a pending 群发 task

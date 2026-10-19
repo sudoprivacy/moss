@@ -354,3 +354,85 @@ func TestRunSendGroupJSONEmitsBareMsgID(t *testing.T) {
 		t.Errorf("got %+v", got)
 	}
 }
+
+func TestCancelGroupMessage(t *testing.T) {
+	var gotMethod, gotPath string
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	resp, err := c.CancelGroupMessage("app1", "msg_x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.OK || resp.AlreadyCancelled {
+		t.Errorf("got %+v", resp)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("want POST, got %s", gotMethod)
+	}
+	if !strings.HasSuffix(gotPath, "/group-messages/msg_x/cancel") {
+		t.Errorf("unexpected path %q", gotPath)
+	}
+	if _, err := c.CancelGroupMessage("app1", ""); err == nil {
+		t.Error("want an error for an empty msgid")
+	}
+}
+
+// runCancel drives `corpapp group-msg-cancel` against a stub whose cancel
+// endpoint answers with status/body.
+func runCancel(t *testing.T, status int, body string, extra ...string) (int, string, string) {
+	t.Helper()
+	c, srv := newTestClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/resolve"):
+			_, _ = w.Write([]byte(`{"id":"app1","name":"x","type":"wecomapp"}`))
+		case strings.HasSuffix(r.URL.Path, "/group-messages/msg_x/cancel") && r.Method == http.MethodPost:
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	var out, errOut bytes.Buffer
+	args := append([]string{"group-msg-cancel", "--app", "x", "--msgid", "msg_x"}, extra...)
+	code := Run(args, c, RunOptions{Stdout: &out, Stderr: &errOut})
+	return code, out.String(), errOut.String()
+}
+
+func TestRunGroupMsgCancel(t *testing.T) {
+	code, out, errOut := runCancel(t, 200, `{"ok":true}`)
+	if code != 0 || !strings.Contains(out, "cancelled  msgid=msg_x") || strings.Contains(out, "already") {
+		t.Errorf("fresh cancel: exit %d out=%q err=%q", code, out, errOut)
+	}
+
+	// A retry loop calls cancel again on a task it already withdrew; that is
+	// success, not a failure to report.
+	code, out, _ = runCancel(t, 200, `{"ok":true,"alreadyCancelled":true}`)
+	if code != 0 || !strings.Contains(out, "already cancelled") {
+		t.Errorf("repeat cancel: exit %d out=%q", code, out)
+	}
+
+	code, out, _ = runCancel(t, 200, `{"ok":true,"alreadyCancelled":true}`, "--json")
+	var got map[string]any
+	if code != 0 || json.Unmarshal([]byte(out), &got) != nil {
+		t.Fatalf("--json: exit %d out=%q", code, out)
+	}
+	if got["msgId"] != "msg_x" || got["ok"] != true || got["alreadyCancelled"] != true {
+		t.Errorf("--json fields: %v", got)
+	}
+
+	// The task may still be live: both a provider error and an unconfirmed
+	// cancel must exit non-zero so the caller retries.
+	if code, _, errOut = runCancel(t, 502, `{"error":{"code":"provider_error","message":"errcode=45009"}}`); code == 0 {
+		t.Error("provider error must exit non-zero")
+	} else if !strings.Contains(errOut, "45009") {
+		t.Errorf("provider error text lost: %q", errOut)
+	}
+	if code, _, _ = runCancel(t, 200, `{"ok":false}`); code == 0 {
+		t.Error("ok:false must exit non-zero")
+	}
+}

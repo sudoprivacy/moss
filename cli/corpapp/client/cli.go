@@ -122,6 +122,8 @@ func Run(args []string, c *Client, opts RunOptions) int {
 		err = runGroupMsgSummary(rest, c, opts)
 	case "group-msg-remind":
 		err = runGroupMsgRemind(rest, c, opts)
+	case "group-msg-cancel":
+		err = runGroupMsgCancel(rest, c, opts)
 	case "-h", "--help", "help":
 		printHelp(opts.Stdout, opts)
 		return 0
@@ -1068,6 +1070,41 @@ func runGroupMsgRemind(args []string, c *Client, opts RunOptions) error {
 		return err
 	}
 	FormatSend(opts.Stdout, resp)
+	return nil
+}
+
+func runGroupMsgCancel(args []string, c *Client, opts RunOptions) error {
+	fs := flag.NewFlagSet("group-msg-cancel", flag.ContinueOnError)
+	app := fs.String("app", "", "corp app name")
+	msgID := fs.String("msgid", "", "group message id")
+	asJSON := fs.Bool("json", false, "print the result as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *app == "" || *msgID == "" {
+		return errors.New("usage: corpapp group-msg-cancel --app <name> --msgid <id> [--json]")
+	}
+	resolved, err := resolveApp(c, *app)
+	if err != nil {
+		return err
+	}
+	resp, err := c.CancelGroupMessage(resolved.ID, *msgID)
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("group-msg-cancel: provider did not confirm the cancel for %s", *msgID)
+	}
+	if *asJSON {
+		return FormatRawJSON(opts.Stdout, mustJSON(map[string]any{
+			"msgId": *msgID, "ok": true, "alreadyCancelled": resp.AlreadyCancelled,
+		}))
+	}
+	if resp.AlreadyCancelled {
+		fmt.Fprintf(opts.Stdout, "already cancelled  msgid=%s\n", *msgID)
+	} else {
+		fmt.Fprintf(opts.Stdout, "cancelled  msgid=%s\n", *msgID)
+	}
 	return nil
 }
 

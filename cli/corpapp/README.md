@@ -34,6 +34,7 @@ corpapp group-msg-summary --app <name> --msgid <id> --userid <u> [--json]  # wha
 corpapp group-msg-result --app <name> --msgid <id> --userid <u>          # raw per-target status
 corpapp group-msg-task --app <name> --msgid <id>                         # raw per-member status
 corpapp group-msg-remind --app <name> --msgid <id>                       # nudge the sender
+corpapp group-msg-cancel --app <name> --msgid <id> [--json]              # withdraw the task
 ```
 
 ### Colored / styled messages
@@ -273,6 +274,31 @@ Status codes: `0` 未发送 · `1` 已发送 · `2` 客户不是好友 · `3` �
 If a task sits unconfirmed, `group-msg-remind` re-triggers the sender's
 prompt (WeCom allows 3 reminders per task per 24h; the API does not report
 how many remain, so track your own count).
+
+### Withdrawing a task
+
+A 群发 task nobody confirms does **not** expire at WeCom: it waits in the
+approver's and sender's queues indefinitely. If someone confirms it days
+later, the group gets a stale message, and it uses up that day's quota so
+the real message comes back as status `3`. Withdraw tasks that should no
+longer go out:
+
+```
+corpapp group-msg-cancel --app SeanClaw --msgid msg_xxx
+# cancelled  msgid=msg_xxx
+```
+
+- It stops only senders who have not confirmed yet. A message that was
+  already delivered stays delivered; there is no recall.
+- It is safe to repeat. A task that was already withdrawn prints
+  `already cancelled` and exits 0, so a retry loop can simply call it again.
+- Prefer the queue when the task has an entry: `group-msg-queue --action
+  cancel --cancel-wecom` and `reap --cancel-wecom` withdraw the task and update
+  the entry in one step. Use `group-msg-cancel` for a task the queue no longer
+  tracks, such as one whose msgid was never recorded, or one whose withdrawal
+  failed during `reap` and left its entry already cancelled.
+- After a withdrawal, `group-msg-task` for that msgid returns errcode `41093`
+  (`group message canceled`). Read that as "gone", not as an error.
 
 ### Errors worth telling apart
 
