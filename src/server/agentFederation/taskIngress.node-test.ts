@@ -131,6 +131,7 @@ void test('channel changes between admission and dispatch preserve exact accepte
   assert.equal(followupRecord?.resolution.status === 'accepted' && followupRecord.resolution.agent.version, '1.0.0')
   const conflict = await f.run({ ...f.input(), session_id: task.session_id, agent: { catalog_id: binding.id, requested_channel: 'canary' } })
   assert.equal(conflict.status, 'rejected'); assert.equal(conflict.policy_decision?.reason_code, 'VERSION_CHANGE_REQUIRES_NEW_SESSION')
+  assert.equal(conflict.policy_decision?.reason, '当前会话已固定智能体版本，切换版本或频道请新建会话。')
   assert.equal(f.calls.length, 2)
 })
 

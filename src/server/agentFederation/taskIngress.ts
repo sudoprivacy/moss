@@ -54,7 +54,11 @@ export async function admitExternalTask(store: ExternalTaskStore, actor: Externa
           binding = { ...binding, ...release.manifest.snapshot }
         } catch (error) {
           if (!(error instanceof ExternalProviderError)) throw error
-          deny(error.code, '请求的智能体版本或频道不存在、已撤销或审批已过期。')
+          deny(error.code, error.code === 'VERSION_CHANGE_REQUIRES_NEW_SESSION'
+            ? '当前会话已固定智能体版本，切换版本或频道请新建会话。'
+            : error.code.startsWith('REGISTRY_')
+              ? '暂时无法核验注册中心的版本信息，请恢复服务或配置后重试；当前请求未执行。'
+              : '请求的智能体版本或频道不存在、已撤销或审批已过期。')
         }
       }
       try {
