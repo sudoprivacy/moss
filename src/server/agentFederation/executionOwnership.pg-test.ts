@@ -52,7 +52,7 @@ void test('PostgreSQL Moss takeover preserves the original invocation and Attemp
       const store = new ExternalTaskStore(driver); await store.ready
       const controller = forPostgresDirectConnectStore(driver)
       const instance = await controller.registerServerInstance('integration-controller')
-      const service = new ExternalProviderService(store, { catalog: new CatalogRepository(driver), identities: new IdentityRepository(driver), secrets, isActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: [endpoint], timeoutMs: 60_000 } }, instance.instanceId)
+      const service = new ExternalProviderService(store, { catalog: new CatalogRepository(driver), identities: new IdentityRepository(driver), secrets, isActorActive: async () => true, isMemberActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: [endpoint], timeoutMs: 60_000 } }, instance.instanceId)
       await service.ownership.ready; await service.releases.ready; services.push(service)
       assert.equal(service.ownership.ownerId, instance.instanceId)
     }

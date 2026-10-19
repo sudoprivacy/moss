@@ -38,7 +38,7 @@ export async function crashFixture(directory: string) {
   const store = new ExternalTaskStore(driver)
   const service = new ExternalProviderService(store, {
     catalog: createCatalogTestRepository(db, driver), identities: createIdentityTestRepository(db, {}, driver), secrets,
-    isActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: ['http://127.0.0.1:8089/v1'], timeoutMs: 1000 },
+    isActorActive: async () => true, isMemberActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: ['http://127.0.0.1:8089/v1'], timeoutMs: 1000 },
     transport: new DifyPilotTransport((async (url: string | URL | Request) => Response.json(String(url).endsWith('/info') ? { name: 'Synthetic' } : { user_input_form: [], file_upload: { enabled: false } })) as typeof fetch),
   })
   const body = { request_id: randomUUID(), name: 'Crash fixture', endpoint: 'http://127.0.0.1:8089/v1', api_key: 'synthetic-secret', app_id: 'app', workspace_id: 'workspace', source_definition: JSON.stringify(queryOnlyDefinition()), decoder: 'text', allowed_user_ids: [actor.userId], review_days: 1, review_note: 'Synthetic crash fixture' }

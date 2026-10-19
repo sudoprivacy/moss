@@ -20,7 +20,8 @@ export interface ExternalSecretPort extends DifySecretPort {
 }
 export interface AdministrationOptions {
   catalog: CatalogRepository; identities: IdentityRepository; secrets: ExternalSecretPort; policy: PilotPolicy
-  isActive: (actor: ExternalActor) => Promise<boolean>
+  isActorActive: (actor: ExternalActor) => Promise<boolean>
+  isMemberActive: (member: ExternalActor) => Promise<boolean>
   members?: (orgId: string) => Promise<ExternalProviderMember[]>
   membersPage?: (orgId: string, after: string, search: string, limit: number) => Promise<ExternalProviderMember[]>
   transport?: DifyPilotTransport
@@ -248,7 +249,7 @@ export class ExternalProviderAdministration {
   private async definition(actor: ExternalActor, body: Record<string, unknown>) {
     if (![1, 3, 7].includes(Number(body.review_days))) return fail('INVALID_REVIEW_DAYS')
     const definition = parseRegistration({ ...(body.provider_kind ? { provider_kind: body.provider_kind } : {}), name: body.name, endpoint: body.endpoint, app_id: body.app_id, workspace_id: body.workspace_id, credential_ref: body.credential_ref, source_digest: body.source_digest, decoder: body.decoder, allowed_user_ids: body.allowed_user_ids, review_expires_at: Date.now() + Number(body.review_days) * 86400_000, review_note: body.review_note }, actor.orgId, await this.effectivePolicy(actor))
-    for (const userId of definition.allowed_user_ids) if (!await this.options.isActive({ orgId: actor.orgId, userId })) return fail('INVALID_MEMBER')
+    for (const userId of definition.allowed_user_ids) if (!await this.options.isMemberActive({ orgId: actor.orgId, userId })) return fail('INVALID_MEMBER')
     return definition
   }
 }

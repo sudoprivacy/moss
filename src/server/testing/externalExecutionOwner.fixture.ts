@@ -12,7 +12,8 @@ process.once('message', async (input: { connectionString: string; schema: string
   const service = new ExternalProviderService(new ExternalTaskStore(driver), {
     catalog: new CatalogRepository(driver), identities: new IdentityRepository(driver),
     secrets: { getSecret: async () => ({ value: input.token, status: 'enabled', version: 1 }) },
-    isActive: async () => true,
+    isActorActive: async () => true,
+    isMemberActive: async () => true,
     policy: { orgIds: [input.actor.orgId], endpoints: [input.endpoint], timeoutMs: 90_000 },
   })
   try {

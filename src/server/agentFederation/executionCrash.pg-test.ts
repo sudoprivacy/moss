@@ -43,7 +43,7 @@ void test('SIGKILL of the Moss controller recovers after the real lease timeout;
   const makeService = () => {
     const service = new ExternalProviderService(new ExternalTaskStore(driver), { catalog: new CatalogRepository(driver), identities: new IdentityRepository(driver),
       secrets: { getSecret: async () => ({ value: token, status: 'enabled', version: 1 }), putSecret: async () => {}, deleteSecret: async () => {} },
-      isActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: [endpoint], timeoutMs: 90_000 },
+      isActorActive: async () => true, isMemberActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: [endpoint], timeoutMs: 90_000 },
       httpRequest: async (url, init) => {
         if (String(url).includes('/runs/')) { recoveryRequests++; if (isPartitioned) throw new Error('Simulated connection loss') }
         return fetch(url, init)

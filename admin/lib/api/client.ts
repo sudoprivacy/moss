@@ -7,6 +7,29 @@ const TOKEN_EXPIRES_KEY = 'moss_token_expires_at'
 // logout) so the same admin returns to the org they were managing.
 const PREFERRED_ORG_KEY = 'moss_preferred_org_id'
 export const UNAUTHORIZED_EVENT = 'moss:unauthorized'
+export const AUTH_REFRESHED_EVENT = 'moss:auth-refreshed'
+
+export type UnauthorizedReason = 'refresh_missing' | 'refresh_rejected' | 'auth_me_rejected'
+
+interface RefreshedSession {
+  access_token: string
+  refresh_token?: string
+  expires_in?: number
+  user?: unknown
+  organization?: unknown
+  scopes?: string[]
+}
+
+export class ApiRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message)
+    this.name = 'ApiRequestError'
+  }
+}
 
 export function getToken(): string | null {
   if (typeof window === 'undefined') return null
@@ -48,6 +71,33 @@ export function removeToken(): void {
   // survives logout/login.
 }
 
+function dispatchUnauthorized(reason: UnauthorizedReason): void {
+  if (typeof window === 'undefined') return
+  const event = typeof CustomEvent === 'function'
+    ? new CustomEvent(UNAUTHORIZED_EVENT, { detail: { reason } })
+    : new Event(UNAUTHORIZED_EVENT)
+  window.dispatchEvent(event)
+}
+
+function terminateSession(reason: UnauthorizedReason): void {
+  const hadSession = Boolean(getToken() || getRefreshToken())
+  removeToken()
+  if (hadSession) dispatchUnauthorized(reason)
+}
+
+function storeRefreshedSession(data: RefreshedSession): string {
+  setToken(data.access_token)
+  if (data.refresh_token) setRefreshToken(data.refresh_token)
+  setTokenExpiresAt(Date.now() + (data.expires_in || 3600) * 1000)
+  if (typeof window !== 'undefined') {
+    const event = typeof CustomEvent === 'function'
+      ? new CustomEvent(AUTH_REFRESHED_EVENT, { detail: data })
+      : new Event(AUTH_REFRESHED_EVENT)
+    window.dispatchEvent(event)
+  }
+  return data.access_token
+}
+
 export function getPreferredOrgId(): string | null {
   if (typeof window === 'undefined') return null
   return localStorage.getItem(PREFERRED_ORG_KEY)
@@ -60,31 +110,34 @@ export function setPreferredOrgId(orgId: string): void {
 
 let refreshPromise: Promise<string | null> | null = null
 
-export async function ensureValidToken(): Promise<string | null> {
-  const token = getToken()
-  if (!token) return null
+async function responseError(response: Response, fallback: string): Promise<ApiRequestError> {
+  const error = await response.json().catch(() => ({ error: fallback }))
+  const raw = (error as { error?: unknown }).error
+  const message = typeof raw === 'string'
+    ? raw
+    : ((raw as { message?: unknown } | null)?.message || (error as { message?: unknown }).message || fallback)
+  const code = typeof (raw as { code?: unknown } | null)?.code === 'string'
+    ? (raw as { code: string }).code
+    : undefined
+  return new ApiRequestError(response.status, String(message), code)
+}
 
-  const expiresAt = getTokenExpiresAt()
-  const buffer = 5 * 60 * 1000
-
-  if (expiresAt && Date.now() < expiresAt - buffer) {
-    return token
-  }
-
+async function refreshSession(baseUrl: string, rejectedAccessToken?: string): Promise<string | null> {
+  const currentToken = getToken()
+  if (!currentToken) return null
+  if (rejectedAccessToken && currentToken !== rejectedAccessToken) return currentToken
   if (refreshPromise) return refreshPromise
 
   refreshPromise = (async () => {
     const refreshToken = getRefreshToken()
     if (!refreshToken) {
-      removeToken()
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
-      }
+      terminateSession('refresh_missing')
       return null
     }
 
+    let response: Response
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/auth/token`, {
+      response = await fetch(`${baseUrl}/api/v1/auth/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -92,49 +145,37 @@ export async function ensureValidToken(): Promise<string | null> {
           refresh_token: refreshToken,
         }),
       })
+    } catch (error) {
+      throw new ApiRequestError(0, error instanceof Error ? error.message : 'Unable to refresh session', 'AUTH_REFRESH_UNAVAILABLE')
+    }
 
-      if (!response.ok) {
-        removeToken()
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
-        }
+    if (!response.ok) {
+      if ([400, 401, 403].includes(response.status)) {
+        terminateSession('refresh_rejected')
         return null
       }
-
-      const data = await response.json()
-      setToken(data.access_token)
-      if (data.refresh_token) {
-        setRefreshToken(data.refresh_token)
-      }
-      setTokenExpiresAt(Date.now() + (data.expires_in || 3600) * 1000)
-      return data.access_token
-    } catch {
-      removeToken()
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
-      }
-      return null
-    } finally {
-      refreshPromise = null
+      throw await responseError(response, 'Unable to refresh session')
     }
-  })()
+
+    const data = await response.json().catch(() => null) as RefreshedSession | null
+    if (!data?.access_token) {
+      throw new ApiRequestError(502, 'Invalid refresh response', 'AUTH_REFRESH_INVALID_RESPONSE')
+    }
+    return storeRefreshedSession(data)
+  })().finally(() => {
+    refreshPromise = null
+  })
 
   return refreshPromise
 }
 
-interface ApiErrorResponse {
-  error: string
-}
-
-export class ApiRequestError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly code?: string,
-  ) {
-    super(message)
-    this.name = 'ApiRequestError'
-  }
+export async function ensureValidToken(force = false): Promise<string | null> {
+  const token = getToken()
+  if (!token) return null
+  const expiresAt = getTokenExpiresAt()
+  const buffer = 5 * 60 * 1000
+  if (!force && expiresAt && Date.now() < expiresAt - buffer) return token
+  return refreshSession(API_BASE_URL, force ? token : undefined)
 }
 
 export function hasScope(scopes: string[], requiredScope: string): boolean {
@@ -156,13 +197,8 @@ export class ApiClient {
     this.baseUrl = baseUrl
   }
 
-  private async request<T>(
-    path: string,
-    options: RequestInit = {}
-  ): Promise<T> {
-    const token = getToken()
+  private headers(options: RequestInit, token: string | null): Headers {
     const headers = new Headers(options.headers)
-
     if (
       options.body !== undefined &&
       !(options.body instanceof FormData) &&
@@ -171,50 +207,50 @@ export class ApiClient {
     ) {
       headers.set('Content-Type', 'application/json')
     }
+    if (token) headers.set('Authorization', `Bearer ${token}`)
+    else headers.delete('Authorization')
+    return headers
+  }
 
-    if (token) {
-      headers.set('Authorization', `Bearer ${token}`)
+  private async probeSession(token: string): Promise<void> {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1/auth/me`, {
+        headers: { Authorization: `Bearer ${getToken() ?? token}` },
+        credentials: 'include',
+      })
+      if (response.status === 401) terminateSession('auth_me_rejected')
+    } catch {
+      // A connectivity failure cannot prove that the session is invalid.
     }
+  }
 
-    let response = await fetch(`${this.baseUrl}${path}`, {
+  private async fetchWithAuthRecovery(path: string, options: RequestInit): Promise<Response> {
+    const execute = (token: string | null) => fetch(`${this.baseUrl}${path}`, {
       ...options,
-      headers,
+      headers: this.headers(options, token),
       credentials: 'include',
     })
 
-    if (response.status === 401 && token) {
-      const newToken = await ensureValidToken()
-      if (newToken) {
-        const retryHeaders = new Headers(options.headers)
-        retryHeaders.set('Authorization', `Bearer ${newToken}`)
-        if (
-          options.body !== undefined &&
-          !(options.body instanceof FormData) &&
-          !(options.body instanceof File) &&
-          !retryHeaders.has('Content-Type')
-        ) {
-          retryHeaders.set('Content-Type', 'application/json')
-        }
-        response = await fetch(`${this.baseUrl}${path}`, {
-          ...options,
-          headers: retryHeaders,
-          credentials: 'include',
-        })
-      }
-    }
+    const originalToken = getToken()
+    let response = await execute(originalToken)
+    if (response.status !== 401 || !originalToken) return response
+
+    const recoveredToken = await refreshSession(this.baseUrl, originalToken)
+    if (!recoveredToken) return response
+
+    response = await execute(recoveredToken)
+    if (response.status === 401) await this.probeSession(recoveredToken)
+    return response
+  }
+
+  private async request<T>(
+    path: string,
+    options: RequestInit = {}
+  ): Promise<T> {
+    const response = await this.fetchWithAuthRecovery(path, options)
 
     if (!response.ok) {
-      if (response.status === 401) {
-        removeToken()
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
-        }
-      }
-
-      const error = await response.json().catch(() => ({ error: response.statusText }))
-      const raw = (error as any).error
-      const message = typeof raw === 'string' ? raw : (raw?.message || (error as any).message || 'Request failed')
-      throw new ApiRequestError(response.status, message, typeof raw?.code === 'string' ? raw.code : undefined)
+      throw await responseError(response, response.statusText || 'Request failed')
     }
 
     return response.json()
@@ -261,37 +297,9 @@ export class ApiClient {
   }
 
   async getBlob(path: string): Promise<Blob> {
-    const token = getToken()
-    const headers = new Headers()
-
-    if (token) {
-      headers.set('Authorization', `Bearer ${token}`)
-    }
-
-    let response = await fetch(`${this.baseUrl}${path}`, {
-      headers,
-      credentials: 'include',
-    })
-
-    if (response.status === 401 && token) {
-      const newToken = await ensureValidToken()
-      if (newToken) {
-        const retryHeaders = new Headers()
-        retryHeaders.set('Authorization', `Bearer ${newToken}`)
-        response = await fetch(`${this.baseUrl}${path}`, {
-          headers: retryHeaders,
-          credentials: 'include',
-        })
-      }
-    }
+    const response = await this.fetchWithAuthRecovery(path, {})
 
     if (!response.ok) {
-      if (response.status === 401) {
-        removeToken()
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
-        }
-      }
       throw new ApiRequestError(response.status, response.statusText)
     }
 
