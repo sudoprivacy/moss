@@ -143,6 +143,8 @@ k3s 二进制和基础镜像，并兼容国内源的 `.tar.gz` 与上游的 `.ta
 
 发布包中的镜像保留工具来自 `sudostack`。`deploy/k3s/sudostack-images.lock.json` 固定源提交和两个模块的 SHA256；构建会逐字节校验并连同来源清单放入部署包。节点离线安装时无需访问源仓库。Server、Nexus 和 Runtime 镜像只有在 CRI 返回预期身份且已固定后，安装才继续；`IMPORT_RUNTIME_IMAGE=0` 允许完整套件自行负责工作镜像。
 
+Runtime 发布清单使用离线归档中经过摘要校验的 OCI manifest/index 身份（`image.digestKind: oci-manifest`），用于匹配 Kubernetes 报告的 manifest/index 摘要。Docker config 摘要仍用于核对保存的归档与刚构建的镜像，以及节点导入、固定校验；两种摘要不能直接比较。
+
 本地构建先准备该锁定版本的工具源码：
 
 ```bash
