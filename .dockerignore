@@ -19,6 +19,7 @@ admin/dist
 .github
 .vscode
 .idea
+.moss-image-tools
 
 # Logs / scratch
 *.log

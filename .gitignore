@@ -27,3 +27,4 @@ nexus-data/
 
 # Python deployment tooling
 __pycache__/
+/.moss-image-tools/

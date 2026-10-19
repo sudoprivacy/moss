@@ -141,9 +141,21 @@ k3s 二进制和基础镜像，并兼容国内源的 `.tar.gz` 与上游的 `.ta
 
 ## 本地构建与发布
 
+发布包中的镜像保留工具来自 `sudostack`。`deploy/k3s/sudostack-images.lock.json` 固定源提交和两个模块的 SHA256；构建会逐字节校验并连同来源清单放入部署包。节点离线安装时无需访问源仓库。Server、Nexus 和 Runtime 镜像只有在 CRI 返回预期身份且已固定后，安装才继续；`IMPORT_RUNTIME_IMAGE=0` 允许完整套件自行负责工作镜像。
+
+本地构建先准备该锁定版本的工具源码：
+
+```bash
+git clone --filter=blob:none --no-checkout https://github.com/sudoprivacy/sudostack.git .moss-image-tools
+git -C .moss-image-tools sparse-checkout set --no-cone /tools/deploy/images.py /tools/deploy/artifacts.py
+git -C .moss-image-tools checkout "$(python3 -c 'import json; print(json.load(open("deploy/k3s/sudostack-images.lock.json"))["revision"])')"
+```
+
 ```bash
 bash deploy/package-control-images.sh <版本号> arm64 ./dist
 ```
+
+也可设置 `MOSS_SHARED_IMAGE_SOURCE` 指向已有的对应源码目录。CI 自动读取同一份锁定清单并检出源码；这些构建依赖不进入业务镜像。
 
 架构参数支持 `amd64` 和 `arm64`；原生 CI runner 分别执行安装和会话验收。该命令构建独立的 Server/Nexus 镜像并导出镜像包和部署工具包。完整发行还需要现有的 Runtime
 构建步骤和带版本号的安装器。`build-release.yml` 在发布资产前执行镜像检查、安装/会话/重启/离线重装
