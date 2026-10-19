@@ -4,10 +4,11 @@ import { Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { AppSidebar } from '@/components/app-sidebar'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
-import { Loader2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Loader2, TriangleAlert } from 'lucide-react'
 
 export function DashboardShell() {
-  const { isAuthenticated, isLoading } = useAuth()
+  const { authError, isAuthenticated, isLoading, retryAuth } = useAuth()
 
   if (isLoading) {
     return (
@@ -19,6 +20,21 @@ export function DashboardShell() {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />
+  }
+
+  if (authError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background p-6">
+        <div className="max-w-md space-y-4 text-center" role="alert">
+          <TriangleAlert className="mx-auto size-9 text-muted-foreground" aria-hidden="true" />
+          <div>
+            <h1 className="text-lg font-semibold">暂时无法验证登录状态</h1>
+            <p className="mt-2 text-sm text-muted-foreground">{authError}</p>
+          </div>
+          <Button type="button" onClick={() => void retryAuth()}>重新验证</Button>
+        </div>
+      </div>
+    )
   }
 
   return (

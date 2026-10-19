@@ -45,7 +45,7 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
     }) as typeof fetch)
     for (const driver of drivers) {
       const store = new ExternalTaskStore(driver); await store.ready
-      services.push(new ExternalProviderService(store, { catalog: new CatalogRepository(driver), identities: new IdentityRepository(driver), secrets, transport, isActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: ['http://127.0.0.1:8089/v1'], timeoutMs: 30000 } }))
+      services.push(new ExternalProviderService(store, { catalog: new CatalogRepository(driver), identities: new IdentityRepository(driver), secrets, transport, isActorActive: async () => true, isMemberActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: ['http://127.0.0.1:8089/v1'], timeoutMs: 30000 } }))
     }
     const [first, second] = services
     const input = { request_id: randomUUID(), name: 'Concurrent pilot', endpoint: 'http://127.0.0.1:8089/v1', api_key: 'synthetic-original', app_id: 'app', workspace_id: 'workspace', source_definition: JSON.stringify(queryOnlyDefinition()), decoder: 'text', allowed_user_ids: [actor.userId], review_days: 1, review_note: 'Synthetic concurrency fixture' }
