@@ -207,6 +207,53 @@ async function fencingFixture(t: TestContext) {
     setReady: () => { isNativeReady = true } }
 }
 
+for (const isNonBlocking of [false, true]) {
+  void test(`${isNonBlocking ? 'detail read' : 'foreground resume'} cannot resurrect a terminated session`, async t => {
+    const f = await fencingFixture(t)
+    await f.runtime.terminateSession('native')
+    if (isNonBlocking) {
+      assert.equal((await f.runtime.ensureSessionReadyNonBlocking('native')).session.desiredState, 'terminated')
+    } else {
+      await assert.rejects(f.runtime.ensureSessionReady('native'), /Session was terminated/)
+    }
+    await f.flush()
+    assert.equal((await f.store.getSession('native'))?.desiredState, 'terminated')
+    assert.equal((await f.store.getSession('native'))?.currentAttemptId, f.old.attemptId)
+    assert.equal(await f.store.latestEvent('native', 'attempt_lost'), null)
+  })
+
+  void test(`terminate wins over an in-flight ${isNonBlocking ? 'detail read' : 'foreground resume'} probe`, async t => {
+    const f = await fencingFixture(t)
+    const probing = deferred<void>()
+    const continueRead = deferred<void>()
+    const readAttempt = f.store.getAttempt.bind(f.store)
+    let isFirstRead = true
+    f.store.getAttempt = async id => {
+      const snapshot = await readAttempt(id)
+      if (isFirstRead) {
+        isFirstRead = false
+        probing.resolve()
+        await continueRead.promise
+      }
+      return snapshot
+    }
+    // Keep the real DB, socket probe, terminate, recovery and attempt fences.
+    const preparing = isNonBlocking
+      ? f.runtime.ensureSessionReadyNonBlocking('native')
+      : f.runtime.ensureSessionReady('native')
+    const completed = isNonBlocking ? preparing : assert.rejects(preparing, /Session was terminated/)
+    await probing.promise
+    await f.runtime.terminateSession('native')
+    continueRead.resolve()
+    await completed
+    await f.flush()
+    assert.equal((await f.store.getSession('native'))?.desiredState, 'terminated')
+    assert.equal((await f.store.getSession('native'))?.currentAttemptId, f.old.attemptId)
+    assert.equal((await f.store.getAttempt(f.old.attemptId))?.runtimeState, 'stopped')
+    assert.equal(await f.store.latestEvent('native', 'attempt_lost'), null)
+  })
+}
+
 void test('a fencing deadline cannot retire the healthy replacement of its original attempt', async t => {
   const f = await fencingFixture(t)
   const started = Date.now()

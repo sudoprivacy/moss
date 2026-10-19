@@ -1802,12 +1802,15 @@ export class DirectConnectStore {
     // terminate — the spawn-complete write (runtimeService.spawnAttempt) races
     // a concurrent terminateSession; the conditional UPDATE lands only while
     // desired_state is still 'active', so the terminated row survives.
+    // Every recovery write also respects a completed terminate, including
+    // stale GET/probe paths that do not request the stronger active guard.
     await this.driver.run(`
       UPDATE sessions
       SET status = ?, desired_state = ?, last_active_at = ?
       WHERE session_id = ?${onlyWhenDesiredActive ? ` AND desired_state = 'active'` : ''}
+        AND (desired_state <> 'terminated' OR ? = 'terminated')
         ${ownership.clause}
-    `, [status, desiredState, ts, sessionId, ...ownership.params])
+    `, [status, desiredState, ts, sessionId, desiredState, ...ownership.params])
   }
 
   /**
@@ -1819,9 +1822,9 @@ export class DirectConnectStore {
     const ts = now()
     await this.driver.run(`
       UPDATE sessions
-      SET status = 'active', desired_state = 'active', ended_at = NULL,
+      SET status = 'active', ended_at = NULL,
           last_active_at = ?
-      WHERE session_id = ?
+      WHERE session_id = ? AND desired_state = 'active'
     `, [ts, sessionId])
   }
 

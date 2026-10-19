@@ -926,8 +926,11 @@ export class RuntimeService {
     if (!session) {
       throw new Error('Session not found')
     }
+    if (session.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
     const attempt = await this.ensureAttempt(session)
-    return { session: (await this.store.getSession(sessionId)) ?? session, attempt }
+    const current = (await this.store.getSession(sessionId)) ?? session
+    if (current.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
+    return { session: current, attempt }
   }
 
   /**
@@ -952,6 +955,8 @@ export class RuntimeService {
     if (!session) {
       throw new Error('Session not found')
     }
+    // Detail reads can race a terminate; they must report its durable intent.
+    if (session.desiredState === 'terminated') return { session }
 
     const existing = session.currentAttemptId
       ? await this.store.getAttempt(session.currentAttemptId)
@@ -1010,6 +1015,8 @@ export class RuntimeService {
     // Runtime is missing/dead — schedule a background respawn unless one is
     // already in flight, and reflect the transitional state to the client.
     if (!this.pendingEnsures.has(session.sessionId)) {
+      const current = await this.store.getSession(session.sessionId)
+      if (current?.desiredState === 'terminated') return { session: current }
       await this.store.setSessionLifecycle(session.sessionId, 'creating', 'active')
       void this.ensureAttempt(session).catch(async error => {
         // A-8: takeover-pending is the DESIGNED control flow of a cross-host
@@ -1506,6 +1513,8 @@ export class RuntimeService {
   private async ensureAttemptInternal(
     session: SessionRecord,
   ): Promise<AttemptRecord> {
+    session = (await this.store.getSession(session.sessionId)) ?? session
+    if (session.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
     const existing = session.currentAttemptId
       ? await this.store.getAttempt(session.currentAttemptId)
       : null
@@ -1558,6 +1567,8 @@ export class RuntimeService {
         existing.attachPath,
         this.options.config.reattachProbeTimeoutMs,
       )
+      const afterProbe = await this.store.getSession(session.sessionId)
+      if (afterProbe?.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
       if (healthy) {
         // Host same-machine takeover guard (A-2): after an adopt claim flips
         // DB ownership to self, the socket this probe just confirmed may
@@ -1630,6 +1641,10 @@ export class RuntimeService {
         throw new AttemptTakeoverPendingError(session.sessionId)
       }
 
+      // A readiness probe can finish after terminate has killed the runner.
+      // Do not interpret that expected disconnect as permission to respawn.
+      const current = await this.store.getSession(session.sessionId)
+      if (current?.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
       await this.store.markAttemptLost(existing.attemptId, 'attach socket unavailable')
       await this.store.addEvent(session.sessionId, existing.attemptId, 'attempt_lost', {
         reason: 'attach_socket_unavailable',
@@ -1910,6 +1925,8 @@ export class RuntimeService {
       enabledSkills?: string[]
     } = {},
   ): Promise<AttemptRecord> {
+    session = (await this.store.getSession(session.sessionId)) ?? session
+    if (session.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
     if (session.runtime?.type === 'external') throw new ResourceAccessError(409, 'Use the external task API for this session')
     if (this.draining) throw new ServerDrainingError()
     if (this.upgradingOwners.has(session.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
@@ -2007,6 +2024,8 @@ export class RuntimeService {
 
     if (options.enabledSkills) options = { ...options, enabledSkills: await resolveOrganizationSkillIds(options.enabledSkills) }
     const resourceSnapshot = await snapshotOrganizationResources()
+    const currentSession = await this.store.getSession(session.sessionId)
+    if (currentSession?.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
     const generation = await this.store.getNextGeneration(session.sessionId)
     const attemptDir = getAttemptDir(this.options.config, session.sessionId, generation)
     const attachPath = getAttachPath(this.options.config, session.sessionId, generation)
