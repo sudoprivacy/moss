@@ -21,9 +21,14 @@
 # node_modules and COPY it into the runtime stage. (onnxruntime-node is a
 # transitive dep of @xenova and is pulled in automatically.)
 FROM oven/bun:1 AS runtime-deps
+ARG TARGETARCH
 WORKDIR /deps
 COPY deploy/runtime-deps.package.json package.json
-RUN bun install
+# Sharp verifies cached libvips archives against its packaged SHA512. Keep
+# native downloads across retries without including the cache in the image.
+RUN --mount=type=cache,id=moss-native-${TARGETARCH},target=/root/.npm,sharing=locked \
+    --mount=type=cache,id=moss-bun-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
+    bun install
 
 # --- Stage 0b: unzip the embedding model -------------------------------------
 # The model ships in-repo as deploy/models/Xenova.zip (tracked via git-lfs). Its
@@ -53,6 +58,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 
 # --- Stage 1: JS/TS bundles + admin frontend (bun) ---------------------------
 FROM oven/bun:1 AS js-builder
+ARG TARGETARCH
 WORKDIR /src
 # Install root + admin deps first (better layer caching), then build.
 COPY package.json bun.lock ./
@@ -60,7 +66,9 @@ COPY admin/package.json admin/bun.lock ./admin/
 # vendor/ is copied by postinstall (copy-vendor.js); bring it in before install.
 COPY vendor ./vendor
 COPY scripts ./scripts
-RUN bun install --frozen-lockfile || bun install
+RUN --mount=type=cache,id=moss-native-${TARGETARCH},target=/root/.npm,sharing=locked \
+    --mount=type=cache,id=moss-bun-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
+    bun install --frozen-lockfile || bun install
 RUN cd admin && (bun install --frozen-lockfile || bun install)
 # Now the full source and run the build (admin/dist + bin/*.mjs).
 COPY . .
@@ -316,11 +324,13 @@ RUN case "$TARGETARCH" in \
     && /opt/node/bin/node --version
 
 FROM ubuntu:22.04 AS host-runtime-deps
+ARG TARGETARCH
 COPY --from=host-node-runtime /opt/node /opt/node
 ENV PATH=/opt/node/bin:$PATH
 WORKDIR /deps
 COPY deploy/runtime-deps.package.json package.json
-RUN npm install --omit=dev --no-audit --no-fund \
+RUN --mount=type=cache,id=moss-native-${TARGETARCH},target=/root/.npm,sharing=locked \
+    npm install --omit=dev --no-audit --no-fund \
     && node -e "Promise.all([import('@sudo/contracts/common/v1/resource-ref'), import('@xenova/transformers'), import('sharp')]).then(() => console.log('runtime deps ok'))"
 
 FROM ubuntu:22.04 AS host-package

@@ -166,6 +166,15 @@ bash deploy/package-control-images.sh <版本号> arm64 ./dist
 构建会话 Runtime 时可通过 `--build-arg HF_ENDPOINT=https://hf-mirror.com --build-arg HF_HUB_DISABLE_XET=1` 指定模型镜像源，
 通过 `--build-arg SCODE_DOWNLOAD_URL=<地址>` 指定 scode 下载地址；scode 仍按仓库固定 SHA256 校验。
 
+`server.Dockerfile.local` 的 npm 原生依赖下载使用按目标架构隔离的 BuildKit 缓存
+`moss-native-amd64` / `moss-native-arm64`，用于镜像构建失败后重试。缓存挂载在
+构建阶段的 `/root/.npm`，不进入最终镜像。Bun 下载同样保存在按架构隔离的
+`moss-bun-*` 缓存中，避免原生安装失败后重新拉取整个依赖集合。
+Sharp 仍按安装包内的 SHA512 校验
+`_libvips` 中的缓存归档；网络受限时可通过可信下载渠道预热经过该摘要校验的
+同版本、同架构文件。不要使用跳过完整性检查的安装选项。缓存不能替代锁定源码、
+候选镜像摘要或实际启动验收。
+
 ## 卸载
 
 ```bash
