@@ -450,6 +450,17 @@ export class CronStore {
     return result.changes > 0
   }
 
+  /**
+   * Give back a lease when its run ends. Only clears the exact lease the caller
+   * took: if it already expired and another instance took a new one, that one
+   * is left alone.
+   */
+  releaseLease(jobId: string, leaseUntil: number): void {
+    this.db.prepare(`
+      UPDATE cron_jobs SET lease_until = NULL WHERE id = ? AND lease_until = ?
+    `).run(jobId, leaseUntil)
+  }
+
   // ==================== Job Runs ====================
 
   createRun(jobId: string, orgId: string, userId: string): CronJobRun {

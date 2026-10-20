@@ -68,6 +68,7 @@ const BUN = [
 const NODE = [
   'authProxySessionToken.test.ts',
   'claimAttempt.test.ts',
+  'cronLeaseRelease.test.ts',
   'creditApplicationsDb.test.ts',
   'jsonlParse.test.ts',
   'knowledgeSpaces.test.ts',
