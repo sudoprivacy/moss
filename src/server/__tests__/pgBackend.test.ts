@@ -292,9 +292,11 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
 
   describe("pg_schema + type normalisation", () => {
     it("applyPgSchema is idempotent (re-run records nothing new)", async () => {
+      const before = await fix.driver.all("SELECT * FROM _migrations ORDER BY version");
       await applyPgSchema(fix.driver);
+      assert.deepEqual(await fix.driver.all("SELECT * FROM _migrations ORDER BY version"), before);
       const rows = await fix.driver.all<{ version: number }>("SELECT version FROM _migrations");
-      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+      assert.deepEqual(rows.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     });
 
     it("BIGINT epoch-ms and COUNT(*) come back as JS numbers (typeParser 20)", async () => {
@@ -1290,7 +1292,7 @@ describe("pg backend (P1-4)", { skip: !PG_URL }, () => {
           { owner_user_id: 'u1', native_agent_id: 'retained-agent', allocation_id: 'primary' },
         ]);
         const versions = await driver.all<{ version: number }>("SELECT version FROM _migrations");
-        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert.deepEqual(versions.map(r => Number(r.version)).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
         const localGrants = await driver.all<{ id: string; local_execution_allowed: number }>('SELECT id, local_execution_allowed FROM users ORDER BY id');
         assert.deepEqual(localGrants.map(row => [row.id, Number(row.local_execution_allowed)]), [['local-allowed', 1], ['local-denied', 0]]);
         await driver.run('UPDATE users SET local_execution_allowed = 0 WHERE id = ?', ['local-allowed']);

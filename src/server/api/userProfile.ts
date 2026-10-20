@@ -25,7 +25,10 @@ export async function getUserProfile(
   return {
     success: true,
     data: {
+      ...(await authService.getOwnProfileDetails(auth)),
       username: user?.name || 'Unknown',
+      organization_id: me.organization?.id ?? auth.orgId,
+      organization_name: me.organization?.name ?? '',
       department: departmentName,
       role: roleName,
       usage: {

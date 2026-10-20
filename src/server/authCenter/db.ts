@@ -709,6 +709,11 @@ export class AuthCenterDb {
       WHERE role IN ('member', 'viewer')
     `)
 
+    this.db.exec(`CREATE TABLE IF NOT EXISTS user_profile_avatars (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      data_url TEXT NOT NULL
+    )`)
+
     const legacyConfigTable = this.db.prepare(`
       SELECT name
       FROM sqlite_master
@@ -725,6 +730,20 @@ export class AuthCenterDb {
         ON CONFLICT(key) DO NOTHING
       `)
     }
+  }
+
+  async getUserAvatar(userId: string): Promise<string | null> {
+    const row = await this.driver.get<{ data_url: string }>('SELECT data_url FROM user_profile_avatars WHERE user_id = ?', [userId])
+    return row?.data_url ?? null
+  }
+
+  async setUserAvatar(userId: string, dataUrl: string | null): Promise<void> {
+    if (dataUrl === null) {
+      await this.driver.run('DELETE FROM user_profile_avatars WHERE user_id = ?', [userId])
+      return
+    }
+    await this.driver.run(`INSERT INTO user_profile_avatars (user_id, data_url) VALUES (?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET data_url = excluded.data_url`, [userId, dataUrl])
   }
 
   private ensureColumn(

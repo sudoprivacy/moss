@@ -6367,6 +6367,17 @@ export function startServer(
         return
       }
 
+      if (req.method === 'POST' && pathname === '/api/v1/user/avatar') {
+        // 2 MiB binary image + base64 overhead, bounded before JSON parsing.
+        const raw = await readRawBody(req, 3 * 1024 * 1024)
+        let body: unknown
+        try { body = JSON.parse(raw.toString('utf8')) } catch { throw new HttpError(400, 'Invalid JSON body') }
+        if (!isJsonBody(body) || !Object.hasOwn(body, 'avatar')) throw new HttpError(400, 'avatar is required')
+        const avatar = await authService.updateOwnAvatar(auth, body.avatar)
+        writeJson(res, 200, { success: true, data: { avatar } })
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/user/update-profile') {
         const body = await readJsonBody(req)
         const nickname = typeof body.nickname === 'string' ? body.nickname.trim() : ''
@@ -6376,7 +6387,7 @@ export function startServer(
         }
         // The display name, not the login name: `name` holds the phone, which
         // is the stable handle and must not move when someone renames himself.
-        await authService.updateUser({ orgId: auth.orgId, userId: auth.userId, displayName: nickname })
+        await authService.updateOwnNickname(auth, nickname)
         writeJson(res, 200, { success: true, msg: 'nickname updated' })
         return
       }

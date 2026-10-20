@@ -1711,6 +1711,32 @@ export class AuthService {
     return department
   }
 
+  /** Account-owned profile fields, independent of the selected organization. */
+  async getOwnProfileDetails(auth: AuthContext) {
+    const actor = await this.requireAuthUser(auth)
+    return {
+      user_id: actor.id,
+      login_name: actor.name,
+      nickname: actor.displayName || actor.name,
+      avatar: await this.db.getUserAvatar(actor.id),
+      can_change_password: Boolean(actor.passwordHash),
+    }
+  }
+
+  async updateOwnNickname(auth: AuthContext, nickname: string): Promise<void> {
+    const actor = await this.requireAuthUser(auth)
+    if (!nickname.trim() || nickname.trim().length > 60) throw new AuthServiceError(400, 'nickname must be between 1 and 60 characters')
+    await this.db.updateUser(actor.id, { displayName: nickname.trim() })
+  }
+
+  async updateOwnAvatar(auth: AuthContext, dataUrl: unknown): Promise<string | null> {
+    const actor = await this.requireAuthUser(auth)
+    const { normalizeProfileAvatar } = await import('../api/profileAvatar.js')
+    const avatar = await normalizeProfileAvatar(dataUrl)
+    await this.db.setUserAvatar(actor.id, avatar)
+    return avatar
+  }
+
   async getMe(auth: AuthContext): Promise<{
     user: NativeUserProjection | null
     organization: NativeOrganizationProjection | null
