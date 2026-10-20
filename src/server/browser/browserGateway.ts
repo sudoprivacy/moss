@@ -66,7 +66,12 @@ export async function invokeSessionBrowser(
   body: unknown,
 ): Promise<unknown> {
   const binding = await authorizeSessionBrowser(deps, principal, sessionId)
-  return deps.worker.invoke(binding, browserController(principal), browserAction(body))
+  const result = await deps.worker.invoke(binding, browserController(principal), browserAction(body))
+  if (result && typeof result === 'object' && 'session' in result) {
+    const reply = result as { session: { capabilities?: Record<string, unknown> } }
+    if (reply.session?.capabilities) return { ...reply, session: { ...reply.session, capabilities: { ...reply.session.capabilities, conversationControl: true } } }
+  }
+  return result
 }
 
 export async function authorizeSessionBrowser(

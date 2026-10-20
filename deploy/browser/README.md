@@ -12,6 +12,23 @@ extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
 the consumer test verifies it against the installed public package.
 
+## Conversation workflow
+
+The host adapts launch guidance during MCP discovery: the agent asks for human
+help through native questions or ordinary conversation. SudoWork uses its
+existing interrupt and a fresh chat message, with no separate browser
+takeover/return buttons.
+
+`POST /api/v1/sessions/:id/browser/conversation` accepts only
+`{ "intent": "interrupt" }` or `{ "intent": "continue" }`. It rechecks the active
+owner, changes only an existing browser bound to that exact conversation, and
+never allocates a profile or claims one from another conversation. An authorized
+manager can continue chat without acquiring the owner's browser. Interrupt
+acquires the SDK's acknowledged input lease; continuation drains input and
+freshly observes before releasing it. It sends no synthetic model turn.
+An uncertain transition remains blocked and is never automatically replayed.
+Deploy this server endpoint before clients that use the conversation workflow.
+
 ## Configuration
 
 Set these on the Moss server:

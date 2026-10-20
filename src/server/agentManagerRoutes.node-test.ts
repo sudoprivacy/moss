@@ -111,6 +111,17 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
     assert.equal((await request('PATCH', `/api/v1/sessions/${created.data.sessionId}`, a.user,
       { client_metadata: { agent_manager_actor_id: b.userId } })).status, 400)
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, b.admin)).status, 403)
+    await t.test('browser conversation intent preserves chat access without granting a manager the owner profile', async () => {
+      const path = `/api/v1/sessions/${created.data.sessionId}/browser/conversation`
+      assert.equal((await request('POST', path, undefined, { intent: 'continue' })).status, 401)
+      for (const token of [a.user, a.admin]) {
+        assert.deepEqual(await ok('POST', path, token, { intent: 'continue' }), { changed: false })
+      }
+      for (const token of [b.user, b.admin]) assert.equal((await request('POST', path, token, { intent: 'continue' })).status, 403)
+      assert.equal((await request('POST', path, a.user, { intent: ['continue'] })).status, 400)
+      assert.equal((await request('POST', path, a.user, { intent: 'continue', actor: 'ai' })).status, 400)
+      assert.equal((await request('POST', '/api/v1/sessions/missing-session/browser/conversation', a.user, { intent: 'continue' })).status, 404)
+    })
     await t.test('live activity uses the same current owner and management authorization as session attach', async () => {
       const path = `/api/v1/sessions/${created.data.sessionId}/activity`
       assert.equal((await request('GET', path)).status, 401)
@@ -140,6 +151,7 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
       'a role change immediately invalidates the previous management token')
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, a.admin)).status, 401)
     const downgraded = await login('a-admin')
+    assert.equal((await request('POST', `/api/v1/sessions/${created.data.sessionId}/browser/conversation`, downgraded, { intent: 'continue' })).status, 403)
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}/activity`, downgraded)).status, 403)
     assert.equal((await request('GET', `/api/v1/sessions/${created.data.sessionId}`, downgraded)).status, 403,
       'the persisted management actor metadata cannot replace current permission')

@@ -18,6 +18,7 @@ const next = { ...a, sessionId: randomUUID() }
 const sessions = new Map<string, BrowserBinding & { desiredState: string }>([a, b, next].map(binding => [binding.sessionId, { ...binding, desiredState: 'active' }]))
 const registry = new BrowserWorkerRegistry(async id => sessions.get(id) ?? null)
 const key = (binding: BrowserBinding) => createHash('sha256').update(JSON.stringify([binding.orgId, binding.userId])).digest('hex').slice(0, 32)
+console.log(JSON.stringify({ phase: 'owned-fixtures', orgId, owners: [key(a), key(b)] }))
 const receipts: unknown[] = []
 const server = createServer((req, res) => {
   if (req.url === '/favicon.ico') { res.writeHead(204); res.end(); return }
@@ -68,6 +69,8 @@ try {
     await registry.mcp(binding, { jsonrpc: '2.0', id: ++rpc, method: 'initialize', params: {} })
     const listed = await registry.mcp(binding, { jsonrpc: '2.0', id: ++rpc, method: 'tools/list' }) as { result: { tools: unknown[] } }
     assert.equal(listed.result.tools.length, 5)
+    assert.deepEqual(await registry.conversationControl(binding, browserController(binding), 'interrupt'), { changed: false })
+    assert.deepEqual(await registry.conversationControl(binding, browserController(binding), 'continue'), { changed: false })
     assert.notEqual((await runDocker(['inspect', `moss-browser-${key(binding)}`])).code, 0)
   }
   console.log(JSON.stringify({ phase: 'discovery', profilesNotClaimed: true, containersNotCreated: true }))
@@ -84,8 +87,10 @@ try {
     console.log(JSON.stringify({ phase: 'owner-isolation', owner, profileId: session.profileId }))
   }
   const original = (await invoke(a, { kind: 'state' })).session
+  assert.deepEqual(await registry.conversationControl(next, browserController(next), 'continue'), { changed: false }, 'Chat in another conversation must not claim this profile')
   await assert.rejects(invoke(next, { kind: 'state' }), /browser_profile_in_use/)
-  const human = (await invoke(a, { kind: 'take', controlEpoch: original.controlEpoch, targetEpoch: original.targetEpoch })).session
+  assert.deepEqual(await registry.conversationControl(a, browserController(a), 'interrupt'), { changed: true })
+  const human = (await invoke(a, { kind: 'state' })).session
   sessions.get(a.sessionId)!.desiredState = 'terminated'
   const moved = (await invoke(next, { kind: 'state' })).session
   assert.equal(moved.profileId, original.profileId)
@@ -96,7 +101,8 @@ try {
   assert.equal(denied.isError, true)
   assert.ok(JSON.stringify(denied).includes('browser_control_held_by_user'))
   await assert.rejects(invoke(a, { kind: 'reload', controlEpoch: original.controlEpoch, targetEpoch: original.targetEpoch }), /browser_profile_in_use/)
-  const returned = (await invoke(next, { kind: 'return', controlEpoch: moved.controlEpoch, targetEpoch: moved.targetEpoch })).session
+  assert.deepEqual(await registry.conversationControl(next, browserController(next), 'continue'), { changed: true })
+  const returned = (await invoke(next, { kind: 'state' })).session
   assert.equal(returned.state, 'ai')
   const cookie = await command(next, 'Runtime.evaluate', { expression: 'document.cookie', returnByValue: true })
   assert.ok(JSON.stringify(cookie).includes('profile_login=owner-a'))

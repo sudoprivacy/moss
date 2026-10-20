@@ -6,6 +6,7 @@ import { runDocker } from '../runtime/dockerCommand.js'
 import { HttpBrowserWorker, browserController, type BrowserBinding, type BrowserWorkerPort } from './browserGateway.js'
 import browserTools from '../../../deploy/browser/mcp-tools.json' with { type: 'json' }
 import { browserAllowedOwners, browserOwnerAllowed } from './browserDeploymentPolicy.js'
+import { browserConversationGuidance, changeBrowserConversationControl } from './browserConversation.js'
 
 type SessionLookup = (id: string) => Promise<(BrowserBinding & { desiredState: string }) | null>
 
@@ -44,7 +45,9 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
     return result.stdout.trim()
   }
 
-  private async resolve(binding: BrowserBinding): Promise<HttpBrowserWorker> {
+  private resolve(binding: BrowserBinding): Promise<HttpBrowserWorker>
+  private resolve(binding: BrowserBinding, isExistingOnly: true): Promise<HttpBrowserWorker | null>
+  private async resolve(binding: BrowserBinding, isExistingOnly = false): Promise<HttpBrowserWorker | null> {
     if (!this.image) {
       const { MOSS_BROWSER_GATEWAY_URL: endpoint, MOSS_BROWSER_GATEWAY_TOKEN: token, MOSS_BROWSER_GATEWAY_AI_TOKEN: aiToken } = process.env
       if (!endpoint || !token || !aiToken) throw new HttpError(503, 'Managed browser is not configured')
@@ -53,7 +56,9 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
         headers: { Authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(2_000),
       })
       if (!response.ok) throw new HttpError(503, 'Managed browser identity unavailable')
-      await this.claim(worker, binding, (await response.json() as { binding: BrowserBinding | null }).binding)
+      const owner = (await response.json() as { binding: BrowserBinding | null }).binding
+      if (isExistingOnly && (!owner || owner.sessionId !== binding.sessionId || owner.orgId !== binding.orgId || owner.userId !== binding.userId)) return null
+      await this.claim(worker, binding, owner)
       return worker
     }
     const key = this.ownerKey(binding)
@@ -65,6 +70,10 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
     const aiToken = this.credential(key, 'ai')
     let inspected = await runDocker(['inspect', name])
     if (inspected.code !== 0) {
+      if (isExistingOnly) {
+        if (/No such (?:object|container):/i.test(inspected.stderr)) return null
+        throw new HttpError(503, 'Managed browser container inspection failed')
+      }
       const existingVolume = await runDocker(['volume', 'inspect', volume])
       if (existingVolume.code === 0) {
         const value = JSON.parse(existingVolume.stdout)[0]
@@ -114,6 +123,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
       }
     }
     if (owner === undefined) throw new HttpError(503, 'Managed browser worker unavailable')
+    if (isExistingOnly && (!owner || owner.sessionId !== binding.sessionId || owner.orgId !== binding.orgId || owner.userId !== binding.userId)) return null
     await this.claim(worker, binding, owner)
     this.workers.set(key, { worker, sessionId: binding.sessionId, checkedAt: Date.now() })
     return worker
@@ -148,6 +158,16 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
     }
   }
 
+  /** Normal chat never allocates a browser or claims another conversation's profile. */
+  async conversationControl(binding: BrowserBinding, controller: string, intent: 'interrupt' | 'continue'): Promise<{ changed: boolean }> {
+    if (!managedBrowserConfigured() || !browserOwnerAllowed(binding)) return { changed: false }
+    return this.mutex.run(this.ownerKey(binding), async () => {
+      const worker = await this.resolve(binding, true)
+      if (!worker) return { changed: false }
+      return changeBrowserConversationControl(worker, binding, controller, intent)
+    })
+  }
+
   async mcp(binding: BrowserBinding, message: unknown): Promise<unknown | null> {
     if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
     // Every agent discovers MCP tools at startup. Discovery must not create a
@@ -158,7 +178,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
       if (rpc.method === 'initialize') return { jsonrpc: '2.0', id: rpc.id, result: {
         protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'moss-managed-browser', version: '0.1.0' },
       } }
-      if (rpc.method === 'tools/list') return { jsonrpc: '2.0', id: rpc.id, result: { tools: browserTools } }
+      if (rpc.method === 'tools/list') return { jsonrpc: '2.0', id: rpc.id, result: { tools: browserTools.map(tool => tool.name === 'browser_launch' ? { ...tool, description: browserConversationGuidance } : tool) } }
       if (rpc.method === 'ping') return { jsonrpc: '2.0', id: rpc.id, result: {} }
     }
     // Release provisioning locks before browser calls so takeover can fence
