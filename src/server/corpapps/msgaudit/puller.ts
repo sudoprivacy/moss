@@ -11,6 +11,20 @@
  * (the archive has a retention window; a gap noticed late cannot be
  * back-filled).
  *
+ * MEDIA COMES AFTER THE CURSOR. Media used to be downloaded before the
+ * cursor was saved, so a page with too much media for one pull (on
+ * 2026-10-16, one 4.6 MB image posted to 351 groups, ~1.6 GB in one page)
+ * was killed at the time limit every time and replayed from the start,
+ * downloading the same files again. The archive stayed frozen for four
+ * days. Now:
+ *   - the cursor is saved as soon as the page's messages are durable;
+ *   - files already on disk are not downloaded again;
+ *   - identical content (same md5sum) is downloaded once per pull and
+ *     linked for the repeats;
+ *   - a pull stops starting new downloads and new pages near its time
+ *     budget, so it returns cleanly instead of being killed. Media it did
+ *     not get to is recorded as skipped in the media index.
+ *
  * Membership snapshots are NOT taken here. They used to run at the end of
  * every pull, which cannot work at tens of thousands of groups (the pull
  * child has a 10-minute budget) and only ever saw rooms that had spoken.
@@ -22,6 +36,9 @@ import { normalizeRecord } from './normalize.js'
 import { openSdk, type RawChatRecord, type SdkHandle } from './sdk.js'
 import {
   appendRecords,
+  hasMedia,
+  linkMedia,
+  mediaRelPath,
   readCursor,
   updateRooms,
   writeCursor,
@@ -36,6 +53,13 @@ const PAGE_LIMIT = 1000
 
 /** Attempts per media object before giving up. */
 const MEDIA_RETRIES = 3
+
+/**
+ * How long one pull may run before it stops starting new media downloads
+ * and new pages. Kept well under the worker's 10-minute child timeout so
+ * the pull returns (and reports) instead of being killed.
+ */
+export const DEFAULT_PULL_BUDGET_MS = 7 * 60 * 1000
 
 /**
  * Fetch one media object, retrying transient failures.
@@ -101,6 +125,8 @@ export type PullConfig = {
   mediaTypesRaw?: string
   /** Skip files larger than this (bytes). 0 = no limit. */
   mediaMaxBytes?: number
+  /** Wall-clock budget for this pull (ms); see DEFAULT_PULL_BUDGET_MS. */
+  budgetMs?: number
 }
 
 export type PullResult = {
@@ -112,6 +138,10 @@ export type PullResult = {
   media: number
   /** Media downloads that were skipped or failed. */
   mediaFailed: number
+  /** Media served from disk or from a same-content file instead of downloading. */
+  mediaReused: number
+  /** True when the time budget stopped this pull before the archive head. */
+  budgetHit: boolean
   failed: number
   cursor: number
   /** Pages consumed this run; equals maxPages when the cap stopped it. */
@@ -148,15 +178,21 @@ function decryptPage(
 
 /**
  * Pull from the stored cursor to the head of the archive (or until
- * `maxPages`). Safe to call repeatedly; concurrent calls for the same
- * instance are the caller's responsibility to serialise.
+ * `maxPages`, or the time budget). Safe to call repeatedly; concurrent
+ * calls for the same instance are the caller's responsibility to serialise.
+ *
+ * `open` is injectable so tests can run without the native SDK.
  */
-export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
+export async function pullOnce(
+  cfg: PullConfig,
+  open: (corpId: string, secret: string) => SdkHandle = openSdk,
+): Promise<PullResult> {
   const privateKeys = parsePrivateKeys(cfg.privateKeysRaw)
   if (Object.keys(privateKeys).length === 0) {
     throw new Error('msgaudit: no RSA private key configured — records cannot be decrypted')
   }
 
+  const deadline = Date.now() + (cfg.budgetMs ?? DEFAULT_PULL_BUDGET_MS)
   const start = await readCursor(cfg.corpAppId)
   let cursor = start.seq
   let fetched = 0
@@ -165,15 +201,22 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
   let filtered = 0
   let media = 0
   let mediaFailed = 0
+  let mediaReused = 0
   let pages = 0
+  let budgetHit = false
   const roomFilter = parseRoomFilter(cfg.roomFilterRaw)
   const mediaTypes = parseMediaTypes(cfg.mediaTypesRaw)
   const mediaMax = Number(cfg.mediaMaxBytes) > 0 ? Number(cfg.mediaMaxBytes) : 0
-  const pendingMedia: MediaIndexEntry[] = []
+  // md5sum -> a file already on disk with that content, for this pull.
+  const byMd5 = new Map<string, string>()
 
-  const sdk = openSdk(cfg.corpId, cfg.secret)
+  const sdk = open(cfg.corpId, cfg.secret)
   try {
     for (;;) {
+      if (Date.now() >= deadline) {
+        budgetHit = true
+        break
+      }
       const page = await sdk.getChatData(cursor, PAGE_LIMIT)
       if (page.length === 0) break
       fetched += page.length
@@ -202,56 +245,35 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
       await updateRooms(cfg.corpAppId, records)
       written += w
 
-      // Media is downloaded AFTER the transcript is durable, and its
-      // outcome is recorded in a sidecar rather than in the message line.
-      // Downloading first would mean a slow or wedged media fetch delays
-      // (or (on a crash) loses) the messages themselves — and the message
-      // is the irreplaceable part, while media is merely time-limited.
-      if (mediaTypes.size > 0) {
-        for (const rec of records) {
-          if (!mediaTypes.has(rec.msgtype)) continue
-          const box = mediaBox(rec)
-          if (!box) continue
-          const size = mediaSize(box)
-          if (mediaMax > 0 && size > mediaMax) {
-            pendingMedia.push({
-              msgid: rec.msgid,
-              msgtime: rec.msgtime,
-              error: `skipped: ${size} bytes exceeds limit ${mediaMax}`,
-            })
-            mediaFailed += 1
-            continue
-          }
-          const outcome = await downloadWithRetry(sdk, rec, box)
-          if (outcome.bytes) {
-            const rel = await writeMedia(
-              cfg.corpAppId,
-              rec.msgid,
-              rec.msgtime,
-              mediaExt(rec, box),
-              outcome.bytes,
-            )
-            pendingMedia.push({ msgid: rec.msgid, msgtime: rec.msgtime, path: rel })
-            media += 1
-          } else {
-            pendingMedia.push({
-              msgid: rec.msgid,
-              msgtime: rec.msgtime,
-              error: outcome.error ?? 'download failed',
-            })
-            mediaFailed += 1
-          }
-        }
-      }
-
       // Advance past the whole page, including records we could not
       // decrypt: they will never become readable, and leaving the cursor
-      // behind them would block the archive permanently.
+      // behind them would block the archive permanently. Saved BEFORE media
+      // so slow or plentiful media can never hold the messages back.
       const maxSeq = page.reduce((m, r) => (r.seq > m ? r.seq : m), cursor)
       cursor = maxSeq
       await writeCursor(cfg.corpAppId, cursor)
-
       pages += 1
+
+      if (mediaTypes.size > 0) {
+        const m = await downloadPageMedia(sdk, cfg.corpAppId, records, {
+          mediaTypes,
+          mediaMax,
+          deadline,
+          byMd5,
+        })
+        media += m.media
+        mediaFailed += m.mediaFailed
+        mediaReused += m.mediaReused
+        if (m.budgetHit) budgetHit = true
+        // Indexed per page, not at the end of the pull, so a pull that is
+        // killed still keeps the record of what it already downloaded.
+        if (m.entries.length > 0) {
+          await appendMediaIndex(cfg.corpAppId, m.entries).catch(() => {
+            // the files are already on disk; a lost index entry is cosmetic
+          })
+        }
+      }
+
       if (page.length < PAGE_LIMIT) break
       if (cfg.maxPages && pages >= cfg.maxPages) break
     }
@@ -265,11 +287,84 @@ export async function pullOnce(cfg: PullConfig): Promise<PullResult> {
     }
   }
 
-  if (pendingMedia.length > 0) {
-    await appendMediaIndex(cfg.corpAppId, pendingMedia).catch(() => {
-      // the files are already on disk; a lost index entry is cosmetic
-    })
-  }
+  return { fetched, written, failed, filtered, media, mediaFailed, mediaReused, budgetHit, cursor, pages }
+}
 
-  return { fetched, written, failed, filtered, media, mediaFailed, cursor, pages }
+/**
+ * Fetch the media for one page of already-durable records. Returns the
+ * index entries to record, one per media-carrying record.
+ */
+async function downloadPageMedia(
+  sdk: SdkHandle,
+  corpAppId: string,
+  records: ChatRecord[],
+  opts: {
+    mediaTypes: Set<string>
+    mediaMax: number
+    deadline: number
+    byMd5: Map<string, string>
+  },
+): Promise<{ entries: MediaIndexEntry[]; media: number; mediaFailed: number; mediaReused: number; budgetHit: boolean }> {
+  const entries: MediaIndexEntry[] = []
+  let media = 0
+  let mediaFailed = 0
+  let mediaReused = 0
+  let budgetHit = false
+
+  for (const rec of records) {
+    if (!opts.mediaTypes.has(rec.msgtype)) continue
+    const box = mediaBox(rec)
+    if (!box) continue
+    const base = { msgid: rec.msgid, msgtime: rec.msgtime }
+    const size = mediaSize(box)
+    if (opts.mediaMax > 0 && size > opts.mediaMax) {
+      entries.push({ ...base, error: `skipped: ${size} bytes exceeds limit ${opts.mediaMax}` })
+      mediaFailed += 1
+      continue
+    }
+
+    const ext = mediaExt(rec, box)
+    const md5 = typeof box.md5sum === 'string' && box.md5sum ? box.md5sum : ''
+
+    // Already on disk (a replayed page): nothing to fetch.
+    const rel = mediaRelPath(rec.msgid, rec.msgtime, ext)
+    if (await hasMedia(corpAppId, rel)) {
+      if (md5 && !opts.byMd5.has(md5)) opts.byMd5.set(md5, rel)
+      entries.push({ ...base, path: rel })
+      mediaReused += 1
+      continue
+    }
+
+    // Same content already fetched this pull: link it instead.
+    const same = md5 ? opts.byMd5.get(md5) : undefined
+    if (same) {
+      try {
+        const linked = await linkMedia(corpAppId, same, rec.msgid, rec.msgtime, ext)
+        entries.push({ ...base, path: linked })
+        mediaReused += 1
+        continue
+      } catch {
+        // fall through to a real download
+      }
+    }
+
+    if (Date.now() >= opts.deadline) {
+      entries.push({ ...base, error: 'skipped: pull time budget used up' })
+      mediaFailed += 1
+      budgetHit = true
+      continue
+    }
+
+    const outcome = await downloadWithRetry(sdk, rec, box)
+    if (outcome.bytes) {
+      const written = await writeMedia(corpAppId, rec.msgid, rec.msgtime, ext, outcome.bytes)
+      if (md5) opts.byMd5.set(md5, written)
+      entries.push({ ...base, path: written })
+      media += 1
+    } else {
+      entries.push({ ...base, error: outcome.error ?? 'download failed' })
+      mediaFailed += 1
+    }
+  }
+  return { entries, media, mediaFailed, mediaReused, budgetHit }
 }
