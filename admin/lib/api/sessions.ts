@@ -1,4 +1,4 @@
-import { dcClient } from './client'
+import { ApiRequestError, dcClient } from './client'
 import type {
   BudgetStatsResponse,
   DashboardStatsResponse,
@@ -46,7 +46,34 @@ export async function getSession(sessionId: string): Promise<GetSessionResponse>
 export async function getSessionContext(
   sessionId: string
 ): Promise<GetSessionContextResponse> {
-  return dcClient.get<GetSessionContextResponse>(`/api/v1/sessions/${sessionId}/context`)
+  try {
+    return await dcClient.get<GetSessionContextResponse>(`/api/v1/sessions/${sessionId}/context`)
+  } catch (error) {
+    if (!(error instanceof ApiRequestError) || error.status !== 404) throw error
+
+    // A committed session can legitimately have no transcript (for example,
+    // startup failed before the first message). Keep its detail and recovery
+    // controls available; getSession still preserves a genuine 404.
+    const { session } = await getSession(sessionId)
+    return {
+      session,
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        totalTokens: 0,
+        webSearchRequests: 0,
+        assistantMessageCount: 0,
+        filesRead: 0,
+        truncatedFiles: [],
+        includesSubagents: false,
+        subagentTranscriptCount: 0,
+        modelUsage: {},
+      },
+      context: { messages: [] },
+    }
+  }
 }
 
 export async function terminateSession(
