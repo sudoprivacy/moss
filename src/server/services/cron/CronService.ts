@@ -335,18 +335,29 @@ export class CronService {
    * starts. The lease covers the full run window (CRON_RUN_TIMEOUT_MS) rather
    * than a flat 30s — the next_run_at advance is the real dedup guard, but
    * sizing the lease to the run keeps the lock meaningful for its duration.
+   *
+   * Returns the lease value it set, or null when another caller holds it.
    */
-  private acquireLease(job: CronJob, nowTs: number): boolean {
+  private acquireLease(job: CronJob, nowTs: number): number | null {
     const leaseUntil = nowTs + CRON_RUN_TIMEOUT_MS + 60_000 // cover the run + margin
     const nextRunAt = computeNextRunAt(job.schedule, nowTs)
-    return this.store.acquireLease(job.id, nowTs, leaseUntil, nextRunAt)
+    return this.store.acquireLease(job.id, nowTs, leaseUntil, nextRunAt) ? leaseUntil : null
   }
 
   private async executeDueJob(jobId: string, nowTs = Date.now()): Promise<void> {
     const job = this.store.getById(jobId)
     if (!job) return
-    if (!this.acquireLease(job, nowTs)) return
-    await this.executeJob(jobId)
+    const leaseUntil = this.acquireLease(job, nowTs)
+    if (leaseUntil == null) return
+    try {
+      await this.executeJob(jobId)
+    } finally {
+      // The lease spans the whole run window (31 min), so it has to be given
+      // back when the run ends. Otherwise any job that fires more often than
+      // that (e.g. every 15 min) is refused at its next slot and only picked
+      // up as overdue once the lease expires — every ~31 min instead of 15.
+      this.store.releaseLease(job.id, leaseUntil)
+    }
   }
 
   /**
