@@ -6,7 +6,7 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.58.0 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.58.1 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
