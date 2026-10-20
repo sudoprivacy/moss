@@ -12,7 +12,7 @@ import { CronStore } from "../services/cron/CronStore.js";
 
 const MIN = 60_000;
 
-function setup() {
+function setup(getUserAuth: () => Promise<null> = async () => null) {
   const { db } = new DirectConnectStore(":memory:");
   const store = new CronStore(db);
   const svc = new CronService(db, {
@@ -22,7 +22,7 @@ function setup() {
     dockerContainerMode: "session",
     // No auth → the run fails fast inside executeJob, which is enough to
     // exercise the lease lifecycle around it.
-    getUserAuth: async () => null,
+    getUserAuth,
   });
   const job = store.insert({
     orgId: "o1",
@@ -58,6 +58,30 @@ describe("cron lease release", () => {
     await fire(t0);
     await fire(t0 + 1 * MIN); // the 60s poll, still inside the same slot
     assert.equal(store.listRunsByJob(job.id).length, 1);
+  });
+
+  it("blocks duplicate fires while a run is still in flight, then frees the next slot", async () => {
+    // Hold the run open: executeJob awaits getUserAuth until we let it go.
+    let finishRun!: () => void;
+    const gate = new Promise<null>((resolve) => { finishRun = () => resolve(null); });
+    const { store, job, t0, fire } = setup(() => gate);
+
+    const first = fire(t0);
+    await new Promise((r) => setImmediate(r));
+    assert.ok(store.getById(job.id)!.leaseUntil, "lease is held during the run");
+
+    // The 60s poll and a racing second fire (e.g. timer + poll, or another
+    // instance) during the run must not start anything.
+    await Promise.all([fire(t0), fire(t0 + 1 * MIN), fire(t0 + 5 * MIN)]);
+    assert.equal(store.listRunsByJob(job.id).length, 1, "no duplicate while the first run is in flight");
+
+    finishRun();
+    await first;
+    assert.equal(store.getById(job.id)!.leaseUntil, null, "lease released as soon as the run ends");
+
+    // Next slot, 15 min after the previous one, well inside the old 31-min window.
+    await fire(t0 + 15 * MIN);
+    assert.equal(store.listRunsByJob(job.id).length, 2);
   });
 
   it("only clears its own lease", () => {
