@@ -12,6 +12,28 @@ import { cohostRepositoryPath, cohostSessionStatePath, readCohostSessionState, r
 import { sessionAgentName } from '../agentIdentity.js'
 import type { SessionRecord } from '../types.js'
 import { syncCohostSkills } from './cohostSkills.js'
+import { ResourceAccessError } from '../catalog/resourceError.js'
+
+void test('terminated session workspace requests never open a recovery channel or native connection', async () => {
+  for (const status of ['terminated', 'ended', 'creating'] as const) {
+    const session = { sessionId: 'closed-session', desiredState: 'active', status,
+      userId: 'owner', assistantName: 'helper' } as SessionRecord
+    const access = createCohostWorkspaceAccess(session, {
+      async connectInternalChannel() { assert.fail('workspace access must not recover a terminated session') },
+      async connectCohostRuntime() { assert.fail('workspace access must not allocate a terminated session runtime') },
+    })
+    // Termination can happen after the route creates the access object.
+    session.desiredState = 'terminated'
+    for (const operation of [
+      () => access.listTree(2),
+      () => access.readFile('retained.txt'),
+      () => access.writeFile('new.txt', Buffer.from('new bytes')),
+    ]) {
+      await assert.rejects(operation, error => error instanceof ResourceAccessError &&
+        error.statusCode === 409 && error.message === 'Session was terminated')
+    }
+  }
+})
 
 void test('skill reconciliation removes disabled skills and obsolete files while retaining user work and executable intent', async t => {
   const root = await mkdtemp(join(tmpdir(), 'moss-cohost-skill-sync-'))

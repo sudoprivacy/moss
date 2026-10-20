@@ -17,6 +17,9 @@ export function createCohostWorkspaceAccess(
   runtime: Pick<RuntimeService, 'connectInternalChannel' | 'connectCohostRuntime'>,
 ): WorkspaceFileAccess {
   const withWorkspace = async <T>(operation: (client: NexusVfsClient, token: string, root: string) => Promise<T>): Promise<T> => {
+    if (session.desiredState === 'terminated') {
+      throw new ResourceAccessError(409, 'Session was terminated')
+    }
     const channel = await runtime.connectInternalChannel(session.sessionId)
     const { processId, binding } = await readLiveManagedExecution(channel, session.sessionId)
     const expectedAgent = session.assistantName ? sessionAgentName(session.userId, session.assistantName) : undefined
