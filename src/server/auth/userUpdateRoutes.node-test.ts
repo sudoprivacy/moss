@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import sharp from 'sharp'
 import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -51,6 +52,43 @@ async function verifyUserUpdates(t: TestContext, isSharedBilling: boolean) {
       accounts[label] = { admin: await login(`${label}-admin`), user: await login(`${label}-user`), userId: user.user.id }
     }
     const a = accounts.a!, b = accounts.b!
+    const profile = (await ok('GET', '/api/v1/user/profile', a.user)).data
+    assert.equal(profile.user_id, a.userId)
+    assert.equal(profile.login_name, 'a-user')
+    assert.equal(profile.can_change_password, true)
+    assert.equal(profile.avatar, null)
+    await ok('POST', '/api/v1/user/update-profile', a.user, { nickname: 'My nickname', user_id: b.userId })
+    assert.equal((await ok('GET', '/api/v1/user/profile', a.user)).data.nickname, 'My nickname')
+    assert.equal((await ok('GET', '/api/v1/user/profile', b.user)).data.nickname, 'b-user')
+    assert.ok(await login('a-user'), 'nickname must not change the login name')
+    assert.equal((await request('POST', '/api/v1/user/update-profile', a.user, { nickname: 'x'.repeat(61) })).status, 400)
+    const png = await sharp({ create: { width: 512, height: 384, channels: 3, background: '#0088ff' } }).png().toBuffer()
+    const avatarInput = `data:image/png;base64,${png.toString('base64')}`
+    assert.equal((await request('POST', '/api/v1/user/avatar', undefined, { avatar: avatarInput })).status, 401)
+    const avatar = (await ok('POST', '/api/v1/user/avatar', a.user, { avatar: avatarInput, user_id: b.userId })).data.avatar
+    const metadata = await sharp(Buffer.from(avatar.split(',')[1], 'base64')).metadata()
+    assert.equal(metadata.format, 'webp')
+    assert.equal(metadata.width, 256)
+    assert.equal(metadata.height, 256)
+    assert.equal((await ok('GET', '/api/v1/user/profile', await login('a-user'))).data.avatar, avatar)
+    assert.equal((await ok('GET', '/api/v1/user/profile', b.user)).data.avatar, null)
+    for (const input of ['data:image/svg+xml;base64,PHN2Zy8+', 'data:image/png;base64,YmFk', 'https://untrusted/image.png']) {
+      assert.equal((await request('POST', '/api/v1/user/avatar', a.user, { avatar: input })).status, 400)
+    }
+    assert.equal((await request('POST', '/api/v1/user/avatar', a.user, { avatar: 'data:image/png;base64,' + 'A'.repeat(3 * 1024 * 1024) })).status, 413)
+    assert.equal((await ok('GET', '/api/v1/user/profile', a.user)).data.avatar, avatar, 'rejected images leave the old avatar intact')
+    await ok('POST', '/api/v1/user/avatar', a.user, { avatar: null })
+    assert.equal((await ok('GET', '/api/v1/user/profile', a.user)).data.avatar, null)
+    const orgs = await ok('GET', '/api/v1/organizations', boot)
+    const selected = await ok('POST', '/api/v1/auth/switch-org', boot, { org_id: orgs.organizations.find((org: any) => org.name === 'a').id })
+    await ok('POST', '/api/v1/user/update-profile', selected.access_token, { nickname: 'Root display' })
+    assert.equal((await ok('GET', '/api/v1/user/profile', boot)).data.nickname, 'Root display')
+    assert.equal((await request('POST', '/api/v1/auth/change-password', a.user, { oldPassword: 'wrong', newPassword: 'ChangedPassword1!' })).status, 403)
+    await ok('POST', '/api/v1/auth/change-password', a.user, { oldPassword: 'test-local-password', newPassword: 'ChangedPassword1!' })
+    assert.equal((await request('POST', '/api/v1/auth/token', undefined, { username: 'a-user', password: 'test-local-password' })).status, 401)
+    const changedToken = (await ok('POST', '/api/v1/auth/token', undefined, { username: 'a-user', password: 'ChangedPassword1!' })).access_token
+    // Restore a valid password for the remaining authorization checks.
+    await ok('POST', '/api/v1/auth/change-password', changedToken, { oldPassword: 'ChangedPassword1!', newPassword: 'TestLocalPassword1!' })
     const path = `/api/v1/users/${a.userId}`
     const updated = await ok('PATCH', path, a.admin, { display_name: 'Updated A' })
     assert.equal(updated.user?.displayName, 'Updated A')
@@ -73,7 +111,7 @@ async function verifyUserUpdates(t: TestContext, isSharedBilling: boolean) {
     assert.equal((await ok('PATCH', path, a.admin, { status: 'disabled' })).user.status, 'disabled')
     assert.equal((await request('GET', '/api/v1/auth/me', a.user)).status, 401)
     assert.equal((await ok('PATCH', path, a.admin, { status: 'active' })).user.status, 'active')
-    assert.ok(await login('a-user'))
+    assert.ok((await ok('POST', '/api/v1/auth/token', undefined, { username: 'a-user', password: 'TestLocalPassword1!' })).access_token)
     if (!isSharedBilling) return
     const shared = await ok('POST', '/api/v1/organizations', boot, { name: 'Shared HTTP admission', initial_amount_usd: '1.00', default_member_limit_usd: '0.05' })
     const sharedRoot = (await ok('POST', '/api/v1/auth/switch-org', boot, { org_id: shared.organization.id })).access_token as string

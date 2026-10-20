@@ -73,6 +73,7 @@ const nodeTestFiles = [
   'src/server/auth/sudorouterCredentials.node-test.ts',
   'src/server/auth/localExecution.node-test.ts',
   'src/server/auth/userUpdateRoutes.node-test.ts',
+  'src/server/authCenter/profileAvatar.node-test.ts',
   'src/server/backends/acpBridge.node-test.ts',
   'src/server/browser/browserGateway.node-test.ts',
   'src/server/browser/browserAgentCapability.node-test.ts',

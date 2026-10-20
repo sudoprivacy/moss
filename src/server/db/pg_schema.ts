@@ -1967,6 +1967,12 @@ const MIGRATIONS: PgMigration[] = [
     ALTER TABLE tenant_assistants ADD CONSTRAINT tenant_assistants_provider_type_check CHECK (provider_type IN ('local', 'moss_runtime', 'dify', 'custom_http'));
   ` },
   { version: 13, name: 'cohost-agent-storage-homes', sql: COHOST_AGENT_HOME_SCHEMA },
+  { version: 14, name: 'account-profile-avatars', sql: `
+    CREATE TABLE IF NOT EXISTS user_profile_avatars (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      data_url TEXT NOT NULL
+    );
+  ` },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */
