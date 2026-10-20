@@ -5,9 +5,10 @@ import { DatabaseSync } from 'node:sqlite'
 import { Pool } from 'pg'
 import { SqliteDriver, PgDriver, type DbDriver, type PgPoolLike } from '../../db/driver.js'
 import { AgentRunStore } from './store.js'
-import { HttpAgentRuntime, immutableAgent, routerExecutor, type AgentDefinition } from './runtime.js'
+import { HttpAgentRuntime, immutableAgent, routerExecutor, type AgentDefinition, type ModelExecutor, type NexusModelTarget } from './runtime.js'
 import { providerServer } from './server.js'
 import { routerTransport } from './routerTransport.js'
+import { nexusModelExecutor, nexusModelTargets } from './nexusModelExecutor.js'
 
 /** Build this entry as one immutable .mjs artifact before running; no Moss server dependency. */
 async function main() {
@@ -15,18 +16,29 @@ async function main() {
   if (!path || !import.meta.filename.endsWith('.mjs')) throw new Error('Usage: node http-agent-provider.mjs /path/to/provider.json')
   const config = JSON.parse(await readFile(path, 'utf8')) as {
     host: string; port: number; database_file?: string; database_url_file?: string;
-    router_config_file: string; clients: { id: string; token_file: string; agent_ids: string[] }[];
-    definitions: AgentDefinition[]; allowed_router_endpoints: string[]; router_allowed_addresses?: string[]; concurrency?: number;
+    router_config_file?: string; clients: { id: string; token_file: string; agent_ids: string[] }[];
+    definitions: AgentDefinition[]; allowed_router_endpoints?: string[]; router_allowed_addresses?: string[]; concurrency?: number;
+    nexus_model?: { endpoint: string; model_mounts: string[]; tls: { ca: string; cert: string; key: string; serverName?: string }; auth_token_file?: string };
   }
   if (!Number.isInteger(config.port) || config.port < 1024 || config.port > 65535 || !config.host
     || Boolean(config.database_file) === Boolean(config.database_url_file)) throw new Error('Invalid provider configuration')
-  const routerConfig = JSON.parse(await readFile(config.router_config_file, 'utf8'))
-  const router = routerConfig.auth_modes?.proxy?.sudorouter
-  if (!router?.baseUrl || !router?.apiKey || !config.allowed_router_endpoints.includes(router.baseUrl)
-    || config.definitions.some(d => d.router_endpoint !== router.baseUrl)) throw new Error('SudoRouter configuration does not match deployment allowlist')
-  const modelRequest = routerTransport(router.baseUrl, { allowedAddresses: config.router_allowed_addresses })
+  if (Boolean(config.router_config_file) === Boolean(config.nexus_model)) throw new Error('Choose exactly one model transport')
+  let executeModel: ModelExecutor
+  let nexusTargets: NexusModelTarget[] = []
+  if (config.nexus_model) {
+    if (config.allowed_router_endpoints !== undefined || config.router_allowed_addresses !== undefined) throw new Error('Nexus transport cannot carry direct Router configuration')
+    const model = { ...config.nexus_model, authToken: config.nexus_model.auth_token_file ? (await readFile(config.nexus_model.auth_token_file, 'utf8')).trim() : undefined }
+    nexusTargets = nexusModelTargets(model)
+    executeModel = nexusModelExecutor(model)
+  } else {
+    const routerConfig = JSON.parse(await readFile(config.router_config_file!, 'utf8'))
+    const router = routerConfig.auth_modes?.proxy?.sudorouter
+    if (!router?.baseUrl || !router?.apiKey || !config.allowed_router_endpoints?.includes(router.baseUrl)
+      || config.definitions.some(d => d.router_endpoint !== router.baseUrl)) throw new Error('SudoRouter configuration does not match deployment allowlist')
+    executeModel = routerExecutor(router.apiKey, routerTransport(router.baseUrl, { allowedAddresses: config.router_allowed_addresses }))
+  }
   const artifactDigest = `sha256:${createHash('sha256').update(await readFile(import.meta.filename)).digest('hex')}`
-  const agents = config.definitions.map(d => immutableAgent(d, artifactDigest, config.allowed_router_endpoints))
+  const agents = config.definitions.map(d => immutableAgent(d, artifactDigest, config.allowed_router_endpoints ?? [], nexusTargets))
   let db: DbDriver
   if (config.database_url_file) {
     const connectionString = (await readFile(config.database_url_file, 'utf8')).trim()
@@ -40,7 +52,7 @@ async function main() {
     db = new SqliteDriver(sqlite)
   }
   const store = new AgentRunStore(db); await store.ready
-  const runtime = new HttpAgentRuntime(store, agents, routerExecutor(router.apiKey, modelRequest), config.concurrency ?? 4)
+  const runtime = new HttpAgentRuntime(store, agents, executeModel, config.concurrency ?? 4)
   const clients = await Promise.all(config.clients.map(async c => ({ id: c.id, token: (await readFile(c.token_file, 'utf8')).trim(), agentIds: c.agent_ids })))
   const server = providerServer(runtime, clients)
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve) })

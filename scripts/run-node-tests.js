@@ -23,6 +23,7 @@ const nodeTestFiles = [
   'src/server/agentFederation/agentFederation.node-test.ts',
   'src/server/agentFederation/provider/provider.node-test.ts',
   'src/server/agentFederation/provider/routerTransport.node-test.ts',
+  'src/server/agentFederation/provider/nexusModelExecutor.node-test.ts',
   'src/server/agentFederation/releases.node-test.ts',
   'src/server/agentFederation/registryClient.node-test.ts',
   'src/server/agentFederation/registryReleases.node-test.ts',

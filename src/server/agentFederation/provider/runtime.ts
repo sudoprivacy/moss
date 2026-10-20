@@ -3,29 +3,41 @@ import { AgentProtocolError, contentDigest, parseSubmitAgentRun } from './protoc
 import { AgentRunStore, type ClaimedRun, type ModelMessage } from './store.js'
 import { routerTransport, type RouterRequest } from './routerTransport.js'
 
-export interface AgentDefinition {
+interface AgentDefinitionBase {
   external_agent_id: string
   name: string
   system_prompt: string
-  router_endpoint: string
   model: string
   max_output_tokens: number
 }
+export type AgentDefinition = AgentDefinitionBase & (
+  | { router_endpoint: string; nexus_endpoint?: never; model_mount?: never }
+  | { nexus_endpoint: string; model_mount: string; router_endpoint?: never }
+)
+export interface NexusModelTarget { nexus_endpoint: string; model_mount: string }
 export interface ImmutableAgent { definition: Readonly<AgentDefinition>; revision: string; artifactDigest: string }
 
-export function immutableAgent(value: unknown, artifactDigest: string, allowedRouterEndpoints: readonly string[]): ImmutableAgent {
+export function immutableAgent(value: unknown, artifactDigest: string, allowedRouterEndpoints: readonly string[], allowedNexusTargets: readonly NexusModelTarget[] = []): ImmutableAgent {
   const d = value as AgentDefinition
   if (!d || typeof d !== 'object' || Array.isArray(d)
-    || Object.keys(d).sort().join(',') !== 'external_agent_id,max_output_tokens,model,name,router_endpoint,system_prompt'
+    || !['external_agent_id,max_output_tokens,model,name,router_endpoint,system_prompt', 'external_agent_id,max_output_tokens,model,model_mount,name,nexus_endpoint,system_prompt'].includes(Object.keys(d).sort().join(','))
     || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(d.external_agent_id)
     || typeof d.name !== 'string' || !d.name.trim() || d.name.length > 200
     || typeof d.system_prompt !== 'string' || !d.system_prompt.trim() || d.system_prompt.length > 8000
     || typeof d.model !== 'string' || !/^[^\s\x00-\x1f\x7f]{1,200}$/.test(d.model)
     || !Number.isSafeInteger(d.max_output_tokens) || d.max_output_tokens < 1 || d.max_output_tokens > 4096
-    || !/^sha256:[a-f0-9]{64}$/.test(artifactDigest)
-    || !allowedRouterEndpoints.includes(d.router_endpoint)) throw new AgentProtocolError(400, 'INVALID_AGENT_DEFINITION')
-  const endpoint = new URL(d.router_endpoint)
-  if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.hash || endpoint.search || d.router_endpoint.endsWith('/')) throw new AgentProtocolError(400, 'INVALID_ROUTER_ENDPOINT')
+    || !/^sha256:[a-f0-9]{64}$/.test(artifactDigest)) throw new AgentProtocolError(400, 'INVALID_AGENT_DEFINITION')
+  if (d.router_endpoint !== undefined) {
+    if (!allowedRouterEndpoints.includes(d.router_endpoint)) throw new AgentProtocolError(400, 'INVALID_AGENT_DEFINITION')
+    const endpoint = new URL(d.router_endpoint)
+    if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.hash || endpoint.search || d.router_endpoint.endsWith('/')) throw new AgentProtocolError(400, 'INVALID_ROUTER_ENDPOINT')
+  } else {
+    if (typeof d.nexus_endpoint !== 'string' || typeof d.model_mount !== 'string'
+      || !allowedNexusTargets.some(t => t.nexus_endpoint === d.nexus_endpoint && t.model_mount === d.model_mount)
+      || !/^\/[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(d.model_mount) || d.model_mount.length > 200) throw new AgentProtocolError(400, 'INVALID_AGENT_DEFINITION')
+    const endpoint = new URL(d.nexus_endpoint)
+    if (endpoint.protocol !== 'https:' || endpoint.origin !== d.nexus_endpoint) throw new AgentProtocolError(400, 'INVALID_NEXUS_MODEL_ENDPOINT')
+  }
   // Definition contains no secrets and is copied/frozen; an operator changing it creates a new revision.
   const definition = Object.freeze({ ...d })
   const revision = contentDigest({ protocol: DURABLE_AGENT_HTTP_API, artifact_digest: artifactDigest, definition })
@@ -42,7 +54,21 @@ export function agentManifest(agent: ImmutableAgent) {
   }
 }
 
-export type ModelExecutor = (agent: ImmutableAgent, history: ModelMessage[], query: string, signal: AbortSignal) => Promise<string>
+export interface ModelExecutionContext { clientId: string; providerRunId: string }
+export type ModelExecutor = (agent: ImmutableAgent, history: ModelMessage[], query: string, signal: AbortSignal, context?: ModelExecutionContext) => Promise<string>
+
+export function modelRequestBody(agent: ImmutableAgent, history: ModelMessage[], query: string) {
+  const d = agent.definition
+  return { model: d.model, stream: false, max_tokens: d.max_output_tokens,
+    messages: [{ role: 'system', content: d.system_prompt }, ...history, { role: 'user', content: query }] }
+}
+
+export function modelAnswer(result: unknown): string {
+  const body = result as { choices?: { message?: { role?: string; content?: unknown; tool_calls?: unknown; function_call?: unknown }; finish_reason?: string }[] } | null
+  const choice = body?.choices?.[0], message = choice?.message
+  if (!message || typeof message.content !== 'string' || message.content.length > 128_000 || message.tool_calls || message.function_call || choice?.finish_reason !== 'stop') throw new AgentProtocolError(502, 'MODEL_OUTPUT_INVALID')
+  return message.content
+}
 
 export async function boundedJson(response: Response, limit: number): Promise<unknown> {
   if (!response.body || !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '')) { await response.body?.cancel(); throw new AgentProtocolError(502, 'INVALID_JSON_RESPONSE') }
@@ -68,20 +94,17 @@ export function routerExecutor(key: string, request?: RouterRequest): ModelExecu
   if (!key || key.length > 4096 || /[\r\n]/.test(key)) throw new AgentProtocolError(400, 'INVALID_ROUTER_CREDENTIAL')
   return async (agent, history, query, signal) => {
     const d = agent.definition
+    if (!d.router_endpoint) throw new AgentProtocolError(403, 'MODEL_EGRESS_DENIED')
     const response = await (request ?? routerTransport(d.router_endpoint))(`${d.router_endpoint}/chat/completions`, {
       method: 'POST', redirect: 'error', signal,
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ model: d.model, stream: false, max_tokens: d.max_output_tokens,
-        messages: [{ role: 'system', content: d.system_prompt }, ...history, { role: 'user', content: query }] }),
+      body: JSON.stringify(modelRequestBody(agent, history, query)),
     })
     if (!response.ok) {
       await response.body?.cancel()
       throw new AgentProtocolError(response.status, [400, 401, 403, 404, 422, 429].includes(response.status) ? 'MODEL_REQUEST_REJECTED' : 'MODEL_EXECUTION_UNCONFIRMED')
     }
-    const result = await boundedJson(response, 2 * 1024 * 1024) as { choices?: { message?: { role?: string; content?: unknown; tool_calls?: unknown; function_call?: unknown }; finish_reason?: string }[] }
-    const choice = result.choices?.[0], message = choice?.message
-    if (!message || typeof message.content !== 'string' || message.content.length > 128_000 || message.tool_calls || message.function_call || choice?.finish_reason !== 'stop') throw new AgentProtocolError(502, 'MODEL_OUTPUT_INVALID')
-    return message.content
+    return modelAnswer(await boundedJson(response, 2 * 1024 * 1024))
   }
 }
 
@@ -154,7 +177,7 @@ export class HttpAgentRuntime {
       const remaining = claim.request.deadline_at - await this.store.now()
       if (remaining <= 0) return
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(Math.min(remaining, 120_000))])
-      const answer = await this.executeModel(agent, claim.history, claim.request.query, signal)
+      const answer = await this.executeModel(agent, claim.history, claim.request.query, signal, { clientId: claim.clientId, providerRunId: claim.run.provider_run_id })
       await this.store.finish(claim, answer, 'succeeded')
     } catch (error) {
       const code = error instanceof AgentProtocolError ? error.code : 'MODEL_EXECUTION_UNCONFIRMED'
