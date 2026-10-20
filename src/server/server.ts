@@ -44,6 +44,7 @@ import { authorizeSessionBrowser, browserController, invokeSessionBrowser } from
 import { browserOwnerAllowed } from './browser/browserDeploymentPolicy.js'
 import { BrowserWorkerRegistry, managedBrowserConfigured } from './browser/browserWorkerRegistry.js'
 import { notifyBrowserReturn } from './browser/browserHandoff.js'
+import { browserConversationIntent } from './browser/browserConversation.js'
 import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness.js'
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, SystemSettingsScopeError, updateSystemSettings } from './systemSettings.js'
@@ -10467,6 +10468,26 @@ export function startServer(
           users: await Promise.all(stats.users.map(async u => ({ ...u, userName: await resolveName(u.userId) }))),
         }
         writeJson(res, 200, statsWithNames)
+        return
+      }
+
+      const browserConversationMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/browser\/conversation$/)
+      if (req.method === 'POST' && browserConversationMatch) {
+        const intent = browserConversationIntent(await readJsonBody(req))
+        const current = await runtime.getSession(browserConversationMatch[1]!)
+        if (!current) throw new HttpError(404, 'Session not found')
+        if (!canAccessSession(auth, current, 'sessions:attach:any')) throw new HttpError(403, 'Forbidden')
+        // A trusted manager can continue a conversation without acquiring the
+        // owner's personal browser, including sessions with no browser at all.
+        if (current.orgId !== auth.orgId || current.userId !== auth.userId) {
+          writeJson(res, 200, { changed: false })
+          return
+        }
+        const binding = await authorizeSessionBrowser({
+          getSession: async () => current,
+          isUserActive: async principal => (await authService.getUserOrNull(principal.userId, principal.orgId))?.status === 'active',
+        }, auth, browserConversationMatch[1]!)
+        writeJson(res, 200, await browserWorkers.conversationControl(binding, browserController(auth), intent))
         return
       }
 
