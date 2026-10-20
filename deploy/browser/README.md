@@ -6,11 +6,16 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.58.1 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.58.2 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
 the consumer test verifies it against the installed public package.
+
+This patch adds bounded selection drag, selection text and multiline paste over
+the existing authenticated input channel. Copy reads the active page selection;
+it does not expose the VM clipboard. Headful launch uses a child-only X11
+environment, so closing a managed browser does not alter later native launches.
 
 ## Conversation workflow
 
