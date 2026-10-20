@@ -352,6 +352,7 @@ export class ExternalProviderService {
       await this.store.db.transaction(async () => {
         const completed = await this.store.mutate(id, current => {
           current.status = result.status; current.raw_answer = result.text; current.answer = decoded.answer
+          current.error_code = result.status === 'failed' ? result.error_code ?? 'PROVIDER_EXECUTION_FAILED' : null
           current.output_status = decoded.valid ? 'valid' : 'invalid'
           return 'answer'
         }, fence)

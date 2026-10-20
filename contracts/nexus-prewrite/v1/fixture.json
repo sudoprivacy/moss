@@ -1,0 +1,14 @@
+{
+  "code": -32003,
+  "message": "write rejected before mutation",
+  "data": {
+    "schema_version": 1,
+    "kind": "PreWriteRejection",
+    "operation": "write",
+    "stage": "pre_write",
+    "hook": "egress_content_gate",
+    "reason_code": "CONTENT_DENIED",
+    "path": "/test.prompt",
+    "request_digest": "sha256:0682c5f2076f099c34cfdd15a9e063849ed437a49677e6fcc5b4198c76575be5"
+  }
+}

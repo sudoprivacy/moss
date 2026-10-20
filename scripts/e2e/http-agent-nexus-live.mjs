@@ -17,7 +17,8 @@ import protoLoader from '@grpc/proto-loader'
 const binary = resolve(process.env.NEXUS_MODEL_TEST_BIN || 'missing-binary')
 const artifact = resolve(process.env.HTTP_AGENT_TEST_ARTIFACT || 'missing-artifact')
 const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex')
-const evidence = { kernel_sha256: await digest(binary), provider_sha256: await digest(artifact), scope: 'synthetic loopback; lab node identity; no end-user delegation or network sandbox claim', cases: [] }
+const expectPrewrite = process.env.NEXUS_MODEL_EXPECT_PREWRITE === '1'
+const evidence = { expects_prewrite_receipt: expectPrewrite, kernel_sha256: await digest(binary), provider_sha256: await digest(artifact), scope: 'synthetic loopback; lab node identity; no end-user delegation or network sandbox claim', cases: [] }
 const root = await mkdtemp(join(tmpdir(), 'http-agent-nexus-live-'))
 const proto = resolve('node_modules/@nexus-ai-fs/vfs-client/proto')
 const definition = protoLoader.loadSync(join(proto, 'nexus/grpc/vfs/vfs.proto'), { keepCase: true, longs: String, defaults: true, includeDirs: [proto] })
@@ -99,10 +100,10 @@ for (const mode of ['deny', 'redact', 'outage']) {
       inputs.push(input); await http('/v1/runs', input)
       const run = await until(async () => { const value = await http(`/v1/runs/${name}`); return ['succeeded', 'failed', 'unknown'].includes(value.status) ? value : null }, provider)
       const allowed = mode === 'redact' || (mode === 'deny' && name === 'clean')
-      assert.equal(run.status, allowed ? 'succeeded' : 'unknown')
+      assert.equal(run.status, allowed ? 'succeeded' : expectPrewrite ? 'failed' : 'unknown')
       if (allowed) assert.equal(run.output.text, '42')
-      else assert.equal(run.error_code, 'MODEL_EXECUTION_UNCONFIRMED')
-      evidence.cases.push({ mode, input: name, status: run.status, upstream_requests: calls.length })
+      else assert.equal(run.error_code, expectPrewrite ? mode === 'outage' ? 'MODEL_CLASSIFIER_UNAVAILABLE' : 'MODEL_CONTENT_DENIED' : 'MODEL_EXECUTION_UNCONFIRMED')
+      evidence.cases.push({ mode, input: name, status: run.status, error_code: run.error_code, upstream_requests: calls.length })
     }
     assert.equal(calls.length, mode === 'deny' ? 1 : mode === 'redact' ? 2 : 0)
     assert(calls.every(c => c.path === '/v1/chat/completions' && c.authorization === 'Bearer synthetic-model-key' && !JSON.stringify(c.body).includes(sensitive)))
@@ -111,6 +112,19 @@ for (const mode of ['deny', 'redact', 'outage']) {
     try {
       const saved = db.prepare('SELECT request FROM http_agent_runs WHERE invocation_id = ?').get('sensitive')
       assert.equal(JSON.parse(saved.request).query, inputs[1].query)
+      if (expectPrewrite) {
+        const receipts = db.prepare('SELECT invocation_id, receipt FROM http_agent_write_rejections').all()
+        assert.equal(receipts.length, mode === 'outage' ? 2 : mode === 'deny' ? 1 : 0)
+        for (const row of receipts) {
+          const receipt = JSON.parse(row.receipt), input = inputs.find(i => i.invocation_id === row.invocation_id)
+          const original = Buffer.from(JSON.stringify({ nexus_http: { version: 1, path: 'chat/completions', headers: {} }, body: { model: 'synthetic-model', stream: false, max_tokens: 64, messages: [{ role: 'system', content: 'Answer synthetic tests.' }, { role: 'user', content: input.query }] } }))
+          assert.equal(receipt.data.request_digest, `sha256:${createHash('sha256').update(original).digest('hex')}`)
+          assert.equal(receipt.data.hook, 'egress_content_gate')
+          assert.equal(receipt.data.stage, 'pre_write')
+          assert(!JSON.stringify(receipt).includes(sensitive))
+        }
+        evidence.cases.push({ mode, persisted_receipts: receipts.length, original_rpc_digest_verified: true })
+      }
       evidence.cases.push({ mode, original_local_query_preserved: true })
     } finally { db.close() }
     provider = start(); await until(() => http('/healthz'), provider)

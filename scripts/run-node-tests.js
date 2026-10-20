@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
   'scripts/contracts/registry-source.test.mjs',
+  'scripts/contracts/nexus-prewrite-source.test.mjs',
   'scripts/e2e/workspace-proof.test.mjs',
   'scripts/e2e/http-agent-artifact.test.mjs',
   'scripts/e2e/fetch-nexus-runtime.test.mjs',

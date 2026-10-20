@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus-vfs.dev/contracts/pre-write-rejection/v1",
+  "title": "Native Write pre-hook rejection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "code",
+    "message",
+    "data"
+  ],
+  "properties": {
+    "code": {
+      "const": -32003
+    },
+    "message": {
+      "const": "write rejected before mutation"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "operation",
+        "stage",
+        "hook",
+        "reason_code",
+        "path",
+        "request_digest"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "PreWriteRejection"
+        },
+        "operation": {
+          "const": "write"
+        },
+        "stage": {
+          "const": "pre_write"
+        },
+        "hook": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z_]{1,64}$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}

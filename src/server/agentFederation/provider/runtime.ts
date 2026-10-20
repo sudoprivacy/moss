@@ -1,5 +1,6 @@
 import { DURABLE_HTTP_CAPABILITIES, DURABLE_AGENT_HTTP_API, type SubmitAgentRun } from '../../../../contracts/agent-http/v1alpha2/contract.js'
 import { AgentProtocolError, contentDigest, parseSubmitAgentRun } from './protocol.js'
+import { NexusWriteRejected } from './nexusWriteRejection.js'
 import { AgentRunStore, type ClaimedRun, type ModelMessage } from './store.js'
 import { routerTransport, type RouterRequest } from './routerTransport.js'
 
@@ -181,8 +182,9 @@ export class HttpAgentRuntime {
       await this.store.finish(claim, answer, 'succeeded')
     } catch (error) {
       const code = error instanceof AgentProtocolError ? error.code : 'MODEL_EXECUTION_UNCONFIRMED'
-      const confirmedFailure = ['MODEL_REQUEST_REJECTED', 'MODEL_OUTPUT_INVALID', 'EXECUTION_REVISION_UNAVAILABLE', 'MODEL_EGRESS_DENIED', 'MODEL_EGRESS_UNAVAILABLE'].includes(code)
-      await this.store.finish(claim, '', confirmedFailure ? 'failed' : 'unknown', confirmedFailure ? code : 'MODEL_EXECUTION_UNCONFIRMED')
+      const receipt = error instanceof NexusWriteRejected ? error.receipt : undefined
+      const confirmedFailure = Boolean(receipt) || ['MODEL_REQUEST_REJECTED', 'MODEL_OUTPUT_INVALID', 'EXECUTION_REVISION_UNAVAILABLE', 'MODEL_EGRESS_DENIED', 'MODEL_EGRESS_UNAVAILABLE'].includes(code)
+      await this.store.finish(claim, '', confirmedFailure ? 'failed' : 'unknown', confirmedFailure ? code : 'MODEL_EXECUTION_UNCONFIRMED', receipt)
     } finally { clearInterval(timer); await heartbeat }
   }
   async idle() { await Promise.all([...this.running.values()].map(item => item.promise)) }

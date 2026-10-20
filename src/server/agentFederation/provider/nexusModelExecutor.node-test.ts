@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import receiptFixture from '../../../../contracts/nexus-prewrite/v1/fixture.json' with { type: 'json' }
+import { NexusWriteRejected } from './nexusWriteRejection.js'
 import { test } from 'node:test'
 import { DatabaseSync } from 'node:sqlite'
 import { SqliteDriver } from '../../db/driver.js'
@@ -137,4 +140,66 @@ void test('durable claim and runtime restart never repeat an uncertain Nexus wri
   assert.equal((await restored.submit('client', input)).status, 'unknown')
   await restored.tick(); await restored.idle()
   assert.equal(f.writes.length, 1)
+})
+
+
+function rejection(path: string, bytes: Buffer, reason = 'CONTENT_DENIED') {
+  return { ...receiptFixture, data: { ...receiptFixture.data, path, request_digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`, reason_code: reason } }
+}
+
+void test('only a current authenticated Write receipt confirms model rejection; malformed or read receipts stay unknown', async () => {
+  for (const reason of ['CONTENT_DENIED', 'CLASSIFIER_UNAVAILABLE', 'REDACTION_UNSAFE']) {
+    const f = fixture()
+    f.client.write = async (path, bytes, token) => { f.writes.push({ path, bytes, token }); throw new Error(JSON.stringify(rejection(path, bytes, reason))) }
+    await assert.rejects(f.execute(makeAgent(), [], 'test', AbortSignal.timeout(1000), context), error => {
+      assert(error instanceof NexusWriteRejected); assert.equal(error.code, `MODEL_${reason}`); return true
+    })
+    assert.equal(f.writes.length, 1); assert.equal(f.reads.length, 0)
+  }
+  const changes = [{ path: '/other.prompt' }, { request_digest: `sha256:${'0'.repeat(64)}` }, { hook: 'foreign_gate' }, { reason_code: 'FUTURE_REASON' }, { schema_version: 2 }, { operation: 'read' }, { stage: 'post_write' }, { extra: 'unknown field' }]
+  for (const patch of changes) {
+    const f = fixture()
+    f.client.write = async (path, bytes) => { const value = rejection(path, bytes); Object.assign(value.data, patch); throw new Error(JSON.stringify(value)) }
+    await assert.rejects(f.execute(makeAgent(), [], 'test', AbortSignal.timeout(1000), context), { code: 'MODEL_EXECUTION_UNCONFIRMED' })
+  }
+  const f = fixture()
+  f.client.streamReadAt = async () => { throw new Error(JSON.stringify(rejection(f.writes[0].path, f.writes[0].bytes))) }
+  await assert.rejects(f.execute(makeAgent(), [], 'test', AbortSignal.timeout(1000), context), { code: 'MODEL_EXECUTION_UNCONFIRMED' })
+  assert.equal(f.writes.length, 1)
+})
+
+void test('confirmed refusal and evidence commit once, survive restart and do not automatically retry', async t => {
+  const f = fixture()
+  f.client.write = async (path, bytes, token) => { f.writes.push({ path, bytes, token }); throw new Error(JSON.stringify(rejection(path, bytes))) }
+  const driver = new SqliteDriver(new DatabaseSync(':memory:')), store = new AgentRunStore(driver), agent = makeAgent()
+  const runtime = new HttpAgentRuntime(store, [agent], f.execute)
+  t.after(async () => { await runtime.close(); await driver.close() }); await store.ready
+  const input = { api_version: DURABLE_AGENT_HTTP_API, kind: 'SubmitAgentRun' as const, invocation_id: 'denied-1', external_agent_id: agent.definition.external_agent_id, execution_revision: agent.revision, query: 'synthetic blocked query', provider_session_id: null, end_user: 'user-1', deadline_at: Date.now() + 30_000 }
+  await runtime.submit('client', input); await runtime.tick(); await runtime.idle()
+  const run = await store.get('client', input.invocation_id)
+  assert.equal(run.status, 'failed'); assert.equal(run.error_code, 'MODEL_CONTENT_DENIED')
+  const evidence = await driver.get('SELECT receipt FROM http_agent_write_rejections WHERE client_id = ? AND invocation_id = ?', ['client', input.invocation_id])
+  assert.deepEqual(JSON.parse(String(evidence?.receipt)), rejection(f.writes[0].path, f.writes[0].bytes))
+  assert.equal((await driver.get('SELECT active_run FROM http_agent_sessions WHERE id = ?', [run.provider_session_id]))?.active_run, null)
+  assert.equal((await driver.get('SELECT receipt FROM http_agent_write_rejections WHERE client_id = ?', ['foreign'])), undefined)
+  const restored = new HttpAgentRuntime(new AgentRunStore(driver), [agent], f.execute)
+  t.after(() => restored.close())
+  assert.equal((await restored.submit('client', input)).status, 'failed')
+  await restored.tick(); await restored.idle(); assert.equal(f.writes.length, 1)
+
+  // A database failure must not leave a terminal state without its evidence.
+  const next = { ...input, invocation_id: 'rollback' }; await runtime.submit('client', next)
+  const claim = await store.claim('client', next.invocation_id); assert(claim)
+  await driver.exec("CREATE TRIGGER reject_receipt BEFORE INSERT ON http_agent_write_rejections BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END;")
+  await assert.rejects(store.finish(claim, '', 'failed', run.error_code, JSON.parse(String(evidence?.receipt))))
+  assert.equal((await store.get('client', next.invocation_id)).status, 'running')
+  await driver.exec('DROP TRIGGER reject_receipt')
+  await driver.run('UPDATE http_agent_runs SET lease_until = 0 WHERE invocation_id = ?', [next.invocation_id])
+  assert.equal(await store.finish(claim, '', 'failed', run.error_code, JSON.parse(String(evidence?.receipt))), false)
+  assert.equal((await driver.get('SELECT receipt FROM http_agent_write_rejections WHERE invocation_id = ?', [next.invocation_id])), undefined)
+  await store.maintain(); assert.equal((await store.get('client', next.invocation_id)).status, 'unknown')
+  await driver.run('UPDATE http_agent_runs SET updated_at = 0 WHERE invocation_id = ?', [input.invocation_id])
+  await store.maintain()
+  assert.equal(await driver.get('SELECT receipt FROM http_agent_write_rejections WHERE invocation_id = ?', [input.invocation_id]), undefined)
+  assert.equal((await store.submit('client', input)).error_code, 'RUN_PAYLOAD_RETIRED')
 })

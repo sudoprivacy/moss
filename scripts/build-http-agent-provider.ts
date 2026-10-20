@@ -1,5 +1,7 @@
 import { mkdir, rm } from 'node:fs/promises'
 import { providerBuildSource, writeProviderManifest } from './http-agent-artifact.mjs'
+import { checkSnapshot } from './contracts/nexus-prewrite-source.mjs'
+checkSnapshot()
 const source = providerBuildSource(process.cwd())
 await mkdir('dist/http-agent-provider', { recursive: true })
 await rm('dist/http-agent-provider/artifact-manifest.json', { force: true })

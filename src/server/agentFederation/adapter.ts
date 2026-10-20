@@ -25,6 +25,8 @@ export interface ProviderInvocation extends TaskCorrelation {
 export interface ProviderResult {
   text: string
   status: 'succeeded' | 'failed'
+  /** Allowlisted provider-reported runtime reason; not a Moss policy verdict. */
+  error_code?: string
   binding: ExternalRunBinding
 }
 export interface ProviderAdapter {

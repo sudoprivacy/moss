@@ -1,0 +1,17 @@
+{
+  "repository": "https://github.com/nexi-lab/nexus-vfs",
+  "revision": "498aa42505908d01aea93126984f234de4811afb",
+  "semanticOwner": "nexus-vfs",
+  "maturity": "experimental-pre-write-rejection",
+  "apiVersion": "nexus-pre-write-rejection/v1",
+  "files": {
+    "rust/transport/contracts/pre-write-rejection.v1/schema.json": {
+      "output": "schema.json",
+      "digest": "sha256:40c1b8e578141710f5cabe4f8f08afcc9f5f7061fce0f4e18480d724baf18bd0"
+    },
+    "rust/transport/contracts/pre-write-rejection.v1/fixture.json": {
+      "output": "fixture.json",
+      "digest": "sha256:d6b7ed6b5481e43414c6aa9feffd768e9e6a6430f7975215fcb926cf911d96e0"
+    }
+  }
+}

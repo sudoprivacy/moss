@@ -5,6 +5,8 @@ import pg from 'pg'
 import { PgDriver, type PgPoolLike } from '../../db/driver.js'
 import { DURABLE_AGENT_HTTP_API } from '../../../../contracts/agent-http/v1alpha2/contract.js'
 import { AgentRunStore } from './store.js'
+import fixture from '../../../../contracts/nexus-prewrite/v1/fixture.json' with { type: 'json' }
+import { NexusWriteRejected } from './nexusWriteRejection.js'
 import { HttpAgentRuntime, immutableAgent } from './runtime.js'
 
 void test('PostgreSQL: independent provider instances serialize requests, fence stale results and recover queued work', { skip: !process.env.MOSS_PG_TEST_URL }, async () => {
@@ -38,6 +40,21 @@ void test('PostgreSQL: independent provider instances serialize requests, fence 
     assert.equal((await stores[0].get('client', second.invocation_id)).status, 'unknown'); assert.equal(modelCalls, 1)
     assert.equal((await runtimes[1].submit('client', second)).status, 'unknown')
     await assert.rejects(stores[1].get('foreign-client', second.invocation_id), { code: 'RUN_NOT_FOUND' })
+    const rejection = NexusWriteRejected.fromWriteError(new Error(JSON.stringify(fixture)), '/test.prompt', Buffer.from('original')); assert(rejection)
+    const third = { ...input, invocation_id: randomUUID() }; await stores[0].submit('client', third)
+    const receiptClaim = await stores[0].claim('client', third.invocation_id); assert(receiptClaim)
+    await drivers[0].exec("CREATE FUNCTION fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected receipt storage failure'; END $$; CREATE TRIGGER fail_receipt BEFORE INSERT ON http_agent_write_rejections FOR EACH ROW EXECUTE FUNCTION fail_receipt();")
+    await assert.rejects(stores[0].finish(receiptClaim, '', 'failed', rejection.code, rejection.receipt))
+    assert.equal((await stores[1].get('client', third.invocation_id)).status, 'running')
+    await drivers[0].exec('DROP TRIGGER fail_receipt ON http_agent_write_rejections; DROP FUNCTION fail_receipt();')
+    assert.equal(await stores[0].finish(receiptClaim, '', 'failed', rejection.code, rejection.receipt), true)
+    const receiptRow = await drivers[1].get('SELECT receipt FROM http_agent_write_rejections WHERE client_id = ? AND invocation_id = ?', ['client', third.invocation_id])
+    assert.deepEqual(JSON.parse(String(receiptRow?.receipt)), rejection.receipt)
+    assert.equal((await stores[1].get('client', third.invocation_id)).error_code, rejection.code)
+    assert.equal((await stores[1].submit('client', third)).status, 'failed')
+    assert.equal(await stores[0].finish(claim, '', 'failed', rejection.code, rejection.receipt), false)
+    assert.equal(await drivers[1].get('SELECT receipt FROM http_agent_write_rejections WHERE invocation_id = ?', [second.invocation_id]), undefined)
+
   } finally {
     await Promise.all(runtimes.map(r => r.close())); await Promise.all(drivers.map(d => d.close()))
     await admin.query(`DROP SCHEMA ${schema} CASCADE`); await admin.end()

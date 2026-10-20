@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 import { NexusVfsClient, type NexusVfsTlsConfig } from '@nexus-ai-fs/vfs-client'
 import { AgentProtocolError } from './protocol.js'
+import { NexusWriteRejected } from './nexusWriteRejection.js'
 import { modelAnswer, modelRequestBody, type ModelExecutor, type NexusModelTarget } from './runtime.js'
 
 export interface NexusModelConfig {
@@ -62,7 +63,8 @@ export function nexusModelExecutor(config: NexusModelConfig, createClient?: () =
     signal.addEventListener('abort', abort, { once: true })
     try {
       signal.throwIfAborted()
-      await client.write(prompt, body, authToken)
+      try { await client.write(prompt, body, authToken) }
+      catch (error) { throw NexusWriteRejected.fromWriteError(error, prompt, body) ?? unconfirmed() }
       let offset = '0', status: number | undefined, size = 0, records = 0
       const chunks: Buffer[] = []
       while (!signal.aborted) {

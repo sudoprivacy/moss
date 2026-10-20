@@ -8,28 +8,31 @@ import { crashFixture } from '../testing/externalProviderCrashFixture.js'
 import { AGENT_FEDERATION_API, AGENT_HTTP_API } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { TASK_API, type SubmitTask } from '../../../contracts/task/v1alpha1/contract.js'
 import { HTTP_CAPABILITIES } from './manifest.js'
+import { DURABLE_AGENT_HTTP_API, DURABLE_HTTP_CAPABILITIES } from '../../../contracts/agent-http/v1alpha2/contract.js'
+import { contentDigest } from './provider/protocol.js'
 import { maintainRetention } from '../externalProviders/retention.js'
 import { dispatchExternalProvider } from '../externalProviders/routes.js'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!() })
-async function setup() {
+async function setup(durableError?: string) {
   const directory = await mkdtemp(join(tmpdir(), 'federation-ingress-'))
   const f = await crashFixture(directory)
   cleanup.push(async () => { await f.service.close(); await f.driver.close(); await rm(directory, { recursive: true, force: true }) })
-  const manifest = { api_version: AGENT_FEDERATION_API, kind: 'CustomAgentManifest', provider_kind: 'custom_http', external_agent_id: 'http-helper', name: 'HTTP helper', source_revision: 'revision-1', execution_mode: 'external_hosted', protocol: AGENT_HTTP_API, input_profile: 'query_only_v1', output_profile: 'text_v1', capabilities: { ...HTTP_CAPABILITIES } }
+  const manifest = { api_version: AGENT_FEDERATION_API, kind: 'CustomAgentManifest', provider_kind: 'custom_http', external_agent_id: 'http-helper', name: 'HTTP helper', source_revision: 'revision-1', execution_mode: 'external_hosted', protocol: AGENT_HTTP_API, input_profile: 'query_only_v1', output_profile: 'text_v1', capabilities: { ...HTTP_CAPABILITIES }, ...(durableError ? { protocol: DURABLE_AGENT_HTTP_API, source_revision: `sha256:${'a'.repeat(64)}`, capabilities: { ...DURABLE_HTTP_CAPABILITIES }, execution_revision: `sha256:${'a'.repeat(64)}` } : {}) }
   const calls: Record<string, unknown>[] = []
   const control = { beforeManifest: async () => {} }
   const options = f.service.administration.options
   options.policy.timeoutMs = 10_000
   options.httpRequest = async (url, init) => {
-    if (String(url).endsWith('/manifest')) { await control.beforeManifest(); return Response.json(manifest) }
+    if (new URL(String(url)).pathname.endsWith('/manifest')) { await control.beforeManifest(); return Response.json(manifest) }
     const request = JSON.parse(String(init?.body))
     const attempt = await f.driver.get('SELECT task_id FROM task_attempts WHERE id = ?', [request.invocation_id])
     assert(attempt)
     const record = await f.store.taskRecord(f.actor, String(attempt.task_id))
     assert.equal(record?.resolution.status, 'accepted', 'Admission is durable before invoking the provider')
     calls.push(request)
+    if (durableError) return Response.json({ api_version: DURABLE_AGENT_HTTP_API, kind: 'AgentRun', invocation_id: request.invocation_id, request_digest: contentDigest(request), external_agent_id: request.external_agent_id, execution_revision: request.execution_revision, provider_run_id: 'remote-run', provider_session_id: 'remote-session', status: 'failed', sequence: 2, output: { text: '' }, error_code: durableError, created_at: Date.now(), updated_at: Date.now() })
     return Response.json({ api_version: AGENT_HTTP_API, kind: 'AgentResult', invocation_id: request.invocation_id, provider_run_id: `remote-run-${calls.length}`, provider_session_id: 'remote-session', status: 'succeeded', output: { text: calls.length === 1 ? '42' : '50' } })
   }
   const body = { ...f.body, provider_kind: 'custom_http', app_id: manifest.external_agent_id, workspace_id: 'custom-http', source_definition: JSON.stringify(manifest) }
@@ -398,4 +401,17 @@ void test('legacy approved bindings remain unpublished on member/admin GET and m
   await f.service.releaseOptions(f.actor, f.agent.id)
   assert.deepEqual(await snapshot(), published)
   assert.equal((await f.run()).status, 'succeeded')
+})
+
+
+void test('durable rejection reason survives accepted Task admission and persisted history, with only known provider codes explained', async () => {
+  for (const errorCode of ['MODEL_CONTENT_DENIED', 'MODEL_CLASSIFIER_UNAVAILABLE', 'MODEL_REDACTION_UNSAFE', 'OTHER_PROVIDER_FAILURE']) {
+    const f = await setup(errorCode)
+    const task = await f.run()
+    assert.equal(task.policy_decision?.status, 'accepted')
+    assert.equal(task.status, 'failed', task.error_code ?? 'missing error')
+    assert.equal(task.error_code, errorCode.startsWith('MODEL_') ? errorCode : 'PROVIDER_EXECUTION_FAILED')
+    assert.equal((await f.store.history(f.actor, task.session_id))[0].error_code, task.error_code)
+    assert.equal(f.calls.length, 1)
+  }
 })
