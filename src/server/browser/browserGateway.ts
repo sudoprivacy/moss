@@ -14,6 +14,68 @@ export interface BrowserWorkerPort {
   download?(binding: BrowserBinding, controller: string, fileId: string): Promise<Uint8Array>
 }
 type BrowserRequest = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+const JPEG_START_OF_FRAME_MARKERS = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf])
+
+/** Add the native screenshot coordinate space before a managed-worker image. */
+export function addBrowserFrameCoordinateHint(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return value
+  const result = (value as { result?: unknown }).result
+  if (!result || typeof result !== 'object') return value
+  const content = (result as { content?: unknown }).content
+  if (!Array.isArray(content)) return value
+  if (content.some(block => block && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string' && (block as { text: string }).text.includes('browserInputCoordinates'))) return value
+  const imageIndex = content.findIndex(
+    block => block && typeof block === 'object' && (block as { type?: unknown }).type === 'image' && (block as { mimeType?: unknown }).mimeType === 'image/jpeg' && typeof (block as { data?: unknown }).data === 'string',
+  )
+  if (imageIndex < 0) return value
+  const dimensions = readJpegDimensions((content[imageIndex] as { data: string }).data)
+  if (!dimensions) return value
+  const hint = {
+    type: 'text',
+    text: JSON.stringify({
+      screenshotPixelDimensions: dimensions,
+      browserInputCoordinates: {
+        unit: 'css-pixel',
+        instruction:
+          'Do not pass raw screenshot pixel positions to browser_action. First call browser_action command with method Runtime.evaluate and paramsJson {"expression":"({width:innerWidth,height:innerHeight,devicePixelRatio})","returnByValue":true}; divide screenshot x and y by the returned devicePixelRatio before clicking or scrolling.',
+      },
+    }),
+  }
+  return {
+    ...value,
+    result: {
+      ...result,
+      content: [...content.slice(0, imageIndex), hint, ...content.slice(imageIndex)],
+    },
+  }
+}
+
+function readJpegDimensions(data: string): { width: number; height: number } | undefined {
+  const bytes = Buffer.from(data, 'base64')
+  if (bytes.length < 10 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return undefined
+  let offset = 2
+  while (offset + 8 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1
+      continue
+    }
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1
+    const marker = bytes[offset++]
+    if (marker === undefined || marker === 0xd9 || marker === 0xda) break
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue
+    if (offset + 1 >= bytes.length) break
+    const length = bytes.readUInt16BE(offset)
+    if (length < 2 || offset + length > bytes.length) break
+    if (JPEG_START_OF_FRAME_MARKERS.has(marker)) {
+      const height = bytes.readUInt16BE(offset + 3)
+      const width = bytes.readUInt16BE(offset + 5)
+      if (width > 0 && height > 0) return { width, height }
+      return undefined
+    }
+    offset += length
+  }
+  return undefined
+}
 
 const actionFields: Record<string, string[]> = {
   state: [], attach: ['viewerId', 'surface'], detach: ['viewerId'],
@@ -132,7 +194,7 @@ export class HttpBrowserWorker implements BrowserWorkerPort {
     }).catch(() => { throw new HttpError(503, 'Browser connection unavailable; input was not replayed') })
     if (response.status === 202) return null
     if (!response.ok) throw new HttpError(502, 'Managed browser MCP unavailable')
-    return response.json()
+    return addBrowserFrameCoordinateHint(await response.json())
   }
 
   private async transfer(path: string, context: Record<string, unknown>, data?: Uint8Array, name?: string): Promise<Response> {

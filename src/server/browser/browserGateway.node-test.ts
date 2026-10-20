@@ -1,6 +1,38 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { HttpBrowserWorker, browserController, invokeSessionBrowser } from './browserGateway.js'
+import { HttpBrowserWorker, addBrowserFrameCoordinateHint, browserController, invokeSessionBrowser } from './browserGateway.js'
+
+function jpeg(width: number, height: number): string {
+  return Buffer.from([
+    0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08,
+    height >> 8, height & 0xff, width >> 8, width & 0xff,
+    0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+    0xff, 0xd9,
+  ]).toString('base64')
+}
+
+void test('browser observations declare the screenshot coordinate space before pixels', () => {
+  const response = addBrowserFrameCoordinateHint({
+    jsonrpc: '2.0', id: 1,
+    result: { content: [
+      { type: 'text', text: '{"session":{}}' },
+      { type: 'image', mimeType: 'image/jpeg', data: jpeg(1280, 674) },
+    ] },
+  }) as { result: { content: Array<{ type: string; text?: string }> } }
+  assert.equal(response.result.content.length, 3)
+  assert.deepEqual(JSON.parse(response.result.content[1]!.text!), {
+    screenshotPixelDimensions: {
+      width: 1280,
+      height: 674,
+    },
+    browserInputCoordinates: {
+      unit: 'css-pixel',
+      instruction:
+        'Do not pass raw screenshot pixel positions to browser_action. First call browser_action command with method Runtime.evaluate and paramsJson {"expression":"({width:innerWidth,height:innerHeight,devicePixelRatio})","returnByValue":true}; divide screenshot x and y by the returned devicePixelRatio before clicking or scrolling.',
+    },
+  })
+  assert.equal(response.result.content[2]!.type, 'image')
+})
 
 void test('opening a panel does not retain revoked profile authorization', async () => {
   const principal = { orgId: 'org', userId: 'owner' }
