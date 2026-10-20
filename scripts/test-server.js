@@ -56,6 +56,7 @@ const BUN = [
   'knowledgeRoutes.test.ts',
   'msgauditRoomList.test.ts',
   'msgauditSnapshotWorker.test.ts',
+  'msgauditPullerMedia.test.ts',
   'wecomCancelGroupMsg.test.ts',
   'queueSweep.test.ts',
   'wecomClientToken.test.ts',

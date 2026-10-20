@@ -181,7 +181,7 @@ export class MsgAuditWorker {
       this.inflight.add(cfg.corpAppId)
       try {
         const r = await pullInChild({ ...cfg, maxPages: this.maxPagesPerTick })
-        if (r.written > 0 || r.failed > 0 || r.filtered > 0 || r.mediaFailed > 0) {
+        if (r.written > 0 || r.failed > 0 || r.filtered > 0 || r.mediaFailed > 0 || r.budgetHit) {
           const capped = this.maxPagesPerTick > 0 && r.pages >= this.maxPagesPerTick
           console.log(
             `[msgaudit] ${cfg.corpAppId}: fetched=${r.fetched} written=${r.written} ` +
@@ -189,8 +189,10 @@ export class MsgAuditWorker {
               (r.filtered > 0 ? ` filtered=${r.filtered}` : '') +
               (r.media > 0 ? ` media=${r.media}` : '') +
               (r.mediaFailed > 0 ? ` mediaFailed=${r.mediaFailed}` : '') +
+              (r.mediaReused > 0 ? ` mediaReused=${r.mediaReused}` : '') +
               ` cursor=${r.cursor}` +
-              (capped ? ` (page cap reached; resuming next tick)` : ''),
+              (capped ? ` (page cap reached; resuming next tick)` : '') +
+              (r.budgetHit ? ` (time budget reached; resuming next tick)` : ''),
           )
         }
       } catch (err) {

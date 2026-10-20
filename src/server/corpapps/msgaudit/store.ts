@@ -81,6 +81,26 @@ export function appDir(corpAppId: string): string {
   return path.join(msgauditRoot(), sanitizeSegment(corpAppId))
 }
 
+/** Where a message's media lives, relative to the instance dir. */
+export function mediaRelPath(msgid: string, msgtime: number, ext: string): string {
+  return `media/${dayKey(msgtime)}/${sanitizeSegment(msgid)}${ext}`
+}
+
+/**
+ * Whether a message's media is already on disk (non-empty). Lets a pull
+ * that replays a page skip files it already has instead of downloading
+ * them again. writeMedia renames into place, so a file that exists is a
+ * complete one.
+ */
+export async function hasMedia(corpAppId: string, rel: string): Promise<boolean> {
+  try {
+    const st = await fsp.stat(path.join(appDir(corpAppId), rel))
+    return st.isFile() && st.size > 0
+  } catch {
+    return false
+  }
+}
+
 /**
  * Write one media object next to the transcript.
  *
@@ -89,6 +109,9 @@ export function appDir(corpAppId: string): string {
  * than stat-ing every file. Named by msgid (unique per message) so a
  * record and its file are trivially correlated by eye. Returns the path
  * relative to the instance dir, which is what goes into the record.
+ *
+ * Written to a temp file and renamed, so a pull killed mid-write never
+ * leaves a truncated file that hasMedia would take as done.
  */
 export async function writeMedia(
   corpAppId: string,
@@ -97,12 +120,41 @@ export async function writeMedia(
   ext: string,
   bytes: Buffer,
 ): Promise<string> {
-  const day = dayKey(msgtime)
-  const dir = path.join(appDir(corpAppId), 'media', day)
-  await fsp.mkdir(dir, { recursive: true })
-  const name = `${sanitizeSegment(msgid)}${ext}`
-  await fsp.writeFile(path.join(dir, name), bytes)
-  return `media/${day}/${name}`
+  const rel = mediaRelPath(msgid, msgtime, ext)
+  const file = path.join(appDir(corpAppId), rel)
+  await fsp.mkdir(path.dirname(file), { recursive: true })
+  const tmp = `${file}.tmp`
+  await fsp.writeFile(tmp, bytes)
+  await fsp.rename(tmp, file)
+  return rel
+}
+
+/**
+ * Store a message's media as a copy of a file already on disk (same
+ * content, e.g. one image posted to hundreds of groups). Hard-linked so
+ * the repeats cost no disk; falls back to a copy where links are not
+ * possible. Deleting one day dir in a purge leaves the other links intact.
+ */
+export async function linkMedia(
+  corpAppId: string,
+  fromRel: string,
+  msgid: string,
+  msgtime: number,
+  ext: string,
+): Promise<string> {
+  const rel = mediaRelPath(msgid, msgtime, ext)
+  const root = appDir(corpAppId)
+  const src = path.join(root, fromRel)
+  const dst = path.join(root, rel)
+  if (src === dst) return rel
+  await fsp.mkdir(path.dirname(dst), { recursive: true })
+  await fsp.rm(dst, { force: true })
+  try {
+    await fsp.link(src, dst)
+  } catch {
+    await fsp.copyFile(src, dst)
+  }
+  return rel
 }
 
 /**
