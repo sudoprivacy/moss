@@ -364,8 +364,12 @@ jobs:
           COHOST_DIGEST="sha256:$(docker run --rm "my-moss-runtime:$IMAGE_TAG" sha256sum /usr/local/bin/nexusd-cohost | awk '{print $1}')"
           IMAGE_DIGEST="$(docker image inspect "my-moss-runtime:$IMAGE_TAG" --format '{{.Id}}')"
           docker save "my-moss-runtime:$IMAGE_TAG" | gzip -1 > "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
+          python3 .moss-image-tools/tools/deploy/images.py --inspect \
+            --archive "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" \
+            > "$RUNNER_TEMP/runtime-image-identities-${{ matrix.arch }}.json"
           bun scripts/create-runtime-manifest.ts "${{ steps.release.outputs.release_tag }}" \
             "docker.io/library/my-moss-runtime:$IMAGE_TAG" "$IMAGE_DIGEST" \
+            "$RUNNER_TEMP/runtime-image-identities-${{ matrix.arch }}.json" \
             "dist/moss-runtime-${{ steps.release.outputs.version }}-linux-${{ matrix.arch }}.tar.gz" \
             dist/scode-version.txt dist/cohost-version.txt "$COHOST_DIGEST" "dist/runtime-release-${{ matrix.arch }}.json"
 
