@@ -1,3 +1,4 @@
+import { isStandardProtocol, StandardHttpAdapter } from '../agentFederation/standardHttpAdapter.js'
 import type { ProductRegistryClient } from '../agentFederation/registryClient.js'
 import { describeExternalAgent } from './description.js'
 import { randomUUID } from 'node:crypto'
@@ -100,7 +101,8 @@ export class ExternalProviderAdministration {
     try {
       if (body.provider_kind === 'custom_http') {
         const source = providerDefinition(body.provider_kind, body.source_definition)
-        return { ...await new CustomHttpAdapter({ manifest: source.sourceManifest!, digest: source.source_digest }, this.options.httpRequest).inspect(endpoint, key, AbortSignal.timeout(10000)), source_identity_evidence: 'unverified' as const }
+        const Adapter = isStandardProtocol(source.sourceManifest) ? StandardHttpAdapter : CustomHttpAdapter
+        return { ...await new Adapter({ manifest: source.sourceManifest!, digest: source.source_digest }, this.options.httpRequest).inspect(endpoint, key, AbortSignal.timeout(10000)), source_identity_evidence: 'unverified' as const }
       }
       if (body.provider_kind !== undefined && body.provider_kind !== 'dify') return fail('PROVIDER_NOT_IMPLEMENTED')
       return await this.transport.inspect(endpoint, key, AbortSignal.timeout(10000))
@@ -165,7 +167,8 @@ export class ExternalProviderAdministration {
   async parameters(binding: Binding, key: string, signal: AbortSignal): Promise<string> {
     if (binding.provider_kind !== 'custom_http') return this.transport.parameters(binding.endpoint, key, signal)
     if (!binding.sourceManifest) return fail('DEFINITION_REVIEW_REQUIRED', 409)
-    const inspected = await new CustomHttpAdapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, this.options.httpRequest).inspect(binding.endpoint, key, signal)
+    const Adapter = isStandardProtocol(binding.sourceManifest) ? StandardHttpAdapter : CustomHttpAdapter
+    const inspected = await new Adapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, this.options.httpRequest).inspect(binding.endpoint, key, signal)
     return inspected.parameters_digest
   }
 

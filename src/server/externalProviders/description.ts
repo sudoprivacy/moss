@@ -7,6 +7,7 @@ export function describeExternalAgent(binding: Binding, now = Date.now()): Exter
   return {
     id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify',
     execution_mode: 'external_hosted', profile: 'synthetic_pilot',
+    ...(binding.sourceManifest ? { protocol: binding.sourceManifest.protocol, ...(binding.sourceManifest.conversation_mode ? { conversation_mode: binding.sourceManifest.conversation_mode } : {}) } : {}),
     source_identity_evidence: 'unverified', source_digest: binding.source_digest,
     decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at,
     capabilities: describeCapabilities(binding),

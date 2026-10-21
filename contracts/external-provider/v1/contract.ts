@@ -27,6 +27,8 @@ export interface ExternalAgent {
   provider: string
   execution_mode: 'external_hosted'
   profile: 'synthetic_pilot'
+  protocol?: string
+  conversation_mode?: 'single_turn'
   /** App/workspace and reviewed source are not bound to the API key by this adapter. */
   source_identity_evidence: 'unverified'
   source_digest: string
@@ -83,7 +85,11 @@ export interface ExternalTaskEvidence {
     }
   }
   execution?: {
-    provider_run_id: string
+    provider_run_id?: string
+    provider_response_id?: string
+    protocol?: string
+    trace_id?: string
+    usage?: { source: 'provider_reported'; input_tokens: number; output_tokens: number }
     execution_revision?: string
     version_evidence: 'source_snapshot_only' | 'provider_revision_fenced'
     resume: 'unsupported' | 'query_only'

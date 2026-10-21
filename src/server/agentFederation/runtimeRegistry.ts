@@ -1,6 +1,7 @@
 import type { ProviderAdapter } from './adapter.js'
 import { ProviderAdapterRegistry } from './adapter.js'
 import { DifyGatewayAdapter } from './difyAdapter.js'
+import { isStandardProtocol, StandardHttpAdapter } from './standardHttpAdapter.js'
 import { CustomHttpAdapter } from './customHttpAdapter.js'
 import { DurableHttpAdapter } from './durableHttpAdapter.js'
 import { DURABLE_AGENT_HTTP_API, DURABLE_HTTP_CAPABILITIES } from '../../../contracts/agent-http/v1alpha2/contract.js'
@@ -30,6 +31,7 @@ export function createRuntimeRegistry(options: AdministrationOptions) {
     } },
     { kind: 'custom_http', capabilities: HTTP_CAPABILITIES, create(binding) {
       if (!binding.sourceManifest) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
+      if (isStandardProtocol(binding.sourceManifest)) return new StandardHttpAdapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, options.httpRequest)
       if (binding.sourceManifest.protocol === DURABLE_AGENT_HTTP_API) return new DurableHttpAdapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, options.httpRequest)
       return new CustomHttpAdapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, options.httpRequest)
     } },

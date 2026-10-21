@@ -255,7 +255,7 @@ export class ExternalProviderService {
         resolved_from_channel: selected.resolved_from_channel, channel_revision: selected.channel_revision,
         execution_revision: selected.execution_revision, version_evidence: selected.version_evidence,
         ...(selected.registry ? { registry: selected.registry } : {}) } } : {}),
-      ...(run ? { execution: { provider_run_id: run.provider_run_id, execution_revision: run.execution_revision, version_evidence: run.version_evidence, resume: run.resume } } : {}),
+      ...(run ? { execution: { provider_run_id: run.provider_run_id, provider_response_id: run.provider_response_id, protocol: run.provider_protocol, trace_id: run.trace_id, usage: run.usage, execution_revision: run.execution_revision, version_evidence: run.version_evidence, resume: run.resume } } : {}),
     }
   }
 

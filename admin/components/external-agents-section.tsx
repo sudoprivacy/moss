@@ -432,7 +432,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
               <div className="flex items-start justify-between gap-3">
                 <h4 className="font-semibold">{agent.name}</h4>
                 <div className="flex shrink-0 gap-2">
-                  <Badge variant="outline">{agent.provider === 'custom_http' ? '自研 HTTP' : 'Dify'}</Badge>
+                  <Badge variant="outline">{agent.provider === 'custom_http' ? agent.protocol ?? '自研 HTTP' : 'Dify'}</Badge>
                   <Badge variant={isPublished ? 'default' : 'secondary'}>
                     {isPublished ? '已发布' : agent.approved ? '审核已到期' : '未发布'}
                   </Badge>
@@ -567,7 +567,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                         setDraft({ ...draft, provider_kind: event.target.value as 'dify' | 'custom_http', source_definition: '', app_id: '', workspace_id: '', name: '' })
                       }}>
                         <option value="dify">Dify</option>
-                        <option value="custom_http">自研 HTTP（Custom Manifest）</option>
+                        <option value="custom_http">协议接入（HTTP / OpenAI / MCP / A2A）</option>
                       </select>
                     </Field>
                     {draft.provider_kind === 'custom_http' ? (
@@ -606,7 +606,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                   </>
                 ) : (
                   <>
-                    {draft.provider_kind === 'custom_http' ? <Feedback>已核对接入说明。服务智能体：{draft.app_id}。此接入仅返回最终文本结果。</Feedback> : <>
+                    {draft.provider_kind === 'custom_http' ? <Feedback>已核对接入说明。服务智能体：{draft.app_id}。能力以已审核协议声明为准。OpenAI、MCP、A2A 当前为单轮文本；每次发送独立执行，不传递历史对话。</Feedback> : <>
                     <div className="grid gap-4 sm:grid-cols-2">
                       <Field id="external-app-id" label="声明的 Dify App ID" hint="测试连接不能证明密钥与填写的应用、工作区和上传定义属于同一来源，请核对实际发布内容。">
                         <Input
