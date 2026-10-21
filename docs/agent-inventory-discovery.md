@@ -23,7 +23,7 @@ Moss → 智能体管理 → 智能体台账。管理员可扫描当前组织目
 | Moss 目录 | 当前组织拥有的目录元数据 | 不把其他组织共享目录导入为本组织资产 |
 | IM | 本组织且所有者仍属于本组织的已存 Bot 连接元数据 | 不连接 Bot、不读取聊天；连接候选须认领、确认或合并，不能自动判断其业务 Agent |
 | Dify | GET `/console/api/workspaces` 当前工作区，以及分页 `/console/api/apps` | 工作区 ID 必须匹配；1.14.2 需要同次登录的 access_token、csrf_token。过期后重新添加来源，不自动切换工作区。不会读取应用密钥或修改应用 |
-| SudoRouter/new-api | `/api/log/query` 指定账户最近 24 小时的消费记录 | Token ID 仅是调用来源候选，不能自动当成可信 Agent 身份。无 Token ID 和网关外调用不可识别；真实 Router 验收尚待后续身份／计量链路 |
+| SudoRouter/new-api | `/api/log/` 指定账户最近 24 小时的消费记录 | Token ID 仅是调用来源候选，不能自动当成可信 Agent 身份。无 Token ID 和网关外调用不可识别；真实 Router 验收尚待后续身份／计量链路 |
 | 平台清单 | GET `/agent-inventory/v1/agents?scope=...&after=...` | owner 为 Nexus `PlatformDiscoveryPage`；仅发现元数据，不能据此授予身份或运行等级 |
 
 清单接口使用 `agent-inventory.sudo.dev/v1alpha1`、`scope`、至多 100 个排序的 `items` 和 `next_cursor`。每项只有 `id/name/platform/external_domain`。这是实验发现 profile，不替代 HTTP、OpenAI、MCP 或 A2A 的运行协议。精确 schema 沿 Nexus → SudoStack → Moss 的 source lock 分发。
@@ -39,3 +39,5 @@ Moss → 智能体管理 → 智能体台账。管理员可扫描当前组织目
 - 成本仍为不可用；短期 IAM 身份、真实 Router 归因、MCP 工具路径、IM 实际调用、Dify/LangGraph L2、同集评测和原生转换仍须继续交付。
 
 运行本地清单样例：`npx tsx scripts/agent-inventory-reference.ts <私有输出目录> [端口]`。连接参数仅写到私有文件。不要把该目录或 `.planning` 内的联调凭据提交到仓库。
+
+Router follow-up: actual new-api backend integration now verifies `/api/user/self` then admin `/api/log/`. The user-facing `/api/log/query` DTO omits caller Token IDs and is not an attribution source. A real model-call Token was discovered as L0; it is still only a caller candidate. See `agent-execution-identity.md`.

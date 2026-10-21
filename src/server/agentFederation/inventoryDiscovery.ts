@@ -208,27 +208,30 @@ export async function scanDiscoverySource(
       if (!data.data.length) fail('DISCOVERY_PAGINATION_INVALID', 502)
     }
   } else if (source.kind === 'router') {
-    // Existing SudoRouter new-api log query. Token IDs are candidates, not proof of an Agent identity.
+    // The user-facing /api/log/query DTO omits token IDs. Use the real admin
+    // ledger; token IDs are still candidates, not proof of an Agent identity.
     const to = Math.floor(now / 1000),
       from = to - 86400
+    const accountResponse = object(await readJson(new URL('/api/user/self', source.origin), token, { 'New-Api-User': source.scope }, request))
+    if (accountResponse.success !== true) fail('DISCOVERY_UPSTREAM_UNAVAILABLE', 502)
+    const account = object(accountResponse.data)
+    if (String(account.id) !== source.scope || typeof account.username !== 'string' || !account.username || account.username.includes('%')) fail('DISCOVERY_SCOPE_MISMATCH', 403)
     for (let page = 1; page <= 100; page++) {
-      const url = new URL('/api/log/query', source.origin)
+      const url = new URL('/api/log/', source.origin)
       url.search = new URLSearchParams({
-        user_id: source.scope,
+        username: account.username,
         type: '2',
-        time_from: String(from),
-        time_to: String(to),
-        page_num: String(page),
+        start_timestamp: String(from),
+        end_timestamp: String(to),
+        p: String(page),
         page_size: '100',
-        order_by: 'created_at',
-        desc: 'true',
       }).toString()
       const response = object(await readJson(url, token, { 'New-Api-User': source.scope }, request))
       if (response.success !== true) fail('DISCOVERY_UPSTREAM_UNAVAILABLE', 502)
       const data = object(response.data),
-        total = integer(data.count)
-      if (total > 10000 || !Array.isArray(data.data) || data.data.length > 100) fail('DISCOVERY_SCAN_LIMIT')
-      for (const raw of data.data) {
+        total = integer(data.total)
+      if (total > 10000 || !Array.isArray(data.items) || data.items.length > 100) fail('DISCOVERY_SCAN_LIMIT')
+      for (const raw of data.items) {
         const log = object(raw)
         if (String(log.user_id) !== source.scope) fail('DISCOVERY_SCOPE_MISMATCH', 403)
         if (Number(log.type) !== 2) continue
@@ -257,7 +260,7 @@ export async function scanDiscoverySource(
         )
       }
       if (page * 100 >= total) return [...rows.values()]
-      if (!data.data.length) fail('DISCOVERY_PAGINATION_INVALID', 502)
+      if (!data.items.length) fail('DISCOVERY_PAGINATION_INVALID', 502)
     }
   } else {
     let after = ''

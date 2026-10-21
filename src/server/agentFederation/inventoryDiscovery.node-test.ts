@@ -46,15 +46,19 @@ void test('discovery reads actual HTTP pagination, validates tenant scopes and n
       )
       return
     }
-    if (url.pathname === '/api/log/query') {
-      assert.equal(url.searchParams.get('user_id'), '1')
-      const createdAt = Number(url.searchParams.get('time_to'))
+    if (url.pathname === '/api/user/self') {
+      res.end(JSON.stringify({ success: true, data: { id: 1, username: 'lab' } }))
+      return
+    }
+    if (url.pathname === '/api/log/') {
+      assert.equal(url.searchParams.get('username'), 'lab')
+      const createdAt = Number(url.searchParams.get('end_timestamp'))
       res.end(
         JSON.stringify({
           success: true,
           data: {
-            count: 2,
-            data: [1, 2].map((id) => ({
+            total: 2,
+            items: [1, 2].map((id) => ({
               id,
               token_id: 42,
               user_id: mode === 'wrong-router' ? 2 : 1,

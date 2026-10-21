@@ -2,6 +2,7 @@ import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto
 import { isDeepStrictEqual } from 'node:util'
 import Ajv2020 from 'ajv/dist/2020.js'
 import type { PlatformDiscoveryPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { CheckExecutionGrant, ExecutionAuthorization, ExecutionGrant, ExecutionGrantPage, ExecutionGrantResult, IssueExecutionGrant } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { assertResourceRef } from '@sudo/contracts/common/v1/resource-ref'
 import schema from '../../../contracts/agent-registry/v1alpha1/schema.json' with { type: 'json' }
 import { AGENT_REGISTRY_API, type CommandResult, type PrincipalRef, type RegistryWire, type Resolution, type SignedVersion, type VersionItem, type VersionsPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
@@ -22,6 +23,8 @@ export interface RegistryClientOptions {
 }
 const RESOURCE_REF_ID = 'urn:sudo:contracts:common:v1:resource-ref'
 const ajv = new Ajv2020({ strict: true, allErrors: false })
+// JSON Schema password format is a redaction/display hint, not a new credential format.
+ajv.addFormat('password', { type: 'string', validate: () => true })
 // Delegate the external reference to its installed owner adapter, without copying its schema.
 ajv.addKeyword({ keyword: 'sudoResourceRef', schemaType: 'boolean', validate: (_schema: boolean, value: unknown) => {
   try { assertResourceRef(value); return true } catch { return false }
@@ -30,6 +33,12 @@ ajv.addKeyword({ keyword: 'discriminator', valid: true })
 ajv.addSchema({ $id: RESOURCE_REF_ID, sudoResourceRef: true })
 ajv.addSchema(schema)
 const validators = {
+  IssueExecutionGrant: ajv.compile<IssueExecutionGrant>({ $ref: `${schema.$id}#/$defs/IssueExecutionGrant` }),
+  CheckExecutionGrant: ajv.compile<CheckExecutionGrant>({ $ref: `${schema.$id}#/$defs/CheckExecutionGrant` }),
+  ExecutionGrant: ajv.compile<ExecutionGrant>({ $ref: `${schema.$id}#/$defs/ExecutionGrant` }),
+  ExecutionGrantResult: ajv.compile<ExecutionGrantResult>({ $ref: `${schema.$id}#/$defs/ExecutionGrantResult` }),
+  ExecutionGrantPage: ajv.compile<ExecutionGrantPage>({ $ref: `${schema.$id}#/$defs/ExecutionGrantPage` }),
+  ExecutionAuthorization: ajv.compile<ExecutionAuthorization>({ $ref: `${schema.$id}#/$defs/ExecutionAuthorization` }),
   PlatformDiscoveryPage: ajv.compile<PlatformDiscoveryPage>({ $ref: `${schema.$id}#/$defs/PlatformDiscoveryPage` }),
   SignedVersion: ajv.compile<SignedVersion>({ $ref: `${schema.$id}#/$defs/SignedVersion` }),
   CommandResult: ajv.compile<CommandResult>({ $ref: `${schema.$id}#/$defs/CommandResult` }),
@@ -141,7 +150,7 @@ export class ProductRegistryClient {
           fail('REGISTRY_RESOURCE_UNAVAILABLE')
         }
         const code = (body as { detail?: { code?: unknown } })?.detail?.code
-        if (typeof code === 'string' && /^(AGENT_|REGISTRY_|CHANNEL_|PRINCIPAL_|IMMUTABLE_|INVALID_|AMBIGUOUS_)[A-Z_]{1,64}$/.test(code)) fail(code, [400, 403, 404, 409].includes(response.status) ? response.status : 503)
+        if (typeof code === 'string' && /^(EXECUTION_|AGENT_|REGISTRY_|CHANNEL_|PRINCIPAL_|IMMUTABLE_|INVALID_|AMBIGUOUS_)[A-Z_]{1,64}$/.test(code)) fail(code, [400, 401, 403, 404, 409].includes(response.status) ? response.status : 503)
         fail('REGISTRY_REQUEST_FAILED')
       }
       return body
@@ -191,6 +200,54 @@ export class ProductRegistryClient {
     if (!validators.AssetHistory(value) || value.asset_id !== id
       || value.events.some((row, i) => row.revision <= (i ? value.events[i - 1].revision : after))
       || (value.next_revision !== null && (!value.events.length || value.next_revision !== value.events.at(-1)!.revision))) fail('REGISTRY_RESPONSE_INVALID')
+    return value
+  }
+  private executionGrant(value: unknown, orgId: string, id?: string): ExecutionGrant {
+    if (!validators.ExecutionGrant(value) || value.zone !== this.scope(orgId).zoneId || (id !== undefined && value.id !== id)
+      || value.expires_at <= value.created_at || value.expires_at - value.created_at > 300_000
+      || value.created_at > Date.now() + 5000
+      || (value.status === 'active' && (!value.key_id || !value.delegation_id || value.cleanup_pending))) fail('EXECUTION_RESPONSE_INVALID')
+    return value
+  }
+  /** Trusted server callers only. Never expose the returned key to browser management routes. */
+  async executionIssue(orgId: string, command: IssueExecutionGrant): Promise<ExecutionGrantResult> {
+    const normalized: IssueExecutionGrant = { api_version: AGENT_REGISTRY_API, kind: 'IssueExecutionGrant', version: null, dataset_digest: null, ttl_seconds: 120, max_model_calls: 8, ...command }
+    if (!validators.IssueExecutionGrant(normalized)) fail('INVALID_EXECUTION_REQUEST', 400)
+    const value = await this.call(orgId, '/execution/grants', normalized)
+    if (!validators.ExecutionGrantResult(value)) fail('EXECUTION_RESPONSE_INVALID')
+    const grant = this.executionGrant(value.grant, orgId)
+    if (!isDeepStrictEqual(grant.request, normalized)
+      || (value.api_key != null && (grant.status !== 'active' || grant.expires_at <= Date.now() || !/^sk-[A-Za-z0-9_-]{16,}$/.test(value.api_key)))) fail('EXECUTION_RESPONSE_INVALID')
+    return value
+  }
+  async executionGet(orgId: string, id: string): Promise<ExecutionGrant> {
+    return this.executionGrant(await this.call(orgId, `/execution/grants/${encodeURIComponent(id)}`), orgId, id)
+  }
+  async executionList(orgId: string, assetId?: string, after = ''): Promise<ExecutionGrantPage> {
+    const query = new URLSearchParams({ after, ...(assetId ? { asset_id: assetId } : {}) })
+    const value = await this.call(orgId, `/execution/grants?${query}`)
+    if (!validators.ExecutionGrantPage(value)) fail('EXECUTION_RESPONSE_INVALID')
+    for (const row of value.items) {
+      this.executionGrant(row, orgId)
+      if (assetId !== undefined && row.request.asset_id !== assetId) fail('EXECUTION_RESPONSE_INVALID')
+    }
+    if (value.items.some((row, i) => row.id <= (i ? value.items[i - 1].id : after))
+      || (value.next_cursor !== null && (!value.items.length || value.next_cursor !== value.items.at(-1)!.id))) fail('EXECUTION_RESPONSE_INVALID')
+    return value
+  }
+  async executionRevoke(orgId: string, id: string): Promise<ExecutionGrant> {
+    const value = this.executionGrant(await this.call(orgId, `/execution/grants/${encodeURIComponent(id)}/revoke`, {}), orgId, id)
+    if (value.status !== 'revoked') fail('EXECUTION_RESPONSE_INVALID')
+    return value
+  }
+  async executionAuthorize(orgId: string, command: CheckExecutionGrant): Promise<ExecutionAuthorization> {
+    if (!validators.CheckExecutionGrant(command)) fail('INVALID_EXECUTION_REQUEST', 400)
+    const value = await this.call(orgId, '/execution/authorize', command)
+    if (!validators.ExecutionAuthorization(value) || value.cacheable !== false || Math.abs(Date.now() - value.authorized_at) > 5000) fail('EXECUTION_RESPONSE_INVALID')
+    const grant = this.executionGrant(value.grant, orgId, command.grant_id)
+    if (grant.status !== 'active' || grant.expires_at <= Date.now() || grant.request.task_id !== command.task_id
+      || grant.request.spec_digest !== command.spec_digest
+      || !grant.request.permissions.some(p => isDeepStrictEqual(p, command.permission))) fail('EXECUTION_RESPONSE_INVALID')
     return value
   }
   async putSnapshot(orgId: string, ref: Record<string, unknown>, snapshot: unknown): Promise<void> {
