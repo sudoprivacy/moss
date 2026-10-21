@@ -313,7 +313,7 @@ export type SessionStatus =
 export type DesiredState = 'active' | 'ended' | 'terminated'
 
 export interface SessionRuntime {
-  type: 'host' | 'docker' | 'k8s' | 'cohost'
+  type: 'host' | 'docker' | 'k8s' | 'cohost' | 'external'
   k8sImage?: string
   dockerImage?: string
   dockerMode?: 'session' | 'user'
@@ -446,7 +446,7 @@ export interface SessionContext {
 
 export interface GetSessionContextResponse {
   session: Session
-  usage: SessionUsage
+  usage: SessionUsage | null
   context: SessionContext
 }
 

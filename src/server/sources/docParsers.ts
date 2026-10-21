@@ -372,23 +372,16 @@ async function collectImageDir(
 }
 
 async function parsePdfWithPdfParse(filePath: string): Promise<ParseResult | null> {
-  let pdfParse: ((data: Buffer) => Promise<{ text: string }>) | null
-  try {
-    const mod = (await import('pdf-parse')) as { default?: unknown } & Record<string, unknown>
-    const candidate =
-      (typeof mod === 'function' ? mod : null) ??
-      (typeof mod.default === 'function' ? (mod.default as unknown) : null)
-    pdfParse = candidate as ((data: Buffer) => Promise<{ text: string }>) | null
-  } catch {
-    return null
-  }
-  if (!pdfParse) return null
-
+  const { PDFParse } = await import('pdf-parse')
   const bytes = await readFile(filePath)
-  const out = await pdfParse(bytes)
-  const text = String(out?.text ?? '').trim()
-  if (!text) return null
-  return { markdown: text, via: 'pdf-parse' }
+  const parser = new PDFParse({ data: bytes })
+  try {
+    const out = await parser.getText({ pageJoiner: '' })
+    const text = out.text.trim()
+    return text ? { markdown: text, via: 'pdf-parse' } : null
+  } finally {
+    await parser.destroy()
+  }
 }
 
 async function parsePdfWithPdftotext(filePath: string): Promise<ParseResult | null> {

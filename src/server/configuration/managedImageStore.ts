@@ -12,7 +12,7 @@ const MIME_BY_EXTENSION = new Map([
 ])
 const GENERATED_FILENAME = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:svg|png|jpe?g)$/
 
-export type ManagedImageKind = 'config-item' | 'enterprise'
+export type ManagedImageKind = 'config-item' | 'enterprise' | 'park-logo'
 
 export class ManagedImageError extends Error {
   constructor(readonly statusCode: number, message: string) {
@@ -85,6 +85,13 @@ export class ManagedImageStore {
     }
   }
 
+  async remove(kind: ManagedImageKind, filename: string): Promise<void> {
+    if (basename(filename) !== filename || !GENERATED_FILENAME.test(filename)) {
+      throw new ManagedImageError(400, 'Invalid image filename')
+    }
+    await rm(join(this.root, directoryFor(kind), filename), { force: true })
+  }
+
   async importExisting(input: {
     kind: ManagedImageKind
     filename: string
@@ -139,7 +146,7 @@ export class ManagedImageStore {
     }
     try {
       const metadata = await sharp(bytes, { failOn: 'error' }).metadata()
-      const actual = metadata.format === 'jpeg' ? 'image/jpeg' : `image/${metadata.format ?? ''}`
+      const actual = metadata.format === 'svg' ? 'image/svg+xml' : metadata.format === 'jpeg' ? 'image/jpeg' : `image/${metadata.format ?? ''}`
       if (actual !== MIME_BY_EXTENSION.get(extension)) throw new Error('format mismatch')
       if (!metadata.width || !metadata.height) throw new Error('missing dimensions')
       if (square && metadata.width !== metadata.height) {
@@ -152,6 +159,6 @@ export class ManagedImageStore {
   }
 }
 
-function directoryFor(kind: ManagedImageKind): 'config-items' | 'enterprises' {
-  return kind === 'config-item' ? 'config-items' : 'enterprises'
+function directoryFor(kind: ManagedImageKind): 'config-items' | 'enterprises' | 'park-logos' {
+  return kind === 'config-item' ? 'config-items' : kind === 'park-logo' ? 'park-logos' : 'enterprises'
 }

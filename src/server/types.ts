@@ -921,6 +921,7 @@ export type SessionListFilter = {
   orgId: string
   userId?: string
   activeOnly?: boolean
+  externalSource?: string
   includeDeleted?: boolean
 }
 

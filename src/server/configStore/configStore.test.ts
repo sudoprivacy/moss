@@ -36,6 +36,7 @@ const {
   updateSystemSettings,
 } = await import('../systemSettings.js')
 const { getModelProviderApiKey } = await import('../modelListCache.js')
+const { createLegacyProvider, toPublicProviders } = await import('../modelProviders.js')
 
 // 必须在任何 settings 写入前确认隔离路径，模块 mock 失效时直接终止。
 expect(SYSTEM_SETTINGS_PATH).toBe(SETTINGS_PATH)
@@ -241,6 +242,16 @@ describe('updateSystemSettings 敏感字段写 Nexus、文件不落盘', () => {
     await store.loadAll()
     fake.mutations.length = 0 // 不计入 loadAll 的健康探针。
   }
+
+  it('uses a legacy-default provider key before the older global key', async () => {
+    const orgId = 'org-legacy-provider'
+    await store.put(organizationConfigKey(orgId, 'settings.model-provider-api-keys'), JSON.stringify({
+      'legacy-default': 'provider-key',
+    }))
+    expect(getModelProviderApiKey('legacy-default', 'stale-global-key', orgId)).toBe('provider-key')
+    expect(getModelProviderApiKey('legacy-default', 'stale-global-key', orgId, 'user-key')).toBe('user-key')
+    expect(toPublicProviders([createLegacyProvider('https://example.test/v1')], { 'legacy-default': 'provider-key' }, '')[0]?.apiKeyConfigured).toBe(true)
+  })
 
   function expectSecretsPreserved(): void {
     expect(fake.read(AUTH_KEY)).toEqual({ value: 'saved-auth' })

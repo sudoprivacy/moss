@@ -555,11 +555,13 @@ export class RuntimeService {
     orgId: string
     userId?: string
     activeOnly?: boolean
+    externalSource?: string
   }): Promise<SessionSummary[]> {
     return this.store.listSessions({
       orgId: filter.orgId,
       userId: filter.userId,
       activeOnly: filter.activeOnly,
+      externalSource: filter.externalSource,
     })
   }
 
@@ -2176,6 +2178,7 @@ export class RuntimeService {
         role: session.role,
         scopes: session.scopes,
         assistantName: effectiveAssistantName ?? null,
+        sessionId: session.sessionId,
       })
       sessionToken = signed.token
     } catch (err) {

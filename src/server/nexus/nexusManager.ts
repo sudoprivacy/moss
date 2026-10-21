@@ -425,7 +425,7 @@ export class NexusManager {
 
   constructor(options: NexusManagerOptions = {}) {
     this.config = options.config ?? resolveNexusConfigFromEnv()
-    this.nexusDir = options.nexusDir ?? join(homedir(), '.moss', 'nexus')
+    this.nexusDir = options.nexusDir ?? resolveNexusDirectory()
     this.binDir = join(this.nexusDir, 'bin')
     this.grpcPort =
       options.grpcPort ?? (this.config.mode === 'embedded' ? this.config.grpcPort : NEXUS_DEFAULT_GRPC_PORT)
@@ -806,4 +806,11 @@ export class NexusManager {
     mkdirSync(this.binDir, { recursive: true })
     writeFileSync(readyPath, NEXUS_VERSION, 'utf8')
   }
+}
+
+export function resolveNexusDirectory(
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = homedir(),
+): string {
+  return env.MOSS_NEXUS_DIR?.trim() || join(homeDir, '.moss', 'nexus')
 }

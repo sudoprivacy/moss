@@ -1,6 +1,6 @@
 import { getOrganizationResourceScope } from '../catalog/organizationResources.js'
 import { spawn } from 'child_process'
-import { writeFileSync } from 'fs'
+import { existsSync, writeFileSync } from 'fs'
 import { mkdir, readFile, copyFile } from 'fs/promises'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'node:url'
@@ -85,14 +85,14 @@ export class ScodeBackend implements SessionBackend {
       const apiKey = env.ANTHROPIC_API_KEY || ''
       // Use model from env (which includes user preference), or fallback
       // env.MOSS_DEFAULT_MODEL has priority: user preference > system settings > default
-      const model = env.MOSS_DEFAULT_MODEL || options.runtime?.model || 'gemini-3-flash-preview'
-      const scodeModelName = model
+      const rawModel = env.MOSS_DEFAULT_MODEL || options.runtime?.model || 'gemini-3-flash-preview'
+      const scodeModelName = rawModel.includes('/') ? rawModel.split('/').slice(1).join('/') : rawModel
 
-      // The proxy connection only. A static model list here would pin every
-      // model to one wire format and freeze a catalog sudorouter changes
-      // underneath us; with only the proxy connection present, scode resolves
-      // unknown aliases through passthrough and takes each model's wire format
-      // from the capabilities it reads off sudorouter `/v1/models`.
+      // The proxy connection plus an alias for this session's model. scode
+      // resolves `--model` against sudocode.json's models map; registering the
+      // selected model as its own alias keeps the passthrough behaviour for
+      // anything the sudorouter catalog knows while making the session's model
+      // always resolvable.
 
       const scodeConfig = {
         auth_modes: {
@@ -103,10 +103,24 @@ export class ScodeBackend implements SessionBackend {
             }
           }
         },
+        models: {
+          [scodeModelName]: {
+            alias: scodeModelName,
+            name: scodeModelName,
+            input: ['text'],
+            providers: {
+              proxy: {
+                provider: 'moss-proxy',
+                model: scodeModelName,
+                api: 'openai-completions'
+              }
+            }
+          }
+        },
       }
       writeFileSync(dummySudocodePath, JSON.stringify(scodeConfig, null, 2), 'utf8')
       process.stderr.write(
-        `[ScodeBackend] Wrote sudocode.json (proxy connection only; models resolved dynamically via sudorouter)\n`,
+        `[ScodeBackend] Wrote sudocode.json (proxy connection + alias for ${scodeModelName})\n`,
       )
     } catch (e) {
       process.stderr.write(`[ScodeBackend] Failed to create dynamic sudocode.json: ${e}\n`)
@@ -126,8 +140,8 @@ export class ScodeBackend implements SessionBackend {
 
     // Use model from env (which includes user preference), or fallback. The id
     // goes to scode verbatim — see the sudocode.json note above.
-    const model = env.MOSS_DEFAULT_MODEL || options.runtime?.model || 'gemini-3-flash-preview'
-    const scodeModel = model
+    const rawModel = env.MOSS_DEFAULT_MODEL || options.runtime?.model || 'gemini-3-flash-preview'
+    const scodeModel = rawModel.includes('/') ? rawModel.split('/').slice(1).join('/') : rawModel
     process.stderr.write(`[ScodeBackend] Model for session ${options.sessionId}: ${scodeModel} (from env.MOSS_DEFAULT_MODEL: ${env.MOSS_DEFAULT_MODEL})\n`)
 
     // 同步技能到工作空间目录（新方案）
@@ -165,6 +179,21 @@ export class ScodeBackend implements SessionBackend {
     await mkdir(dirname(artifactToolPath), { recursive: true })
     await copyFile(join(dirname(fileURLToPath(import.meta.url)), 'artifact-mcp.mjs'), artifactToolPath)
 
+    // Park anonymous consultation sessions get the park tools as a native MCP
+    // server: models follow structured tool calls far more reliably than the
+    // skill's shell-command instructions.
+    const mcpServerList = [...acpMcpServers(options.mcpSettings), { name: 'moss-artifacts', command: process.execPath, args: [artifactToolPath], env: [] }]
+    if (options.userId === 'park-public-consultation') {
+      // syncWorkspaceSkills materialises organisation skills under the
+      // workspace's .nexus/sudocode/skills directory.
+      const parkToolSource = join(options.cwd, '.nexus', 'sudocode', 'skills', 'park-consultation-tools', 'scripts', 'park-tools-mcp.mjs')
+      if (existsSync(parkToolSource)) {
+        mcpServerList.push({ name: 'park-consultation-tools', command: process.execPath, args: [parkToolSource], env: [] })
+      } else {
+        process.stderr.write(`[ScodeBackend] park tools MCP script missing at ${parkToolSource}\n`)
+      }
+    }
+
     const child = spawn(scodePath, args, {
       cwd: options.cwd,
       env: {
@@ -184,7 +213,7 @@ export class ScodeBackend implements SessionBackend {
 
     const handle = createAcpBridgeHandle({
       child,
-      mcpServers: [...acpMcpServers(options.mcpSettings), { name: 'moss-artifacts', command: process.execPath, args: [artifactToolPath], env: [] }],
+      mcpServers: mcpServerList,
       sessionId: options.sessionId,
       cwd: options.cwd,
       model: scodeModel,

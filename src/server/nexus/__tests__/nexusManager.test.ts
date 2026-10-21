@@ -14,6 +14,7 @@ import {
   formatNexusStartupFailure,
   parseNexusVersion,
   resolveNexusConfigFromEnv,
+  resolveNexusDirectory,
   resolveNexusZoneIdLockPath,
   resolveVaultDylibName,
 } from '../nexusManager.js'
@@ -105,6 +106,13 @@ afterEach(async () => {
 })
 
 describe('NexusManager', () => {
+  it('allows isolated embedded Nexus storage through MOSS_NEXUS_DIR', () => {
+    expect(resolveNexusDirectory({ MOSS_NEXUS_DIR: 'C:\\acceptance\\nexus' }, 'C:\\users\\default')).toBe(
+      'C:\\acceptance\\nexus',
+    )
+    expect(resolveNexusDirectory({}, 'C:\\users\\default')).toBe(join('C:\\users\\default', '.moss', 'nexus'))
+  })
+
   it('uses the repository runtime version config for the Docker assembly', () => {
     const runtimeVersions = JSON.parse(
       readFileSync(join(import.meta.dir, '..', 'runtime-versions.json'), 'utf8'),

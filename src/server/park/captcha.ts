@@ -18,10 +18,10 @@ function svgImage(answer: string): string {
 export class ParkCaptcha {
   constructor(private readonly store: ParkStore, private readonly key?: string, private readonly codeFactory?: () => string) {}
 
-  async issue(sessionId: string, now = Date.now()): Promise<string> {
+  async issue(sessionId: string, now = Date.now(), isContactRetry = false): Promise<string> {
     if (!this.key || this.key.length < 32) throw new HttpError(503, 'CAPTCHA is not configured')
     const previous = await this.store.db.get<{ issued_at: number }>('SELECT issued_at FROM park_captcha_challenges WHERE session_id = ?', [sessionId])
-    if (previous && now - Number(previous.issued_at) < 10_000) throw new HttpError(429, 'Wait before requesting another challenge')
+    if (!isContactRetry && previous && now - Number(previous.issued_at) < 10_000) throw new HttpError(429, 'Wait before requesting another challenge')
     const answer = this.codeFactory?.() ?? Array.from({ length: 5 }, () => SYMBOLS[randomInt(SYMBOLS.length)]).join('')
     if (!/^[A-Z2-9]{5}$/.test(answer)) throw new Error('Invalid CAPTCHA generator output')
     await this.store.db.run(`INSERT INTO park_captcha_challenges (session_id, answer_hash, issued_at, expires_at, attempts, passed_until)

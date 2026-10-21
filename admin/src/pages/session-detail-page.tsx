@@ -325,7 +325,7 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
     : session.runtime.type === 'docker' ? session.runtime.dockerImage : undefined
   const statusInfo = statusConfig[session.status] || { label: session.status, variant: 'outline' as const }
 
-  const canResume = ['ended', 'terminated', 'failed', 'lost'].includes(session.status)
+  const canResume = session.runtime.type !== 'external' && ['ended', 'terminated', 'failed', 'lost'].includes(session.status)
   const canTerminate = ['active', 'creating', 'detached'].includes(session.status)
   const ownerName = resolveOwnerName(users, session.userId, session.userName)
 
@@ -470,34 +470,34 @@ export function SessionDetailPage({ sessionId }: SessionDetailPageProps) {
               <div className="grid gap-4 grid-cols-2">
                 <div className="p-3 rounded-lg bg-muted/50">
                   <p className="text-sm text-muted-foreground">输入 Token</p>
-                  <p className="text-xl font-bold">{usage.inputTokens.toLocaleString()}</p>
+                  <p className="text-xl font-bold">{usage?.inputTokens.toLocaleString() ?? '—'}</p>
                 </div>
                 <div className="p-3 rounded-lg bg-muted/50">
                   <p className="text-sm text-muted-foreground">输出 Token</p>
-                  <p className="text-xl font-bold">{usage.outputTokens.toLocaleString()}</p>
+                  <p className="text-xl font-bold">{usage?.outputTokens.toLocaleString() ?? '—'}</p>
                 </div>
                 <div className="p-3 rounded-lg bg-muted/50">
                   <p className="text-sm text-muted-foreground">总 Token</p>
-                  <p className="text-xl font-bold">{usage.totalTokens.toLocaleString()}</p>
+                  <p className="text-xl font-bold">{usage?.totalTokens.toLocaleString() ?? '—'}</p>
                 </div>
               </div>
 
               <div className="mt-4 pt-4 border-t space-y-2">
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">缓存读取</span>
-                  <span>{usage.cacheReadInputTokens.toLocaleString()}</span>
+                  <span>{usage?.cacheReadInputTokens.toLocaleString() ?? '—'}</span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">缓存创建</span>
-                  <span>{usage.cacheCreationInputTokens.toLocaleString()}</span>
+                  <span>{usage?.cacheCreationInputTokens.toLocaleString() ?? '—'}</span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">智能体消息</span>
-                  <span>{usage.assistantMessageCount}</span>
+                  <span>{usage?.assistantMessageCount ?? '—'}</span>
                 </div>
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">读取文件</span>
-                  <span>{usage.filesRead}</span>
+                  <span>{usage?.filesRead ?? '—'}</span>
                 </div>
               </div>
             </CardContent>

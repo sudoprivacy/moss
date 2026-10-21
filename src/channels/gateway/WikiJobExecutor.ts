@@ -14,7 +14,7 @@
  *   the verified staging directory is published atomically
  */
 
-import { readFile, mkdir, readdir, writeFile, rename, rm, stat } from 'fs/promises'
+import { cp, readFile, mkdir, readdir, writeFile, rename, rm, stat } from 'fs/promises'
 import path from 'path'
 import { RuntimeService } from '../../server/runtimeService.js'
 import type { SessionRecord } from '../../server/types.js'
@@ -24,6 +24,8 @@ import { DocumentStore, type DocumentRecord, type WikiBuildJob, type WikiRecord 
 import type { DirectConnectStore } from '../../server/db.js'
 import { MOSS_WIKIS_DIR, MOSS_MODELS_DIR } from '../../utils/wikis/localWikiDirectories.js'
 import { buildVectorIndex } from '../../server/wikiIndex/build.js'
+import type { WikiSourceSnapshot } from '../../server/wikiSourceSnapshot.js'
+import { createHash } from 'node:crypto'
 
 // Each build runs in its own private staging dir under wikis/.stage/ (same
 // filesystem as wikis/, so the publish rename is atomic). The wiki's live
@@ -240,11 +242,13 @@ export class WikiJobExecutor {
     // equals the pick list; for 'dir' mode it's the live subtree resolved at
     // build time. Recorded into _moss_meta.json so Track 2 staleness diffs and
     // dir-mode meta stay truthful.
-    let builtDocIds: string[] = []
+    let builtSources: WikiSourceSnapshot[] = []
     // Private staging dir for this build. Built in full here; only swapped
     // into the live wiki dir on success (see publishStaged). Cleaned up on
     // every exit path (success swap consumes it; failure rm -rf's it).
     const stageDir = path.join(STAGE_DIR, `${job.wikiId}.${job.id}`)
+    let publishDir = stageDir
+    let isSessionTerminated = false
     try {
       wiki = await this.docStore.getWikiById(job.wikiId)
       if (!wiki) throw new Error(`wiki ${job.wikiId} not found`)
@@ -253,7 +257,7 @@ export class WikiJobExecutor {
       // resolved doc set (dir mode expands to the live subtree) so meta records
       // exactly what was built.
       await mkdir(stageDir, { recursive: true })
-      builtDocIds = await this.prepareInputs(wiki, stageDir)
+      builtSources = await this.prepareInputs(wiki, stageDir)
       const prompt = await loadWikiBuilderPrompt()
       await assertStillRunning()
       await this.docStore.updateBuildJob(job.id, { progress: 25, currentStep: '调用 AI 生成 Wiki' })
@@ -401,7 +405,28 @@ export class WikiJobExecutor {
       // build. If it fails, fail the whole build rather than publish a wiki
       // with no recency marker.
       await assertStillRunning()
-      await this.writeWikiMeta(wiki, stageDir, startedAt, builtDocIds)
+      // Restore server-captured sources after the model has finished. The
+      // private sibling is never delivered to the build runtime.
+      if (builtSources.some(source => source.markdownPath)) {
+        await cp(`${stageDir}.sources`, path.join(stageDir, '_sources'), { recursive: true })
+      }
+      await this.writeWikiMeta(wiki, stageDir, startedAt, builtSources)
+
+      // A completed agent session can keep its workspace as the process CWD
+      // until it is explicitly terminated. Windows rejects renaming such a
+      // directory with EBUSY, so release the runtime before the atomic publish.
+      // Runtime-backed workspaces have already been copied out above.
+      await this.runtime.terminateSession(created.sessionId)
+      isSessionTerminated = true
+
+      // Windows can retain a directory lock after the process that used it as
+      // its CWD has exited. Copy the verified output to an unlocked sibling on
+      // the same filesystem, then atomically publish that sibling instead.
+      if (process.platform === 'win32') {
+        publishDir = `${stageDir}.publish`
+        await rm(publishDir, { recursive: true, force: true })
+        await cp(stageDir, publishDir, { recursive: true })
+      }
 
       // Stage 6: atomically publish the staging dir into the live wiki dir.
       // Fail-safe against concurrent same-wiki swaps (see publishStaged).
@@ -413,7 +438,7 @@ export class WikiJobExecutor {
       if (prePublish?.claimedBy !== (this.instanceId ?? null)) {
         throw new BuildCancelledError()
       }
-      await this.publishStaged(wiki, stageDir, startedAt)
+      await this.publishStaged(wiki, publishDir, startedAt)
 
       await this.docStore.updateBuildJob(job.id, {
         status: 'succeeded',
@@ -441,7 +466,7 @@ export class WikiJobExecutor {
     } finally {
       this.cancelRequested.delete(job.id)
       const sessionId = this.running.get(job.id)?.sessionId
-      if (sessionId) {
+      if (sessionId && !isSessionTerminated) {
         await this.runtime.terminateSession(sessionId).catch(error => {
           console.error(`[WikiJobExecutor] failed to terminate build session ${sessionId}:`, error)
         })
@@ -453,6 +478,14 @@ export class WikiJobExecutor {
       await rm(stageDir, { recursive: true, force: true }).catch((e) => {
         console.error(`[WikiJobExecutor] failed to clean staging dir ${stageDir}:`, e)
       })
+      await rm(`${stageDir}.sources`, { recursive: true, force: true }).catch(error => {
+        console.error('[WikiJobExecutor] failed to clean source snapshots:', error)
+      })
+      if (publishDir !== stageDir) {
+        await rm(publishDir, { recursive: true, force: true }).catch((e) => {
+          console.error(`[WikiJobExecutor] failed to clean publish dir ${publishDir}:`, e)
+        })
+      }
     }
   }
 
@@ -486,7 +519,7 @@ export class WikiJobExecutor {
     wiki: WikiRecord,
     dir: string,
     startedAt: number,
-    builtDocIds: string[],
+    builtSources: WikiSourceSnapshot[],
   ): Promise<void> {
     const entries = await readdir(dir, { withFileTypes: true })
     const mdFiles = entries
@@ -543,7 +576,8 @@ export class WikiJobExecutor {
       builtAt: Date.now(),
       // Record the doc set that was actually built (dir mode resolves live),
       // so Track 2 staleness diffs and dir-mode inspection stay accurate.
-      sourceDocumentIds: builtDocIds,
+      sourceDocumentIds: builtSources.map(source => source.id),
+      sourceDocuments: builtSources,
       pages,
       images,
     }
@@ -612,7 +646,7 @@ export class WikiJobExecutor {
     try {
       // Step 1: move the current live dir aside (skip if first build).
       try {
-        await rename(liveDir, oldDir)
+        await this.renameForPublish(liveDir, oldDir)
         movedAside = true
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
@@ -620,7 +654,7 @@ export class WikiJobExecutor {
       }
 
       // Step 2: move our freshly-built dir into place.
-      await rename(stageDir, liveDir)
+      await this.renameForPublish(stageDir, liveDir)
     } catch (err) {
       // A concurrent swap already populated the live dir — it won. Don't
       // clobber the winner; abandon our publish and let finally clean up.
@@ -638,7 +672,7 @@ export class WikiJobExecutor {
       // Live dir is absent and we moved the old one aside — restore it so
       // the wiki is never left missing, then surface the failure.
       if (movedAside) {
-        await rename(oldDir, liveDir).catch((revertErr) => {
+        await this.renameForPublish(oldDir, liveDir).catch((revertErr) => {
           console.error(
             `[WikiJobExecutor] CRITICAL: failed to restore wiki=${wiki.id} from ${oldDir} after swap error:`,
             revertErr,
@@ -663,6 +697,24 @@ export class WikiJobExecutor {
       return true
     } catch {
       return false
+    }
+  }
+
+  private async renameForPublish(source: string, destination: string): Promise<void> {
+    const deadline = Date.now() + 30_000
+    let waitMs = 25
+    while (true) {
+      try {
+        await rename(source, destination)
+        return
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        const isTransientWindowsLock = process.platform === 'win32' &&
+          (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES')
+        if (!isTransientWindowsLock || Date.now() >= deadline) throw error
+        await new Promise(resolve => setTimeout(resolve, waitMs))
+        waitMs = Math.min(waitMs * 2, 1_000)
+      }
     }
   }
 
@@ -794,10 +846,10 @@ export class WikiJobExecutor {
    *               resolved live at build time (so new files auto-join and
    *               deleted files drop out).
    *
-   * Returns the resolved document IDs actually staged, so the caller can
+   * Returns metadata of documents actually staged, so the caller can
    * record the truthful built set in _moss_meta.json.
    */
-  private async prepareInputs(wiki: WikiRecord, baseDir: string): Promise<string[]> {
+  private async prepareInputs(wiki: WikiRecord, baseDir: string): Promise<WikiSourceSnapshot[]> {
     const inputDir = path.join(baseDir, 'input')
     await mkdir(inputDir, { recursive: true })
 
@@ -818,7 +870,7 @@ export class WikiJobExecutor {
       docIds = wiki.sourceDocumentIds
     }
 
-    const staged: string[] = []
+    const staged: WikiSourceSnapshot[] = []
     for (const docId of docIds) {
       // Cross-org lookup: build runs as system, document still has org_id
       const docRow = await this.db.getDocument(docId, wiki.orgId)
@@ -827,10 +879,11 @@ export class WikiJobExecutor {
         continue
       }
       const doc = mapDocumentRow(docRow)
+      const node = await this.docStore.getNode(doc.nodeId, wiki.orgId)
       const safeName = path.basename(doc.fileName)
 
       try {
-        const parsed = await parseAndWrite(doc.storagePath, safeName, inputDir)
+        const parsed = await parseAndWrite(doc.storagePath, `${docId}-${safeName}`, inputDir)
         if (parsed) {
           console.log(
             `[WikiJobExecutor] staged ${safeName} via ${parsed.via}`,
@@ -839,12 +892,21 @@ export class WikiJobExecutor {
           // No parser worked. Copy raw bytes so at least the file is
           // present and the agent can pick it up via its read_file tool.
           const content = await readFile(doc.storagePath)
-          await writeFile(path.join(inputDir, safeName), content)
+          await writeFile(path.join(inputDir, `${docId}-${safeName}`), content)
           console.warn(
             `[WikiJobExecutor] no parser for ${safeName}; copied raw bytes`,
           )
         }
-        staged.push(docId)
+        const source: WikiSourceSnapshot = { id: docId, fileName: doc.fileName, nodeName: node?.name ?? '', sizeBytes: doc.sizeBytes }
+        if (parsed) {
+          const markdown = await readFile(parsed.writtenPath)
+          const snapshotDir = `${baseDir}.sources`
+          await mkdir(snapshotDir, { recursive: true })
+          await writeFile(path.join(snapshotDir, `${docId}.md`), markdown)
+          source.markdownPath = `_sources/${docId}.md`
+          source.markdownSha256 = createHash('sha256').update(markdown).digest('hex')
+        }
+        staged.push(source)
       } catch (err) {
         console.warn(`[WikiJobExecutor] failed to stage source doc ${docId}:`, err)
       }

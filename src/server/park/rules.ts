@@ -18,6 +18,8 @@ const TOPICS: ReadonlyArray<{ name: string; pattern: RegExp; score: number }> = 
   { name: '入驻周期', pattern: /多久|周期|什么时候|时间表/, score: 10 },
 ]
 
+export const DEFAULT_REDACTION_SUMMARY_LENGTH = 4000
+
 /** Remove direct identifiers before inquiry text enters the operational store. */
 export function redactInquiry(text: string, config?: { extra_terms?: string[]; summary_max_length?: number }): string {
   let redacted = text
@@ -28,7 +30,7 @@ export function redactInquiry(text: string, config?: { extra_terms?: string[]; s
   for (const term of config?.extra_terms ?? []) {
     if (typeof term === 'string' && term.length >= 2 && term.length <= 100) redacted = redacted.replaceAll(term, '[敏感词]')
   }
-  const limit = Math.min(4000, Math.max(100, Number(config?.summary_max_length) || 4000))
+  const limit = Math.min(4000, Math.max(100, Number(config?.summary_max_length) || DEFAULT_REDACTION_SUMMARY_LENGTH))
   return redacted.slice(0, limit)
 }
 

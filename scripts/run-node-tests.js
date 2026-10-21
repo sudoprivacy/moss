@@ -30,6 +30,8 @@ const nodeTestFiles = [
   'src/server/testing/sqliteBootstrap.node-test.ts',
   'src/server/skillImportValidation.node-test.ts',
   'src/server/park/park.node-test.ts',
+  'src/server/park/policySearch.node-test.ts',
+  'src/server/park/brandingAndSources.node-test.ts',
   'src/server/park/parkServer.node-test.ts',
   'src/server/wikiBuildJobFencing.node-test.ts',
   'src/server/privateAgentArchives.node-test.ts',

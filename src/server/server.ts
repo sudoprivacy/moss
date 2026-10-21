@@ -3,11 +3,15 @@ import { ExternalProviderError } from './externalProviders/policy.js'
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { ParkStore } from './park/store.js'
 import { handlePublicParkRoute } from './park/publicRoutes.js'
+import { ManagedImageStore } from './configuration/managedImageStore.js'
 import { handleInternalParkRoute, recordParkAudit } from './park/internalRoutes.js'
+import { dispatchParkAgentApi } from './park/parkAgentRoutes.js'
 import { ParkPhoneVerification, type ParkSmsSender } from './park/phoneVerification.js'
 import { ParkCaptcha } from './park/captcha.js'
 import { boxOperationsFromEnvironment } from './park/boxOperations.js'
-import { createParkAnswerer } from './park/answer.js'
+import { ParkRuntimeAgentChannel, type ParkAgentChannel } from './park/agentChannel.js'
+import { PARK_PUBLIC_SESSION_SOURCE, parkPublicSessionMessages } from './park/mossSessions.js'
+import { processExpiredParkSessions } from './park/publicRoutes.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { AgentManager, canUpgradeAgentRuntime, managedSessionAgentName } from './agentManager.js'
 import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
@@ -1069,7 +1073,8 @@ async function authenticateRequest(
   if (token && !auth) {
     process.stderr.write(`[authenticateRequest] Verification failed for token: ${token.slice(0, 10)}...\n`)
   }
-  if (auth && !(await isUserActive(auth.userId, authService))) return null
+  if (auth && !(auth.sessionId && auth.assistantId !== undefined)
+    && !(await isUserActive(auth.userId, authService))) return null
   return auth
 }
 
@@ -1316,6 +1321,25 @@ function canAccessSession(
  * auth-parameter VALUES are masked.
  */
 const REDACTED_QUERY_KEYS = new Set(['refresh_token', 'token', 'access_token'])
+
+/** Read the repo-bundled park consultation skill files once for org-skill registration on publish. */
+async function loadParkSkillEntries(): Promise<Array<{ path: string; contentBase64: string }>> {
+  const skillDir = resolve(process.cwd(), 'skills/park-consultation-tools')
+  const entries: Array<{ path: string; contentBase64: string }> = []
+  async function walk(dir: string, prefix: string): Promise<void> {
+    const items = await readdir(dir, { withFileTypes: true }).catch(() => [])
+    for (const item of items) {
+      const relativePath = prefix ? `${prefix}/${item.name}` : item.name
+      if (item.isDirectory()) await walk(join(dir, item.name), relativePath)
+      else if (item.isFile()) {
+        const content = await readFile(join(dir, item.name))
+        entries.push({ path: relativePath, contentBase64: content.toString('base64') })
+      }
+    }
+  }
+  await walk(skillDir, '')
+  return entries
+}
 function redactWsUrl(rawUrl: string | undefined): string {
   if (!rawUrl) return ''
   try {
@@ -2028,6 +2052,7 @@ export function startServer(
   platformConfig?: PlatformConfigService,
   cas?: SudoworkCasService,
   parkSmsSender?: ParkSmsSender,
+  parkAgentChannelOverride?: ParkAgentChannel,
 ): {
   port: number | null
   ready: Promise<number | null>
@@ -2038,17 +2063,32 @@ export function startServer(
   getConnections: () => Promise<number>
 } {
   const parkStore = new ParkStore(runtime.store.driver)
+  const parkImages = new ManagedImageStore(join(config.runtimeDir, 'uploads'))
   const parkPhoneVerification = new ParkPhoneVerification(parkStore, parkSmsSender, process.env.PARK_SMS_HMAC_KEY)
-  const parkCaptcha = new ParkCaptcha(parkStore, process.env.PARK_CAPTCHA_HMAC_KEY)
+  const acceptanceCaptchaCode = process.env.PARK_ACCEPTANCE_TEST_MODE === '1'
+    ? process.env.PARK_CAPTCHA_FIXED_CODE?.trim().toUpperCase()
+    : undefined
+  const parkCaptcha = new ParkCaptcha(
+    parkStore,
+    process.env.PARK_CAPTCHA_HMAC_KEY,
+    acceptanceCaptchaCode ? () => acceptanceCaptchaCode : undefined,
+  )
   const parkBoxOperations = boxOperationsFromEnvironment(config.rootDir)
-  const parkAnswerer = createParkAnswerer(authService)
+  const parkAgentChannel = parkAgentChannelOverride ?? new ParkRuntimeAgentChannel(runtime)
   const parkOrgId = process.env.PARK_ORG_ID?.trim() || null
+  const parkSkillEntries = loadParkSkillEntries()
   let parkReady: Promise<void> | null = null
   const ensureParkReady = () => (parkReady ??= parkStore.init())
   const parkLeadTimer = setInterval(() => {
     if (parkReady) void parkStore.processLeadJobs().catch(error => logger.error(String(error)))
   }, 10_000)
   parkLeadTimer.unref()
+  const parkReclaimTimer = setInterval(() => {
+    if (parkReady && parkOrgId) {
+      void processExpiredParkSessions({ store: parkStore, orgId: parkOrgId, readBody: readJsonBody, agentChannel: parkAgentChannel, documentStore }).catch(error => logger.error(String(error)))
+    }
+  }, 30_000)
+  parkReclaimTimer.unref()
   const browserWorkers = new BrowserWorkerRegistry(id => runtime.getSession(id))
   const adminDistDir = resolveAdminDistDir()
   const agentManager = new AgentManager({
@@ -2553,7 +2593,7 @@ export function startServer(
 
       if (pathname.startsWith('/public/consult/') || pathname.startsWith('/public/sessions/')) {
         await ensureParkReady()
-        if (await handlePublicParkRoute(req, res, pathname, { store: parkStore, orgId: parkOrgId, readBody: readJsonBody, phoneVerification: parkPhoneVerification, captcha: parkCaptcha, answerer: parkAnswerer })) return
+        if (await handlePublicParkRoute(req, res, pathname, { store: parkStore, orgId: parkOrgId, readBody: readJsonBody, phoneVerification: parkPhoneVerification, captcha: parkCaptcha, agentChannel: parkAgentChannel, documentStore, managedImages: parkImages })) return
       }
 
       if (cabinApi && await cabinApi.handle(req, res, pathname)) {
@@ -3656,7 +3696,7 @@ export function startServer(
       if (pathname.startsWith('/api/v1/parks/')) {
         await ensureParkReady()
         try {
-          if (await handleInternalParkRoute(req, res, pathname, auth, { store: parkStore, orgId: parkOrgId, authService, readBody: readJsonBody, boxOperations: parkBoxOperations })) return
+          if (await handleInternalParkRoute(req, res, pathname, auth, { store: parkStore, orgId: parkOrgId, authService, readBody: readJsonBody, boxOperations: parkBoxOperations, documentStore, parkSkillEntries, managedImages: parkImages })) return
         } catch (error) {
           if (parkOrgId && error instanceof HttpError && error.statusCode >= 400) {
             await recordParkAudit(parkStore, parkOrgId, pathname, req.method ?? 'GET', error.statusCode, auth.userId, error.message)
@@ -5421,6 +5461,23 @@ export function startServer(
           chunk_count: chunkCount,
         })
         return
+      }
+
+      // ---- Park agent tools (session-token scoped, mirrors the agent wikis bearer model) ----
+      if (pathname.startsWith('/api/v1/agent/park/')) {
+        const result = await dispatchParkAgentApi({
+          store: parkStore,
+          orgId: parkOrgId,
+          readBody: readJsonBody,
+          documentStore,
+          vectorOptions: config.wikiIndex.enabled
+            ? { enabled: true, modelId: config.wikiIndex.modelId, cacheDir: MOSS_MODELS_DIR, mirror: config.wikiIndex.modelMirror, topKVector: config.wikiIndex.topKVector, maxMatches: 100 }
+            : null,
+        }, auth, req.method ?? 'GET', pathname, url, req)
+        if (result) {
+          writeJson(res, result.status, result.body)
+          return
+        }
       }
 
       // ---- Agent-facing corp-auth endpoint (called by the `corpauth` CLI inside scode) ----
@@ -10403,13 +10460,13 @@ export function startServer(
           : await authService.listSubtreeUserIds(auth.orgId, auth)
         let sessions: Awaited<ReturnType<typeof runtime.listSessions>>
         if (hasScope(auth.scopes, 'sessions:list:any')) {
-          sessions = await runtime.listSessions({ orgId: auth.orgId, activeOnly })
+          sessions = await runtime.listSessions({ orgId: auth.orgId, activeOnly, externalSource: PARK_PUBLIC_SESSION_SOURCE })
         } else if (sessionSubtree && sessionSubtree.size > 1) {
           // dept_admin: list the whole org, then narrow to the subtree set.
-          sessions = (await runtime.listSessions({ orgId: auth.orgId, activeOnly }))
+          sessions = (await runtime.listSessions({ orgId: auth.orgId, activeOnly, externalSource: PARK_PUBLIC_SESSION_SOURCE }))
             .filter(session => sessionSubtree.has(session.userId))
         } else {
-          sessions = await runtime.listSessions({ orgId: auth.orgId, userId: auth.userId, activeOnly })
+          sessions = await runtime.listSessions({ orgId: auth.orgId, userId: auth.userId, activeOnly, externalSource: PARK_PUBLIC_SESSION_SOURCE })
         }
 
         // Filter by source if provided
@@ -10577,8 +10634,10 @@ export function startServer(
         if (!canAccessSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
-        const context = await loadSessionContextFromTranscript(session)
-        if (!context) {
+        const context = session.source === PARK_PUBLIC_SESSION_SOURCE
+          ? { messages: await parkPublicSessionMessages(parkStore, session.orgId, session.sessionId), usage: null, customTitle: undefined, tag: undefined, summary: undefined }
+          : await loadSessionContextFromTranscript(session)
+        if (!context || !context.messages) {
           throw new HttpError(404, 'Session context not found')
         }
         writeJson(res, 200, {
@@ -10632,7 +10691,10 @@ export function startServer(
         if (!canAccessSession(auth, session, 'sessions:terminate:any')) {
           throw new HttpError(403, 'Forbidden')
         }
-        await runtime.terminateSession(sessionId)
+        if (session.source === PARK_PUBLIC_SESSION_SOURCE) {
+          await runtime.terminateSession(sessionId)
+          await parkStore.db.run('UPDATE park_sessions SET expires_at = ? WHERE org_id = ? AND moss_session_id = ?', [Date.now(), session.orgId, sessionId])
+        } else await runtime.terminateSession(sessionId)
         writeJson(res, 200, { ok: true })
         return
       }
@@ -10732,7 +10794,7 @@ export function startServer(
         // hangs on a cold Docker container start. The client connects via
         // ws_url and sees status flip to 'active' once the runtime is back.
         const ready =
-          session.desiredState === 'active'
+          session.desiredState === 'active' && session.source !== PARK_PUBLIC_SESSION_SOURCE
             ? await runtime.ensureSessionReadyNonBlocking(sessionId)
             : { session }
         const owner = ready.session.currentAttemptId

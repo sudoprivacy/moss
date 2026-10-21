@@ -473,6 +473,16 @@ export class DocumentStore {
     const doc = await this.getDocument(id, orgId)
     if (!doc) return
     await this.store.deleteDocument(id, orgId)
+    // Cascade: a deleted source file must leave every wiki's source list,
+    // otherwise later builds/edits fail on the dangling document id.
+    const wikis = await this.listWikis(orgId)
+    for (const wiki of wikis) {
+      if (wiki.sourceDocumentIds.includes(id)) {
+        await this.updateWiki(wiki.id, orgId, {
+          sourceDocumentIds: wiki.sourceDocumentIds.filter(documentId => documentId !== id),
+        })
+      }
+    }
     // Best-effort on-disk cleanup
     try {
       const dir = path.dirname(doc.storagePath)

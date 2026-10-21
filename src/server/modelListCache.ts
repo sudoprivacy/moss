@@ -20,9 +20,10 @@ type ModelCatalogOptions = {
 }
 
 export function getModelProviderApiKey(providerId: string, legacyApiKey: string, orgId?: string, userApiKey?: string): string | undefined {
+  const providerApiKey = getStoredProviderApiKeys(orgId)[providerId]
   return providerId === 'legacy-default'
-    ? userApiKey || legacyApiKey || undefined
-    : getStoredProviderApiKeys(orgId)[providerId]
+    ? userApiKey || providerApiKey || legacyApiKey || undefined
+    : providerApiKey
 }
 
 export async function getAvailableModels(

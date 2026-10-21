@@ -1,6 +1,11 @@
 import type { DbDriver } from '../db/driver.js'
 
 const TABLES = [
+  `CREATE TABLE IF NOT EXISTS park_document_history (
+    org_id TEXT NOT NULL, document_id TEXT NOT NULL, file_name TEXT NOT NULL,
+    node_name TEXT NOT NULL, size_bytes BIGINT NOT NULL,
+    PRIMARY KEY (org_id, document_id)
+  )`,
   `CREATE TABLE IF NOT EXISTS park_config (
     org_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, logo_url TEXT,
     welcome_text TEXT NOT NULL, contact_enabled INTEGER NOT NULL DEFAULT 1,
@@ -8,6 +13,7 @@ const TABLES = [
     service_catalog_version TEXT NOT NULL DEFAULT '1',
     assistant_status TEXT NOT NULL DEFAULT 'draft', assistant_config TEXT NOT NULL DEFAULT '{}',
     rate_config TEXT NOT NULL DEFAULT '{}', redaction_config TEXT NOT NULL DEFAULT '{}',
+    consent_text TEXT NOT NULL DEFAULT '',
     updated_at BIGINT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS park_user_roles (
@@ -36,7 +42,8 @@ const TABLES = [
     id TEXT PRIMARY KEY, org_id TEXT NOT NULL, source_channel TEXT NOT NULL,
     started_at BIGINT NOT NULL, last_active_at BIGINT NOT NULL,
     expires_at BIGINT NOT NULL, risk_state TEXT NOT NULL DEFAULT 'normal',
-    message_count INTEGER NOT NULL DEFAULT 0, token_budget_used INTEGER NOT NULL DEFAULT 0
+    message_count INTEGER NOT NULL DEFAULT 0, token_budget_used INTEGER NOT NULL DEFAULT 0,
+    moss_session_id TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS park_sessions_org_started_idx ON park_sessions (org_id, started_at)`,
   `CREATE TABLE IF NOT EXISTS park_inquiries (
@@ -50,7 +57,7 @@ const TABLES = [
   `CREATE INDEX IF NOT EXISTS park_inquiries_org_created_idx ON park_inquiries (org_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS park_leads (
     id TEXT PRIMARY KEY, org_id TEXT NOT NULL, source_session_id TEXT NOT NULL UNIQUE,
-    source_inquiry_id TEXT NOT NULL, score INTEGER NOT NULL,
+    source_inquiry_id TEXT, score INTEGER NOT NULL,
     score_explanation TEXT NOT NULL, tags_json TEXT NOT NULL,
     suggested_action TEXT NOT NULL, contact_status TEXT NOT NULL DEFAULT 'none',
     status TEXT NOT NULL DEFAULT 'proposed', owner_id TEXT,
@@ -100,4 +107,42 @@ const TABLES = [
 
 export async function initializeParkSchema(driver: DbDriver): Promise<void> {
   for (const statement of TABLES) await driver.exec(statement)
+  await migrateLegacyColumns(driver)
+}
+
+/** Additive column migrations for databases created before the column existed. */
+async function addColumnIfMissing(driver: DbDriver, table: string, column: string, definition: string): Promise<void> {
+  const rows = await driver.all<{ name: string }>(`PRAGMA table_info(${table})`)
+  if (rows.some(row => row.name === column)) return
+  await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+}
+
+/**
+ * Legacy databases created park_leads with `source_inquiry_id NOT NULL`; direct
+ * contact submission (no prior inquiry) needs it nullable. SQLite cannot drop
+ * a NOT NULL constraint in place, so the table is rebuilt once, idempotently.
+ */
+async function relaxLeadInquiryNullable(driver: DbDriver): Promise<void> {
+  const rows = await driver.all<{ name: string; notnull: number; type: string }>('PRAGMA table_info(park_leads)')
+  const column = rows.find(row => row.name === 'source_inquiry_id')
+  if (!column || column.notnull === 0) return
+  await driver.exec(`
+    CREATE TABLE park_leads_migrated (
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL, source_session_id TEXT NOT NULL UNIQUE,
+      source_inquiry_id TEXT, score INTEGER NOT NULL,
+      score_explanation TEXT NOT NULL, tags_json TEXT NOT NULL,
+      suggested_action TEXT NOT NULL, contact_status TEXT NOT NULL DEFAULT 'none',
+      status TEXT NOT NULL DEFAULT 'proposed', owner_id TEXT,
+      created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+    )`)
+  await driver.exec('INSERT INTO park_leads_migrated SELECT * FROM park_leads')
+  await driver.exec('DROP TABLE park_leads')
+  await driver.exec('ALTER TABLE park_leads_migrated RENAME TO park_leads')
+  await driver.exec('CREATE INDEX IF NOT EXISTS park_leads_org_status_idx ON park_leads (org_id, status, created_at)')
+}
+
+async function migrateLegacyColumns(driver: DbDriver): Promise<void> {
+  await addColumnIfMissing(driver, 'park_config', 'consent_text', "TEXT NOT NULL DEFAULT ''")
+  await addColumnIfMissing(driver, 'park_sessions', 'moss_session_id', 'TEXT')
+  await relaxLeadInquiryNullable(driver)
 }

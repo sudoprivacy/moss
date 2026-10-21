@@ -914,6 +914,12 @@ export class AuthService {
     if (await this.db.isTokenRevoked(auth.jti)) {
       return null
     }
+    // Runtime session tokens are issued internally for agent tools and may use
+    // synthetic principals (for example anonymous park consultations or wiki
+    // build jobs) that intentionally have no interactive user row.
+    if (auth.sessionId && auth.assistantId !== undefined) {
+      return auth
+    }
     // Role changes invalidate the issued grants immediately. Refresh/login
     // issues a new token with the current role; internal scoped tokens keep
     // their original limits while their owner's role remains unchanged.
@@ -3062,6 +3068,7 @@ export class AuthService {
     role: string
     scopes: string[]
     assistantName: string | null
+    sessionId?: string
     expiresInSec?: number
   }): { token: string; expiresAt: number } {
     return issueWikiSessionToken({
@@ -3073,6 +3080,7 @@ export class AuthService {
       scopes: input.scopes,
       keyId: randomUUID(),
       assistantName: input.assistantName,
+      sessionId: input.sessionId,
       expiresInSec: input.expiresInSec,
     })
   }

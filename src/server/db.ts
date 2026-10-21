@@ -2089,8 +2089,9 @@ export class DirectConnectStore {
   }
 
   async listSessionRecords(filter: SessionListFilter): Promise<SessionRecord[]> {
-    const clauses = ['org_id = ?', "runtime_type != 'external'"]
+    const clauses = ['org_id = ?', filter.externalSource ? "(runtime_type != 'external' OR source = ?)" : "runtime_type != 'external'"]
     const values: Array<string | number> = [filter.orgId]
+    if (filter.externalSource) values.push(filter.externalSource)
     if (filter.userId) {
       clauses.push('user_id = ?')
       values.push(filter.userId)

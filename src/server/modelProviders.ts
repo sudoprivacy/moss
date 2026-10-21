@@ -157,7 +157,7 @@ export async function saveProviderApiKeys(keys: Record<string, string>, orgId?: 
 export function toPublicProviders(providers: ModelProvider[], apiKeys: Record<string, string>, legacyApiKey: string): PublicModelProvider[] {
   return providers.map(provider => ({
     ...provider,
-    apiKeyConfigured: provider.id === 'legacy-default' ? Boolean(legacyApiKey) : Boolean(apiKeys[provider.id]),
+    apiKeyConfigured: Boolean(apiKeys[provider.id] || (provider.id === 'legacy-default' && legacyApiKey)),
   }))
 }
 

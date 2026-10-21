@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { DbDriver, SqlRow } from '../db/driver.js'
 import { initializeParkSchema } from './schema.js'
+import type { WikiSourceSnapshot } from '../wikiSourceSnapshot.js'
 import { isPolicyPublic, type LeadSignal, type PublicPolicy } from './rules.js'
 
 export type ParkRole = 'park_leader' | 'park_recruiter' | 'park_system_operator'
@@ -19,6 +20,7 @@ export interface ParkConfigRow extends SqlRow {
   assistant_config: string
   rate_config: string
   redaction_config: string
+  consent_text: string
   updated_at: number
 }
 
@@ -32,6 +34,7 @@ export interface ParkSessionRow extends SqlRow {
   risk_state: string
   message_count: number
   token_budget_used: number
+  moss_session_id: string | null
 }
 
 export interface ParkLeadRow extends SqlRow {
@@ -75,7 +78,30 @@ export class ParkStore {
     return this.db.get<ParkConfigRow>('SELECT * FROM park_config WHERE org_id = ?', [orgId])
   }
 
-  async putConfig(orgId: string, patch: Partial<Pick<ParkConfigRow, 'display_name' | 'logo_url' | 'welcome_text' | 'contact_enabled' | 'park_profile' | 'service_catalog' | 'service_catalog_version' | 'assistant_status' | 'assistant_config' | 'rate_config' | 'redaction_config'>>): Promise<ParkConfigRow> {
+  async rememberDocument(orgId: string, document: WikiSourceSnapshot): Promise<void> {
+    await this.db.run(`INSERT INTO park_document_history (org_id, document_id, file_name, node_name, size_bytes) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (org_id, document_id) DO NOTHING`, [orgId, document.id, document.fileName, document.nodeName, document.sizeBytes])
+  }
+
+  async documentHistory(orgId: string, id: string): Promise<WikiSourceSnapshot | undefined> {
+    const row = await this.db.get('SELECT * FROM park_document_history WHERE org_id = ? AND document_id = ?', [orgId, id])
+    return row ? { id, fileName: String(row.file_name), nodeName: String(row.node_name), sizeBytes: Number(row.size_bytes) } : undefined
+  }
+
+  async wasPolicyDocumentDeleted(orgId: string, id: string): Promise<boolean> {
+    const row = await this.db.get(`SELECT id FROM operation_audit_events WHERE org_id = ? AND method = 'DELETE' AND response_status = 204 AND path = ? LIMIT 1`,
+      [orgId, `/api/v1/parks/${orgId}/admin/policy/documents/${id}`])
+    return !!row
+  }
+
+  async deletePublicLink(orgId: string, id: string): Promise<'deleted' | 'enabled' | 'missing'> {
+    const count = await this.db.run('DELETE FROM park_public_links WHERE org_id = ? AND id = ? AND enabled = 0', [orgId, id])
+    if (count === 1) return 'deleted'
+    const row = await this.db.get('SELECT id FROM park_public_links WHERE org_id = ? AND id = ?', [orgId, id])
+    return row ? 'enabled' : 'missing'
+  }
+
+  async putConfig(orgId: string, patch: Partial<Pick<ParkConfigRow, 'display_name' | 'logo_url' | 'welcome_text' | 'contact_enabled' | 'park_profile' | 'service_catalog' | 'service_catalog_version' | 'assistant_status' | 'assistant_config' | 'rate_config' | 'redaction_config' | 'consent_text'>>): Promise<ParkConfigRow> {
     const current = await this.config(orgId)
     const value = {
       display_name: patch.display_name ?? current?.display_name ?? '',
@@ -89,19 +115,20 @@ export class ParkStore {
       assistant_config: patch.assistant_config ?? current?.assistant_config ?? '{}',
       rate_config: patch.rate_config ?? current?.rate_config ?? '{}',
       redaction_config: patch.redaction_config ?? current?.redaction_config ?? '{}',
+      consent_text: patch.consent_text ?? current?.consent_text ?? '',
     }
     if (!value.display_name.trim()) throw new Error('Park display name is required')
-    await this.db.run(`INSERT INTO park_config (org_id, display_name, logo_url, welcome_text, contact_enabled, park_profile, service_catalog, service_catalog_version, assistant_status, assistant_config, rate_config, redaction_config, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    await this.db.run(`INSERT INTO park_config (org_id, display_name, logo_url, welcome_text, contact_enabled, park_profile, service_catalog, service_catalog_version, assistant_status, assistant_config, rate_config, redaction_config, consent_text, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (org_id) DO UPDATE SET display_name = excluded.display_name, logo_url = excluded.logo_url,
       welcome_text = excluded.welcome_text, contact_enabled = excluded.contact_enabled,
       park_profile = excluded.park_profile, service_catalog = excluded.service_catalog,
       service_catalog_version = excluded.service_catalog_version, assistant_status = excluded.assistant_status,
       assistant_config = excluded.assistant_config, rate_config = excluded.rate_config,
-      redaction_config = excluded.redaction_config, updated_at = excluded.updated_at`,
+      redaction_config = excluded.redaction_config, consent_text = excluded.consent_text, updated_at = excluded.updated_at`,
     [orgId, value.display_name, value.logo_url, value.welcome_text, value.contact_enabled,
       value.park_profile, value.service_catalog, value.service_catalog_version, value.assistant_status,
-      value.assistant_config, value.rate_config, value.redaction_config, Date.now()])
+      value.assistant_config, value.rate_config, value.redaction_config, value.consent_text, Date.now()])
     return (await this.config(orgId))!
   }
 
@@ -162,8 +189,8 @@ export class ParkStore {
     return (await this.db.run('DELETE FROM park_quick_questions WHERE org_id = ? AND id = ?', [orgId, id])) === 1
   }
 
-  async createSession(orgId: string, sourceChannel: string, ttlMs: number): Promise<ParkSessionRow> {
-    const id = randomUUID()
+  async createSession(orgId: string, sourceChannel: string, ttlMs: number, mossSessionId?: string): Promise<ParkSessionRow> {
+    const id = mossSessionId ?? randomUUID()
     const now = Date.now()
     await this.db.run('INSERT INTO park_sessions (id, org_id, source_channel, started_at, last_active_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)', [id, orgId, sourceChannel, now, now, now + ttlMs])
     return (await this.session(orgId, id))!
@@ -213,7 +240,7 @@ export class ParkStore {
     })
   }
 
-  async saveLead(orgId: string, sessionId: string, inquiryId: string, signal: LeadSignal): Promise<ParkLeadRow> {
+  async saveLead(orgId: string, sessionId: string, inquiryId: string | null, signal: LeadSignal): Promise<ParkLeadRow> {
     const id = randomUUID()
     const now = Date.now()
     await this.db.run(`INSERT INTO park_leads (id, org_id, source_session_id, source_inquiry_id, score, score_explanation, tags_json, suggested_action, created_at, updated_at)
