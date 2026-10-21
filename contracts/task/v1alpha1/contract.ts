@@ -1,5 +1,15 @@
 import type { ResourceRef } from '@sudo/contracts/common/v1/resource-ref'
 
+/** Projection of Nexus NativeOutputVerification; validator conformance is checked against the pinned owner. */
+export interface NativeTaskVerification {
+  kind: 'NativeOutputVerification'
+  policy: 'native-text-completion-v1'
+  profile_digest: string
+  output_digest: string
+  verdict: 'passed' | 'rejected'
+  failures: ('output_text' | 'model_call_count' | 'native_trace' | 'execution_cleanup')[]
+}
+
 /** Product Task ingress implementation; ADR-003/004 remain Proposed. */
 export const TASK_API = 'task.sudo.dev/v1alpha1' as const
 export interface AgentPrincipalRef { trust_domain: string; agent_name: string }
@@ -38,21 +48,7 @@ interface ResolutionBase {
   policy_snapshot_digest: string
   decided_at: string
 }
-export type TaskExecutionResolution = ResolutionBase & (
-  | { status: 'rejected' }
-  | {
-    status: 'accepted'
-    attempt_id: string
-    execution_mode: 'external_hosted'
-    resolved_runtime: 'external_provider'
-    resolution_mode: 'default'
-    governance_org_id: string
-    agent: { principal: AgentPrincipalRef; version: string; source_digest: string; version_evidence: 'source_snapshot_only' | 'provider_revision_fenced'; registry?: { authority: 'nexus_registry'; principal: AgentPrincipalRef; registration_digest: string; signing_key_id: string; evidence: 'signed_registration_only' }; release_digest?: string; execution_revision?: string; resolved_from_channel?: string; channel_revision?: number; source_identity_evidence?: 'unverified'; claimed_app_id?: string; claimed_workspace_id?: string }
-    binding_id: string
-    configuration_revision: number
-    provider_kind: 'dify' | 'custom_http'
-  }
-  | {
+type HostedArtifactResolution = {
     status: 'accepted'
     attempt_id: string
     execution_mode: 'internal_hosted'
@@ -68,6 +64,28 @@ export type TaskExecutionResolution = ResolutionBase & (
     artifact: { spec_digest: string; image_id: string; dependency_lock_digest: string; profile: 'dify-0.6.0-linear-text-v1' | 'langgraph-stdio-v1' }
     limits: { timeout_ms: number; max_model_calls: number }
   }
+type NativeArtifactResolution = Omit<HostedArtifactResolution, 'resolved_runtime' | 'artifact' | 'agent'> & {
+  resolved_runtime: 'native_sudocode'
+  native_profile_digest: string
+  agent: Omit<HostedArtifactResolution['agent'], 'version_evidence'> & { version_evidence: 'immutable_native_artifact' }
+  artifact: Omit<HostedArtifactResolution['artifact'], 'profile'> & { profile: 'sudocode-dify-independent-text-v1alpha1' }
+}
+export type TaskExecutionResolution = ResolutionBase & (
+  | { status: 'rejected' }
+  | {
+    status: 'accepted'
+    attempt_id: string
+    execution_mode: 'external_hosted'
+    resolved_runtime: 'external_provider'
+    resolution_mode: 'default'
+    governance_org_id: string
+    agent: { principal: AgentPrincipalRef; version: string; source_digest: string; version_evidence: 'source_snapshot_only' | 'provider_revision_fenced'; registry?: { authority: 'nexus_registry'; principal: AgentPrincipalRef; registration_digest: string; signing_key_id: string; evidence: 'signed_registration_only' }; release_digest?: string; execution_revision?: string; resolved_from_channel?: string; channel_revision?: number; source_identity_evidence?: 'unverified'; claimed_app_id?: string; claimed_workspace_id?: string }
+    binding_id: string
+    configuration_revision: number
+    provider_kind: 'dify' | 'custom_http'
+  }
+  | HostedArtifactResolution
+  | NativeArtifactResolution
 )
 export interface TaskRecord {
   api_version: typeof TASK_API
@@ -80,6 +98,7 @@ export interface TaskRecord {
 export interface HostedTask {
   api_version: typeof TASK_API
   kind: 'HostedTask'
+  native_verification?: NativeTaskVerification
   id: string
   session_id: string
   catalog_id: string
@@ -144,6 +163,7 @@ export interface HostedEventsPage {
 export interface HostedTaskEvidence {
   api_version: typeof TASK_API
   kind: 'HostedTaskEvidence'
+  native_verification?: NativeTaskVerification
   task_id: string
   task_sequence: number
   captured_at: number

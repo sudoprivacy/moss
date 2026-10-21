@@ -1,3 +1,5 @@
+import { nativeExecutionProfile } from './nativeExecution.js'
+import { contentDigest } from './provider/protocol.js'
 import { assertAssetOpen, assetControlRevision } from './assetControlStore.js'
 import { projectHostedTaskEvidence } from './hostedTaskEvidence.js'
 import type { HostedAgent } from '../../../contracts/task/v1alpha1/contract.js'
@@ -6,7 +8,7 @@ import type { CatalogAgent, CatalogRepository } from '../catalog/catalogReposito
 import type { ExternalActor } from '../externalProviders/store.js'
 import { digest } from '../externalProviders/store.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
-import type { HostedArtifact, Resolution } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { HostedArtifact, NativeConversion, Resolution } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { HostedTaskCoordinator } from './hostedTaskCoordinator.js'
 import type { HostedReleases } from './hostedReleases.js'
 import type { ProductRegistryClient } from './registryClient.js'
@@ -54,7 +56,10 @@ export class HostedTaskService {
     const release = await this.options.registry.resolve(actor.orgId, this.options.registry.principal(actor.orgId, id), { version, channel })
     const artifact = await this.options.releases.artifactFor(actor, item, release.version)
     if (artifact.metadata_digest !== asset.metadata_digest) fail('HOSTED_RELEASE_ARTIFACT_MISMATCH')
-    return { item, asset, release, artifact, controlRevision }
+    const nativeProfile = artifact.kind === 'NativeConversion' ? nativeExecutionProfile(artifact) : undefined
+    if (nativeProfile && (asset.actual_level !== 'L3' || asset.acceptance?.native_binding?.conversion_id !== artifact.id
+      || asset.acceptance.native_binding.profile_digest !== contentDigest(nativeProfile))) fail('AGENT_NATIVE_EVIDENCE_MISMATCH')
+    return { item, asset, release, artifact, nativeProfile, controlRevision }
   }
   async create(actor: ExternalActor, value: unknown) {
     await this.authorize(actor)
@@ -86,7 +91,8 @@ export class HostedTaskService {
       if (!(error instanceof ExternalProviderError)) throw error
       code = error.code
     }
-    const policy = { profile: 'hosted-synthetic-text/v1', organization: actor.orgId, catalog_id: input.agent.catalog_id,
+    const policy = { profile: selected?.nativeProfile ? 'native-independent-text-v1alpha1' : 'hosted-synthetic-text/v1',
+      ...(selected?.nativeProfile ? { native_profile_digest: contentDigest(selected.nativeProfile) } : {}), organization: actor.orgId, catalog_id: input.agent.catalog_id,
       catalog_updated_at: selected?.item.updatedAt ?? null, metadata_digest: selected?.asset.metadata_digest ?? null,
       artifact_id: selected?.artifact.id ?? null, spec_digest: selected?.artifact.spec_digest ?? null, runtime_authority_id: runtimeId ?? null }
     const task = await this.store.create(actor, input, { assetId: selected?.asset.id ?? 'unresolved', ...(code === 'ALLOWED' ? { controlRevision: selected?.controlRevision } : {}), policySnapshot: policy,
@@ -96,15 +102,20 @@ export class HostedTaskService {
           reason_code: code, reason: code === 'ALLOWED' ? '已核验托管制品、版本、授权及合成数据范围。' : '当前权限、版本、托管环境或输入范围不允许执行。',
           policy_version: policy.profile, policy_snapshot_digest: digest(canonicalTaskJson(policy)), decided_at: new Date(task.created_at).toISOString() }
         if (code !== 'ALLOWED' || !selected || !runtimeId) return { ...base, status: 'rejected' }
-        const { release, artifact, asset } = selected
-        return { ...base, status: 'accepted', attempt_id: task.attempt_id!, execution_mode: 'internal_hosted', resolved_runtime: 'hosted_artifact',
-          runtime_authority_id: runtimeId, resolution_mode: 'default', governance_org_id: actor.orgId, catalog_id: input.agent.catalog_id,
+        const { release, artifact, asset, nativeProfile } = selected
+        const common = { ...base, status: 'accepted' as const, attempt_id: task.attempt_id!, execution_mode: 'internal_hosted' as const,
+          runtime_authority_id: runtimeId, resolution_mode: 'default' as const, governance_org_id: actor.orgId, catalog_id: input.agent.catalog_id,
           asset_id: asset.id, artifact_id: artifact.id, metadata_digest: artifact.metadata_digest,
           agent: { principal: release.version.manifest.principal, version: release.version.manifest.version,
-            source_digest: artifact.image.source_digest, version_evidence: 'immutable_hosted_artifact', release_digest: artifact.spec_digest,
+            source_digest: artifact.image.source_digest, version_evidence: 'immutable_hosted_artifact' as const, release_digest: artifact.spec_digest,
             registry: registryEvidence(release.version), ...(release.channel ? { resolved_from_channel: release.channel.name, channel_revision: release.channel.revision } : {}) },
           artifact: { spec_digest: artifact.spec_digest, image_id: artifact.image.image_id, dependency_lock_digest: artifact.image.dependency_lock_digest, profile: artifact.image.profile },
-          limits: { timeout_ms: 270000, max_model_calls: artifact.image.profile === 'dify-0.6.0-linear-text-v1' ? 1 : 8 } }
+          limits: { timeout_ms: 270000, max_model_calls: artifact.image.profile === 'langgraph-stdio-v1' ? 8 : 1 } }
+        if (artifact.kind === 'NativeConversion' && nativeProfile) return { ...common, resolved_runtime: 'native_sudocode' as const, native_profile_digest: contentDigest(nativeProfile),
+          agent: { ...common.agent, version_evidence: 'immutable_native_artifact' as const }, artifact: { ...common.artifact, profile: 'sudocode-dify-independent-text-v1alpha1' as const } }
+        const profile = artifact.image.profile
+        if (artifact.kind === 'NativeConversion' || (profile !== 'dify-0.6.0-linear-text-v1' && profile !== 'langgraph-stdio-v1')) fail('AGENT_NATIVE_EVIDENCE_MISMATCH')
+        return { ...common, resolved_runtime: 'hosted_artifact' as const, artifact: { ...common.artifact, profile } }
       } })
     if (task.status === 'accepted') await this.dispatch(actor, task.id)
     return this.store.get(actor, task.id)
@@ -153,7 +164,7 @@ export class HostedTaskService {
     ])
     return projectHostedTaskEvidence(actor, task, record, calls, trace)
   }
-  private describe(item: CatalogAgent, release: Resolution, artifact: HostedArtifact): HostedAgent {
+  private describe(item: CatalogAgent, release: Resolution, artifact: HostedArtifact | NativeConversion): HostedAgent {
     return { api_version: TASK_API, kind: 'HostedAgent', id: item.id, name: item.name, description: item.description,
       execution_mode: 'internal_hosted', asset_id: artifact.asset_id, version: release.version.manifest.version,
       spec_digest: artifact.spec_digest, source_platform: item.sourceProvider, data_scope: 'synthetic', conversation_mode: 'independent_turns' }

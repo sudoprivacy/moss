@@ -50,6 +50,7 @@ export function projectHostedTaskEvidence(actor: ExternalActor, task: HostedTask
   const status = pending > 0 || !finished ? 'pending' : ledger.size > 0 ? 'verified' : 'not_invoked'
   return parseHostedTaskEvidence({ api_version: TASK_API, kind: 'HostedTaskEvidence', task_id: task.id,
     task_sequence: task.sequence, captured_at: Date.now(), cleanup: task.cleanup,
+    ...(task.native_verification ? { native_verification: task.native_verification } : {}),
     release: accepted ? { version: accepted.agent.version, artifact_id: accepted.artifact_id, spec_digest: accepted.artifact.spec_digest,
       image_id: accepted.artifact.image_id, registration_digest: accepted.agent.registry.registration_digest } : null,
     usage: { authority: 'sudorouter', unit: 'router_quota', status, ...totals, pending_calls: pending, calls: projected }, ...trace })

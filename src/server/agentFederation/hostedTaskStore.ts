@@ -12,6 +12,7 @@ function fail(code: string, status = 409): never { throw new ExternalProviderErr
 const terminal = (status: HostedTask['status']) => ['succeeded', 'failed', 'rejected', 'unknown', 'cancelled'].includes(status)
 export interface HostedTaskFence { attemptId: string; ownerId: string; token: string }
 export interface HostedTaskUpdate {
+  native_verification?: HostedTask['native_verification']
   status?: 'running' | 'succeeded' | 'failed' | 'unknown' | 'cancelled'
   answer?: string
   error_code?: string | null
@@ -88,6 +89,11 @@ export class HostedTaskStore {
       || r.policy_snapshot_digest !== digest(canonicalTaskJson(JSON.parse(String(row!.policy_snapshot))))
       || (r.status === 'accepted' && (r.execution_mode !== 'internal_hosted' || r.governance_org_id !== actor.orgId
         || r.attempt_id !== task.attempt_id || r.asset_id !== task.asset_id || r.catalog_id !== task.catalog_id))) fail('HOSTED_TASK_RECORD_INVALID', 500)
+    if (r.status === 'accepted' && r.execution_mode === 'internal_hosted' && r.resolved_runtime === 'native_sudocode') {
+      if (task.native_verification && (task.native_verification.profile_digest !== r.native_profile_digest
+        || task.native_verification.output_digest !== digest(task.answer))) fail('HOSTED_TASK_RECORD_INVALID', 500)
+      if (task.status === 'succeeded' && task.native_verification?.verdict !== 'passed') fail('HOSTED_TASK_RECORD_INVALID', 500)
+    }
     return record
   }
   async create(actor: ExternalActor, value: unknown, admission: HostedTaskAdmission): Promise<HostedTask> {
@@ -203,12 +209,19 @@ export class HostedTaskStore {
     return this.db.transaction(async () => {
       const task = await this.lock(actor, id)
       if (terminal(task.status) || task.deadline_at <= await this.now() || !await this.owned(task, fence)) return null
-      if (Object.keys(patch).some(key => !['status', 'answer', 'error_code', 'cleanup'].includes(key))
+      if (Object.keys(patch).some(key => !['status', 'answer', 'error_code', 'cleanup', 'native_verification'].includes(key))
         || (patch.status !== undefined && !['running', 'succeeded', 'failed', 'unknown', 'cancelled'].includes(patch.status))
         || (patch.cleanup !== undefined && !['pending', 'confirmed', 'unknown'].includes(patch.cleanup))
         || (patch.error_code != null && !/^[A-Z][A-Z0-9_]{0,127}$/.test(patch.error_code))
         || (patch.answer !== undefined && typeof patch.answer !== 'string')) fail('INVALID_HOSTED_TASK_UPDATE', 500)
+      const { resolution } = await this.record(actor, id)
       Object.assign(task, patch)
+      if (resolution.status === 'accepted' && resolution.execution_mode === 'internal_hosted' && resolution.resolved_runtime === 'native_sudocode') {
+        const verified = task.native_verification
+        if (verified && (verified.profile_digest !== resolution.native_profile_digest || verified.output_digest !== digest(task.answer)
+          || (verified.verdict === 'passed') !== (verified.failures.length === 0))) fail('HOSTED_TASK_VERIFICATION_INVALID')
+        if (task.status === 'succeeded' && verified?.verdict !== 'passed') fail('HOSTED_TASK_COMPLETION_UNCONFIRMED')
+      } else if (task.native_verification) fail('HOSTED_TASK_VERIFICATION_INVALID')
       if (Buffer.byteLength(task.answer) > 128_000) fail('HOSTED_OUTPUT_LIMIT')
       if (task.status === 'succeeded' && (task.cancel_requested_at !== null || task.cleanup !== 'confirmed')) fail('HOSTED_TASK_COMPLETION_UNCONFIRMED')
       if (task.status === 'cancelled' && (task.cancel_requested_at === null || task.cleanup !== 'confirmed')) fail('HOSTED_TASK_CANCELLATION_UNCONFIRMED')

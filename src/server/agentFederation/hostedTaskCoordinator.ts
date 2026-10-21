@@ -1,3 +1,6 @@
+import { nativeExecutionProfile, verifyNativeOutput } from './nativeExecution.js'
+import { contentDigest } from './provider/protocol.js'
+import type { NativeConversion, NativeExecutionProfile, NativeOutputVerification } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { ExternalActor } from '../externalProviders/store.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import type { ProductRegistryClient } from './registryClient.js'
@@ -50,7 +53,9 @@ export class HostedTaskCoordinator {
     }, 5000)
     timer.unref()
     let runtimeAuthorityId: string | undefined
-    let runningArtifact: Awaited<ReturnType<ProductRegistryClient['hostedGet']>> | undefined
+    let runningArtifact: Awaited<ReturnType<ProductRegistryClient['hostedGet']>> | NativeConversion | undefined
+    let nativeProfile: NativeExecutionProfile | undefined
+    const runtimeTrace: { node: string; phase: 'started' | 'completed' }[] = [], callIds: string[] = []
     let grantId: string | undefined, grantRequested = false, entered = false, cleaned = true, answer: string | undefined, errorCode: string | null = null
     const fresh = async () => {
       signal.throwIfAborted()
@@ -68,7 +73,7 @@ export class HostedTaskCoordinator {
         || !['auto', 'private', 'cloud'].includes(record.spec.requested_mode)
         || record.spec.required_capabilities.some(c => !['idempotency', 'version_pin'].includes(c))) fail('HOSTED_TASK_PROFILE_UNSUPPORTED')
       const [artifact, asset, selected] = await Promise.all([
-        this.registry.hostedGet(actor.orgId, resolution.artifact_id), this.registry.inventoryGet(actor.orgId, resolution.asset_id),
+        resolution.resolved_runtime === 'native_sudocode' ? this.registry.nativeGet(actor.orgId, resolution.artifact_id) : this.registry.hostedGet(actor.orgId, resolution.artifact_id), this.registry.inventoryGet(actor.orgId, resolution.asset_id),
         this.registry.resolve(actor.orgId, resolution.agent.principal, { version: resolution.agent.version }),
       ])
       if (!asset.principal || asset.principal.trust_domain !== resolution.agent.principal.trust_domain || asset.principal.agent_name !== resolution.agent.principal.agent_name
@@ -78,6 +83,12 @@ export class HostedTaskCoordinator {
         || artifact.image.source_digest !== resolution.agent.source_digest || artifact.image.dependency_lock_digest !== resolution.artifact.dependency_lock_digest
         || artifact.image.profile !== resolution.artifact.profile || selected.version.manifest.spec_digest !== artifact.spec_digest
         || selected.version.digest !== resolution.agent.registry.registration_digest || selected.version.key_id !== resolution.agent.registry.signing_key_id) fail('HOSTED_TASK_ARTIFACT_MISMATCH')
+      if (artifact.kind === 'NativeConversion') {
+        nativeProfile = nativeExecutionProfile(artifact)
+        if (resolution.resolved_runtime !== 'native_sudocode' || contentDigest(nativeProfile) !== resolution.native_profile_digest
+          || resolution.limits.max_model_calls !== 1 || asset.actual_level !== 'L3' || asset.acceptance?.native_binding?.profile_digest !== resolution.native_profile_digest
+          || asset.acceptance.native_binding.conversion_id !== artifact.id) fail('AGENT_NATIVE_EVIDENCE_MISMATCH')
+      } else if (resolution.resolved_runtime !== 'hosted_artifact') fail('HOSTED_TASK_ARTIFACT_MISMATCH')
       if (await this.runner.identity() !== resolution.runtime_authority_id) fail('HOSTED_RUNTIME_AUTHORITY_MISMATCH')
       if (!this.configured(actor.orgId, artifact.image.model_resource, artifact.image.model_name)) fail('HOSTED_MODEL_NOT_CONFIGURED', 503)
       await fresh()
@@ -98,7 +109,7 @@ export class HostedTaskCoordinator {
       const result = await this.runner.run({ artifact, query: task.query, signal, executionId: fence.attemptId.replaceAll('-', ''), runtimeAuthorityId: resolution.runtime_authority_id,
         timeoutSeconds: Math.max(1, Math.min(240, Math.floor((task.deadline_at - Date.now() - 30000) / 1000))),
         maxModelCalls: resolution.limits.max_model_calls,
-        trace: async frame => { await fresh(); if (!await this.store.trace(actor, id, fence, frame)) fail('EXECUTION_OWNERSHIP_LOST') },
+        trace: async frame => { await fresh(); runtimeTrace.push(frame); if (!await this.store.trace(actor, id, fence, frame)) fail('EXECUTION_OWNERSHIP_LOST') },
         model: async (sequence, input) => {
           await fresh()
           const call = await this.gateway.invoke(actor.orgId, { call_id: `${id}:${sequence}`, grant_id: grantId!, task_id: id,
@@ -119,6 +130,7 @@ export class HostedTaskCoordinator {
       // These authorities are cleaned independently. An unavailable backend cannot skip another revoke.
       try {
         for (const call of await this.gateway.taskCalls(actor.orgId, id)) {
+          callIds.push(call.id)
           const updated = await this.gateway.reconcile(actor.orgId, call.id)
           if (updated.tokenCleanupPending || updated.ledgerStatus !== 'router_verified') {
             cleaned = false; errorCode = 'HOSTED_MODEL_RECONCILIATION_PENDING'
@@ -132,13 +144,14 @@ export class HostedTaskCoordinator {
       } catch { cleaned = false; errorCode = 'HOSTED_IAM_CLEANUP_PENDING' }
       clearInterval(timer)
     }
-    await this.finish(actor, id, fence, { answer, entered, cleaned, errorCode })
+    const verification = nativeProfile && entered ? verifyNativeOutput(nativeProfile, answer ?? '', callIds, runtimeTrace, answer !== undefined && errorCode === null, cleaned) : undefined
+    await this.finish(actor, id, fence, { answer, entered, cleaned, errorCode, verification })
   }
-  private async finish(actor: ExternalActor, id: string, fence: HostedTaskFence, result: { answer?: string; entered: boolean; cleaned: boolean; errorCode: string | null }) {
+  private async finish(actor: ExternalActor, id: string, fence: HostedTaskFence, result: { answer?: string; entered: boolean; cleaned: boolean; errorCode: string | null; verification?: Required<NativeOutputVerification> }) {
     const current = await this.store.get(actor, id), cancelled = current.cancel_requested_at !== null
-    const status = !result.cleaned ? 'unknown' : cancelled ? 'cancelled' : result.answer !== undefined ? 'succeeded' : result.entered ? 'unknown' : 'failed'
+    const status = !result.cleaned ? 'unknown' : cancelled ? 'cancelled' : result.verification?.verdict === 'rejected' && result.answer !== undefined ? 'failed' : result.answer !== undefined ? 'succeeded' : result.entered ? 'unknown' : 'failed'
     await this.store.update(actor, id, fence, { status, cleanup: result.cleaned ? 'confirmed' : 'unknown',
-      ...(result.answer !== undefined ? { answer: result.answer } : {}), error_code: status === 'succeeded' ? null : result.errorCode ?? (cancelled ? 'HOSTED_CANCELLED' : 'HOSTED_EXECUTION_UNCONFIRMED') })
+      ...(result.answer !== undefined ? { answer: result.answer } : {}), ...(result.verification ? { native_verification: result.verification } : {}), error_code: status === 'succeeded' ? null : result.errorCode ?? (result.verification?.verdict === 'rejected' ? 'NATIVE_OUTPUT_VERIFICATION_FAILED' : cancelled ? 'HOSTED_CANCELLED' : 'HOSTED_EXECUTION_UNCONFIRMED') })
   }
   /** Recovery only: it can revoke and close a worker, but never reissue or rerun a Task. */
   async reconcile(actor: ExternalActor, id: string) {
@@ -147,7 +160,7 @@ export class HostedTaskCoordinator {
     if (task.status !== 'unknown') return task
     const resolution = (await this.store.record(actor, id)).resolution
     if (resolution.status !== 'accepted' || resolution.execution_mode !== 'internal_hosted' || !task.attempt_id) fail('HOSTED_TASK_ADMISSION_INVALID')
-    const artifact = await this.registry.hostedGet(actor.orgId, resolution.artifact_id)
+    const artifact = resolution.resolved_runtime === 'native_sudocode' ? await this.registry.nativeGet(actor.orgId, resolution.artifact_id) : await this.registry.hostedGet(actor.orgId, resolution.artifact_id)
     if (artifact.spec_digest !== resolution.artifact.spec_digest || artifact.image.image_id !== resolution.artifact.image_id
       || artifact.asset_id !== resolution.asset_id || artifact.metadata_digest !== resolution.metadata_digest) fail('HOSTED_TASK_ARTIFACT_MISMATCH')
     let confirmed = true

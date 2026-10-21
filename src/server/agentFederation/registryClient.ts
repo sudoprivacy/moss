@@ -554,8 +554,8 @@ export class ProductRegistryClient {
     await this.putSnapshotContent(orgId, { ...ref }, content)
   }
   /** Keep the owner bytes that were evaluated; JS reserialization changes Python floats. */
-  async putHostedSnapshot(orgId: string, ref: Record<string, unknown>, artifact: HostedArtifact): Promise<void> {
-    const validated = this.hostedArtifact(orgId, artifact)
+  async putHostedSnapshot(orgId: string, ref: Record<string, unknown>, artifact: HostedArtifact | NativeConversion): Promise<void> {
+    const validated = artifact.kind === 'NativeConversion' ? this.nativeConversion(orgId, artifact) : this.hostedArtifact(orgId, artifact)
     if (ref.digest !== validated.spec_digest) fail('REGISTRY_RESOURCE_DIGEST_MISMATCH')
     await this.putSnapshotContent(orgId, { ...ref }, base64(validated.spec_payload_base64, 750000))
   }

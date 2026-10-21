@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from '@/components/ui/input'
 import { createInventoryApi, type AssetRecord, type HostedArtifact, type NativeConversion, type NativeImage } from '@/lib/api/agent-inventory'
 import { hostedArtifactAdmitted, inventoryError } from '@/lib/agent-inventory-labels'
+import { AgentHostedReleases } from './agent-hosted-releases'
 import { AgentHostedEvaluations } from './agent-hosted-evaluations'
 import { AgentEvaluationDatasets } from './agent-evaluation-datasets'
 
@@ -76,13 +77,14 @@ export function AgentNativeConversions({ asset, canManage, onClose }: { asset: A
       <section className="space-y-3" aria-label="已登记原生候选"><h3 className="font-medium">已登记原生候选</h3>
         {!records.length && <p className="text-sm text-muted-foreground">{busy ? '正在加载…' : '尚无原生候选。'}</p>}
         {records.map(record => <article className="space-y-2 rounded border p-3" key={record.id}>
-          <p className="font-medium">{record.image.model_name} · 已登记，待原生验收</p>
+          <p className="font-medium">{record.image.model_name} · {asset.actual_level === 'L3' && asset.acceptance?.native_binding?.conversion_id === record.id ? '原生验收有效' : '已登记，待原生验收'}</p>
           <p className="text-xs text-muted-foreground">{new Date(record.created_at).toLocaleString()} · 来源 L2 → 原生候选</p>
           {record.metadata_digest !== asset.metadata_digest && <p className="text-sm text-amber-700">台账已变更，此候选关联旧资料，需要重新登记。</p>}
           <details className="break-all text-xs"><summary>来源与构建信息</summary><p className="mt-2">源制品：{record.source_artifact_id}<br />源规格：{record.source_spec_digest}<br />原生候选：{record.id}<br />原生规格：{record.spec_digest}<br />镜像：{record.image.image_id}<br />SudoCode 提交：{record.image.runtime.commit}<br />执行文件：{record.image.runtime.executable_digest}</p></details>
         </article>)}
         {cursor && <Button variant="outline" disabled={busy} onClick={() => void perform(async () => { const page = await api.nativeList(asset.id, cursor); setRecords(previous => [...previous, ...page.items]); setCursor(page.next_cursor) })}>加载更多原生候选</Button>}
       </section>
+      <AgentHostedReleases asset={asset} artifacts={records} canManage={canManage} />
       <AgentHostedEvaluations asset={asset} artifacts={records} canManage={canManage} />
       <AgentEvaluationDatasets asset={asset} canManage={editable} />
     </DialogContent>

@@ -1,14 +1,15 @@
 import { ApiRequestError } from './api/client'
-import type { AssetRecord, HostedArtifact } from './api/agent-inventory'
+import type { AssetRecord, HostedArtifact, NativeConversion } from './api/agent-inventory'
 
 /** Display the exact reviewed artifact; server admission remains authoritative. */
-export function hostedArtifactAdmitted(asset: AssetRecord, artifact: HostedArtifact): boolean {
+export function hostedArtifactAdmitted(asset: AssetRecord, artifact: HostedArtifact | NativeConversion): boolean {
   const acceptance = asset.acceptance
   return asset.status === 'approved' && ['L2', 'L3'].includes(asset.actual_level)
     && asset.evidence_status === 'current' && !!acceptance && acceptance.expires_at > Date.now()
     && artifact.asset_id === asset.id && artifact.metadata_digest === asset.metadata_digest
     && acceptance.metadata_digest === artifact.metadata_digest && acceptance.spec_digest === artifact.spec_digest
     && acceptance.execution_revision === artifact.image.image_id
+    && (artifact.kind !== 'NativeConversion' || (asset.actual_level === 'L3' && acceptance.native_binding?.conversion_id === artifact.id))
 }
 export const assetStatuses: Record<string, string> = {
   discovered: '待认领',
@@ -62,6 +63,9 @@ export function inventoryError(error: unknown): string {
     NATIVE_RESPONSE_INVALID: '原生转换记录的完整性校验失败，请刷新后联系管理员核对。',
     NATIVE_IDEMPOTENCY_CONFLICT: '此次登记内容与已提交请求不同，请重新选择制品后提交。',
     NATIVE_SCHEMA_REQUIRED: '原生转换记录库尚未初始化，请由部署管理员完成显式初始化。',
+    AGENT_NATIVE_EVIDENCE_MISMATCH: '原生版本、运行约束或构建证据不匹配，请重新核对验收材料。',
+    AGENT_NATIVE_VERIFICATION_REQUIRED: '原生候选缺少有效执行校验，不能通过验收。',
+    NATIVE_OUTPUT_VERIFICATION_FAILED: '原生输出或运行记录不符合约束，请查看运行证据。',
     NATIVE_MODEL_EVIDENCE_REQUIRED: '原生运行缺少可核对的模型调用记录，不能判定评测成功。',
 
     EVALUATION_NOT_SETTLED: '所有用例结束并确认执行与凭证清理后才能固定阈值或生成对比；请先核对未知结果。',

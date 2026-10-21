@@ -1,4 +1,4 @@
-import { AGENT_REGISTRY_API, type AssetRecord, type HostedArtifact, type SignedVersion } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import { AGENT_REGISTRY_API, type AssetRecord, type HostedArtifact, type NativeConversion, type SignedVersion } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { CatalogAgent, CatalogRepository } from '../catalog/catalogRepository.js'
 import type { ExternalActor } from '../externalProviders/store.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
@@ -19,7 +19,8 @@ export class HostedReleases {
   }
   private checkAsset(asset: AssetRecord, admitted: boolean) {
     if (asset.metadata.hosting !== 'internal_hosted' || asset.external_domain || !asset.metadata.owner_user_id) fail('HOSTED_ASSET_NOT_ADMITTED')
-    if (admitted && (asset.status !== 'approved' || !['L2', 'L3'].includes(asset.actual_level))) fail('HOSTED_ASSET_NOT_ADMITTED')
+    if (admitted && (asset.status !== 'approved' || !['L2', 'L3'].includes(asset.actual_level)
+      || (asset.metadata.source_platform === 'native' && asset.actual_level !== 'L3'))) fail('HOSTED_ASSET_NOT_ADMITTED')
   }
   async catalogFor(actor: ExternalActor, assetId: string): Promise<CatalogAgent | null> {
     const item = await this.catalog.getAgent(this.catalogId(actor.orgId, assetId), actor.orgId)
@@ -59,15 +60,15 @@ export class HostedReleases {
     return { catalog: { id: item.id, enabled: item.enabled, status: item.status, visible_to: item.visibleTo },
       registry, linked: !!asset.principal && same(asset.principal, principal) }
   }
-  specRef(orgId: string, catalogId: string, artifact: HostedArtifact) {
+  specRef(orgId: string, catalogId: string, artifact: HostedArtifact | NativeConversion) {
     return { api_version: 'common.sudo.dev/v1' as const, kind: 'ResourceRef' as const, zone_id: this.client().scope(orgId).zoneId,
-      path: `/agent-snapshots/hosted/${catalogId}/${artifact.id}/${artifact.spec_digest.slice(7)}.json`, digest: artifact.spec_digest }
+      path: `/agent-snapshots/${artifact.kind === 'NativeConversion' ? 'native' : 'hosted'}/${catalogId}/${artifact.id}/${artifact.spec_digest.slice(7)}.json`, digest: artifact.spec_digest }
   }
-  async artifactFor(actor: ExternalActor, item: CatalogAgent, signed: SignedVersion): Promise<HostedArtifact> {
+  async artifactFor(actor: ExternalActor, item: CatalogAgent, signed: SignedVersion): Promise<HostedArtifact | NativeConversion> {
     const client = this.client(), ref = signed.manifest.spec_ref
-    const match = typeof ref.path === 'string' ? /^\/agent-snapshots\/hosted\/([\w-]+)\/([\w-]+)\/([a-f0-9]{64})\.json$/.exec(ref.path) : null
-    if (!match || match[1] !== item.id || !same(signed.manifest.principal, client.principal(actor.orgId, item.id))) fail('HOSTED_RELEASE_ARTIFACT_MISMATCH')
-    const artifact = await client.hostedGet(actor.orgId, match[2])
+    const match = typeof ref.path === 'string' ? /^\/agent-snapshots\/(hosted|native)\/([\w-]+)\/([\w-]+)\/([a-f0-9]{64})\.json$/.exec(ref.path) : null
+    if (!match || match[2] !== item.id || !same(signed.manifest.principal, client.principal(actor.orgId, item.id))) fail('HOSTED_RELEASE_ARTIFACT_MISMATCH')
+    const artifact = match[1] === 'native' ? await client.nativeGet(actor.orgId, match[3]) : await client.hostedGet(actor.orgId, match[3])
     if (artifact.asset_id !== item.providerBinding?.assetId || artifact.spec_digest !== signed.manifest.spec_digest
       || !same(ref, this.specRef(actor.orgId, item.id, artifact))) fail('HOSTED_RELEASE_ARTIFACT_MISMATCH')
     // Content service verifies the digest of original bytes, including cross-language numeric serialization.
@@ -80,7 +81,7 @@ export class HostedReleases {
     this.checkAsset(asset, true)
     const item = await this.catalogFor(actor, assetId)
     if (!item || !asset.principal || !same(asset.principal, client.principal(actor.orgId, item.id))) fail('HOSTED_ENROLLMENT_REQUIRED')
-    const artifact = await client.hostedGet(actor.orgId, artifactId)
+    const artifact = asset.metadata.source_platform === 'native' ? await client.nativeGet(actor.orgId, artifactId) : await client.hostedGet(actor.orgId, artifactId)
     if (artifact.asset_id !== assetId || artifact.metadata_digest !== asset.metadata_digest) fail('HOSTED_RELEASE_ARTIFACT_MISMATCH')
     const spec_ref = this.specRef(actor.orgId, item.id, artifact)
     await client.putHostedSnapshot(actor.orgId, spec_ref, artifact)

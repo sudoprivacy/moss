@@ -1,3 +1,5 @@
+import { nativeExecutionProfile } from './nativeExecution.js'
+import { contentDigest } from './provider/protocol.js'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { DatabaseSync } from 'node:sqlite'
@@ -14,24 +16,26 @@ import { TASK_API } from './taskContract.js'
 import { dispatchHostedTask } from './hostedTaskRoutes.js'
 
 const actor = { userId: 'member-a', orgId: 'org-a' }, hash = 'sha256:' + 'a'.repeat(64)
-async function fixture(t: { after: (fn: () => void) => void }) {
+async function fixture(t: { after: (fn: () => void) => void }, native = false) {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close())
   const catalog = createCatalogTestRepository(db), driver = new SqliteDriver(db)
   const store = new HostedTaskStore(driver); await store.ready
-  const state = { starts: 0, active: true, level: 'L2', calls: [] as ExecutionModelCall[] }
+  const state = { starts: 0, active: true, level: native ? 'L3' : 'L2', calls: [] as ExecutionModelCall[] }
   const client = {
     identity: () => hash, scope: () => ({ zoneId: 'zone-a' }),
     principal: (_org: string, id: string) => ({ trust_domain: 'agents.example', agent_name: `external-${id}` }),
     inventoryGet: async () => ({ id: 'asset:a@example.org', status: 'approved', actual_level: state.level, metadata_digest: hash,
-      metadata: { hosting: 'internal_hosted', owner_user_id: actor.userId } }),
-    hostedGet: async () => artifact, readSnapshot: async () => ({}),
+      metadata: { hosting: 'internal_hosted', owner_user_id: actor.userId },
+      ...(native ? { acceptance: { native_binding: { conversion_id: artifact.id, profile_digest: contentDigest(nativeExecutionProfile(artifact as never)) } } } : {}) }),
+    hostedGet: async () => artifact, nativeGet: async () => artifact, readSnapshot: async () => ({}),
     resolve: async () => ({ version: { digest: hash, key_id: hash, manifest: { principal: client.principal(actor.orgId, id),
       version: 'v1', spec_digest: hash, spec_ref: releases.specRef(actor.orgId, id, artifact as never) } } }),
   }
   const releases = new HostedReleases(catalog, { client: client as unknown as ProductRegistryClient, command: async () => ({} as never) })
   const id = releases.catalogId(actor.orgId, 'asset:a@example.org')
-  const artifact = { id: 'artifact-a', asset_id: 'asset:a@example.org', metadata_digest: hash, spec_digest: hash,
-    image: { source_digest: hash, image_id: hash, dependency_lock_digest: hash, profile: 'langgraph-stdio-v1' } }
+  const artifact = { kind: native ? 'NativeConversion' : 'HostedArtifact', id: 'artifact-a', asset_id: 'asset:a@example.org', metadata_digest: hash, spec_digest: hash,
+    image: { source_digest: hash, image_id: hash, dependency_lock_digest: hash, profile: native ? 'sudocode-dify-independent-text-v1alpha1' : 'langgraph-stdio-v1', definition_digest: hash,
+      runtime: { kind: 'sudocode', commit: 'a'.repeat(40), executable_digest: hash, runner_digest: hash, platform: 'linux/amd64' } } }
   await catalog.createAgent({ id, orgId: actor.orgId, name: 'Synthetic hosted', authorId: 'admin-a', enabled: true, status: 'approved',
     visibleTo: { user_ids: [actor.userId] }, providerType: 'moss_runtime', supportedModes: 'cloud',
     providerBinding: { executionMode: 'internal_hosted', assetId: 'asset:a@example.org', registryAuthorityId: hash } })
@@ -155,5 +159,23 @@ void test('organization admin can close a departed owner unknown task with separ
   assert.equal((await inventory.hostedUnknown(admin)).items.length, 0)
   const audit = JSON.parse(String((await f.driver.get("SELECT payload_json FROM session_events WHERE event_type = 'hosted.reconciled'"))!.payload_json))
   assert.equal(audit.user_id, admin.userId); assert.equal(audit.task_user_id, actor.userId); assert.equal(audit.performed_as, 'org_admin')
+  assert.equal(f.state.starts, 1)
+})
+
+
+void test('native catalog selects its immutable snapshot and enforces one-call synthetic independent tasks', async t => {
+  const f = await fixture(t, true), task = await f.service.create(actor, f.request())
+  const record = await f.store.record(actor, task.id), r = record.resolution
+  assert.ok(r.status === 'accepted' && r.execution_mode === 'internal_hosted' && r.resolved_runtime === 'native_sudocode')
+  assert.equal(r.limits.max_model_calls, 1)
+  assert.equal(r.agent.version_evidence, 'immutable_native_artifact')
+  assert.match(r.native_profile_digest, /^sha256:[a-f0-9]{64}$/)
+  assert.equal(f.state.starts, 1)
+  for (const change of [{ required_capabilities: ['tools'] }, { data_classification: 'internal' }]) {
+    assert.equal((await f.service.create(actor, { ...f.request(), ...change })).status, 'rejected')
+  }
+  await assert.rejects(f.service.create(actor, { ...f.request(), input: { instruction: 'test', resource_refs: [], parameters: { memory: true } } }), { code: 'INVALID_TASK_SPEC' })
+  f.state.level = 'L2'
+  assert.equal((await f.service.create(actor, f.request())).status, 'rejected')
   assert.equal(f.state.starts, 1)
 })

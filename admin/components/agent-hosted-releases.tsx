@@ -3,10 +3,10 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
-import { createInventoryApi, type AssetRecord, type HostedArtifact, type HostedReleaseAction, type HostedReleaseView, type InventoryMember } from '@/lib/api/agent-inventory'
+import { createInventoryApi, type AssetRecord, type HostedArtifact, type NativeConversion, type HostedReleaseAction, type HostedReleaseView, type InventoryMember } from '@/lib/api/agent-inventory'
 import { hostedArtifactAdmitted, inventoryError } from '@/lib/agent-inventory-labels'
 
-export function AgentHostedReleases({ asset, artifacts, canManage }: { asset: AssetRecord; artifacts: HostedArtifact[]; canManage: boolean }) {
+export function AgentHostedReleases({ asset, artifacts, canManage }: { asset: AssetRecord; artifacts: (HostedArtifact | NativeConversion)[]; canManage: boolean }) {
   const controller = useRef(new AbortController())
   const api = useMemo(() => createInventoryApi(undefined, () => controller.current.signal), [])
   const [view, setView] = useState<HostedReleaseView | null>(null)
@@ -45,7 +45,7 @@ export function AgentHostedReleases({ asset, artifacts, canManage }: { asset: As
     <p className="text-sm text-muted-foreground">固定制品版本经审核并切换到 stable 频道后，可授权成员从专属智能体使用。登记目录不改变纳管等级。</p>
     {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
     {notice && <p role="status" className="text-sm">{notice}</p>}
-    {!admitted && <p className="text-sm text-amber-700">当前等级 {asset.actual_level}。须完成 L2 运行验收和台账审核后，才能发布及开放使用。</p>}
+    {!admitted && <p className="text-sm text-amber-700">当前等级 {asset.actual_level}。须完成 {asset.metadata.source_platform === 'native' ? 'L3 原生' : 'L2 运行'}验收和台账审核后，才能发布及开放使用。</p>}
     {canManage && (!view?.linked || !view?.registry) && <Button disabled={busy || !view} variant="outline" onClick={() => void perform(() => action({ action: 'enroll' }))}>登记托管目录</Button>}
     {view?.catalog && <>
       <p className="text-sm">目录入口：{view.catalog.enabled ? '已开启' : '已关闭'} · 注册身份：{view.registry?.principal.status === 'active' ? '有效' : '不可用'}</p>

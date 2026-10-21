@@ -39,6 +39,7 @@ const nodeTestFiles = [
   'src/server/agentFederation/assetSuspension.node-test.ts',
   'src/server/agentFederation/nexusModelRelay.node-test.ts',
   'src/server/agentFederation/hostedRunner.node-test.ts',
+  'src/server/agentFederation/nativeExecution.node-test.ts',
   'src/server/agentFederation/evaluationDatasets.node-test.ts',
   'src/server/agentFederation/hostedEvaluationCoordinator.node-test.ts',
   'src/server/agentFederation/hostedConfiguration.node-test.ts',

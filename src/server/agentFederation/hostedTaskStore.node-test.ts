@@ -1,3 +1,5 @@
+import { nativeExecutionProfile } from './nativeExecution.js'
+import { contentDigest } from './provider/protocol.js'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { DatabaseSync } from 'node:sqlite'
@@ -122,19 +124,30 @@ for (const [name, check] of [['atomic admission, idempotency, ownership, version
 }
 
 // Controlled owner/gateway/runner tests; real platform qualification is separate.
-async function coordinatorFixture(t: { after: (fn: () => Promise<void>) => void }) {
+async function coordinatorFixture(t: { after: (fn: () => Promise<void>) => void }, native = false) {
   const { HostedTaskCoordinator } = await import('./hostedTaskCoordinator.js')
   const db = new SqliteDriver(new DatabaseSync(':memory:')); t.after(() => db.close())
-  const store = await fixture(db), input = request(), task = await store.create(actor, input, admission())
+  const store = await fixture(db), input = request()
   const control = { runs: 0, grants: 0, revokes: 0, authorized: 0, reconciled: 0,
-    level: 'L2', source: hash, ledger: 'router_verified', cleanupPending: false, issueLost: false, lostVisible: true, runnerFails: false, workerCleanup: true,
+    level: native ? 'L3' : 'L2', source: hash, nativeBinding: true, badTrace: false, answer: '42', ledger: 'router_verified', cleanupPending: false, issueLost: false, lostVisible: true, runnerFails: false, workerCleanup: true,
     beforeModel: async () => {} }
   const issued: Record<string, any> = {}
-  const artifact = { id: 'artifact-a', asset_id: 'asset-a', metadata_digest: hash, spec_digest: hash,
-    image: { image_id: hash, source_digest: hash, dependency_lock_digest: hash, profile: 'langgraph-stdio-v1', model_resource: 'model-resource', model_name: 'model' } }
+  const artifact = { kind: native ? 'NativeConversion' : 'HostedArtifact', id: 'artifact-a', asset_id: 'asset-a', metadata_digest: hash, spec_digest: hash,
+    image: { image_id: hash, source_digest: hash, dependency_lock_digest: hash, profile: native ? 'sudocode-dify-independent-text-v1alpha1' : 'langgraph-stdio-v1', model_resource: 'model-resource', model_name: 'model',
+      definition_digest: hash, runtime: { kind: 'sudocode', commit: 'a'.repeat(40), executable_digest: hash, runner_digest: hash, platform: 'linux/amd64' } } }
+  const nativeProfile = nativeExecutionProfile(artifact as never), admitted = admission()
+  const task = await store.create(actor, input, native ? { ...admitted, resolution: task => {
+    const r = admitted.resolution(task)
+    assert.ok(r.status === 'accepted' && r.execution_mode === 'internal_hosted')
+    return { ...r, resolved_runtime: 'native_sudocode', native_profile_digest: contentDigest(nativeProfile),
+      agent: { ...r.agent, version_evidence: 'immutable_native_artifact' },
+      artifact: { ...r.artifact, profile: 'sudocode-dify-independent-text-v1alpha1' }, limits: { ...r.limits, max_model_calls: 1 } }
+  } } : admitted)
   const registry = {
+    nativeGet: async () => ({ ...artifact, image: { ...artifact.image, source_digest: control.source } }),
     hostedGet: async () => ({ ...artifact, image: { ...artifact.image, source_digest: control.source } }),
-    inventoryGet: async () => ({ id: 'asset-a', status: 'approved', actual_level: control.level, principal, metadata_digest: hash, metadata: { hosting: 'internal_hosted' } }),
+    inventoryGet: async () => ({ id: 'asset-a', status: 'approved', actual_level: control.level, principal, metadata_digest: hash, metadata: { hosting: 'internal_hosted' },
+      acceptance: control.nativeBinding ? { native_binding: { conversion_id: artifact.id, profile_digest: contentDigest(nativeProfile) } } : null }),
     resolve: async () => ({ version: { digest: hash, key_id: hash, manifest: { spec_digest: hash } } }),
     executionIssue: async (_org: string, command: Record<string, any>) => {
       control.grants++; issued.request = command
@@ -153,7 +166,7 @@ async function coordinatorFixture(t: { after: (fn: () => Promise<void>) => void 
     },
   }
   const gateway = {
-    invoke: async () => { await control.beforeModel(); return { status: 'completed', answer: '42' } },
+    invoke: async () => { await control.beforeModel(); return { status: 'completed', answer: control.answer } },
     taskCalls: async () => control.runs ? [{ id: 'model-call-a' }] : [],
     reconcile: async () => { control.reconciled++; return { tokenCleanupPending: false, ledgerStatus: control.ledger } },
   }
@@ -166,16 +179,16 @@ async function coordinatorFixture(t: { after: (fn: () => Promise<void>) => void 
     assert.equal((await store.record(actor, task.id)).resolution.status, 'accepted')
     assert.equal(control.authorized, 1)
     assert.equal(JSON.stringify(options).includes('synthetic-one-time-key'), false)
-    await options.trace({ node: 'llm', phase: 'started', origin: 'worker_reported' })
+    await options.trace({ node: native && !control.badTrace ? 'native-sudocode' : 'llm', phase: 'started', origin: 'worker_reported' })
     const answer = await options.model(1, { messages: [{ role: 'user', content: '6 * 7' }] })
     if (control.runnerFails) throw new Error('controlled runner uncertainty')
-    await options.trace({ node: 'llm', phase: 'completed', origin: 'worker_reported' })
+    await options.trace({ node: native && !control.badTrace ? 'native-sudocode' : 'llm', phase: 'completed', origin: 'worker_reported' })
     return { answer, modelCalls: 1 }
   } }
   const coordinator = new HostedTaskCoordinator(store, 'owner-a', registry as unknown as import('./registryClient.js').ProductRegistryClient,
     gateway as unknown as import('./executionModelGateway.js').ExecutionModelGateway, runner, () => true)
   t.after(() => coordinator.close())
-  return { store, task, control, coordinator }
+  return { store, task, control, coordinator, db }
 }
 void test('hosted coordinator binds run IAM and durable trace, then requires worker, ledger and credential cleanup', async t => {
   const f = await coordinatorFixture(t)
@@ -281,4 +294,60 @@ void test('hosted admission made before suspension cannot be revived by a later 
   await assert.rejects(store.create(actor, request(), { ...admission(), controlRevision: 0 }), { code: 'AGENT_SUSPENSION_CHANGED' })
   assert.equal(Number((await db.get('SELECT COUNT(*) AS n FROM tasks'))?.n), 0)
   assert.equal((await store.create(actor, request(), { ...admission(), controlRevision: 1 })).status, 'accepted')
+})
+
+
+void test('native Task persists verified output with immutable profile and rejects low grade or stale binding before running', async t => {
+  for (const mode of ['valid', 'L2', 'missing-binding', 'changed-image', 'bad-trace', 'blank', 'unknown', 'cleanup']) {
+    const f = await coordinatorFixture(t, true)
+    if (mode === 'L2') f.control.level = 'L2'
+    if (mode === 'missing-binding') f.control.nativeBinding = false
+    if (mode === 'changed-image') f.control.source = `sha256:${'b'.repeat(64)}`
+    if (mode === 'bad-trace') f.control.badTrace = true
+    if (mode === 'blank') f.control.answer = ' '
+    if (mode === 'unknown') f.control.runnerFails = true
+    if (mode === 'cleanup') f.control.cleanupPending = true
+    await f.coordinator.start(actor, f.task.id, async () => {}); await f.coordinator.wait(f.task.id)
+    const task = await f.store.get(actor, f.task.id)
+    const expected = mode === 'valid' ? 'succeeded' : ['unknown', 'cleanup'].includes(mode) ? 'unknown' : 'failed'
+    assert.equal(task.status, expected, mode)
+    if (mode === 'valid') {
+      assert.equal(task.native_verification?.verdict, 'passed')
+      assert.equal(task.native_verification?.output_digest, digest('42'))
+      const saved = await f.store.record(actor, task.id)
+      assert.equal(saved.resolution.status === 'accepted' && saved.resolution.resolved_runtime, 'native_sudocode')
+    }
+    if (['L2', 'missing-binding', 'changed-image'].includes(mode)) assert.equal(f.control.runs, 0, mode)
+    if (mode === 'unknown') {
+      await f.coordinator.reconcile(actor, task.id)
+      assert.equal((await f.store.get(actor, task.id)).status, 'unknown')
+      await f.coordinator.start(actor, task.id, async () => {})
+      assert.equal(f.control.runs, 1)
+    }
+  }
+})
+
+void test('native storage cannot mark success with missing, mismatched or rejected verification', async t => {
+  const f = await coordinatorFixture(t, true), claim = (await f.store.claim(actor, f.task.id, 'owner-a'))!
+  await assert.rejects(f.store.update(actor, f.task.id, claim.fence, { status: 'succeeded', cleanup: 'confirmed', answer: '42' }), { code: 'HOSTED_TASK_COMPLETION_UNCONFIRMED' })
+  await assert.rejects(f.store.update(actor, f.task.id, claim.fence, { status: 'succeeded', cleanup: 'confirmed', answer: '42', native_verification: {
+    kind: 'NativeOutputVerification', policy: 'native-text-completion-v1', profile_digest: hash, output_digest: digest('42'), verdict: 'passed', failures: [],
+  } }), { code: 'HOSTED_TASK_VERIFICATION_INVALID' })
+  assert.equal((await f.store.get(actor, f.task.id)).status, 'dispatching')
+})
+
+void test('native cancellation and persisted one-call policy cannot grant an extra model call', async t => {
+  const f = await coordinatorFixture(t, true)
+  f.control.beforeModel = () => f.coordinator.cancel(actor, f.task.id).then(() => {})
+  await f.coordinator.start(actor, f.task.id, async () => {}); await f.coordinator.wait(f.task.id)
+  assert.equal((await f.store.get(actor, f.task.id)).status, 'cancelled')
+  assert.equal((await f.store.get(actor, f.task.id)).native_verification?.verdict, 'rejected')
+  const invalid = await coordinatorFixture(t, true), record = await invalid.store.record(actor, invalid.task.id)
+  assert.ok(record.resolution.status === 'accepted' && record.resolution.execution_mode === 'internal_hosted')
+  record.resolution.limits.max_model_calls = 2
+  await invalid.db.run('UPDATE product_task_records SET document = ? WHERE task_id = ?', [JSON.stringify(record), invalid.task.id])
+  await invalid.coordinator.start(actor, invalid.task.id, async () => {}); await invalid.coordinator.wait(invalid.task.id)
+  assert.equal((await invalid.store.get(actor, invalid.task.id)).status, 'failed')
+  assert.equal(invalid.control.runs, 0)
+  assert.equal(invalid.control.grants, 0)
 })
