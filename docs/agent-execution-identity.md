@@ -22,11 +22,11 @@ The user-facing Router `/api/log/query` response has no Token ID/log ID. Discove
 
 ## Current scope boundary
 
-The new direct model gateway **permits isolated evaluation mode only**. Production `run` grants are rejected with `MODEL_CONTENT_PATH_NOT_CONFIGURED` until this path is composed with the existing Nexus content-enforced model route. Existing provider→Nexus content enforcement remains unchanged. Passing IAM checks does not prove that sensitive content may leave the node.
+The direct configuration without a Nexus content path permits isolated evaluation mode only. `run` rejects it with `MODEL_CONTENT_PATH_NOT_CONFIGURED`. The configured content-path implementation now composes actual Nexus prewrite checks, a private one-use model relay and Router; hosted Tasks and opt-in external task context use this path. Passing IAM checks alone does not prove that content may leave the node.
 
-The gateway modules are not yet registered as a user-facing production Moss task/runtime flow. Frontend controls, real Dify/LangGraph hosted execution, tool/IM paths, controlled legacy-key rotation, production cost views and full release acceptance remain work in progress. A synthetically reviewed L0 asset used by the evaluation runner is still L0 after successful execution.
+Moss management, Work shared conversations, real supported Dify/LangGraph hosted tasks, tool MCP and trusted cost views are connected. The four HTTP/OpenAI/MCP/A2A reference Agents also obtain task-scoped run grants automatically; see [task context](agent-task-execution-context.md). Native L3 conversion and full offline/assembled deployment acceptance remain incomplete; real IM is explicitly deferred. The grant does not revoke unrelated original-platform credentials. A synthetically reviewed L0 evaluation asset remains L0 until separate evidence and review admit it.
 
-## Evidence
+## Initial identity increment evidence
 
 - Nexus Registry/IAM/HTTP/inventory regression: 101 tests passed before the additional call-cap change; the call-cap/API/contract subset subsequently passed 22 tests.
 - Moss transport/model gateway/discovery checks: 17 tests passed. Includes concurrent call limits, no redispatch, revocation between token issue and dispatch, ambiguous create recovery, cleanup outage, attribution tampering and rejection of production direct calls.
@@ -34,4 +34,4 @@ The gateway modules are not yet registered as a user-facing production Moss task
 - Real isolated integration used Nexus Registry + AgentRegistrationService + DelegationService + DatabaseAPIKeyAuth, Moss gateway/SQLite, actual new-api `dacf5b036f0f8e366d1fe82ea1296749de07f50c`, and a real `gpt-4o-mini` upstream. The task returned `42`; a corresponding Router ledger row recorded account/Token ID and usage. The raw model key was not stored in the call record. Replay reused the call; revocation denied the next call.
 - The new-api lab was built from the original feature-named worktree, with a minimal ignored dashboard placeholder. This verifies backend behavior, not a dashboard/release build. No tracked new-api source was changed.
 
-Live evidence is kept in a protected local lab directory and is not committed with credentials. PostgreSQL/HA and full hosted-runtime acceptance have not been qualified by these SQLite and model-call checks.
+Live evidence is kept in a protected local lab directory and is not committed with credentials. These initial SQLite/model checks do not prove HA. Later PostgreSQL and actual task checks are recorded separately in the task-context and hosted-task documentation; they also do not establish production HA.

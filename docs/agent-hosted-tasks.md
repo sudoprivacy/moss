@@ -11,7 +11,8 @@ Moss inventory → hosted artifacts → publication and authorization:
 1. Enrol an internal hosted asset in the organization catalog. This creates a
    disabled entry and links its existing Registry identity; it grants no level.
 2. Finish migration evaluation, runtime qualification and asset review. A valid
-   L2/L3 acceptance for the exact artifact spec is required by Nexus.
+   L2 acceptance for the exact artifact spec is required by Nexus. L3 is blocked
+   until native conversion and its runtime evidence are actually implemented.
 3. Publish original artifact spec bytes as an immutable ResourceRef. Review the
    version, explicitly promote a channel, then choose authorized members.
 4. Submit the formal Task through `/api/v1/tasks`. Global org/user/idempotency
@@ -22,8 +23,11 @@ The release UI lives alongside hosted artifacts. Directory records have
 `providerType=moss_runtime` and `executionMode=internal_hosted`. Native template
 listing/loading/download paths exclude these records. The Task user endpoints
 are `/api/v1/hosted-agents`, `/api/v1/hosted-sessions` and the shared Task routes.
-The Work consumer integration and complete real L2 qualification remain pending
-at this checkpoint; source availability is not a release acceptance statement.
+Work uses its shared desktop/WebUI conversation and history for these tasks.
+The supported Dify and official LangGraph synthetic samples have passed source
+versus hosted evaluation, separate L2 review, fixed publication, and actual Work
+tasks with verified Router usage. This is sample-scoped integration evidence,
+not qualification of arbitrary uploaded code or complete 1.1 acceptance.
 
 ## Execution facts and cleanup
 
@@ -68,7 +72,7 @@ The supported profile remains synthetic independent text turns. Attachments,
 workspace inputs, arbitrary tools, automatic retry and cost-budget enforcement
 are refused. User cancellation is a request until cleanup is confirmed.
 
-## Evidence at this checkpoint
+## Initial task increment evidence
 
 - Runtime owner unit/regression suite: 59 passed.
 - Actual remote Docker: supervisor SIGKILL leaves a worker; exact-attempt cleanup
@@ -90,6 +94,8 @@ server type ratchet passed (104 existing baseline diagnostics, no increase).
 Actual management UI enrollment retained L0, a disabled directory, zero member
 grants and no versions; publish/open remained disabled.
 
-Exact source distribution and Work integration must be checked on their final
-source revisions before handing off for review. The actual IM example is
+These counts describe the initial task increment, before the subsequent model,
+tool, suspension and Work integration checks. The current aggregate and exact
+source pins belong in the final handoff; see [task context](agent-task-execution-context.md)
+for the later four-protocol checks. The actual IM example is
 explicitly deferred by the user because no test bot/session is available.

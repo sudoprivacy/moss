@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/sudoprivacy/sudostack",
-  "revision": "df3ac9bd382dbfbeafe7c55d91dbff0a4a3d8cf1",
+  "revision": "b612e24231020e6fb523e7316f2488439a391a3a",
   "files": {
     "contract.gen.ts": {
       "path": "contracts/experimental/agent-registry/contract.gen.ts",
@@ -20,7 +20,7 @@
     "source.lock.json": {
       "path": "contracts/experimental/agent-registry/source.lock.json",
       "output": "owner.source.lock.json",
-      "digest": "sha256:d1fe55fbb9212d214554c387e231addf1f05a628e5388b4ace86f07ab988c8eb"
+      "digest": "sha256:b5d3a617c0e52c8bf506e8247c3a9686f21e9d01990b38c5590e17f45003bb4e"
     }
   }
 }

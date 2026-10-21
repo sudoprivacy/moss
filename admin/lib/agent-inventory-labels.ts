@@ -54,6 +54,7 @@ export function inventoryError(error: unknown): string {
     EVALUATION_SOURCE_EXECUTION_FAILED: '原工程执行未确认完成，请查看已保存的调用记录；已开始的用例不会自动重发。',
     AGENT_MIGRATION_COMPARISON_REQUIRED: 'L2 验收必须关联已保存的迁移对比，独立评测或人工填写的分数不能代替。',
     AGENT_MIGRATION_COMPARISON_MISMATCH: '验收报告与迁移对比、镜像或评测集不一致，或对比未通过。',
+    AGENT_NATIVE_CONVERSION_REQUIRED: 'L3 需要已验证的原生转换产物和六项契约运行证据。当前不支持仅凭验收标记升级为 L3，请保持已验证的纳管等级。',
 
     EVALUATION_NOT_SETTLED: '所有用例结束并确认执行与凭证清理后才能固定阈值或生成对比；请先核对未知结果。',
     EVALUATION_POLICY_REQUIRED: '此托管运行未预先绑定迁移阈值，不能补挂；请按已保存阈值创建新的候选运行。',
