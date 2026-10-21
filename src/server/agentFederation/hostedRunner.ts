@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { isAbsolute } from 'node:path'
-import type { HostedArtifact } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { HostedArtifact, NativeConversion } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import { runEvaluationProcess } from './evaluationProcess.js'
 
@@ -10,8 +10,8 @@ export interface HostedRunnerConfig {
   /** Development/assembled source location; never supplied by a task. */
   modulePath?: string
 }
-export interface HostedRunOptions {
-  artifact: HostedArtifact
+export interface HostedRunOptions<Artifact = HostedArtifact> {
+  artifact: Artifact
   /** Canonical attempt UUID without separators; never a user-selected container name. */
   executionId?: string
   runtimeAuthorityId?: string
@@ -63,7 +63,7 @@ export class HostedRunner {
       || !/^sha256:[a-f0-9]{64}$/.test(frame.runtime_authority_id)) throw new ExternalProviderError(502, 'HOSTED_RUNTIME_UNAVAILABLE')
     return frame.runtime_authority_id
   }
-  async reconcile(artifact: HostedArtifact, executionId: string, runtimeAuthorityId: string): Promise<void> {
+  async reconcile(artifact: HostedArtifact | NativeConversion, executionId: string, runtimeAuthorityId: string): Promise<void> {
     this.executionId(executionId)
     if (!/^sha256:[a-f0-9]{64}$/.test(runtimeAuthorityId)) throw new ExternalProviderError(502, 'HOSTED_RUNTIME_AUTHORITY_MISMATCH')
     const frame = await this.control({ kind: 'reconcile', artifact: artifact.image, execution_id: executionId, runtime_authority_id: runtimeAuthorityId })
@@ -71,7 +71,7 @@ export class HostedRunner {
       || frame.kind !== 'cleanup_confirmed' || frame.execution_id !== executionId || frame.runtime_authority_id !== runtimeAuthorityId)
       throw new ExternalProviderError(502, 'HOSTED_CLEANUP_UNCONFIRMED')
   }
-  run(options: HostedRunOptions) {
+  run(options: HostedRunOptions<HostedArtifact | NativeConversion>) {
     if (options.executionId !== undefined) {
       this.executionId(options.executionId)
       if (!/^sha256:[a-f0-9]{64}$/.test(options.runtimeAuthorityId ?? '')) throw new ExternalProviderError(502, 'HOSTED_RUNTIME_AUTHORITY_MISMATCH')

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { Download, Plus, RefreshCw, X } from 'lucide-react'
 import { AgentDiscoverySection } from './agent-discovery-section'
 import { AgentHostedArtifacts } from './agent-hosted-artifacts'
+import { AgentNativeConversions } from './agent-native-conversions'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -404,6 +405,7 @@ function ScopedInventory({ query }: { query: string }) {
                         {asset.metadata.hosting === 'internal_hosted' && ['dify', 'langgraph'].includes(asset.metadata.source_platform) && (
                           <Button size="sm" variant="ghost" disabled={busy} onClick={() => setHostedAsset(asset)}>托管制品</Button>
                         )}
+                        {asset.metadata.hosting === 'internal_hosted' && asset.metadata.source_platform === 'native' && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setHostedAsset(asset)}>原生转换</Button>}
                         {asset.status !== 'merged' && (
                           <Button size="sm" variant="ghost" disabled={busy} onClick={() => open('edit', asset)}>
                             {asset.status === 'discovered' ? '认领／补充' : '编辑'}
@@ -473,7 +475,9 @@ function ScopedInventory({ query }: { query: string }) {
         </>
       )}
 
-      {hostedAsset && <AgentHostedArtifacts key={hostedAsset.id} asset={hostedAsset} canManage={access?.can_manage === true} onClose={() => setHostedAsset(null)} />}
+      {hostedAsset && (hostedAsset.metadata.source_platform === 'native'
+        ? <AgentNativeConversions key={hostedAsset.id} asset={hostedAsset} canManage={access?.can_manage === true} onClose={() => setHostedAsset(null)} />
+        : <AgentHostedArtifacts key={hostedAsset.id} asset={hostedAsset} canManage={access?.can_manage === true} onClose={() => setHostedAsset(null)} />)}
       <Dialog
         open={!!dialog}
         onOpenChange={(value) => {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { createInventoryApi, type AssetRecord, type HostedArtifact, type EvaluationDataset } from '@/lib/api/agent-inventory'
+import { createInventoryApi, type AssetRecord, type HostedArtifact, type NativeConversion, type EvaluationDataset } from '@/lib/api/agent-inventory'
 import { inventoryError } from '@/lib/agent-inventory-labels'
 import type { HostedEvaluationRun, HostedEvaluationCase, MigrationPolicy, MigrationComparison } from '../../contracts/agent-registry/v1alpha1/contract.gen'
 
@@ -12,7 +12,10 @@ function threshold(value: string): number {
   return Number(whole) * 100 + Number(decimals.padEnd(2, '0'))
 }
 const labels = { queued: '待执行', running: '执行中', finished: '已结束', succeeded: '已返回', failed: '失败', unknown: '结果未知' }
-export function AgentHostedEvaluations({ asset, artifacts, canManage }: { asset: AssetRecord; artifacts: HostedArtifact[]; canManage: boolean }) {
+export function AgentHostedEvaluations({ asset, artifacts, canManage }: { asset: AssetRecord; artifacts: (HostedArtifact | NativeConversion)[]; canManage: boolean }) {
+  const native = asset.metadata.source_platform === 'native'
+  const baselineLabel = native ? 'L2 源制品基线' : '原平台基线'
+  const candidateLabel = native ? '原生候选' : '托管候选'
   const controller = useRef(new AbortController())
   const api = useMemo(() => createInventoryApi(undefined, () => controller.current.signal), [])
   const [runs, setRuns] = useState<HostedEvaluationRun[]>([])
@@ -91,21 +94,21 @@ export function AgentHostedEvaluations({ asset, artifacts, canManage }: { asset:
   const matchingPolicies = policies.filter(row => row.metadata_digest === asset.metadata_digest && row.artifact_id === artifactId && row.dataset_id === datasetId)
   const baseline = runs.find(row => row.id === baselineId)
   return <section className="space-y-3 border-t pt-4">
-    <div className="flex items-center justify-between gap-3"><h3 className="font-medium">迁移基线与托管评测</h3><Button variant="outline" size="sm" disabled={busy} onClick={() => void perform(async () => { await refresh(); if (selected) await show(selected) })}>刷新评测记录</Button></div>
-    <p className="text-sm text-muted-foreground">选择已登记的运行制品与已保存的评测集，执行合成文本样本。结果按全部样本计分。先运行原平台基线，再固定阈值并运行托管候选。迁移对比通过后仍需独立的权限、隔离与准入审核。</p>
+    <div className="flex items-center justify-between gap-3"><h3 className="font-medium">{native ? '原生迁移评测' : '迁移基线与托管评测'}</h3><Button variant="outline" size="sm" disabled={busy} onClick={() => void perform(async () => { await refresh(); if (selected) await show(selected) })}>刷新评测记录</Button></div>
+    <p className="text-sm text-muted-foreground">选择已登记的运行制品与已保存的评测集，执行合成文本样本。结果按全部样本计分。先运行{baselineLabel}，再固定阈值并运行{candidateLabel}。迁移对比通过后仍需独立的权限、隔离与准入审核。</p>
     {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
     {canManage && <div className="grid gap-3 rounded border p-3">
-      <label className="grid gap-1 text-sm">评测阶段<select className="rounded border bg-background p-2" value={role} disabled={busy} onChange={e => { setRole(e.target.value as 'hosted' | 'source_baseline'); setRequestId(crypto.randomUUID()) }}><option value="source_baseline">原平台基线</option><option value="hosted">托管运行</option></select></label>
-      {role === 'source_baseline' && <p className="text-xs text-muted-foreground">{asset.metadata.source_platform === 'langgraph' ? '运行已关联的原始 LangGraph 工程，核对源码、依赖版本和运行器摘要。' : '调用部署管理员已关联的原平台运行器。Dify 在执行前后核对已发布内容，记录观察到的版本；不保证远端版本不可变。'}</p>}
+      <label className="grid gap-1 text-sm">评测阶段<select className="rounded border bg-background p-2" value={role} disabled={busy} onChange={e => { setRole(e.target.value as 'hosted' | 'source_baseline'); setRequestId(crypto.randomUUID()) }}><option value="source_baseline">{baselineLabel}</option><option value="hosted">{native ? '原生运行' : '托管运行'}</option></select></label>
+      {role === 'source_baseline' && <p className="text-xs text-muted-foreground">{native ? '运行转换记录关联的固定 L2 源制品，使用当前原生目标的独立授权；候选阶段运行原生镜像。' : asset.metadata.source_platform === 'langgraph' ? '运行已关联的原始 LangGraph 工程，核对源码、依赖版本和运行器摘要。' : '调用部署管理员已关联的原平台运行器。Dify 在执行前后核对已发布内容，记录观察到的版本；不保证远端版本不可变。'}</p>}
       <label className="grid gap-1 text-sm">运行制品<select className="rounded border bg-background p-2" value={artifactId} disabled={busy} onChange={e => { setArtifactId(e.target.value); setPolicyId(''); setRequestId(crypto.randomUUID()) }}><option value="">请选择制品</option>{available.map(row => <option key={row.id} value={row.id}>{row.image.profile} · {new Date(row.created_at).toLocaleString()} · {row.id.slice(0, 8)}</option>)}</select></label>
       <label className="grid gap-1 text-sm">评测集版本<select className="rounded border bg-background p-2" value={datasetId} disabled={busy} onChange={e => { setDatasetId(e.target.value); setPolicyId(''); setRequestId(crypto.randomUUID()) }}><option value="">请选择评测集</option>{validDatasets.map(row => <option key={row.id} value={row.id}>{row.dataset.name} · {row.dataset.version} · {row.dataset.cases.length} 个样本</option>)}</select></label>
       {datasetCursor && <Button variant="outline" disabled={busy} onClick={() => void perform(async () => { const page = await api.datasetList(asset.id, datasetCursor); setDatasets(previous => [...previous, ...page.items]); setDatasetCursor(page.next_cursor) })}>加载更多可选评测集</Button>}
-      {role === 'hosted' && <label className="grid gap-1 text-sm">迁移验收阈值<select className="rounded border bg-background p-2" value={policyId} disabled={busy} onChange={e => { setPolicyId(e.target.value); setRequestId(crypto.randomUUID()) }}><option value="">独立托管评测（不形成迁移对比）</option>{matchingPolicies.map(p => <option key={p.id} value={p.id}>基线 {p.baseline_passed}/{p.total_cases} · 至少 {percent(p.minimum_pass_bps)} · 最多下降 {percent(p.maximum_drop_bps)} · {p.id.slice(0, 8)}</option>)}</select></label>}
+      {role === 'hosted' && <label className="grid gap-1 text-sm">迁移验收阈值<select className="rounded border bg-background p-2" value={policyId} disabled={busy} onChange={e => { setPolicyId(e.target.value); setRequestId(crypto.randomUUID()) }}><option value="">{native ? '独立原生评测（不形成迁移对比）' : '独立托管评测（不形成迁移对比）'}</option>{matchingPolicies.map(p => <option key={p.id} value={p.id}>基线 {p.baseline_passed}/{p.total_cases} · 至少 {percent(p.minimum_pass_bps)} · 最多下降 {percent(p.maximum_drop_bps)} · {p.id.slice(0, 8)}</option>)}</select></label>}
       {policyCursor && <Button variant="outline" disabled={busy} onClick={() => void perform(async () => { const page = await api.migrationPolicies(asset.id, policyCursor); setPolicies(previous => [...previous, ...page.items]); setPolicyCursor(page.next_cursor) })}>加载更多阈值</Button>}
       <Button disabled={busy || asset.status !== 'approved' || !available.some(row => row.id === artifactId) || !validDatasets.some(row => row.id === datasetId)} onClick={() => void perform(async () => {
         const run = await api.evaluationStart({ request_id: requestId, asset_id: asset.id, metadata_digest: asset.metadata_digest, artifact_id: artifactId, dataset_id: datasetId, timeout_seconds: 120, max_model_calls: 1, role, comparison_policy_id: role === 'hosted' && policyId ? policyId : null })
         putRun(run); setRequestId(crypto.randomUUID()); await show(run.id)
-      })}>{role === 'source_baseline' ? '运行原平台基线' : policyId ? '按固定阈值运行托管候选' : '开始托管评测'}</Button>
+      })}>{role === 'source_baseline' ? `运行${baselineLabel}` : policyId ? `按固定阈值运行${candidateLabel}` : native ? '开始原生评测' : '开始托管评测'}</Button>
     </div>}
     {canManage && baseline && <form className="grid gap-3 rounded border p-3" onSubmit={e => { e.preventDefault(); void perform(async () => {
       const policy = await api.migrationPolicyCreate({ request_id: policyRequestId, baseline_run_id: baseline.id, minimum_pass_bps: threshold(minimum), maximum_drop_bps: threshold(drop) })
@@ -120,9 +123,9 @@ export function AgentHostedEvaluations({ asset, artifacts, canManage }: { asset:
     </form>}
     {!runs.length && <p className="text-sm text-muted-foreground">尚无评测记录。</p>}
     {runs.map(run => <article key={run.id} className="space-y-2 rounded border p-3 text-sm">
-      <p className="font-medium">{run.role === 'source_baseline' ? '原平台基线' : run.comparison_policy_id ? '托管候选' : '独立托管评测'} · {new Date(run.created_at).toLocaleString()} · {run.status === 'running' && run.running_cases === 0 ? '等待继续或核对' : labels[run.status]} · 通过 {run.passed_cases} / {run.total_cases}</p>
+      <p className="font-medium">{run.role === 'source_baseline' ? baselineLabel : run.comparison_policy_id ? candidateLabel : native ? '独立原生评测' : '独立托管评测'} · {new Date(run.created_at).toLocaleString()} · {run.status === 'running' && run.running_cases === 0 ? '等待继续或核对' : labels[run.status]} · 通过 {run.passed_cases} / {run.total_cases}</p>
       <p>待执行 {run.queued_cases} · 执行中 {run.running_cases} · 已结束 {run.finished_cases}</p>
-      <details><summary className="cursor-pointer">运行版本与评测依据</summary><p className="mt-1 break-all text-xs">运行制品：{run.artifact_id}<br />制品摘要：{run.spec_digest}<br />评测集摘要：{run.dataset_digest}<br />评分规则摘要：{run.rubric_digest}{run.source_runtime && <><br />原平台快照：{run.source_runtime.runtime_digest}<br />模型：{run.source_runtime.model_name} · {run.source_runtime.revision_strength === 'observed_source_snapshot' ? '观察到的发布内容' : '固定本地源码摘要'}</>}{run.comparison_policy_id && <><br />固定阈值：{run.comparison_policy_id}</>}</p></details>
+      <details><summary className="cursor-pointer">运行版本与评测依据</summary><p className="mt-1 break-all text-xs">运行制品：{run.artifact_id}<br />制品摘要：{run.spec_digest}<br />评测集摘要：{run.dataset_digest}<br />评分规则摘要：{run.rubric_digest}{run.source_runtime && <><br />{native ? 'L2 源制品规格：' : '原平台快照：'}{run.source_runtime.runtime_digest}<br />模型：{run.source_runtime.model_name} · {run.source_runtime.revision_strength === 'observed_source_snapshot' ? '观察到的发布内容' : native ? '固定 L2 制品规格' : '固定本地源码摘要'}</>}{run.comparison_policy_id && <><br />固定阈值：{run.comparison_policy_id}</>}</p></details>
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" size="sm" disabled={busy} onClick={() => void perform(() => show(run.id))}>查看用例结果</Button>
         {canManage && <>
@@ -133,7 +136,7 @@ export function AgentHostedEvaluations({ asset, artifacts, canManage }: { asset:
           {run.status !== 'finished' && <Button variant="outline" size="sm" disabled={busy} onClick={() => void perform(() => action(run.id, 'stop'))}>停止评测</Button>}
         </>}
       </div>
-      {comparisons[run.id] && <div className="rounded bg-muted p-2"><p className="font-medium">迁移对比：{comparisons[run.id].passed ? '满足本次固定阈值' : '未满足固定阈值'}</p><p>原平台 {comparisons[run.id].baseline_passed}/{comparisons[run.id].total_cases} → 托管 {comparisons[run.id].candidate_passed}/{comparisons[run.id].total_cases}</p><p>至少 {percent(comparisons[run.id].minimum_pass_bps)} · 最多下降 {percent(comparisons[run.id].maximum_drop_bps)}</p><p className="break-all text-xs">对比记录：{comparisons[run.id].id}</p><p className="text-xs">仅证明此合成评测集的结果，不自动授予 L2。</p></div>}
+      {comparisons[run.id] && <div className="rounded bg-muted p-2"><p className="font-medium">迁移对比：{comparisons[run.id].passed ? '满足本次固定阈值' : '未满足固定阈值'}</p><p>{baselineLabel} {comparisons[run.id].baseline_passed}/{comparisons[run.id].total_cases} → {candidateLabel} {comparisons[run.id].candidate_passed}/{comparisons[run.id].total_cases}</p><p>至少 {percent(comparisons[run.id].minimum_pass_bps)} · 最多下降 {percent(comparisons[run.id].maximum_drop_bps)}</p><p className="break-all text-xs">对比记录：{comparisons[run.id].id}</p><p className="text-xs">仅证明此合成评测集的结果，不自动授予 {native ? 'L3' : 'L2'}。</p></div>}
       {selected === run.id && <div className="space-y-2 border-t pt-2">
         <p className="text-xs text-muted-foreground">结果未知的用例不会自动重发。停止评测会阻止新用例并撤销执行授权；容器清理未确认时仍需核对。</p>
         {results.map(row => <div key={row.id} className="rounded bg-muted p-2">

@@ -268,6 +268,35 @@ void test('inventory gateway enforces real AuthCenter identity, owner, departmen
     (await service.members(switched)).items.map((row) => row.id),
     ['charlie'],
   )
+  // Native conversion reads share live inventory authorization; only a manager can
+  // register a target and both source and target must still have active owners.
+  const target = asset('native-a')
+  target.metadata = { ...target.metadata, source_platform: 'native', hosting: 'internal_hosted', requested_level: 'L3' }
+  target.metadata_digest = `sha256:${createHash('sha256').update(stableJson(target.metadata)).digest('hex')}`
+  rows.push(target)
+  let nativeReads = 0, nativeWrites = 0
+  t.mock.method(ProductRegistryClient.prototype, 'nativeList', async (org: string, id: string) => {
+    assert.equal(org, 'org-a'); assert.equal(id, target.id); nativeReads++
+    return { items: [], next_cursor: null }
+  })
+  t.mock.method(ProductRegistryClient.prototype, 'hostedGet', async () => ({ asset_id: 'asset-b' }))
+  t.mock.method(ProductRegistryClient.prototype, 'nativeRegister', async (org: string, input: { initiated_by: string }) => {
+    assert.equal(org, 'org-a'); assert.equal(input.initiated_by, 'admin-a'); nativeWrites++
+    return { id: 'conversion-a' }
+  })
+  const nativeInput = { request_id: randomUUID(), asset_id: target.id, metadata_digest: target.metadata_digest, source_artifact_id: 'source-a', image: {} }
+  assert.equal((await call(alice, '/assets/native-a/native-conversions')).status, 200)
+  assert.equal((await call(bob, '/assets/native-a/native-conversions')).status, 404)
+  assert.equal((await call(switched, '/assets/native-a/native-conversions')).status, 404)
+  assert.equal(nativeReads, 1); assert.equal(nativeWrites, 0)
+  assert.equal((await call(alice, '/native/conversions', 'POST', nativeInput)).status, 403)
+  assert.equal((await call(admin, '/native/conversions', 'POST', { ...nativeInput, initiated_by: 'root' })).status, 400)
+  assert.equal((await call(admin, '/native/conversions', 'POST', { ...nativeInput, metadata_digest: 'stale' })).status, 409)
+  await authDb.updateUser('bob', { status: 'disabled' })
+  assert.equal((await call(admin, '/native/conversions', 'POST', nativeInput)).status, 409)
+  await authDb.updateUser('bob', { status: 'active' })
+  assert.equal((await call(admin, '/native/conversions', 'POST', nativeInput)).status, 200)
+  assert.equal(nativeWrites, 1)
   const previousOrigins = process.env.MOSS_AGENT_DISCOVERY_ORIGINS
   const secrets = new Map<string, string>()
   process.env.MOSS_AGENT_DISCOVERY_ORIGINS = JSON.stringify({ 'org-a': ['http://127.0.0.1:19999'] })
@@ -315,6 +344,8 @@ void test('inventory gateway enforces real AuthCenter identity, owner, departmen
   // A role or status revoked after token issuance is checked again at the gateway.
   await authDb.updateUser('admin-a', { role: 'user' })
   assert.equal((await service.access(admin)).can_manage, false)
+  assert.equal((await call(admin, '/native/conversions', 'POST', nativeInput)).status, 403)
+  assert.equal(nativeWrites, 1)
   await authDb.updateUser('alice', { status: 'disabled' })
   assert.equal((await call(alice, '/assets')).status, 401)
   const beforeInactiveApproval = outbound.filter((item) => item.body).length

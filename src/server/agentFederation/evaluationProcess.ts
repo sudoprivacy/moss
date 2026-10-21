@@ -4,7 +4,7 @@ import type { HostedRunOptions } from './hostedRunner.js'
 const LIMIT = 256000
 function fail(code: string): never { throw new ExternalProviderError(502, code) }
 /** Shared bounded IPC only. Isolation belongs to the configured runtime, not this helper. */
-export async function runEvaluationProcess(options: HostedRunOptions, launch: {
+export async function runEvaluationProcess(options: Omit<HostedRunOptions, 'artifact'>, launch: {
   command: string; args: string[]; env: Record<string, string>; protocol: string; request: object
 }): Promise<{answer: string; modelCalls: number}> {
     if (

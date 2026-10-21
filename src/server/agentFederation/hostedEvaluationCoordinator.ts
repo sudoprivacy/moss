@@ -1,4 +1,4 @@
-import type { SourceEvaluationExecution, EvaluationTrace, HostedArtifact, HostedEvaluationRun, SourceEvaluationRuntime, StartHostedEvaluation } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { NativeConversion, SourceEvaluationExecution, EvaluationTrace, HostedArtifact, HostedEvaluationRun, SourceEvaluationRuntime, StartHostedEvaluation } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { isDeepStrictEqual } from 'node:util'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import type { ProductRegistryClient } from './registryClient.js'
@@ -24,16 +24,28 @@ export class HostedEvaluationCoordinator {
     private readonly sourceFor?: (orgId: string, assetId: string) => SourceBaselineRunner | undefined,
   ) {}
   private key(orgId: string, runId: string) { return JSON.stringify([orgId, runId]) }
+  private artifact(orgId: string, request: Pick<StartHostedEvaluation, 'artifact_id' | 'execution_kind'>) {
+    return request.execution_kind === 'native' ? this.registry.nativeGet(orgId, request.artifact_id) : this.registry.hostedGet(orgId, request.artifact_id)
+  }
+  private nativeSource(conversion: NativeConversion): SourceEvaluationRuntime {
+    return { profile: 'registry-hosted-artifact-v1', runtime_digest: conversion.source_spec_digest,
+      source_digest: conversion.image.source_digest, model_name: conversion.image.model_name, revision_strength: 'local_source_digest' }
+  }
   async start(orgId: string, command: StartHostedEvaluation, admit: EvaluationAdmission) {
     await admit()
-    const artifact = await this.registry.hostedGet(orgId, command.artifact_id)
+    const artifact = await this.artifact(orgId, command)
     if (!this.configured(orgId, artifact.image.model_resource, artifact.image.model_name)) fail('HOSTED_MODEL_NOT_CONFIGURED', 503)
     if (this.closed || this.active.size >= 4) fail('EVALUATION_CAPACITY_LIMIT', 429)
     let request = command
     if (command.role === 'source_baseline') {
-      const source = this.sourceFor?.(orgId, command.asset_id)
-      if (!source) fail('EVALUATION_SOURCE_NOT_CONFIGURED', 503)
-      request = { ...command, source_runtime: await source.snapshot(artifact, AbortSignal.timeout(60000)), comparison_policy_id: null }
+      if (artifact.kind === 'NativeConversion') {
+        request = { ...command, source_runtime: this.nativeSource(artifact), comparison_policy_id: null }
+      } else {
+        if (artifact.kind !== 'HostedArtifact') fail('EVALUATION_SOURCE_CHANGED')
+        const source = this.sourceFor?.(orgId, command.asset_id)
+        if (!source) fail('EVALUATION_SOURCE_NOT_CONFIGURED', 503)
+        request = { ...command, source_runtime: await source.snapshot(artifact, AbortSignal.timeout(60000)), comparison_policy_id: null }
+      }
       await admit()
     }
     const run = await this.registry.evaluationStart(orgId, request)
@@ -48,17 +60,29 @@ export class HostedEvaluationCoordinator {
     const run = await this.registry.evaluationGet(orgId, runId)
     // A source baseline must execute the original platform. Never run an imported
     // image under a source label when its dedicated adapter is unavailable.
-    const source = run.role === 'source_baseline' ? this.sourceFor?.(orgId, run.asset_id) : undefined
-    if (run.role === 'source_baseline' && (!source || !run.source_runtime)) fail('EVALUATION_SOURCE_NOT_CONFIGURED', 503)
+    const originalPlatform = run.role === 'source_baseline' && run.execution_kind !== 'native'
+    const source = originalPlatform ? this.sourceFor?.(orgId, run.asset_id) : undefined
+    if (originalPlatform && (!source || !run.source_runtime)) fail('EVALUATION_SOURCE_NOT_CONFIGURED', 503)
     const [artifact, dataset] = await Promise.all([
-      this.registry.hostedGet(orgId, run.artifact_id), this.registry.evaluationDatasetGet(orgId, run.dataset_id),
+      this.artifact(orgId, run), this.registry.evaluationDatasetGet(orgId, run.dataset_id),
     ])
     if (artifact.asset_id !== run.asset_id || dataset.asset_id !== run.asset_id
       || artifact.metadata_digest !== run.metadata_digest || dataset.metadata_digest !== run.metadata_digest
       || artifact.spec_digest !== run.spec_digest || dataset.dataset_digest !== run.dataset_digest
       || dataset.rubric_digest !== run.rubric_digest || dataset.dataset.cases.length !== run.total_cases) fail('EVALUATION_INPUT_MISMATCH')
     if (!this.configured(orgId, artifact.image.model_resource, artifact.image.model_name)) fail('HOSTED_MODEL_NOT_CONFIGURED', 503)
-    if (source && !isDeepStrictEqual(await source.snapshot(artifact, AbortSignal.timeout(60000)), run.source_runtime)) fail('EVALUATION_SOURCE_CHANGED')
+    let runtimeArtifact = artifact
+    if (artifact.kind === 'NativeConversion' && run.role === 'source_baseline') {
+      if (!isDeepStrictEqual(this.nativeSource(artifact), run.source_runtime)) fail('EVALUATION_SOURCE_CHANGED')
+      const original = await this.registry.hostedGet(orgId, artifact.source_artifact_id)
+      if (original.asset_id !== artifact.source_asset_id || original.metadata_digest !== artifact.source_metadata_digest
+        || original.spec_digest !== artifact.source_spec_digest || original.image.source_digest !== artifact.image.source_digest
+        || original.image.model_resource !== artifact.image.model_resource || original.image.model_name !== artifact.image.model_name) fail('EVALUATION_SOURCE_CHANGED')
+      runtimeArtifact = original
+    }
+    if (source) {
+      if (artifact.kind !== 'HostedArtifact' || !isDeepStrictEqual(await source.snapshot(artifact, AbortSignal.timeout(60000)), run.source_runtime)) fail('EVALUATION_SOURCE_CHANGED')
+    }
     if (run.status === 'finished') return
     if (run.running_cases) fail('EVALUATION_CASE_IN_PROGRESS')
     // Recheck after reads, before claiming the local execution slot.
@@ -90,8 +114,8 @@ export class HostedEvaluationCoordinator {
             || request.permissions[0].operation !== 'model.invoke' || request.permissions[0].resource !== artifact.image.model_resource) fail('EVALUATION_INPUT_MISMATCH')
           signal.throwIfAborted()
           enteredRunner = true; cleanup = false
-          const options: HostedRunOptions = {
-            artifact, query: sample.query, timeoutSeconds: run.timeout_seconds, maxModelCalls: run.max_model_calls, signal,
+          const options: HostedRunOptions<HostedArtifact | NativeConversion> = {
+            artifact: runtimeArtifact, query: sample.query, timeoutSeconds: run.timeout_seconds, maxModelCalls: run.max_model_calls, signal,
             trace: async frame => { if (trace.length >= 256) fail('HOSTED_TRACE_LIMIT'); trace.push(frame) },
             model: async (sequence, input) => {
               await admit()
@@ -103,13 +127,15 @@ export class HostedEvaluationCoordinator {
               return call.answer
             },
           }
-          const output = source && run.source_runtime
-            ? await source.run(options, run.source_runtime, claim.case.id, async () => {
+          let output: { answer: string; modelCalls: number }
+          if (source && run.source_runtime) {
+            if (runtimeArtifact.kind !== 'HostedArtifact') fail('EVALUATION_SOURCE_CHANGED')
+            output = await source.run({ ...options, artifact: runtimeArtifact }, run.source_runtime, claim.case.id, async () => {
                 await admit()
                 await this.registry.executionAuthorize(orgId, { grant_id: issued.grant.id, task_id: claim.case.id, spec_digest: run.spec_digest,
                   permission: { operation: 'model.invoke', resource: artifact.image.model_resource }, token: issued.api_key! })
               }, async execution => { await this.registry.evaluationObserveSource(orgId, runId, { ...command, source_execution: execution }) })
-            : await this.runner.run(options)
+          } else output = await this.runner.run(options)
           answer = output.answer; cleanup = true
         } catch (error) {
           errorCode = error instanceof ExternalProviderError ? error.code : 'HOSTED_RESULT_UNCONFIRMED'

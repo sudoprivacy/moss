@@ -5,6 +5,7 @@ import Ajv2020 from 'ajv/dist/2020.js'
 import type { EvaluationDataset, EvaluationDatasetPage, RegisterEvaluationDataset } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { PlatformDiscoveryPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { DifyTextPlan, HostedArtifact, HostedArtifactPage, RegisterHostedArtifact } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { NativeConversion, NativeConversionPage, RegisterNativeConversion } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { RevokeExecutionRequest, ExecutionRequestRevocation, CheckExecutionGrant, ExecutionAuthorization, ExecutionGrant, ExecutionGrantPage, ExecutionGrantResult, IssueExecutionGrant } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { assertResourceRef } from '@sudo/contracts/common/v1/resource-ref'
 import schema from '../../../contracts/agent-registry/v1alpha1/schema.json' with { type: 'json' }
@@ -39,6 +40,9 @@ ajv.addKeyword({ keyword: 'discriminator', valid: true })
 ajv.addSchema({ $id: RESOURCE_REF_ID, sudoResourceRef: true })
 ajv.addSchema(schema)
 const validators = {
+  NativeConversion: ajv.compile<NativeConversion>({ $ref: `${schema.$id}#/$defs/NativeConversion` }),
+  NativeConversionPage: ajv.compile<NativeConversionPage>({ $ref: `${schema.$id}#/$defs/NativeConversionPage` }),
+  RegisterNativeConversion: ajv.compile<RegisterNativeConversion>({ $ref: `${schema.$id}#/$defs/RegisterNativeConversion` }),
   RevokeExecutionRequest: ajv.compile<RevokeExecutionRequest>({ $ref: `${schema.$id}#/$defs/RevokeExecutionRequest` }),
   ExecutionRequestRevocation: ajv.compile<ExecutionRequestRevocation>({ $ref: `${schema.$id}#/$defs/ExecutionRequestRevocation` }),
   ObserveSourceEvaluation: ajv.compile<ObserveSourceEvaluation>({ $ref: `${schema.$id}#/$defs/ObserveSourceEvaluation` }),
@@ -282,6 +286,56 @@ export class ProductRegistryClient {
   async hostedGet(orgId: string, id: string): Promise<HostedArtifact> {
     return this.hostedArtifact(orgId, await this.call(orgId, `/hosted/artifacts/${encodeURIComponent(id)}`), undefined, id)
   }
+  private nativeConversion(orgId: string, value: unknown, assetId?: string, id?: string): NativeConversion {
+    if (!validators.NativeConversion(value) || value.kind !== 'NativeConversion' || value.zone !== this.scope(orgId).zoneId
+      || (assetId !== undefined && value.asset_id !== assetId) || (id !== undefined && value.id !== id)
+      || value.source_asset_id === value.asset_id || value.source_acceptance.level !== 'L2'
+      || value.source_acceptance.asset_id !== value.source_asset_id
+      || value.source_acceptance.metadata_digest !== value.source_metadata_digest
+      || value.source_acceptance.spec_digest !== value.source_spec_digest
+      || value.source_acceptance.expires_at <= value.created_at
+      || value.definition.plan.source_digest !== value.image.source_digest
+      || value.definition.plan.source_model !== value.image.model_name
+      || (value.definition.plan.max_tokens ?? 128) !== value.image.max_output_tokens
+      || value.definition.tools?.length !== 0 || value.definition.memory !== 'disabled'
+      || value.definition.input !== 'literal_text' || value.definition.max_model_calls !== 1
+      || !value.definition_payload_base64 || !value.source_acceptance_payload_base64) fail('NATIVE_RESPONSE_INVALID')
+    const checkBytes = (encoded: string, digest: string, expected: unknown, limit: number) => {
+      const payload = base64(encoded, limit)
+      if (hash(payload) !== digest) fail('NATIVE_RESPONSE_INVALID')
+      let decoded: unknown
+      try { decoded = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payload)) } catch { fail('NATIVE_RESPONSE_INVALID') }
+      if (!isDeepStrictEqual(decoded, expected)) fail('NATIVE_RESPONSE_INVALID')
+    }
+    checkBytes(value.definition_payload_base64, value.image.definition_digest, value.definition, 500000)
+    checkBytes(value.source_acceptance_payload_base64, value.source_acceptance_digest, value.source_acceptance, 64000)
+    checkBytes(value.spec_payload_base64, value.spec_digest, {
+      kind: 'NativeConversionSpec', asset_id: value.asset_id, metadata_digest: value.metadata_digest,
+      source_asset_id: value.source_asset_id, source_artifact_id: value.source_artifact_id,
+      source_metadata_digest: value.source_metadata_digest, source_spec_digest: value.source_spec_digest,
+      source_acceptance_digest: value.source_acceptance_digest, image: value.image, definition: value.definition,
+    }, 750000)
+    return value
+  }
+  async nativeRegister(orgId: string, command: RegisterNativeConversion): Promise<NativeConversion> {
+    if (!validators.RegisterNativeConversion(command) || Buffer.byteLength(JSON.stringify(command)) > 32000) fail('INVALID_NATIVE_CONVERSION', 400)
+    const value = this.nativeConversion(orgId, await this.call(orgId, '/native/conversions', command), command.asset_id)
+    if (value.metadata_digest !== command.metadata_digest || value.initiated_by !== command.initiated_by
+      || value.source_artifact_id !== command.source_artifact_id
+      || !isDeepStrictEqual(value.image, { api_version: AGENT_REGISTRY_API, kind: 'NativeImage', profile: 'sudocode-dify-independent-text-v1alpha1', protocol: 'agent-hosted-stdio/v1', max_output_tokens: 128, ...command.image })) fail('NATIVE_RESPONSE_INVALID')
+    return value
+  }
+  async nativeGet(orgId: string, id: string): Promise<NativeConversion> {
+    return this.nativeConversion(orgId, await this.call(orgId, `/native/conversions/${encodeURIComponent(id)}`), undefined, id)
+  }
+  async nativeList(orgId: string, assetId: string, after = ''): Promise<NativeConversionPage> {
+    const page = await this.call(orgId, `/native/conversions?${new URLSearchParams({ asset_id: assetId, after })}`)
+    if (!validators.NativeConversionPage(page)) fail('NATIVE_RESPONSE_INVALID')
+    page.items.forEach(row => this.nativeConversion(orgId, row, assetId))
+    if (page.items.some((row, index) => row.id <= (index ? page.items[index - 1].id : after))
+      || (page.next_cursor !== null && page.next_cursor !== page.items.at(-1)?.id)) fail('NATIVE_RESPONSE_INVALID')
+    return page
+  }
   private evaluationDataset(orgId: string, value: unknown, assetId?: string, id?: string): EvaluationDataset {
     if (!validators.EvaluationDataset(value) || value.zone !== this.scope(orgId).zoneId
       || (assetId !== undefined && value.asset_id !== assetId) || (id !== undefined && value.id !== id)
@@ -334,7 +388,8 @@ export class ProductRegistryClient {
     const value = this.evaluationRun(orgId, await this.call(orgId, '/hosted/evaluations', normalized), command.asset_id)
     for (const key of ['metadata_digest', 'artifact_id', 'dataset_id', 'initiated_by', 'timeout_seconds', 'max_model_calls'] as const)
       if (value[key] !== normalized[key]) fail('EVALUATION_RESPONSE_INVALID')
-    if ((value.role ?? 'hosted') !== normalized.role || !isDeepStrictEqual(value.source_runtime ?? null, normalized.source_runtime)
+    if ((value.execution_kind ?? 'hosted') !== (command.execution_kind ?? 'hosted')
+      || (value.role ?? 'hosted') !== normalized.role || !isDeepStrictEqual(value.source_runtime ?? null, normalized.source_runtime)
       || (value.comparison_policy_id ?? null) !== normalized.comparison_policy_id) fail('EVALUATION_RESPONSE_INVALID')
     return value
   }

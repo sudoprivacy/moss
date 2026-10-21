@@ -5,7 +5,7 @@ import { ProductRegistryClient, type RegistryRequest } from './registryClient.js
 import { AgentInventoryService } from './inventoryService.js'
 import { dispatchAgentInventory } from './inventoryRoutes.js'
 import fixture from '../../../contracts/agent-registry/v1alpha1/signed-version.fixture.json' with { type: 'json' }
-import type { HostedArtifact, DifyTextPlan } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { NativeConversion, HostedArtifact, DifyTextPlan } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { AuthContext } from '../auth/token.js'
 
 const hash = (text: string) => `sha256:${createHash('sha256').update(text).digest('hex')}`
@@ -120,4 +120,42 @@ void test('hosted publication stores exact evaluated bytes, reads back and refus
   corruptRead = true
   await assert.rejects(registry.putHostedSnapshot('org-a', ref, artifact), { code: 'REGISTRY_RESOURCE_DIGEST_MISMATCH' })
   assert.equal(writes, 1, 'corrupted immutable content is never overwritten')
+})
+
+function nativeRecord(): NativeConversion {
+  const definition = { profile: 'sudocode-dify-independent-text-v1alpha1' as const, plan, tools: [], memory: 'disabled' as const, input: 'literal_text' as const, max_model_calls: 1 as const }
+  const definitionBytes = JSON.stringify(definition).replace('"temperature":0,', '"temperature":0.0,')
+  const sourceAcceptance = { kind: 'AgentAcceptanceReport' as const, asset_id: 'asset-a', metadata_digest: hash('source-metadata'), spec_digest: hash('source-spec'), level: 'L2' as const, expires_at: 2000, evidence_refs: [hash('source-evidence')], checks: ['entry', 'identity', 'router', 'revoke', 'isolation', 'evaluation', 'trace'] as ('entry' | 'identity' | 'router' | 'revoke' | 'isolation' | 'evaluation' | 'trace')[], before_score: 1, after_score: 1, allowed_drop: 0 }
+  const acceptanceBytes = JSON.stringify(sourceAcceptance).replace('"before_score":1,', '"before_score":1.0,')
+  const image = { ...record().image, kind: 'NativeImage' as const, profile: definition.profile, definition_digest: hash(definitionBytes), runtime: { kind: 'sudocode' as const, commit: 'a'.repeat(40), executable_digest: hash('binary'), runner_digest: hash('runner'), platform: 'linux/amd64' as const } }
+  const lineage = { source_asset_id: 'asset-a', source_artifact_id: 'artifact-a', source_metadata_digest: sourceAcceptance.metadata_digest, source_spec_digest: sourceAcceptance.spec_digest, source_acceptance_digest: hash(acceptanceBytes) }
+  const payload = JSON.stringify({ kind: 'NativeConversionSpec', asset_id: 'native-asset', metadata_digest: hash('native-metadata'), ...lineage, image, definition }).replace('"temperature":0,', '"temperature":0.0,')
+  return { api_version: 'agent-registry.sudo.dev/v1alpha1', kind: 'NativeConversion', id: 'native-conversion', zone: 'zone-a', asset_id: 'native-asset', metadata_digest: hash('native-metadata'), ...lineage, source_acceptance: sourceAcceptance, source_acceptance_issuer: 'reviewer', source_acceptance_payload_base64: Buffer.from(acceptanceBytes).toString('base64'), definition_payload_base64: Buffer.from(definitionBytes).toString('base64'), image, definition, spec_digest: hash(payload), spec_payload_base64: Buffer.from(payload).toString('base64'), created_by: 'gateway', initiated_by: 'admin', created_at: 1000, evidence: 'registered_only' }
+}
+
+void test('native response validates each exact material and source-to-target binding', async () => {
+  let value: unknown = nativeRecord()
+  const registry = client(async () => Response.json(value))
+  assert.deepEqual(await registry.nativeGet('org-a', 'native-conversion'), nativeRecord())
+  for (const patch of [
+    { zone: 'zone-b' }, { source_asset_id: 'native-asset' }, { source_spec_digest: hash('different') },
+    { source_acceptance_payload_base64: Buffer.from('{}').toString('base64') },
+    { definition_payload_base64: Buffer.from('{}').toString('base64') }, { spec_digest: hash('wrong') },
+    { definition: { ...nativeRecord().definition, memory: 'enabled' } },
+    { image: { ...nativeRecord().image, runtime: { ...nativeRecord().image.runtime, commit: 'b'.repeat(40) } } },
+  ]) {
+    value = { ...nativeRecord(), ...patch }
+    await assert.rejects(registry.nativeGet('org-a', 'native-conversion'), { code: 'NATIVE_RESPONSE_INVALID' })
+  }
+})
+
+void test('native list rejects foreign asset, duplicated IDs and broken cursor', async () => {
+  let value: unknown = { kind: 'NativeConversionPage', items: [nativeRecord()], next_cursor: null }
+  const registry = client(async () => Response.json(value))
+  assert.equal((await registry.nativeList('org-a', 'native-asset')).items.length, 1)
+  await assert.rejects(registry.nativeList('org-a', 'other-asset'), { code: 'NATIVE_RESPONSE_INVALID' })
+  for (const page of [
+    { kind: 'NativeConversionPage', items: [nativeRecord(), nativeRecord()], next_cursor: null },
+    { kind: 'NativeConversionPage', items: [nativeRecord()], next_cursor: 'unrelated' },
+  ]) { value = page; await assert.rejects(registry.nativeList('org-a', 'native-asset'), { code: 'NATIVE_RESPONSE_INVALID' }) }
 })

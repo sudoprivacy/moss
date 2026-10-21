@@ -9,7 +9,7 @@ import { ExternalProviderError } from '../externalProviders/policy.js'
 function fixture() {
   const events: string[] = [], completions: any[] = []
   const run: any = { id: 'run-a', asset_id: 'asset-a', artifact_id: 'artifact-a', dataset_id: 'dataset-a', metadata_digest: 'metadata', spec_digest: 'spec', dataset_digest: 'dataset', rubric_digest: 'rubric', initiated_by: 'alice', total_cases: 1, timeout_seconds: 120, max_model_calls: 1, status: 'queued', running_cases: 0 }
-  const artifact: any = { id: 'artifact-a', asset_id: 'asset-a', metadata_digest: 'metadata', spec_digest: 'spec', image: {model_resource: 'model:lab', model_name: 'model'} }
+  const artifact: any = { kind: 'HostedArtifact', id: 'artifact-a', asset_id: 'asset-a', metadata_digest: 'metadata', spec_digest: 'spec', image: {model_resource: 'model:lab', model_name: 'model'} }
   let claimed = false
   const registry: any = {
     hostedGet: async () => artifact,
@@ -186,4 +186,35 @@ void test('migration management rejects injected results and verifies current or
  manage=true;assert.equal((await dispatchAgentInventory(service,actor,'POST',create,input)).status,200)
  assert.equal((await dispatchAgentInventory(service,actor,'POST',new URL(base+'/hosted/evaluations/run-a/compare'),{passed:true})).status,400)
  assert.equal(writes,1)
+})
+
+function nativeFixture(role: 'hosted' | 'source_baseline') {
+  const f = fixture()
+  const source: any = { kind: 'HostedArtifact', id: 'source-artifact', asset_id: 'source-asset', metadata_digest: 'source-metadata', spec_digest: 'source-spec', image: { model_resource: 'model:lab', model_name: 'model', source_digest: 'source', image_id: 'source-image' } }
+  const conversion: any = { kind: 'NativeConversion', id: 'artifact-a', asset_id: 'asset-a', metadata_digest: 'metadata', spec_digest: 'spec', source_asset_id: source.asset_id, source_artifact_id: source.id, source_metadata_digest: source.metadata_digest, source_spec_digest: source.spec_digest, image: { ...source.image, image_id: 'native-image' } }
+  f.run.execution_kind = 'native'; f.run.role = role
+  f.run.source_runtime = role === 'source_baseline' ? { profile: 'registry-hosted-artifact-v1', source_digest: 'source', runtime_digest: 'source-spec', model_name: 'model', revision_strength: 'local_source_digest' } : null
+  f.registry.nativeGet = async () => conversion
+  f.registry.hostedGet = async (_org: string, id: string) => { assert.equal(id, source.id); return source }
+  return { ...f, source, conversion }
+}
+
+for (const role of ['hosted', 'source_baseline'] as const) void test(`native ${role} executes its exact image with target grant and cleanup`, async () => {
+  const f = nativeFixture(role), original = f.runner.run
+  f.runner.run = async (options: any) => {
+    assert.equal(options.artifact.image.image_id, role === 'source_baseline' ? 'source-image' : 'native-image')
+    return original(options)
+  }
+  await f.coordinator.resume('org-a', 'run-a', f.admit); await f.finished()
+  assert.equal(f.completions[0].status, 'succeeded')
+  assert.deepEqual(f.completions[0].model_call_ids, ['call-a'])
+  await f.coordinator.close()
+})
+
+void test('native baseline rejects substituted source before claiming or issuing a grant', async () => {
+  const f = nativeFixture('source_baseline')
+  f.source.spec_digest = 'substituted'
+  await assert.rejects(f.coordinator.resume('org-a', 'run-a', f.admit), { code: 'EVALUATION_SOURCE_CHANGED' })
+  assert.ok(!f.events.includes('claim')); assert.ok(!f.events.includes('grant'))
+  await f.coordinator.close()
 })

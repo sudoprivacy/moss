@@ -22,6 +22,9 @@ import type {
   HostedArtifact,
   HostedArtifactPage,
   HostedImage,
+  NativeConversion,
+  NativeConversionPage,
+  NativeImage,
   DifyTextPlan,
   EvaluationDataset,
   EvaluationDatasetInput,
@@ -32,6 +35,7 @@ import type {
   InventoryPageView as AssetPage,
 } from '../../../src/server/agentFederation/inventoryViews'
 export type { AssetRecord, AssetMetadata, AssetHistory, HostedArtifact, HostedImage, DifyTextPlan, EvaluationDataset, EvaluationDatasetInput }
+export type { NativeConversion, NativeImage }
 type PublicCommand<T> = T extends { kind: 'SaveAsset' | 'SubmitAsset' | 'ReviewAsset' | 'SuspendAsset' | 'MergeAsset' }
   ? Omit<T, 'api_version' | 'initiated_by'>
   : never
@@ -113,6 +117,8 @@ export function createInventoryApi(client: Client = dcClient, signal?: () => Abo
     hostedReleases: (assetId: string, after = '') => call<HostedReleaseView>(`/assets/${encodeURIComponent(assetId)}/releases?after=${encodeURIComponent(after)}`),
     hostedReleaseAction: (assetId: string, body: HostedReleaseAction) => call<unknown>(`/assets/${encodeURIComponent(assetId)}/releases`, body),
     hostedList: (assetId: string, after = '') => call<HostedArtifactPage>(`/assets/${encodeURIComponent(assetId)}/artifacts?after=${encodeURIComponent(after)}`),
+    nativeList: (assetId: string, after = '') => call<NativeConversionPage>(`/assets/${encodeURIComponent(assetId)}/native-conversions?after=${encodeURIComponent(after)}`),
+    nativeRegister: (body: { request_id: string; asset_id: string; metadata_digest: string; source_artifact_id: string; image: NativeImage }) => call<NativeConversion>('/native/conversions', body),
     datasetList: (assetId: string, after = '') => call<EvaluationDatasetPage>(`/assets/${encodeURIComponent(assetId)}/datasets?after=${encodeURIComponent(after)}`),
     evaluationList: (assetId: string, after = '') => call<HostedEvaluationPage>(`/assets/${encodeURIComponent(assetId)}/evaluations?after=${encodeURIComponent(after)}`),
     evaluationGet: (runId: string) => call<HostedEvaluationRun>(`/hosted/evaluations/${encodeURIComponent(runId)}`),

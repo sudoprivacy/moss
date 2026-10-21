@@ -13,7 +13,7 @@ import { parseInventoryCommand, type ProductRegistryClient } from './registryCli
 import type { InventoryAssetView, InventoryPageView } from './inventoryViews.js'
 import { discoveryDigest, discoveryId, discoverySourceKey, type DiscoveryResult } from './inventoryDiscovery.js'
 import type { InventorySources } from './inventorySources.js'
-import type { RegisterHostedArtifact, RegisterEvaluationDataset } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { RegisterNativeConversion, RegisterHostedArtifact, RegisterEvaluationDataset } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 
 export interface InventoryServiceOptions {
   registry?: ProductRegistryClient
@@ -165,6 +165,21 @@ export class AgentInventoryService {
     if (after) identifier(after)
     return this.registry(actor.orgId).hostedList(actor.orgId, id, after)
   }
+  async nativeList(actor: AuthContext, id: string, after = '') {
+    const { canManage } = await this.options.authorize(actor)
+    await this.readable(actor, identifier(id), canManage)
+    if (after) identifier(after)
+    return this.registry(actor.orgId).nativeList(actor.orgId, id, after)
+  }
+  async nativeRegister(actor: AuthContext, body: unknown) {
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    const input = object(body, ['request_id', 'asset_id', 'metadata_digest', 'source_artifact_id', 'image'])
+    const target = await this.evaluationManage(actor, identifier(input.asset_id))
+    if (target.metadata_digest !== input.metadata_digest || target.metadata.source_platform !== 'native') fail('NATIVE_TARGET_NOT_ADMITTED', 409)
+    const registry = this.registry(actor.orgId), source = await registry.hostedGet(actor.orgId, identifier(input.source_artifact_id))
+    await this.evaluationManage(actor, source.asset_id)
+    return registry.nativeRegister(actor.orgId, { ...input, api_version: AGENT_REGISTRY_API, kind: 'RegisterNativeConversion', initiated_by: actor.userId } as RegisterNativeConversion)
+  }
   async hostedReleases(actor: AuthContext, assetId: string, after = '') {
     const { canManage } = await this.options.authorize(actor)
     await this.readable(actor, identifier(assetId), canManage)
@@ -262,13 +277,15 @@ export class AgentInventoryService {
     return this.registry(actor.orgId).evaluationCases(actor.orgId, id, after)
   }
   async evaluationStart(actor: AuthContext, body: unknown) {
-    const input = object(body, ['request_id', 'asset_id', 'metadata_digest', 'artifact_id', 'dataset_id', 'timeout_seconds', 'max_model_calls', 'role', 'comparison_policy_id'])
+    const input = object(body, ['request_id', 'asset_id', 'metadata_digest', 'artifact_id', 'dataset_id', 'timeout_seconds', 'max_model_calls', 'role', 'comparison_policy_id', 'execution_kind'])
     if (input.role !== undefined && !['hosted', 'source_baseline'].includes(String(input.role))) fail('INVALID_EVALUATION_REQUEST')
     const asset = await this.evaluationManage(actor, identifier(input.asset_id))
+    const executionKind = asset.metadata.source_platform === 'native' ? 'native' : 'hosted'
+    if (input.execution_kind !== undefined && input.execution_kind !== executionKind) fail('INVALID_EVALUATION_REQUEST')
     if (asset.metadata_digest !== input.metadata_digest) fail('EVALUATION_ASSET_NOT_ADMITTED', 409)
     if (!this.options.hosted) fail('HOSTED_NOT_CONFIGURED', 503)
     return this.options.hosted.start(actor.orgId, {
-      ...input, api_version: AGENT_REGISTRY_API, kind: 'StartHostedEvaluation', initiated_by: actor.userId,
+      ...input, execution_kind: executionKind, api_version: AGENT_REGISTRY_API, kind: 'StartHostedEvaluation', initiated_by: actor.userId,
     } as StartHostedEvaluation, async () => { await this.evaluationManage(actor, asset.id) })
   }
   async evaluationAction(actor: AuthContext, id: string, action: 'resume' | 'stop' | 'reconcile', body: unknown) {

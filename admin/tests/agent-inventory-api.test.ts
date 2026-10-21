@@ -64,3 +64,19 @@ test('suspension status reads stay read-only and retry contains no identity over
     { method: 'POST', path: '/api/v1/agent-inventory/assets/asset%3Aa/suspension', body: {} },
   ])
 })
+
+test('native candidate reads remain scoped and cancellable across an organization switch', async () => {
+  const controller = new AbortController()
+  const calls: string[] = []
+  let respond!: (value: unknown) => void
+  const request = createInventoryApi({
+    get: async <T>(path: string, init?: Partial<RequestInit>): Promise<T> => {
+      calls.push(path); assert.equal(init?.signal, controller.signal)
+      return new Promise(resolve => { respond = value => resolve(value as T) })
+    },
+    post: async <T>(): Promise<T> => { throw new Error('A read must not register or publish') },
+  }, () => controller.signal).nativeList('asset:a', 'cursor:b')
+  controller.abort(); respond({ success: true, data: { items: [{ id: 'old-zone' }], next_cursor: null } })
+  await assert.rejects(request, error => error instanceof Error && error.name === 'AbortError')
+  assert.deepEqual(calls, ['/api/v1/agent-inventory/assets/asset%3Aa/native-conversions?after=cursor%3Ab'])
+})
