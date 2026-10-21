@@ -1,6 +1,7 @@
 import type { AuthContext } from '../auth/token.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import type { AgentInventoryService } from './inventoryService.js'
+import { DifySourceError } from './registryClient.js'
 
 export const isAgentInventoryRoute = (path: string) => /^\/api\/v1\/agent-inventory(?:\/|$)/.test(path)
 
@@ -15,6 +16,7 @@ export async function dispatchAgentInventory(
     const base = '/api/v1/agent-inventory',
       path = url.pathname
     const match = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)(\/history)?$/.exec(path)
+    const hosted = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/artifacts$/.exec(path)
     let data
     if (method === 'GET' && path === `${base}/access`) data = await service.access(actor)
     else if (method === 'GET' && path === `${base}/members`)
@@ -33,6 +35,9 @@ export async function dispatchAgentInventory(
         ? await service.history(actor, match[1], Number(url.searchParams.get('after') ?? 0))
         : await service.get(actor, match[1])
     else if (method === 'POST' && path === `${base}/commands`) data = await service.command(actor, body)
+    else if (method === 'GET' && hosted) data = await service.hostedList(actor, hosted[1], url.searchParams.get('after') ?? '')
+    else if (method === 'POST' && path === `${base}/hosted/dify/inspect`) data = await service.hostedInspect(actor, body)
+    else if (method === 'POST' && path === `${base}/hosted/artifacts`) data = await service.hostedRegister(actor, body)
     else throw new ExternalProviderError(404, 'NOT_FOUND')
     return { status: 200, body: { success: true, data } }
   } catch (error) {
@@ -40,7 +45,9 @@ export async function dispatchAgentInventory(
       status: error instanceof ExternalProviderError ? error.status : 503,
       body: {
         success: false,
-        error: { code: error instanceof ExternalProviderError ? error.code : 'AGENT_INVENTORY_UNAVAILABLE' },
+        error: { code: error instanceof ExternalProviderError ? error.code : 'AGENT_INVENTORY_UNAVAILABLE',
+          ...(error instanceof DifySourceError ? { message: `DSL_FIELD:${error.fieldPath}` } : {}),
+        },
       },
     }
   }

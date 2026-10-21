@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Download, Plus, RefreshCw, X } from 'lucide-react'
 import { AgentDiscoverySection } from './agent-discovery-section'
+import { AgentHostedArtifacts } from './agent-hosted-artifacts'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -92,6 +93,7 @@ function ScopedInventory({ query }: { query: string }) {
   const [catalog, setCatalog] = useState<ExternalAgentAdmin[]>([])
   const [catalogCursor, setCatalogCursor] = useState<string | null>(null)
   const [details, setDetails] = useState<AssetRecord | null>(null)
+  const [hostedAsset, setHostedAsset] = useState<AssetRecord | null>(null)
   const [history, setHistory] = useState<AssetHistory | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const detailGeneration = useRef(0)
@@ -392,6 +394,9 @@ function ScopedInventory({ query }: { query: string }) {
                         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void inspect(asset)}>
                           详情
                         </Button>
+                        {asset.metadata.hosting === 'internal_hosted' && ['dify', 'langgraph'].includes(asset.metadata.source_platform) && (
+                          <Button size="sm" variant="ghost" disabled={busy} onClick={() => setHostedAsset(asset)}>托管制品</Button>
+                        )}
                         {asset.status !== 'merged' && (
                           <Button size="sm" variant="ghost" disabled={busy} onClick={() => open('edit', asset)}>
                             {asset.status === 'discovered' ? '认领／补充' : '编辑'}
@@ -461,6 +466,7 @@ function ScopedInventory({ query }: { query: string }) {
         </>
       )}
 
+      {hostedAsset && <AgentHostedArtifacts key={hostedAsset.id} asset={hostedAsset} canManage={access?.can_manage === true} onClose={() => setHostedAsset(null)} />}
       <Dialog
         open={!!dialog}
         onOpenChange={(value) => {

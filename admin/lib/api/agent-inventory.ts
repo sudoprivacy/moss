@@ -4,12 +4,16 @@ import type {
   AssetHistory,
   InventoryWire,
   AssetMetadata,
+  HostedArtifact,
+  HostedArtifactPage,
+  HostedImage,
+  DifyTextPlan,
 } from '../../../contracts/agent-registry/v1alpha1/contract.gen'
 import type {
   InventoryAssetView as AssetRecord,
   InventoryPageView as AssetPage,
 } from '../../../src/server/agentFederation/inventoryViews'
-export type { AssetRecord, AssetMetadata, AssetHistory }
+export type { AssetRecord, AssetMetadata, AssetHistory, HostedArtifact, HostedImage, DifyTextPlan }
 type PublicCommand<T> = T extends { kind: 'SaveAsset' | 'SubmitAsset' | 'ReviewAsset' | 'SuspendAsset' | 'MergeAsset' }
   ? Omit<T, 'api_version' | 'initiated_by'>
   : never
@@ -71,6 +75,9 @@ export function createInventoryApi(client: Client = dcClient, signal?: () => Abo
       call<DiscoverySource>('/sources', body),
     disableSource: (id: string) => call<{ disabled: boolean }>(`/sources/${encodeURIComponent(id)}/disable`, {}),
     discover: (source_id: string) => call<DiscoveryResult>('/discover', { source_id }),
+    hostedList: (assetId: string, after = '') => call<HostedArtifactPage>(`/assets/${encodeURIComponent(assetId)}/artifacts?after=${encodeURIComponent(after)}`),
+    hostedInspect: (source: string) => call<DifyTextPlan>('/hosted/dify/inspect', { source }),
+    hostedRegister: (body: { request_id: string; asset_id: string; metadata_digest: string; image: HostedImage; dify_source: string | null }) => call<HostedArtifact>('/hosted/artifacts', body),
   }
 }
 

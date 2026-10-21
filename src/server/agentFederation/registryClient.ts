@@ -2,6 +2,7 @@ import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto
 import { isDeepStrictEqual } from 'node:util'
 import Ajv2020 from 'ajv/dist/2020.js'
 import type { PlatformDiscoveryPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { DifyTextPlan, HostedArtifact, HostedArtifactPage, RegisterHostedArtifact } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { CheckExecutionGrant, ExecutionAuthorization, ExecutionGrant, ExecutionGrantPage, ExecutionGrantResult, IssueExecutionGrant } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { assertResourceRef } from '@sudo/contracts/common/v1/resource-ref'
 import schema from '../../../contracts/agent-registry/v1alpha1/schema.json' with { type: 'json' }
@@ -12,6 +13,9 @@ import { stableJson } from './provider/protocol.js'
 
 export type RegistryCommand = Extract<RegistryWire, { request_id: string }>
 export type InventoryCommand = Extract<InventoryWire, { request_id: string }>
+export class DifySourceError extends ExternalProviderError {
+  constructor(code: string, readonly fieldPath: string) { super(400, code) }
+}
 export interface RegistryScope { trustDomain: string; zoneId: string }
 export type RegistryRequest = (url: string, init: { method: string; redirect: 'error'; cache: 'no-store'; signal: AbortSignal; headers: Record<string, string>; body?: string }) => Promise<Response>
 export interface RegistryClientOptions {
@@ -33,6 +37,10 @@ ajv.addKeyword({ keyword: 'discriminator', valid: true })
 ajv.addSchema({ $id: RESOURCE_REF_ID, sudoResourceRef: true })
 ajv.addSchema(schema)
 const validators = {
+  DifyTextPlan: ajv.compile<DifyTextPlan>({ $ref: `${schema.$id}#/$defs/DifyTextPlan` }),
+  HostedArtifact: ajv.compile<HostedArtifact>({ $ref: `${schema.$id}#/$defs/HostedArtifact` }),
+  HostedArtifactPage: ajv.compile<HostedArtifactPage>({ $ref: `${schema.$id}#/$defs/HostedArtifactPage` }),
+  RegisterHostedArtifact: ajv.compile<RegisterHostedArtifact>({ $ref: `${schema.$id}#/$defs/RegisterHostedArtifact` }),
   IssueExecutionGrant: ajv.compile<IssueExecutionGrant>({ $ref: `${schema.$id}#/$defs/IssueExecutionGrant` }),
   CheckExecutionGrant: ajv.compile<CheckExecutionGrant>({ $ref: `${schema.$id}#/$defs/CheckExecutionGrant` }),
   ExecutionGrant: ajv.compile<ExecutionGrant>({ $ref: `${schema.$id}#/$defs/ExecutionGrant` }),
@@ -121,13 +129,13 @@ export class ProductRegistryClient {
       || [value.manifest.spec_ref, ...value.manifest.source_evidence_refs].some(ref => ref.zone_id !== zone || typeof ref.digest !== 'string')) fail('REGISTRY_REFERENCE_MISMATCH')
     return value
   }
-  private async call(orgId: string, suffix: string, command?: unknown, apiRoot = '/api/v2/product-agents'): Promise<unknown> {
+  private async call(orgId: string, suffix: string, command?: unknown, apiRoot = '/api/v2/product-agents', rawSource?: string): Promise<unknown> {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10_000)
     try {
       const response = await this.request(`${this.endpoint}${apiRoot}${suffix}`, {
-        method: command ? 'POST' : 'GET', redirect: 'error', cache: 'no-store', signal: controller.signal,
-        headers: { Authorization: `Bearer ${this.options.token}`, 'X-Nexus-Zone-ID': this.scope(orgId).zoneId, ...(command ? { 'Content-Type': 'application/json' } : {}) },
-        ...(command ? { body: JSON.stringify(command) } : {}),
+        method: command || rawSource !== undefined ? 'POST' : 'GET', redirect: 'error', cache: 'no-store', signal: controller.signal,
+        headers: { Authorization: `Bearer ${this.options.token}`, 'X-Nexus-Zone-ID': this.scope(orgId).zoneId, ...(rawSource !== undefined ? { 'Content-Type': 'application/yaml' } : command ? { 'Content-Type': 'application/json' } : {}) },
+        ...(rawSource !== undefined ? { body: rawSource } : command ? { body: JSON.stringify(command) } : {}),
       })
       if (!response.body) fail('REGISTRY_RESPONSE_INVALID')
       const reader = response.body.getReader(), chunks: Uint8Array[] = []
@@ -150,7 +158,10 @@ export class ProductRegistryClient {
           fail('REGISTRY_RESOURCE_UNAVAILABLE')
         }
         const code = (body as { detail?: { code?: unknown } })?.detail?.code
-        if (typeof code === 'string' && /^(EXECUTION_|AGENT_|REGISTRY_|CHANNEL_|PRINCIPAL_|IMMUTABLE_|INVALID_|AMBIGUOUS_)[A-Z_]{1,64}$/.test(code)) fail(code, [400, 401, 403, 404, 409].includes(response.status) ? response.status : 503)
+        const fieldPath = (body as { detail?: { path?: unknown } })?.detail?.path
+        if (response.status === 400 && typeof code === 'string' && /^DIFY_[A-Z_]{1,64}$/.test(code)
+          && typeof fieldPath === 'string' && /^[A-Za-z0-9_.$\[\]]{1,160}$/.test(fieldPath)) throw new DifySourceError(code, fieldPath)
+        if (typeof code === 'string' && /^(HOSTED_|DIFY_|EXECUTION_|AGENT_|REGISTRY_|CHANNEL_|PRINCIPAL_|IMMUTABLE_|INVALID_|AMBIGUOUS_)[A-Z_]{1,64}$/.test(code)) fail(code, [400, 401, 403, 404, 409, 413].includes(response.status) ? response.status : 503)
         fail('REGISTRY_REQUEST_FAILED')
       }
       return body
@@ -201,6 +212,43 @@ export class ProductRegistryClient {
       || value.events.some((row, i) => row.revision <= (i ? value.events[i - 1].revision : after))
       || (value.next_revision !== null && (!value.events.length || value.next_revision !== value.events.at(-1)!.revision))) fail('REGISTRY_RESPONSE_INVALID')
     return value
+  }
+  async hostedInspectDify(orgId: string, source: string): Promise<DifyTextPlan> {
+    if (typeof source !== 'string' || !source || Buffer.byteLength(source) > 256000) fail('DIFY_SOURCE_SIZE', 400)
+    const value = await this.call(orgId, '/hosted/dify/inspect', undefined, undefined, source)
+    if (!validators.DifyTextPlan(value) || value.source_digest !== hash(Buffer.from(source))) fail('HOSTED_RESPONSE_INVALID')
+    return value
+  }
+  private hostedArtifact(orgId: string, value: unknown, assetId?: string, id?: string): HostedArtifact {
+    if (!validators.HostedArtifact(value) || value.zone !== this.scope(orgId).zoneId
+      || (assetId !== undefined && value.asset_id !== assetId) || (id !== undefined && value.id !== id)
+      || (value.image.profile === 'dify-0.6.0-linear-text-v1') !== (value.dify_plan !== null)
+      || (value.dify_plan && value.image.max_output_tokens !== (value.dify_plan.max_tokens ?? 128))
+      || (value.dify_plan && (value.dify_plan.source_digest !== value.image.source_digest || value.dify_plan.source_model !== value.image.model_name))) fail('HOSTED_RESPONSE_INVALID')
+    const payload = base64(value.spec_payload_base64, 750000)
+    if (hash(payload) !== value.spec_digest) fail('HOSTED_RESPONSE_INVALID')
+    let decoded: unknown
+    try { decoded = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payload)) } catch { fail('HOSTED_RESPONSE_INVALID') }
+    if (!isDeepStrictEqual(decoded, { image: value.image, dify_plan: value.dify_plan })) fail('HOSTED_RESPONSE_INVALID')
+    return value
+  }
+  async hostedRegister(orgId: string, command: RegisterHostedArtifact): Promise<HostedArtifact> {
+    if (!validators.RegisterHostedArtifact(command) || Buffer.byteLength(JSON.stringify(command)) > 1024000) fail('INVALID_HOSTED_ARTIFACT', 400)
+    const value = this.hostedArtifact(orgId, await this.call(orgId, '/hosted/artifacts', command), command.asset_id)
+    if (value.metadata_digest !== command.metadata_digest || value.initiated_by !== command.initiated_by
+      || !isDeepStrictEqual(value.image, { api_version: AGENT_REGISTRY_API, kind: 'HostedImage', protocol: 'agent-hosted-stdio/v1', max_output_tokens: 128, ...command.image })) fail('HOSTED_RESPONSE_INVALID')
+    return value
+  }
+  async hostedList(orgId: string, assetId: string, after = ''): Promise<HostedArtifactPage> {
+    const value = await this.call(orgId, `/hosted/artifacts?${new URLSearchParams({ asset_id: assetId, after })}`)
+    if (!validators.HostedArtifactPage(value)) fail('HOSTED_RESPONSE_INVALID')
+    for (const row of value.items) this.hostedArtifact(orgId, row, assetId)
+    if (value.items.some((row, i) => row.id <= (i ? value.items[i - 1].id : after))
+      || (value.next_cursor !== null && value.next_cursor !== value.items.at(-1)?.id)) fail('HOSTED_RESPONSE_INVALID')
+    return value
+  }
+  async hostedGet(orgId: string, id: string): Promise<HostedArtifact> {
+    return this.hostedArtifact(orgId, await this.call(orgId, `/hosted/artifacts/${encodeURIComponent(id)}`), undefined, id)
   }
   private executionGrant(value: unknown, orgId: string, id?: string): ExecutionGrant {
     if (!validators.ExecutionGrant(value) || value.zone !== this.scope(orgId).zoneId || (id !== undefined && value.id !== id)

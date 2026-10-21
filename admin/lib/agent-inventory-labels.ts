@@ -30,6 +30,19 @@ export const recommendationLabels: Record<string, string> = {
 export function inventoryError(error: unknown): string {
   const code = error instanceof ApiRequestError ? error.code : error instanceof Error ? error.message : ''
   const labels: Record<string, string> = {
+    HOSTED_SCHEMA_REQUIRED: '托管制品数据库尚未初始化，请由部署管理员执行显式初始化。',
+    HOSTED_ASSET_NOT_ADMITTED: '台账资料或状态已变化，请刷新后核对负责人、模型资源和托管位置。',
+    HOSTED_SOURCE_MISMATCH: '源文件、模型或输出上限与镜像描述不一致，请重新构建并核对制品。',
+    HOSTED_PLATFORM_MISMATCH: '镜像类型与台账的来源平台不一致。',
+    HOSTED_BUILT_IMAGE_REQUIRED: '请提供实际构建完成的镜像摘要。',
+    HOSTED_IDEMPOTENCY_CONFLICT: '本次登记内容已变化，请重新选择文件后提交。',
+    INVALID_HOSTED_ARTIFACT: '镜像描述不符合托管制品格式，请检查导出的 JSON 文件。',
+    DIFY_UNSUPPORTED: 'DSL 含当前不支持的结构、依赖或参数。请核对支持范围，系统未忽略这些内容。',
+    DIFY_YAML_INVALID: 'DSL 不是有效的 UTF-8 YAML 文件。',
+    DIFY_YAML_DUPLICATE_OR_NONSTRING_KEY: 'DSL 含重复字段或非文本字段名，请修正后重新导入。',
+    DIFY_YAML_ALIAS_DENIED: 'DSL 使用了不支持的 YAML 别名，请展开后重新导入。',
+    DIFY_YAML_COMPLEXITY: 'DSL 的嵌套或节点数超出当前导入限制。',
+    DIFY_SOURCE_SIZE: 'DSL 文件为空或超过 256 KB 限制。',
     REGISTRY_NOT_CONFIGURED: '当前服务尚未配置统一台账。',
     REGISTRY_ORGANIZATION_UNCONFIGURED: '当前组织尚未开通统一台账。',
     REGISTRY_INVENTORY_SCHEMA_REQUIRED: '台账数据库尚未初始化，请由运维执行显式初始化。',
@@ -64,5 +77,7 @@ export function inventoryError(error: unknown): string {
     INVALID_DISCOVERY_SOURCE: '发现来源配置不完整，请检查名称、范围和访问令牌。',
     CREDENTIAL_STORAGE_UNAVAILABLE: '密钥库不可用，无法保存发现来源凭据。',
   }
-  return labels[code ?? ''] ?? '台账操作未完成，请刷新核对状态后重试。'
+  const field = error instanceof ApiRequestError && code?.startsWith('DIFY_')
+    ? /^DSL_FIELD:([A-Za-z0-9_.$\[\]]{1,160})$/.exec(error.message)?.[1] : undefined
+  return (labels[code ?? ''] ?? '台账操作未完成，请刷新核对状态后重试。') + (field ? ` 位置：${field}。` : '')
 }

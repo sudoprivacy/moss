@@ -1,16 +1,16 @@
 {
   "repository": "https://github.com/sudoprivacy/sudostack",
-  "revision": "c2cd26029989a6ee4dbd3f748e9c6ba10249c580",
+  "revision": "3f6366b1de7a7c894af918cf8d499fc3277e7fc7",
   "files": {
     "contract.gen.ts": {
       "path": "contracts/experimental/agent-registry/contract.gen.ts",
       "output": "contract.gen.ts",
-      "digest": "sha256:b65f927efa101f1f00f6a111d1c01f157f91385d98c808020428d57065ca687a"
+      "digest": "sha256:d410af8921a7bfcc2d2561fc2b66189d1ea8a8bc03c2fedd89f771252cfc39d0"
     },
     "schema.json": {
       "path": "contracts/experimental/agent-registry/schema.json",
       "output": "schema.json",
-      "digest": "sha256:4284d2791679750845ff34f5ebb6425e1d21a0f307bc27cad40c5431873cd0e2"
+      "digest": "sha256:5f491d0b88866ea7afe7f8ae0b3368ccb0019151131158784702fd66f58ac8e5"
     },
     "signed-version.fixture.json": {
       "path": "contracts/experimental/agent-registry/signed-version.fixture.json",
@@ -20,7 +20,7 @@
     "source.lock.json": {
       "path": "contracts/experimental/agent-registry/source.lock.json",
       "output": "owner.source.lock.json",
-      "digest": "sha256:22169f12628489c99b83365126d045828e23e64fba3b2a66fe3631f4351f26f7"
+      "digest": "sha256:b69e91275b677436ddffcb61b62b85d7fd726ab91fe5cad9c1cf8be611f6f5ef"
     }
   }
 }
