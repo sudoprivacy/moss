@@ -1,4 +1,5 @@
 import { dispatchToolManagement, toolInvocationRoute, toolManagementRoute } from './agentFederation/toolGatewayRoutes.js'
+import { dispatchModelInvocation, modelInvocationRoute, readExecutionJson, MODEL_BODY_LIMIT, TOOL_BODY_LIMIT } from './agentFederation/executionGatewayRoutes.js'
 import { dispatchHostedTask, isHostedTaskRoute } from './agentFederation/hostedTaskRoutes.js'
 import { dispatchExternalProvider, isExternalProviderRoute } from './externalProviders/routes.js'
 import { dispatchAgentInventory, isAgentInventoryRoute } from './agentFederation/inventoryRoutes.js'
@@ -3888,6 +3889,29 @@ export function startServer(
         return
       }
 
+      const modelInvocation = modelInvocationRoute.exec(pathname)
+      if (modelInvocation) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method !== 'POST') throw new HttpError(405, 'METHOD_NOT_ALLOWED')
+        const cancellation = new AbortController()
+        const disconnected = () => { if (!res.writableEnded) cancellation.abort() }
+        res.once('close', disconnected)
+        try {
+          await hostedReady
+          if (url.search) throw new ExternalProviderError(400, 'INVALID_EXECUTION_QUERY')
+          const bearer = getBearerToken(req) ?? ''
+          if (!bearer) throw new ExternalProviderError(401, 'EXECUTION_TOKEN_INVALID')
+          const result = await dispatchModelInvocation(hostedEvaluations?.gateway, modelInvocation[1],
+            await readExecutionJson(req, MODEL_BODY_LIMIT), bearer, cancellation.signal)
+          writeJson(res, 200, { success: true, data: result })
+        } catch (error) {
+          const status = error instanceof ExternalProviderError ? error.status : 503
+          const code = error instanceof ExternalProviderError ? error.code : 'MODEL_GATEWAY_UNAVAILABLE'
+          writeJson(res, status, { success: false, error: { code, message: code } })
+        } finally { res.off('close', disconnected) }
+        return
+      }
+
       const toolInvocation = toolInvocationRoute.exec(pathname)
       if (toolInvocation) {
         res.setHeader('Cache-Control', 'no-store')
@@ -3895,7 +3919,10 @@ export function startServer(
         if (!agentTools) throw new HttpError(503, 'TOOL_GATEWAY_NOT_CONFIGURED')
         // Only Nexus task-bound IAM credentials are accepted here. No browser identity override.
         try {
-          const result = await agentTools.gateway.invoke(toolInvocation[1], await readJsonBody(req), getBearerToken(req) ?? '')
+          if (url.search) throw new ExternalProviderError(400, 'INVALID_EXECUTION_QUERY')
+          const bearer = getBearerToken(req) ?? ''
+          if (!bearer) throw new ExternalProviderError(401, 'EXECUTION_TOKEN_INVALID')
+          const result = await agentTools.gateway.invoke(toolInvocation[1], await readExecutionJson(req, TOOL_BODY_LIMIT), bearer)
           writeJson(res, 200, { success: true, data: result })
         } catch (error) {
           const status = error instanceof ExternalProviderError ? error.status : 503
