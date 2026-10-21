@@ -34,7 +34,7 @@ function fixture() {
   return {registry,run,gateway,runner,events,completions,coordinator,admit,finished}
 }
 
-test('durable claim precedes IAM/model, completion contains trace and never contains key', async () => {
+void test('durable claim precedes IAM/model, completion contains trace and never contains key', async () => {
   const f = fixture()
   await f.coordinator.resume('org-a','run-a',f.admit)
   await f.finished()
@@ -50,7 +50,7 @@ test('durable claim precedes IAM/model, completion contains trace and never cont
   await f.coordinator.close()
 })
 
-test('lost one-time IAM key does not execute a second worker', async () => {
+void test('lost one-time IAM key does not execute a second worker', async () => {
   const f=fixture(), original=f.registry.evaluationGrant
   f.registry.evaluationGrant=async()=>({...await original(),api_key:null})
   await f.coordinator.resume('org-a','run-a',f.admit); await f.finished()
@@ -61,7 +61,7 @@ test('lost one-time IAM key does not execute a second worker', async () => {
   await f.coordinator.close()
 })
 
-test('model cleanup outage still revokes IAM and cannot report success', async () => {
+void test('model cleanup outage still revokes IAM and cannot report success', async () => {
   const f=fixture()
   f.gateway.reconcile=async()=>{throw new Error('private provider details')}
   await f.coordinator.resume('org-a','run-a',f.admit);await f.finished()
@@ -73,7 +73,7 @@ test('model cleanup outage still revokes IAM and cannot report success', async (
   await f.coordinator.close()
 })
 
-test('worker termination remains unknown and blocks next local case', async () => {
+void test('worker termination remains unknown and blocks next local case', async () => {
   const f=fixture()
   f.runner.run=async()=>{throw new Error('worker died')}
   await f.coordinator.resume('org-a','run-a',f.admit);await f.finished()
@@ -83,7 +83,7 @@ test('worker termination remains unknown and blocks next local case', async () =
   await f.coordinator.close()
 })
 
-test('restart cannot execute a durably running case; malformed artifact cannot dispatch', async () => {
+void test('restart cannot execute a durably running case; malformed artifact cannot dispatch', async () => {
   const f=fixture();f.run.running_cases=1
   await assert.rejects(f.coordinator.resume('org-a','run-a',f.admit),{code:'EVALUATION_CASE_IN_PROGRESS'})
   assert.ok(!f.events.includes('claim'))
@@ -92,7 +92,7 @@ test('restart cannot execute a durably running case; malformed artifact cannot d
   assert.ok(!f.events.includes('claim')); await f.coordinator.close()
 })
 
-test('concurrent resume claims only one local execution slot', async () => {
+void test('concurrent resume claims only one local execution slot', async () => {
   const f=fixture()
   await Promise.all(Array.from({length:8},()=>f.coordinator.resume('org-a','run-a',f.admit)))
   await f.finished()
@@ -100,7 +100,7 @@ test('concurrent resume claims only one local execution slot', async () => {
   await f.coordinator.close()
 })
 
-test('manager boundary blocks caller scores, forged actor, lease and owner writes', async () => {
+void test('manager boundary blocks caller scores, forged actor, lease and owner writes', async () => {
   const actor:any={orgId:'org-a',userId:'alice',role:'admin',scopes:[]}
   let manage=true, starts:any[]=[]
   const service=new AgentInventoryService({
@@ -110,7 +110,7 @@ test('manager boundary blocks caller scores, forged actor, lease and owner write
   })
   const body={asset_id:'asset-a',metadata_digest:'metadata',artifact_id:'artifact-a',dataset_id:'dataset-a',request_id:'request-1'}
   const url=new URL('http://local/api/v1/agent-inventory/hosted/evaluations')
-  for(const patch of [{passed_cases:1},{initiated_by:'other'},{lease_token:'secret'},{status:'succeeded'}]) {
+  for(const patch of [{passed_cases:1},{initiated_by:'other'},{lease_token:'secret'},{status:'succeeded'},{source_runtime:{profile:'dify-service-api-v1'}}]) {
     const result=await dispatchAgentInventory(service,actor,'POST',url,{...body,...patch})
     assert.equal(result.status,400)
   }
@@ -124,7 +124,7 @@ test('manager boundary blocks caller scores, forged actor, lease and owner write
   assert.equal((await dispatchAgentInventory(service,actor,'POST',forbidden,{})).status,404)
 })
 
-test('evaluation detail and case reads require current owner or manager without mutation', async () => {
+void test('evaluation detail and case reads require current owner or manager without mutation', async () => {
   let manage=false, owner='alice', mutations=0
   const run={id:'run-a',asset_id:'asset-a'}
   const service=new AgentInventoryService({
@@ -140,4 +140,50 @@ test('evaluation detail and case reads require current owner or manager without 
     manage=true;assert.equal((await dispatchAgentInventory(service,actor,'GET',url,undefined)).status,200);manage=false
   }
   assert.equal(mutations,0)
+})
+
+void test('source baseline cannot accidentally run the imported hosted image', async () => {
+  const f=fixture();f.run.role='source_baseline'
+  await assert.rejects(f.coordinator.resume('org-a','run-a',f.admit),{code:'EVALUATION_SOURCE_NOT_CONFIGURED'})
+  assert.ok(!f.events.includes('claim'));assert.ok(!f.events.includes('runner'))
+  await f.coordinator.close()
+})
+
+void test('source execution uses durable references and fresh admission, never invokes hosted runner', async () => {
+  const f=fixture(), snapshot:any={profile:'dify-service-api-v1',source_digest:'source',runtime_digest:'runtime',model_name:'model',revision_strength:'observed_source_snapshot'}
+  f.run.role='source_baseline';f.run.source_runtime=snapshot
+  f.gateway.taskCalls=async()=>[]
+  f.registry.executionAuthorize=async()=>{f.events.push('authorize')}
+  f.registry.evaluationObserveSource=async(_org:string,_run:string,body:any)=>{assert.equal(body.lease_token,'one-time-lease');assert.equal(body.source_execution.request_id,'case-a');f.events.push('observe')}
+  const source:any={snapshot:async()=>snapshot,run:async(_options:any,_expected:any,id:string,admit:any,observe:any)=>{
+    await observe({profile:'dify-service-api-v1',request_id:id});await admit();f.events.push('source-post')
+    return {answer:'42',modelCalls:0}
+  }}
+  const coordinator=new HostedEvaluationCoordinator(f.registry,f.gateway,f.runner,()=>true,()=>source)
+  await coordinator.resume('org-a','run-a',f.admit);await f.finished()
+  assert.ok(f.events.indexOf('grant')<f.events.indexOf('observe'))
+  assert.ok(f.events.indexOf('observe')<f.events.indexOf('authorize'))
+  assert.ok(f.events.indexOf('authorize')<f.events.indexOf('source-post'))
+  assert.ok(!f.events.includes('runner'));assert.ok(!f.events.includes('model'))
+  assert.equal(f.completions[0].status,'succeeded');assert.deepEqual(f.completions[0].model_call_ids,[])
+  await coordinator.close()
+})
+
+void test('migration management rejects injected results and verifies current organizational authority', async()=>{
+ let manage=true, owner='alice', writes=0
+ const actor:any={orgId:'org-a',userId:'alice',role:'admin',scopes:[]}
+ const service=new AgentInventoryService({
+  registry:{scope:()=>({}),inventoryGet:async()=>({id:'asset-a',metadata:{owner_user_id:owner}}),evaluationGet:async()=>({id:'run-a',asset_id:'asset-a'}),
+   migrationPolicyList:async()=>({items:[],next_cursor:null}),migrationPolicyCreate:async(_org:string,input:any)=>{writes++;assert.equal(input.initiated_by,'alice');return {id:'policy-a'}},
+   migrationCompare:async()=>{writes++;return {id:'comparison-a'}}} as any,
+  catalog:{} as any,authorize:async()=>({canManage:manage}),member:async()=>({id:'alice',departmentId:null}),members:async()=>[],labels:async()=>({users:new Map(),departments:new Map()}),
+ })
+ const base='http://local/api/v1/agent-inventory',create=new URL(base+'/hosted/migration/policies')
+ const input={request_id:'request-1',baseline_run_id:'run-a',minimum_pass_bps:10000,maximum_drop_bps:0}
+ for(const patch of [{initiated_by:'bob'},{passed:true},{candidate_passed:20}])assert.equal((await dispatchAgentInventory(service,actor,'POST',create,{...input,...patch})).status,400)
+ manage=false;assert.equal((await dispatchAgentInventory(service,actor,'POST',create,input)).status,403)
+ owner='other';assert.equal((await dispatchAgentInventory(service,actor,'GET',new URL(base+'/assets/asset-a/migration-policies'),undefined)).status,404)
+ manage=true;assert.equal((await dispatchAgentInventory(service,actor,'POST',create,input)).status,200)
+ assert.equal((await dispatchAgentInventory(service,actor,'POST',new URL(base+'/hosted/evaluations/run-a/compare'),{passed:true})).status,400)
+ assert.equal(writes,1)
 })

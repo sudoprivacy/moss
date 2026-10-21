@@ -1,5 +1,5 @@
 import type { HostedEvaluationCoordinator } from './hostedEvaluationCoordinator.js'
-import type { StartHostedEvaluation } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { StartHostedEvaluation, CreateMigrationPolicy } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { AGENT_REGISTRY_API, type AssetRecord } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { AuthContext } from '../auth/token.js'
 import type { CatalogRepository } from '../catalog/catalogRepository.js'
@@ -173,7 +173,8 @@ export class AgentInventoryService {
     return this.registry(actor.orgId).evaluationCases(actor.orgId, id, after)
   }
   async evaluationStart(actor: AuthContext, body: unknown) {
-    const input = object(body, ['request_id', 'asset_id', 'metadata_digest', 'artifact_id', 'dataset_id', 'timeout_seconds', 'max_model_calls'])
+    const input = object(body, ['request_id', 'asset_id', 'metadata_digest', 'artifact_id', 'dataset_id', 'timeout_seconds', 'max_model_calls', 'role', 'comparison_policy_id'])
+    if (input.role !== undefined && !['hosted', 'source_baseline'].includes(String(input.role))) fail('INVALID_EVALUATION_REQUEST')
     const asset = await this.evaluationManage(actor, identifier(input.asset_id))
     if (asset.metadata_digest !== input.metadata_digest) fail('EVALUATION_ASSET_NOT_ADMITTED', 409)
     if (!this.options.hosted) fail('HOSTED_NOT_CONFIGURED', 503)
@@ -193,6 +194,32 @@ export class AgentInventoryService {
     if (!this.options.hosted) fail('HOSTED_NOT_CONFIGURED', 503)
     await this.options.hosted.resume(actor.orgId, id, async () => { await this.evaluationManage(actor, run.asset_id) })
     return registry.evaluationGet(actor.orgId, id)
+  }
+  async migrationPolicies(actor: AuthContext, assetId: string, after = '') {
+    const { canManage } = await this.options.authorize(actor)
+    await this.readable(actor, identifier(assetId), canManage)
+    if (after) identifier(after)
+    return this.registry(actor.orgId).migrationPolicyList(actor.orgId, assetId, after)
+  }
+  async migrationPolicyCreate(actor: AuthContext, body: unknown) {
+    const input = object(body, ['request_id', 'baseline_run_id', 'minimum_pass_bps', 'maximum_drop_bps'])
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    const registry = this.registry(actor.orgId), run = await registry.evaluationGet(actor.orgId, identifier(input.baseline_run_id))
+    await this.evaluationManage(actor, run.asset_id)
+    return registry.migrationPolicyCreate(actor.orgId, { ...input, initiated_by: actor.userId } as CreateMigrationPolicy)
+  }
+  async migrationCompare(actor: AuthContext, runId: string, body: unknown) {
+    object(body, [])
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    const registry = this.registry(actor.orgId), run = await registry.evaluationGet(actor.orgId, identifier(runId))
+    await this.evaluationManage(actor, run.asset_id)
+    return registry.migrationCompare(actor.orgId, runId)
+  }
+  async migrationComparison(actor: AuthContext, id: string) {
+    const { canManage } = await this.options.authorize(actor)
+    const comparison = await this.registry(actor.orgId).migrationComparisonGet(actor.orgId, identifier(id))
+    await this.readable(actor, comparison.asset_id, canManage)
+    return comparison
   }
   async discovered(actor: AuthContext, after = '') {
     await this.options.authorize(actor)

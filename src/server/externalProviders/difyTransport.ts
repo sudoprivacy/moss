@@ -101,7 +101,7 @@ export class DifyPilotTransport {
     return digest(stable(value))
   }
 
-  async execute(input: { endpoint: string; key: string; query: string; conversationId: string | null; endUser: string; signal: AbortSignal }, onProgress: (progress: ProviderProgress) => Promise<void>): Promise<ProviderProgress> {
+  async execute(input: { endpoint: string; key: string; query: string; conversationId: string | null; endUser: string; signal: AbortSignal }, onProgress: (progress: ProviderProgress) => Promise<void>, onTrace?: (frame: { node: string; phase: 'started' | 'completed'; origin: 'worker_reported' }) => Promise<void>): Promise<ProviderProgress> {
     const response = await this.request(`${input.endpoint}/chat-messages`, {
       method: 'POST', redirect: 'error', signal: input.signal,
       headers: { Authorization: `Bearer ${input.key}`, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
@@ -137,6 +137,11 @@ export class DifyPilotTransport {
           const data = frame.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n')
           if (!data || data === '[DONE]') continue
           const event = JSON.parse(data) as Record<string, unknown>
+          if (onTrace && (event.event === 'node_started' || event.event === 'node_finished')) {
+            const node = event.data as Record<string, unknown> | undefined
+            if (!node || typeof node.node_id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(node.node_id)) throw new ExternalProviderError(502, 'PROVIDER_TRACE_INVALID')
+            if (event.event === 'node_started' || node.status === 'succeeded') await onTrace({ node: node.node_id, phase: event.event === 'node_started' ? 'started' : 'completed', origin: 'worker_reported' })
+          }
           for (const name of ['conversation_id', 'message_id', 'task_id', 'workflow_run_id'] as const) {
             if (typeof event[name] === 'string' && event[name].length <= 200) {
               if (refs[name] && refs[name] !== event[name]) throw new ExternalProviderError(502, 'PROVIDER_ID_CHANGED')

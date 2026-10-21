@@ -1,4 +1,4 @@
-import type { StartHostedEvaluation, HostedEvaluationRun, HostedEvaluationCase, HostedEvaluationPage, HostedEvaluationCasePage, HostedEvaluationClaim, EvaluationCaseLease, CompleteHostedEvaluationCase } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { ObserveSourceEvaluation, CreateMigrationPolicy, MigrationPolicy, MigrationPolicyPage, MigrationComparison, StartHostedEvaluation, HostedEvaluationRun, HostedEvaluationCase, HostedEvaluationPage, HostedEvaluationCasePage, HostedEvaluationClaim, EvaluationCaseLease, CompleteHostedEvaluationCase } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import Ajv2020 from 'ajv/dist/2020.js'
@@ -39,6 +39,11 @@ ajv.addKeyword({ keyword: 'discriminator', valid: true })
 ajv.addSchema({ $id: RESOURCE_REF_ID, sudoResourceRef: true })
 ajv.addSchema(schema)
 const validators = {
+  ObserveSourceEvaluation: ajv.compile<ObserveSourceEvaluation>({ $ref: `${schema.$id}#/$defs/ObserveSourceEvaluation` }),
+  CreateMigrationPolicy: ajv.compile<CreateMigrationPolicy>({ $ref: `${schema.$id}#/$defs/CreateMigrationPolicy` }),
+  MigrationPolicy: ajv.compile<MigrationPolicy>({ $ref: `${schema.$id}#/$defs/MigrationPolicy` }),
+  MigrationPolicyPage: ajv.compile<MigrationPolicyPage>({ $ref: `${schema.$id}#/$defs/MigrationPolicyPage` }),
+  MigrationComparison: ajv.compile<MigrationComparison>({ $ref: `${schema.$id}#/$defs/MigrationComparison` }),
   StartHostedEvaluation: ajv.compile<StartHostedEvaluation>({ $ref: `${schema.$id}#/$defs/StartHostedEvaluation` }),
   HostedEvaluationRun: ajv.compile<HostedEvaluationRun>({ $ref: `${schema.$id}#/$defs/HostedEvaluationRun` }),
   HostedEvaluationCase: ajv.compile<HostedEvaluationCase>({ $ref: `${schema.$id}#/$defs/HostedEvaluationCase` }),
@@ -298,6 +303,8 @@ export class ProductRegistryClient {
       || (assetId !== undefined && value.asset_id !== assetId) || (id !== undefined && value.id !== id)
       || value.queued_cases + value.running_cases + value.finished_cases !== value.total_cases
       || value.passed_cases > value.finished_cases || value.running_cases > 1
+      || ((value.role === 'source_baseline') !== (value.source_runtime != null))
+      || (value.role === 'source_baseline' && value.comparison_policy_id != null)
       || value.status !== (!value.queued_cases && !value.running_cases ? 'finished' : value.queued_cases === value.total_cases ? 'queued' : 'running')) fail('EVALUATION_RESPONSE_INVALID')
     return value
   }
@@ -309,12 +316,52 @@ export class ProductRegistryClient {
     return value
   }
   async evaluationStart(orgId: string, command: StartHostedEvaluation): Promise<HostedEvaluationRun> {
-    const normalized = { api_version: AGENT_REGISTRY_API, kind: 'StartHostedEvaluation', timeout_seconds: 120, max_model_calls: 1, ...command }
+    const normalized = { api_version: AGENT_REGISTRY_API, kind: 'StartHostedEvaluation', timeout_seconds: 120, max_model_calls: 1, role: 'hosted', source_runtime: null, comparison_policy_id: null, ...command }
     if (!validators.StartHostedEvaluation(normalized)) fail('INVALID_EVALUATION_REQUEST', 400)
     const value = this.evaluationRun(orgId, await this.call(orgId, '/hosted/evaluations', normalized), command.asset_id)
     for (const key of ['metadata_digest', 'artifact_id', 'dataset_id', 'initiated_by', 'timeout_seconds', 'max_model_calls'] as const)
       if (value[key] !== normalized[key]) fail('EVALUATION_RESPONSE_INVALID')
+    if ((value.role ?? 'hosted') !== normalized.role || !isDeepStrictEqual(value.source_runtime ?? null, normalized.source_runtime)
+      || (value.comparison_policy_id ?? null) !== normalized.comparison_policy_id) fail('EVALUATION_RESPONSE_INVALID')
     return value
+  }
+  private migrationPolicy(orgId: string, value: unknown, id?: string, assetId?: string): MigrationPolicy {
+    if (!validators.MigrationPolicy(value) || value.zone !== this.scope(orgId).zoneId
+      || (id !== undefined && value.id !== id) || (assetId !== undefined && value.asset_id !== assetId)
+      || value.baseline_passed > value.total_cases) fail('EVALUATION_POLICY_RESPONSE_INVALID')
+    return value
+  }
+  async migrationPolicyCreate(orgId: string, command: CreateMigrationPolicy): Promise<MigrationPolicy> {
+    if (!validators.CreateMigrationPolicy(command)) fail('INVALID_EVALUATION_POLICY', 400)
+    const policy = this.migrationPolicy(orgId, await this.call(orgId, '/hosted/migration/policies', command))
+    for (const field of ['baseline_run_id', 'minimum_pass_bps', 'maximum_drop_bps', 'initiated_by'] as const)
+      if (policy[field] !== command[field]) fail('EVALUATION_POLICY_RESPONSE_INVALID')
+    return policy
+  }
+  async migrationPolicyGet(orgId: string, id: string): Promise<MigrationPolicy> {
+    return this.migrationPolicy(orgId, await this.call(orgId, `/hosted/migration/policies/${encodeURIComponent(id)}`), id)
+  }
+  async migrationPolicyList(orgId: string, assetId: string, after = ''): Promise<MigrationPolicyPage> {
+    const page = await this.call(orgId, `/hosted/migration/policies?${new URLSearchParams({ asset_id: assetId, after })}`)
+    if (!validators.MigrationPolicyPage(page)) fail('EVALUATION_POLICY_RESPONSE_INVALID')
+    page.items.forEach(row => this.migrationPolicy(orgId, row, undefined, assetId))
+    if (page.items.some((row, i) => row.id <= (i ? page.items[i - 1].id : after))
+      || (page.next_cursor !== null && page.next_cursor !== page.items.at(-1)?.id)) fail('EVALUATION_POLICY_RESPONSE_INVALID')
+    return page
+  }
+  private migrationComparison(orgId: string, value: unknown, id?: string, runId?: string): MigrationComparison {
+    if (!validators.MigrationComparison(value) || value.zone !== this.scope(orgId).zoneId
+      || (id !== undefined && value.id !== id) || (runId !== undefined && value.candidate_run_id !== runId)
+      || value.baseline_passed > value.total_cases || value.candidate_passed > value.total_cases
+      || value.passed !== (value.candidate_passed * 10000 >= value.minimum_pass_bps * value.total_cases
+        && (value.baseline_passed - value.candidate_passed) * 10000 <= value.maximum_drop_bps * value.total_cases)) fail('EVALUATION_COMPARISON_RESPONSE_INVALID')
+    return value
+  }
+  async migrationCompare(orgId: string, runId: string): Promise<MigrationComparison> {
+    return this.migrationComparison(orgId, await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(runId)}/compare`, {}), undefined, runId)
+  }
+  async migrationComparisonGet(orgId: string, id: string): Promise<MigrationComparison> {
+    return this.migrationComparison(orgId, await this.call(orgId, `/hosted/migration/comparisons/${encodeURIComponent(id)}`), id)
   }
   async evaluationGet(orgId: string, id: string): Promise<HostedEvaluationRun> {
     return this.evaluationRun(orgId, await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(id)}`), undefined, id)
@@ -351,6 +398,12 @@ export class ProductRegistryClient {
     this.executionGrant(value.grant, orgId)
     if (value.grant.request.task_id !== command.case_id || value.grant.request.request_id !== `evaluation-${command.case_id}`
       || (value.api_key != null && (value.grant.status !== 'active' || !/^sk-[A-Za-z0-9_-]{16,}$/.test(value.api_key)))) fail('EVALUATION_RESPONSE_INVALID')
+    return value
+  }
+  async evaluationObserveSource(orgId: string, runId: string, command: ObserveSourceEvaluation): Promise<HostedEvaluationCase> {
+    if (!validators.ObserveSourceEvaluation(command)) fail('INVALID_EVALUATION_REQUEST', 400)
+    const value = this.evaluationCase(await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(runId)}/source`, command), runId)
+    if (value.id !== command.case_id || !isDeepStrictEqual(value.source_execution, { task_id: null, workflow_run_id: null, conversation_id: null, message_id: null, origin: 'source_reported', ...command.source_execution })) fail('EVALUATION_RESPONSE_INVALID')
     return value
   }
   async evaluationComplete(orgId: string, runId: string, command: CompleteHostedEvaluationCase): Promise<HostedEvaluationCase> {

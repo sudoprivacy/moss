@@ -35,6 +35,7 @@ const nodeTestFiles = [
   'src/server/agentFederation/evaluationDatasets.node-test.ts',
   'src/server/agentFederation/hostedEvaluationCoordinator.node-test.ts',
   'src/server/agentFederation/hostedConfiguration.node-test.ts',
+  'src/server/agentFederation/difySourceBaseline.node-test.ts',
   'src/server/agentFederation/evaluationRuns.node-test.ts',
   'src/server/agentFederation/hostedArtifacts.node-test.ts',
   'src/server/agentFederation/inventoryService.node-test.ts',

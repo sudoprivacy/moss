@@ -1,6 +1,10 @@
 import { dcClient } from './client'
 import type { DiscoverySource, DiscoveryResult } from '../../../src/server/agentFederation/inventoryViews'
 import type {
+  CreateMigrationPolicy,
+  MigrationPolicy,
+  MigrationPolicyPage,
+  MigrationComparison,
   HostedEvaluationRun,
   HostedEvaluationPage,
   HostedEvaluationCasePage,
@@ -87,7 +91,11 @@ export function createInventoryApi(client: Client = dcClient, signal?: () => Abo
     evaluationList: (assetId: string, after = '') => call<HostedEvaluationPage>(`/assets/${encodeURIComponent(assetId)}/evaluations?after=${encodeURIComponent(after)}`),
     evaluationGet: (runId: string) => call<HostedEvaluationRun>(`/hosted/evaluations/${encodeURIComponent(runId)}`),
     evaluationCases: (runId: string, after = '') => call<HostedEvaluationCasePage>(`/hosted/evaluations/${encodeURIComponent(runId)}/cases?after=${encodeURIComponent(after)}`),
-    evaluationStart: (body: Omit<StartHostedEvaluation, 'api_version' | 'kind' | 'initiated_by'>) => call<HostedEvaluationRun>('/hosted/evaluations', body),
+    evaluationStart: (body: Omit<StartHostedEvaluation, 'api_version' | 'kind' | 'initiated_by' | 'source_runtime'>) => call<HostedEvaluationRun>('/hosted/evaluations', body),
+    migrationPolicies: (assetId: string, after = '') => call<MigrationPolicyPage>(`/assets/${encodeURIComponent(assetId)}/migration-policies?after=${encodeURIComponent(after)}`),
+    migrationPolicyCreate: (body: Omit<CreateMigrationPolicy, 'initiated_by'>) => call<MigrationPolicy>('/hosted/migration/policies', body),
+    migrationCompare: (runId: string) => call<MigrationComparison>(`/hosted/evaluations/${encodeURIComponent(runId)}/compare`, {}),
+    migrationComparison: (id: string) => call<MigrationComparison>(`/hosted/migration/comparisons/${encodeURIComponent(id)}`),
     evaluationAction: (runId: string, action: 'resume' | 'stop' | 'reconcile') => call<HostedEvaluationRun>(`/hosted/evaluations/${encodeURIComponent(runId)}/${action}`, {}),
     datasetRegister: (body: { request_id: string; asset_id: string; metadata_digest: string; dataset: EvaluationDatasetInput }) => call<EvaluationDataset>('/hosted/datasets', body),
     hostedInspect: (source: string) => call<DifyTextPlan>('/hosted/dify/inspect', { source }),

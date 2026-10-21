@@ -2,6 +2,7 @@ import { readFileSync, statSync } from 'node:fs'
 import type { DbDriver } from '../db/driver.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import { object } from '../externalProviders/administration.js'
+import { DifySourceBaseline } from './difySourceBaseline.js'
 import { HostedEvaluationCoordinator } from './hostedEvaluationCoordinator.js'
 import { HostedRunner, type HostedRunnerConfig } from './hostedRunner.js'
 import { ExecutionModelGateway, type ExecutionModelResource } from './executionModelGateway.js'
@@ -26,7 +27,8 @@ export async function hostedFromEnvironment(db: DbDriver, registry?: ProductRegi
   try {
     if (!registry) throw new Error('registry required')
     if (!path.startsWith('/') || !statSync(path).isFile() || statSync(path).size > 1024 * 1024) throw new Error('invalid configuration file')
-    const value = object(JSON.parse(readFileSync(path, 'utf8')), ['runner', 'relays', 'resources'])
+    const value = object(JSON.parse(readFileSync(path, 'utf8')), ['runner', 'relays', 'resources', 'sourceBaselines'])
+    const sources = configuredSourceBaselines(value.sourceBaselines, registry)
     const runnerConfig = object(value.runner, ['python', 'docker', 'modulePath'])
     const runner = new HostedRunner(runnerConfig as unknown as HostedRunnerConfig)
     if (!Array.isArray(value.relays) || !value.relays.length || value.relays.length > 16
@@ -63,10 +65,33 @@ export async function hostedFromEnvironment(db: DbDriver, registry?: ProductRegi
     const gateway = new ExecutionModelGateway(db, registry, resources)
     await gateway.ready
     const coordinator = new HostedEvaluationCoordinator(registry, gateway, runner,
-      (org, resource, model) => resources.some(r => r.orgId === org && r.id === resource && r.model === model))
+      (org, resource, model) => resources.some(r => r.orgId === org && r.id === resource && r.model === model),
+      (org, asset) => sources.get(JSON.stringify([org, asset])))
     return { coordinator, close: async () => { await coordinator.close(); await Promise.all([...relays.values()].map(r => r.relay.close())) } }
   } catch {
     await Promise.all([...relays.values()].map(r => r.relay.close().catch(() => {})))
     throw new ExternalProviderError(500, 'HOSTED_CONFIGURATION_INVALID')
   }
+}
+
+/** Only deployment-reviewed original runtimes may be used as migration baselines. */
+export function configuredSourceBaselines(value: unknown, registry: ProductRegistryClient) {
+  const result = new Map<string, DifySourceBaseline>()
+  if (value === undefined) return result
+  if (!Array.isArray(value) || value.length > 64) throw new Error('invalid source baselines')
+  for (const raw of value) {
+    const c = object(raw, ['profile', 'orgId', 'assetId', 'origin', 'appId', 'workspaceId', 'apiKeyFile', 'consoleTokenFile', 'csrfTokenFile'])
+    if (c.profile !== 'dify-service-api-v1' || typeof c.orgId !== 'string' || typeof c.assetId !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$/.test(c.assetId) || typeof c.origin !== 'string'
+      || typeof c.appId !== 'string' || typeof c.workspaceId !== 'string') throw new Error('invalid source baseline')
+    registry.scope(c.orgId)
+    const key = JSON.stringify([c.orgId, c.assetId])
+    if (result.has(key)) throw new Error('duplicate source baseline')
+    const credentials = async () => ({apiKey: secret(c.apiKeyFile), consoleToken: secret(c.consoleTokenFile), csrfToken: secret(c.csrfTokenFile)})
+    // Validate all referenced private files before the service starts listening.
+    secret(c.apiKeyFile); secret(c.consoleTokenFile); secret(c.csrfTokenFile)
+    result.set(key, new DifySourceBaseline({orgId: c.orgId, assetId: c.assetId, origin: c.origin,
+      appId: c.appId, workspaceId: c.workspaceId, credentials}, registry))
+  }
+  return result
 }

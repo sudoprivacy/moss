@@ -30,7 +30,20 @@ export const recommendationLabels: Record<string, string> = {
 export function inventoryError(error: unknown): string {
   const code = error instanceof ApiRequestError ? error.code : error instanceof Error ? error.message : ''
   const labels: Record<string, string> = {
+    EVALUATION_NOT_SETTLED: '所有用例结束并确认执行与凭证清理后才能固定阈值或生成对比；请先核对未知结果。',
+    EVALUATION_POLICY_REQUIRED: '此托管运行未预先绑定迁移阈值，不能补挂；请按已保存阈值创建新的候选运行。',
+    EVALUATION_POLICY_MISMATCH: '迁移阈值与当前资产、制品或评测集不一致，请重新选择。',
+    EVALUATION_SOURCE_BASELINE_REQUIRED: '固定迁移阈值需要原平台基线，独立托管评测不能作为基线。',
+
+    EVALUATION_THRESHOLD_INVALID: '阈值应为 0 到 100 之间的数字，最多两位小数。',
+    EVALUATION_SOURCE_UNAVAILABLE: '原平台当前不可访问，或控制台凭据已过期，请刷新部署凭据后重试尚未开始的用例。',
+    EVALUATION_SOURCE_MISMATCH: '原平台内容、模型或登记制品不一致，已拒绝作为迁移基线。',
+    EVALUATION_SOURCE_CHANGED: '原平台发布内容或执行凭据在评测期间发生变化，本次结果需核对，不会自动重发。',
+    EVALUATION_SOURCE_KEY_MISMATCH: '基线调用凭据不属于指定的 Dify 应用。',
+    EVALUATION_SOURCE_EVIDENCE_REQUIRED: '原平台未返回可核对的运行编号，无法确认基线成功。',
+
     EVALUATION_RUN_SCHEMA_REQUIRED: '评测运行数据库尚未初始化，请由部署管理员执行显式初始化。',
+    EVALUATION_SOURCE_NOT_CONFIGURED: '原平台基线运行器尚未配置，不能用托管镜像代替原平台执行。',
     HOSTED_NOT_CONFIGURED: '当前环境尚未配置托管执行服务。',
     HOSTED_MODEL_NOT_CONFIGURED: '此制品使用的模型尚未连接托管执行环境。',
     HOSTED_RUNTIME_UNAVAILABLE: '托管运行环境不可用，请核对镜像和执行服务。',
