@@ -5,6 +5,23 @@ export type StandardHttpProtocol = typeof STANDARD_HTTP_PROTOCOLS[number]
 export interface ProtocolUsage { source: 'provider_reported'; input_tokens: number; output_tokens: number }
 
 export const AGENT_HTTP_API = 'agent-http.sudo.dev/v1alpha1' as const
+export const TASK_GRANT_PROFILE = 'sudo-task-grant/v1' as const
+export interface TaskGrantProfile {
+  profile: typeof TASK_GRANT_PROFILE
+  model_resource: string
+  tool_resources: string[]
+  max_model_calls: number
+}
+/** Ephemeral capability: never persist in TaskSpec, Registry, logs, prompts or user-visible history. */
+export interface TaskExecutionContext extends TaskCorrelation, TaskGrantProfile {
+  org_id: string
+  grant_id: string
+  spec_digest: string
+  expires_at: number
+  model_gateway: string
+  tool_gateway: string
+  access_token: string
+}
 
 export interface ProviderCapabilities {
   supports_streaming: boolean
@@ -37,6 +54,8 @@ export interface CustomAgentManifest {
   input_profile: 'query_only_v1'
   output_profile: 'text_v1'
   capabilities: ProviderCapabilities
+  /** Explicitly reviewed task identity profile; absent means no execution credential is sent. */
+  execution_context?: TaskGrantProfile
 }
 
 /** Created by authenticated ingress; provider identifiers never populate these fields. */

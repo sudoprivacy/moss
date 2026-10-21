@@ -10,7 +10,7 @@ export function ExternalAgentUsageDetails({ agent }: { agent: ExternalAgent }) {
       <summary className="cursor-pointer text-muted-foreground">能力与使用范围</summary>
       {usage ? (
         <div className="mt-2 space-y-2 text-xs text-muted-foreground">
-          <p>仅允许合成测试文本；不支持附件、资源引用和工具调用。</p>
+          <p>对话仅接受合成测试文本，不接受附件、资源引用或用户指定的工具。智能体自身的工具权限需单独审核。</p>
           <p>数据类型由调用方声明，尚未进行内容识别。请勿提交真实业务或敏感数据。</p>
           <dl className="grid grid-cols-2 gap-2">
             <dt>流式回复</dt><dd>{capabilityLabel[agent.capabilities.streaming]}</dd>

@@ -1,3 +1,4 @@
+import { ExternalTaskProfile } from './external-task-profile'
 import { ExternalAgentRegistryStatus } from './external-agent-registry-status'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -82,6 +83,7 @@ export function ExternalAgentVersions({ agent, onClose }: { agent: ExternalAgent
                 <p>登记签名证明版本登记信息；远端执行版本保证仍取决于 Provider。</p>
               </div>}
               <p className="text-xs text-muted-foreground">发布于 {new Date(version.created_at).toLocaleString()} · {version.created_by}</p>
+              <ExternalTaskProfile profile={version.snapshot.sourceManifest?.execution_context} />
               {!version.snapshot.sourceManifest?.execution_revision && <p className="text-xs text-muted-foreground">此来源未提供远端不可变执行保证；运行前仍需核对来源。</p>}
               <div className="flex flex-wrap gap-2">
                 {(['stable', 'canary'] as const).map(name => <Button key={name} size="sm" variant="outline" disabled={isBusy || !approved || agent.archived} onClick={() => void run(() => api.moveChannel(agent.id, { name, version: version.version, revision: page.channels.find(c => c.name === name)?.revision ?? 0 }), `${name} 已切换到 ${version.version}。`)}>设为 {name}</Button>)}

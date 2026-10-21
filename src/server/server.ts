@@ -2074,6 +2074,7 @@ export function startServer(
   const hostedReady = authService.createHostedEvaluationRuntime(runtime.serverInstanceId, externalProviders?.releases).then(async value => {
     if (isStopped) { await value?.close(); return }
     hostedEvaluations = value
+    await externalProviders?.configureTaskExecution(value?.gateway, process.env.MOSS_AGENT_EXTERNAL_TASK_CONTEXT_ORIGIN)
     await agentInventory.close()
     agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, value?.coordinator, externalProviders?.releases, value?.tasks, value?.gateway, externalProviders ?? undefined)
     agentInventory.start()

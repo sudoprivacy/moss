@@ -220,6 +220,12 @@ export class ProductRegistryClient {
   async inventoryGet(orgId: string, id: string): Promise<AssetRecord> {
     return this.inventoryRecord(await this.call(orgId, `/inventory/assets/${encodeURIComponent(id)}`), orgId, id)
   }
+  async admittedAsset(orgId: string, ref: PrincipalRef, specDigest: string): Promise<AssetRecord> {
+    if (ref.trust_domain !== this.scope(orgId).trustDomain || !/^sha256:[a-f0-9]{64}$/.test(specDigest)) fail('REGISTRY_ORGANIZATION_MISMATCH', 403)
+    const value = this.inventoryRecord(await this.call(orgId, `${this.path(ref)}/admitted-asset?${new URLSearchParams({ spec_digest: specDigest })}`), orgId)
+    if (!isDeepStrictEqual(value.principal, ref) || value.status !== 'approved' || value.actual_level === 'L0') fail('AGENT_ASSET_NOT_ADMITTED', 409)
+    return value
+  }
   async inventoryList(orgId: string, after = '', owner?: string): Promise<AssetPage> {
     const query = new URLSearchParams({ after, ...(owner === undefined ? {} : { owner }) })
     const value = await this.call(orgId, `/inventory/assets?${query}`)

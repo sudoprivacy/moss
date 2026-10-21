@@ -1,3 +1,4 @@
+import { ExternalTaskProfile } from './external-task-profile'
 import { ExternalAgentUsageDetails } from './external-agent-usage-details'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Cloud, Loader2, Plus, RefreshCw } from 'lucide-react'
@@ -574,6 +575,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                       <Field id="external-manifest" label="接入说明文件（Manifest）" hint="上传服务提供的 JSON 接入文件，最大 64 KB。测试连接会核对服务当前说明与文件是否一致。">
                         <Input id="external-manifest" type="file" accept=".json" onChange={(event) => void onFile(event.target.files?.[0])} />
                         {fileName ? <p className="text-xs text-muted-foreground">已读取：{fileName}</p> : null}
+                        {draft.provider_kind === 'custom_http' && <ExternalTaskProfile source={draft.source_definition} />}
                       </Field>
                     ) : null}
                     <Field id="external-endpoint" label="服务 API 地址">
@@ -635,6 +637,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                         onChange={(event) => void onFile(event.target.files?.[0])}
                       />
                       {fileName ? <p className="text-xs text-muted-foreground">已读取：{fileName}</p> : null}
+
                     </Field>
                     </>}
                     {metadataFields}
@@ -648,6 +651,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                 <Field id="external-definition-update" label="重新上传应用定义" hint={draft.provider_kind === 'custom_http' ? '上传更新的 JSON Manifest，服务智能体标识必须保持不变。留空保留当前说明；保存后需要重新审核。' : '旧定义需重新上传；已核验定义可留空保留。文件必须包含工作流功能配置，且需人工核对当前 Dify 发布内容。'}>
                   <Input id="external-definition-update" type="file" accept=".yaml,.yml,.json" onChange={(event) => void onFile(event.target.files?.[0])} />
                   {fileName ? <p className="text-xs text-muted-foreground">已读取：{fileName}</p> : null}
+                        {draft.provider_kind === 'custom_http' && <ExternalTaskProfile source={draft.source_definition} />}
                 </Field>
                 {metadataFields}
               </>

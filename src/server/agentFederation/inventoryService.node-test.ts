@@ -364,3 +364,20 @@ void test('inventory client rejects wrong owner, zone, digest, cursor and read r
     await assert.rejects(() => client.inventoryList('org', '', 'alice'), /REGISTRY_RESPONSE_INVALID/)
   }
 })
+
+void test('admitted asset lookup is read-only, validates the exact principal and denies L0 or unapproved authority results', async () => {
+  const ref = { trust_domain: 'a.example', agent_name: 'external-test' }, digest = 'sha256:' + 'a'.repeat(64)
+  const admitted = { ...asset(), status: 'approved', actual_level: 'L1', principal: ref }
+  const requests: { path: string; method?: string }[] = []
+  let value = admitted
+  const client = new ProductRegistryClient({ endpoint: 'http://127.0.0.1:12345', token: 'synthetic-token', publicKeys: [fixture.public_key_pem],
+    organizations: { org: { trustDomain: 'a.example', zoneId: 'zone-a' } }, request: async (url, init) => { requests.push({ path: String(url), method: init?.method }); return Response.json(value) } })
+  assert.equal((await client.admittedAsset('org', ref, digest)).id, admitted.id)
+  assert(requests[0].path.includes('/admitted-asset?spec_digest=sha256%3A')); assert(!requests[0].method || requests[0].method === 'GET')
+  for (const patch of [{ actual_level: 'L0' }, { status: 'suspended' }, { principal: { ...ref, agent_name: 'other' } }]) {
+    value = { ...admitted, ...patch }; await assert.rejects(client.admittedAsset('org', ref, digest), /AGENT_ASSET_NOT_ADMITTED/)
+  }
+  const before = requests.length
+  await assert.rejects(client.admittedAsset('org', { ...ref, trust_domain: 'other.example' }, digest), /REGISTRY_ORGANIZATION_MISMATCH/)
+  assert.equal(requests.length, before)
+})

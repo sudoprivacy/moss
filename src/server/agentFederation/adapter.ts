@@ -1,4 +1,4 @@
-import type { CustomAgentManifest, ExternalRunBinding, ProviderCapabilities, ProviderObservation, TaskCorrelation } from '../../../contracts/agent-federation/v1alpha1/contract.js'
+import type { CustomAgentManifest, ExternalRunBinding, ProviderCapabilities, ProviderObservation, TaskCorrelation, TaskExecutionContext } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { AGENT_FEDERATION_API } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { assertPilot, canonicalEndpoint, ExternalProviderError, type PilotPolicy } from '../externalProviders/policy.js'
 import { parseExternalRunBinding, parseProviderObservation } from './manifest.js'
@@ -21,6 +21,8 @@ export interface ProviderInvocation extends TaskCorrelation {
   signal: AbortSignal
   /** Persist the dispatch intent and recheck governance under the caller's lock. */
   authorize_dispatch: () => Promise<void>
+  /** Issued by the trusted task coordinator after source preflight, never by the browser. */
+  execution_context?: () => Promise<TaskExecutionContext>
 }
 export interface ProviderResult {
   text: string

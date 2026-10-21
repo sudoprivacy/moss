@@ -435,3 +435,18 @@ void test('suspension recovers an already-created token when its response is sti
   assert.equal(f.state.models, 0)
   assert.equal((await f.gateway.suspendAsset('org-a', 'asset-a')).pending, 0)
 })
+
+void test('task cleanup finds arbitrary call IDs, isolates tenants and disables before expiry even if another call fails', async t => {
+  const f = await setup(t)
+  f.state.disableFailure = true
+  const first = await f.gateway.invoke('org-a', f.body, f.token)
+  const second = await f.gateway.invoke('org-a', { ...f.body, call_id: 'provider-chosen-sequence' }, f.token)
+  assert.deepEqual((await f.gateway.taskCalls('org-a', 'task-a')).map(c => c.id).sort(), [first.id, second.id].sort())
+  assert.equal((await f.gateway.taskCalls('org-b', 'task-a')).length, 0)
+  assert.equal((await f.gateway.stopTaskCalls('org-a', 'task-a')).pending, 2)
+  f.state.disableFailure = false
+  const result = await f.gateway.stopTaskCalls('org-a', 'task-a')
+  assert.deepEqual(result, { calls: 2, pending: 0 })
+  assert.equal(f.state.models, 2)
+  assert([...f.tokens.values()].every(token => token.status === 2))
+})

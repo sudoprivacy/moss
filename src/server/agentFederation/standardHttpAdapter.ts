@@ -5,6 +5,7 @@ import { canonicalEndpoint, ExternalProviderError } from '../externalProviders/p
 import { createObserver, invocationContext, type ProviderAdapter, type ProviderInvocation, type ReviewedHttpManifest } from './adapter.js'
 import { customManifestDigest, HTTP_CAPABILITIES, parseCustomManifest, parseExternalRunBinding } from './manifest.js'
 import type { ProviderRequest } from './customHttpAdapter.js'
+import { taskExecutionHeaders } from './taskExecutionContext.js'
 
 type Json = Record<string, unknown>
 export type StandardManifest = CustomAgentManifest & { protocol: StandardHttpProtocol; target: string; discovery_digest: string; conversation_mode: 'single_turn' }
@@ -22,6 +23,7 @@ class Wire {
   readonly endpoint: string
   session?: string
   initialized = false
+  executionHeaders: Record<string, string> = {}
   constructor(endpoint: string, readonly key: string, readonly signal: AbortSignal, readonly request: ProviderRequest, readonly traceparent?: string) {
     this.endpoint = canonicalEndpoint(endpoint)
     if (!key || key.length > 1024 || /[\r\n]/.test(key)) throw new ExternalProviderError(400, 'INVALID_CREDENTIAL')
@@ -33,6 +35,7 @@ class Wire {
       headers: { Authorization: `Bearer ${this.key}`, Accept: mcp ? 'application/json, text/event-stream' : 'application/json',
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...(this.traceparent ? { traceparent: this.traceparent } : {}),
+        ...this.executionHeaders,
         ...(mcp && this.initialized ? { 'MCP-Protocol-Version': '2025-06-18' } : {}),
         ...(mcp && this.session ? { 'Mcp-Session-Id': this.session } : {}),
       }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -176,6 +179,7 @@ export class StandardHttpAdapter implements ProviderAdapter {
     let output = '', status: 'succeeded' | 'failed' = 'succeeded', runId: string | undefined, responseId: string | undefined, usage: ProtocolUsage | undefined
     try {
       await this.check(wire, input.query)
+      wire.executionHeaders = await taskExecutionHeaders(this.manifest, input)
       await input.authorize_dispatch(); signal.throwIfAborted()
       if (this.manifest.protocol === 'openai-chat-completions/v1') {
         const result = record(await wire.send(`${endpoint}/chat/completions`, { model: this.manifest.target, messages: [{ role: 'user', content: input.query }], stream: false, n: 1, user: input.end_user }))
@@ -196,6 +200,7 @@ export class StandardHttpAdapter implements ProviderAdapter {
         if (result.isError === true) { status = 'failed'; output = '' }
       } else {
         let result = record(await wire.rpc('message/send', { message: { kind: 'message', role: 'user', messageId: randomUUID(), parts: [{ kind: 'text', text: input.query }] }, configuration: { acceptedOutputModes: ['text/plain'], blocking: false, historyLength: 0 } }))
+        wire.executionHeaders = {} // Polling needs provider auth only; never resend the task capability.
         if (result.kind === 'message') {
           if (result.role !== 'agent') return failure()
           responseId = id(result.messageId); output = parts(result.parts)

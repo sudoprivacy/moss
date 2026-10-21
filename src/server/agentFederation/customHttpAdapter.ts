@@ -2,6 +2,7 @@ import { AGENT_HTTP_API, type InvokeHttpAgent, type ProviderObservation } from '
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import { createObserver, invocationContext, runBinding, type ProviderAdapter, type ProviderInvocation, type ReviewedHttpManifest } from './adapter.js'
 import { customManifestDigest, HTTP_CAPABILITIES, parseCustomManifest, parseHttpAgentResult } from './manifest.js'
+import { taskExecutionHeaders } from './taskExecutionContext.js'
 
 export const MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 export type ProviderRequest = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>
@@ -63,10 +64,11 @@ export class CustomHttpAdapter implements ProviderAdapter {
     }
     const startedAt = new Date().toISOString()
     // No retry: the initial profile makes no remote idempotency or cancellation promise.
+    const executionHeaders = await taskExecutionHeaders(this.reviewed.manifest, input)
     await input.authorize_dispatch()
     signal.throwIfAborted()
     const response = await this.request(`${endpoint}/invoke`, {
-      method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+      method: 'POST', headers: { ...headers, ...executionHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify(body), redirect: 'error', signal,
     })
     if (!response.ok) {

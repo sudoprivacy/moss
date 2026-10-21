@@ -1,4 +1,8 @@
 import { initializeAssetControls, assertAssetOpen } from '../agentFederation/assetControlStore.js'
+import { assertNoTaskCredential } from '../agentFederation/taskExecutionContext.js'
+import { ExternalTaskExecution } from '../agentFederation/externalTaskExecution.js'
+import type { ExecutionModelGateway } from '../agentFederation/executionModelGateway.js'
+import type { AgentVersionManifest } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { describeExternalAgent } from './description.js'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 import { ExternalProviderAdministration, object, type AdministrationOptions } from './administration.js'
@@ -31,6 +35,7 @@ export class ExternalProviderService {
   readonly registryMigration: RegistryMigration
   readonly ownership: ExternalExecutionOwnership
   private closing = false
+  private taskExecution?: ExternalTaskExecution
   private readonly adapters: ReturnType<typeof createRuntimeRegistry>
   constructor(readonly store: ExternalTaskStore, private readonly options: AdministrationOptions, serverInstanceId?: string) {
     this.controlsReady = store.ready.then(() => initializeAssetControls(store.db))
@@ -53,12 +58,21 @@ export class ExternalProviderService {
     await this.ownership.stop()
   }
 
+  async configureTaskExecution(gateway?: ExecutionModelGateway, origin?: string) {
+    if (!origin) return
+    if (!gateway || !this.options.registry) throw new ExternalProviderError(503, 'TASK_EXECUTION_CONTEXT_UNAVAILABLE')
+    await this.store.ready
+    this.taskExecution = new ExternalTaskExecution(this.store.db, this.options.registry, gateway, origin)
+    await this.taskExecution.ready
+  }
+
   maintain(): Promise<void> {
     if (this.maintenance) return this.maintenance
     this.maintenance = (async () => {
       await this.store.ready
       await this.ownership.heartbeat()
       await this.store.scheduled('expiry', 1000, () => this.store.expire())
+      await this.taskExecution?.maintain()
       if (Date.now() >= this.nextCredentialMaintenance) {
         this.nextCredentialMaintenance = Date.now() + 60_000
         await this.administration.operations.reconcile()
@@ -298,7 +312,8 @@ export class ExternalProviderService {
       renewing = this.ownership.renew(fence).then(ok => { if (!ok) controller.abort() }, () => controller.abort()).finally(() => { renewing = undefined })
     }, 5000)
     heartbeat.unref()
-    let submitted = Boolean(task.dispatch_authorized_at) || recovery, durable = false
+    let submitted = Boolean(task.dispatch_authorized_at) || recovery, durable = false, managed = false
+    let executionToken: string | undefined
     try {
       const governedBinding = await this.store.binding(actor, task.agent_id)
       await this.authorize(actor)
@@ -307,11 +322,14 @@ export class ExternalProviderService {
       let binding = governedBinding
       const record = await this.store.taskRecord(actor, task.id)
       const resolution = record?.resolution
+      let version: AgentVersionManifest | undefined
       if (resolution?.status === 'accepted' && resolution.agent.release_digest) {
-        const version = await this.releases.version(actor, task.agent_id, resolution.agent.version)
+        version = await this.releases.version(actor, task.agent_id, resolution.agent.version)
         if (version.spec_digest !== resolution.agent.release_digest || version.snapshot.source_digest !== task.source_digest) throw new ExternalProviderError(409, 'AGENT_VERSION_DIGEST_MISMATCH')
         binding = { ...governedBinding, ...version.snapshot }
       }
+      managed = Boolean(binding.sourceManifest?.execution_context)
+      if (managed && (!this.taskExecution || !version || recovery)) throw new ExternalProviderError(409, recovery ? 'RECOVERY_UNSUPPORTED' : 'TASK_EXECUTION_CONTEXT_UNAVAILABLE')
       durable = binding.sourceManifest?.protocol === DURABLE_AGENT_HTTP_API
       if (recovery && !durable) {
         await this.store.mutate(id, current => { current.status = 'unknown'; current.error_code = 'RECOVERY_UNSUPPORTED'; return 'status' }, fence)
@@ -332,6 +350,15 @@ export class ExternalProviderService {
         endpoint: binding.endpoint, org_id: actor.orgId, policy: await this.administration.effectivePolicy(actor),
         key, query: task.query, provider_session_id: invocation.provider_session_id, deadline_at: task.deadline_at,
         end_user: invocation.end_user, signal: controller.signal, recovery, known_provider_run_id: task.provider_refs.run_id,
+        ...(managed ? { execution_context: async () => {
+          const context = await this.taskExecution!.prepare(actor, task, version!, binding.sourceManifest!.execution_context!, controller.signal, async () => {
+          controller.signal.throwIfAborted()
+          await this.authorize(actor)
+          await this.executable(actor, await this.store.binding(actor, task.agent_id))
+          })
+          executionToken = context.access_token
+          return context
+        } } : {}),
         authorize_dispatch: async () => {
           // Adapter preflight precedes the same durable governance linearization point.
           await this.store.db.transaction(async () => {
@@ -353,6 +380,7 @@ export class ExternalProviderService {
           submitted = true
         },
       }, async observation => {
+        assertNoTaskCredential(observation, executionToken)
         await this.store.mutate(id, current => {
           current.status = 'running'; current.raw_answer = observation.text
           current.provider_refs = {
@@ -366,11 +394,13 @@ export class ExternalProviderService {
           return 'answer'
         }, fence)
       })
+      assertNoTaskCredential(result, executionToken)
       const decoded = decodeOutput(result.text, binding.decoder, true)
+      const cleaned = !managed || await this.taskExecution!.finish(actor.orgId, task.id)
       await this.store.db.transaction(async () => {
         const completed = await this.store.mutate(id, current => {
-          current.status = result.status; current.raw_answer = result.text; current.answer = decoded.answer
-          current.error_code = result.status === 'failed' ? result.error_code ?? 'PROVIDER_EXECUTION_FAILED' : null
+          current.status = cleaned ? result.status : 'unknown'; current.raw_answer = result.text; current.answer = decoded.answer
+          current.error_code = !cleaned ? 'EXTERNAL_EXECUTION_CLEANUP_PENDING' : result.status === 'failed' ? result.error_code ?? 'PROVIDER_EXECUTION_FAILED' : null
           current.output_status = decoded.valid ? 'valid' : 'invalid'
           return 'answer'
         }, fence)
@@ -384,12 +414,16 @@ export class ExternalProviderService {
         current.error_code = code
         return 'status'
       }, fence)
-    } finally { clearTimeout(timeout); clearInterval(heartbeat); await renewing; this.controllers.delete(controller) }
+    } finally {
+      if (managed) await this.taskExecution?.finish(actor.orgId, task.id).catch(() => {})
+      clearTimeout(timeout); clearInterval(heartbeat); await renewing; this.controllers.delete(controller)
+    }
   }
 
   private async executable(actor: ExternalActor, binding: Binding, context?: { policy: PilotPolicy; agents: Map<string, CatalogAgent>; connections: Map<string, IntegrationConnection> }): Promise<void> {
     await this.controlsReady
     await assertAssetOpen(this.store.db, actor.orgId, undefined, binding.id)
+    if (binding.sourceManifest?.execution_context && !this.taskExecution) throw new ExternalProviderError(503, 'TASK_EXECUTION_CONTEXT_UNAVAILABLE')
     this.adapters.get(binding.provider_kind ?? 'dify')
     if (binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
     assertPilot(context?.policy ?? await this.administration.effectivePolicy(actor), actor.orgId, binding.endpoint)

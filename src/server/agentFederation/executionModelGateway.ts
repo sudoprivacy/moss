@@ -185,6 +185,8 @@ export class ExecutionModelGateway {
     );`).then(async () => {
       const created = db.kind === 'postgres' ? "CAST(document::jsonb ->> 'createdAt' AS BIGINT)" : "CAST(json_extract(document, '$.createdAt') AS INTEGER)";
       await db.exec(`CREATE INDEX IF NOT EXISTS agent_model_calls_report ON agent_model_calls(org_id, (${created}));`);
+      const task = db.kind === 'postgres' ? "document::jsonb ->> 'taskId'" : "json_extract(document, '$.taskId')";
+      await db.exec(`CREATE INDEX IF NOT EXISTS agent_model_calls_task ON agent_model_calls(org_id, (${task}));`);
       await initializeAssetControls(db);
     });
   }
@@ -482,9 +484,19 @@ export class ExecutionModelGateway {
   /** Management gateway only; authorization belongs to the enclosing admin route. */
   async taskCalls(orgId: string, taskId: string): Promise<ExecutionModelCall[]> {
     await this.ready;
-    const ids = Array.from({ length: 32 }, (_, i) => `${taskId}:${i + 1}`);
-    const rows = await this.db.all(`SELECT document FROM agent_model_calls WHERE org_id = ? AND call_id IN (${ids.map(() => "?").join(",")}) ORDER BY id`, [orgId, ...ids]);
+    const task = this.db.kind === 'postgres' ? "document::jsonb ->> 'taskId'" : "json_extract(document, '$.taskId')";
+    const rows = await this.db.all(`SELECT document FROM agent_model_calls WHERE org_id = ? AND (${task}) = ? ORDER BY id LIMIT 1025`, [orgId, taskId]);
+    if (rows.length > 1024) fail('MODEL_TASK_CALL_LIMIT', 503);
     return rows.map(row => JSON.parse(String(row.document)) as ExecutionModelCall);
+  }
+  /** Internal task controller: revoke every task-scoped Router token, even before IAM expiry. */
+  async stopTaskCalls(orgId: string, taskId: string): Promise<{ calls: number; pending: number }> {
+    const calls = await this.taskCalls(orgId, taskId);
+    let pending = 0;
+    for (const call of calls) {
+      try { if (!await this.stopCall(call)) pending++; } catch { pending++; }
+    }
+    return { calls: calls.length, pending };
   }
   /** Revocation only. Does not re-execute or claim that an in-flight model was cancelled. */
   async suspendAsset(orgId: string, assetId: string): Promise<{ calls: number; pending: number }> {
