@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { redactInquiry } from './rules.js'
 import type { ParkStore } from './store.js'
+import type { ConsultationSource } from './consultationSources.js'
 
 export interface AgentInquiryInput {
   orgId: string
@@ -11,7 +12,7 @@ export interface AgentInquiryInput {
   industryTags: string[]
   /** Server-recorded policy hits for this turn (client reports are ignored). */
   policyHitCount: number
-  sourceRefs: Array<{ name: string; version: string; section: string }>
+  sourceRefs: ConsultationSource[]
   redactionConfig?: { extra_terms?: string[]; summary_max_length?: number }
 }
 
@@ -56,7 +57,7 @@ export async function appendAgentInquiry(store: ParkStore, input: AgentInquiryIn
       null,
       JSON.stringify(input.industryTags.slice(0, 20)),
       confidence,
-      JSON.stringify(input.sourceRefs.slice(0, 20)),
+      JSON.stringify(input.sourceRefs),
       Date.now(),
     ],
   )

@@ -31,6 +31,7 @@ const nodeTestFiles = [
   'src/server/skillImportValidation.node-test.ts',
   'src/server/park/park.node-test.ts',
   'src/server/park/policySearch.node-test.ts',
+  'src/server/park/consultationSources.node-test.ts',
   'src/server/park/brandingAndSources.node-test.ts',
   'src/server/park/parkServer.node-test.ts',
   'src/server/wikiBuildJobFencing.node-test.ts',

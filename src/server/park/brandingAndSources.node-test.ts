@@ -13,7 +13,7 @@ import { ManagedImageStore } from '../configuration/managedImageStore.js'
 import { DocumentStore } from '../documentStore.js'
 import { HttpError, writeJson } from '../httpRespond.js'
 import { ParkStore } from './store.js'
-import { handleInternalParkRoute, recordParkAudit } from './internalRoutes.js'
+import { handleInternalParkRoute, recordParkAudit, parkAuditContext } from './internalRoutes.js'
 import { handlePublicParkRoute } from './publicRoutes.js'
 import { getParkWikiSources } from './wikiSources.js'
 import { policySamples } from './testing/policySamples.js'
@@ -65,11 +65,14 @@ async function fixture() {
           return
       }
       writeJson(res, 404, {})
-    })().catch((error) =>
+    })().catch(async (error) => {
+      if (error instanceof HttpError && req.url?.startsWith('/api/v1/parks/')) {
+        await recordParkAudit(store, 'park', new URL(req.url, 'http://localhost').pathname, req.method!, error.statusCode, String(req.headers['x-user'] ?? 'operator'), error.message, parkAuditContext(req))
+      }
       writeJson(res, error instanceof HttpError ? error.statusCode : 500, {
         error: String(error.message),
-      }),
-    )
+      })
+    })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const port = (server.address() as { port: number }).port
@@ -369,11 +372,12 @@ void test('policy uploads require a supported parseable source and audit records
     assert.equal((await f.request(`admin/policy/wikis/${wiki.id}`, 'PATCH', { name: '新的政策知识库' })).status, 200)
     assert.equal((await f.request(`admin/policy/wikis/${wiki.id}`, 'PATCH', { source_document_ids: [] })).status, 400)
     assert.equal((await f.request(`admin/policy/documents/${uploaded[0]}`, 'DELETE')).status, 204)
-    const rows = await (await f.request('admin/audit-events')).json() as Array<{ actor_name: string; action_label: string; object_label: string; path: string; method: string }>
+    const rows = await (await f.request('admin/audit-events')).json() as Array<{ actor_name: string; action_label: string; object_label: string; path: string; method: string; response_status: number }>
     assert.equal(rows.filter(row => row.action_label === '创建政策目录').length, 1)
-    assert.equal(rows.filter(row => row.action_label === '修改知识库').length, 1)
+    assert.equal(rows.filter(row => row.action_label === '修改知识库' && row.response_status === 200).length, 1)
     assert.ok(rows.some(row => row.action_label === '修改知识库' && row.object_label === '新的政策知识库'))
     assert.ok(rows.some(row => row.action_label === '删除政策文件' && row.object_label === 'policy.txt'))
+    assert.ok(rows.some(row => row.action_label === '上传政策文件' && row.object_label.includes('fake.docx') && row.object_label.includes('请求名称')))
     assert.ok(rows.every(row => row.actor_name === '园区管理员'))
     assert.ok(rows.every(row => row.path.startsWith('/api/v1/parks/park/') && row.method))
     await recordParkAudit(f.store, 'park', '/api/v1/parks/park/admin/redaction', 'PUT', 200, 'leader')

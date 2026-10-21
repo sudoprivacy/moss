@@ -1,0 +1,12 @@
+{
+  "administrator": {"username": "park-admin", "password": "REPLACE_WITH_DEPLOYMENT_PASSWORD"},
+  "public_url": "http://localhost:44176/consult",
+  "park": {"display_name": "园区名称", "welcome_text": "欢迎咨询园区政策", "contact_enabled": true, "consent_text": "联系方式仅用于招商对接"},
+  "model": {"model": "gpt-4.1-mini", "apiKey": "REPLACE_WITH_PROVIDER_KEY", "defaultModelProviderId": "park-router", "modelProviders": [{"id": "park-router", "name": "园区模型服务", "kind": "openai-compatible", "baseUrl": "https://YOUR_PROVIDER/v1", "discoveryUrl": "https://YOUR_PROVIDER/v1/models", "protocol": "openai-completions", "enabled": true}]},
+  "accounts": [
+    {"name": "park-leader", "email": "leader@example.invalid", "role": "user", "password": "REPLACE_WITH_LEADER_PASSWORD", "park_role": "park_leader"},
+    {"name": "park-recruiter", "email": "recruiter@example.invalid", "role": "user", "password": "REPLACE_WITH_RECRUITER_PASSWORD", "park_role": "park_recruiter"}
+  ],
+  "policies": [{"file": "政策.md", "mime_type": "text/markdown"}],
+  "quick_questions": ["园区有哪些支持政策？", "申请政策支持需要什么条件？", "如何申请入驻？", "园区提供哪些企业服务？"]
+}

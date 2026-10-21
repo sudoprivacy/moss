@@ -23,6 +23,10 @@ admin/dist
 # Logs / scratch
 *.log
 .DS_Store
+deploy/park-box/configuration
+deploy/park-box/**/*.tar.gz
+deploy/park-box/**/*.sig
+deploy/park-box/**/__pycache__
 
 # Deploy-local scratch / assets that must NOT be excluded:
 #   .sudocode-build-context/  (the napi stage COPYs it — keep it)

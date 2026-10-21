@@ -4,6 +4,7 @@ import { lstat, readFile, readdir, statfs } from 'node:fs/promises'
 import { basename, isAbsolute, resolve, sep } from 'node:path'
 import os from 'node:os'
 import { HttpError } from '../httpRespond.js'
+import { BoxAgentClient, type BoxTask } from './boxAgentClient.js'
 
 type HookName = 'backup' | 'restore' | 'upgrade' | 'rollback' | 'reindex' | 'modelCheck'
 
@@ -16,6 +17,9 @@ export interface BoxOperationOptions {
   healthUrls?: string[]
   version?: string
   run?: (command: string, args: string[]) => Promise<string>
+  agent?: BoxAgentClient
+  healthProbe?: () => Promise<unknown>
+  businessProbe?: () => Promise<unknown>
 }
 
 async function execute(command: string, args: string[]): Promise<string> {
@@ -65,8 +69,16 @@ export class BoxOperations {
   }
 
   async status(): Promise<unknown> {
+    if (this.options.agent) {
+      const status = await this.options.agent.request<Record<string, unknown>>('/status')
+      const health = this.options.healthProbe ? await this.options.healthProbe() : null
+      let business: unknown
+      try { business = await this.options.businessProbe?.() }
+      catch (error) { business = { configured: true, healthy: false, reason: error instanceof Error ? error.message : 'Business probe failed' } }
+      return { ...status, health, model: business, uptime_seconds: Math.floor(process.uptime()) }
+    }
     const disk = await statfs(this.options.rootDir)
-    const health = await Promise.all((this.options.healthUrls ?? []).map(async url => {
+    const health = this.options.healthProbe ? await this.options.healthProbe() : await Promise.all((this.options.healthUrls ?? []).map(async url => {
       try {
         const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
         return { url, healthy: response.ok, status: response.status }
@@ -86,6 +98,8 @@ export class BoxOperations {
       memory: { total_bytes: os.totalmem(), free_bytes: os.freemem() },
       disk: { total_bytes: Number(disk.blocks) * Number(disk.bsize), free_bytes: Number(disk.bavail) * Number(disk.bsize) },
       health, model, archives, upgrades,
+      configured: false,
+      action_reasons: Object.fromEntries(['backup', 'restore', 'verify-upgrade', 'upgrade', 'rollback', 'reindex', 'model-check'].map(name => [name, ['Start the Docker Compose operations container and configure PARK_BOX_AGENT_SOCKET'] ])),
       available_actions: Object.fromEntries((['backup', 'restore', 'upgrade', 'rollback', 'reindex'] as HookName[]).map(name => [name, Boolean(this.options.hooks?.[name])])),
     }
   }
@@ -127,24 +141,23 @@ export class BoxOperations {
 
   async rollback(): Promise<string> { return this.run(this.hook('rollback'), []) }
   async reindex(): Promise<string> { return this.run(this.hook('reindex'), []) }
+
+  get usesAgent(): boolean { return Boolean(this.options.agent) }
+
+  async submit(action: string, orgId: string, actor: string, requestId: string, name: string): Promise<BoxTask> {
+    if (!this.options.agent) throw new HttpError(503, 'Configure PARK_BOX_AGENT_SOCKET and start the operations container')
+    return this.options.agent.request<BoxTask>('/tasks', { action, org_id: orgId, actor, request_id: requestId, name })
+  }
+
+  async task(id: string): Promise<BoxTask> {
+    if (!this.options.agent) throw new HttpError(503, 'Box agent is unavailable')
+    return this.options.agent.request<BoxTask>(`/tasks/${encodeURIComponent(id)}`)
+  }
 }
 
-export function boxOperationsFromEnvironment(rootDir: string): BoxOperations {
-  const list = (process.env.PARK_BOX_HEALTH_URLS ?? '').split(',').map(value => value.trim()).filter(Boolean)
-  return new BoxOperations({
-    rootDir,
-    backupDir: process.env.PARK_BOX_BACKUP_DIR,
-    upgradeDir: process.env.PARK_BOX_UPGRADE_DIR,
-    publicKeyPath: process.env.PARK_BOX_UPGRADE_PUBLIC_KEY,
-    version: process.env.PARK_BOX_VERSION,
-    healthUrls: list,
-    hooks: {
-      backup: process.env.PARK_BOX_BACKUP_BIN,
-      restore: process.env.PARK_BOX_RESTORE_BIN,
-      upgrade: process.env.PARK_BOX_UPGRADE_BIN,
-      rollback: process.env.PARK_BOX_ROLLBACK_BIN,
-      reindex: process.env.PARK_BOX_REINDEX_BIN,
-      modelCheck: process.env.PARK_BOX_MODEL_CHECK_BIN,
-    },
-  })
+export function boxOperationsFromEnvironment(rootDir: string, probes: Pick<BoxOperationOptions, 'healthProbe' | 'businessProbe'> = {}): BoxOperations {
+  if (process.env.PARK_BOX_AGENT_SOCKET) return new BoxOperations({ rootDir, ...probes, agent: new BoxAgentClient(process.env.PARK_BOX_AGENT_SOCKET) })
+  // Production never executes environment-supplied programs. The legacy runner
+  // remains injectable only for existing unit fixtures.
+  return new BoxOperations({ rootDir, ...probes })
 }

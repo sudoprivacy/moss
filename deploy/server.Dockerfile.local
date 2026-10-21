@@ -52,7 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && chmod 755 /kubectl
 
 # --- Stage 1: JS/TS bundles + admin frontend (bun) ---------------------------
-FROM oven/bun:1 AS js-builder
+FROM oven/bun:1 AS js-dependencies
 WORKDIR /src
 # Install root + admin deps first (better layer caching), then build.
 COPY package.json bun.lock ./
@@ -62,6 +62,7 @@ COPY vendor ./vendor
 COPY scripts ./scripts
 RUN bun install --frozen-lockfile || bun install
 RUN cd admin && (bun install --frozen-lockfile || bun install)
+FROM js-dependencies AS js-builder
 # Now the full source and run the build (admin/dist + bin/*.mjs).
 COPY . .
 RUN bun run build:node
@@ -137,7 +138,8 @@ ARG TARGETARCH
 ARG SCODE_DOWNLOAD_URL
 WORKDIR /dl
 COPY deploy/fetch-scode.sh /fetch-scode.sh
-RUN bash /fetch-scode.sh /runtime-versions.json "$TARGETARCH" /out/bin/scode
+RUN sed -i 's/\r$//' /fetch-scode.sh \
+    && bash /fetch-scode.sh /runtime-versions.json "$TARGETARCH" /out/bin/scode
 
 # Validate both the static x64 and glibc ARM64 binary on the oldest host userspace.
 FROM ubuntu:22.04 AS host-scode-runtime
@@ -286,6 +288,11 @@ EXPOSE 43128
 
 CMD ["node", "bin/moss-server.mjs", "start"]
 
+FROM node:22.22.1-trixie-slim AS park-box-nexus
+WORKDIR /app
+COPY --from=nexus-dl /out/bin/nexus /app/bin/nexus
+ENTRYPOINT ["/app/bin/nexus/nexusd"]
+
 # --- Host package targets ----------------------------------------------------
 # The deployment release runs moss-server on the Linux host and only uses
 # Docker for session runtimes. Keep these stages in this Dockerfile so the
@@ -386,3 +393,41 @@ RUN for i in 1 2 3; do \
 COPY --from=dl /out/bin/nexus/nexusd ./bin/nexus/nexusd
 COPY --from=dl /out/bin/nexus/plugins ./bin/nexus/plugins
 COPY --from=dl /out/bin/scode ./bin/scode
+
+# Park is delivered entirely as containers. Its existing public agent channel
+# runs scode inside the Moss container; no host processes or Docker socket are
+# needed by the business service. Deployment orchestration has its own image.
+FROM js-dependencies AS park-box-admin
+COPY admin ./admin
+RUN cd admin && bun run build
+
+FROM js-dependencies AS park-box-build
+COPY tsconfig.json ./tsconfig.json
+COPY src ./src
+COPY scripts ./scripts
+COPY assistants ./assistants
+COPY skills ./skills
+COPY contracts ./contracts
+COPY deploy/browser/mcp-tools.json ./deploy/browser/mcp-tools.json
+COPY --from=park-box-admin /src/admin/dist ./admin/dist
+COPY deploy/park-box/build-metadata.mjs ./deploy/park-box/build-metadata.mjs
+RUN bun run build:node --skip-admin && bun deploy/park-box/build-metadata.mjs
+
+FROM runtime-deps AS park-box-deps
+RUN bun add qrcode@1.5.4
+
+FROM node:22.22.1-trixie-slim AS park-box-server
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=park-box-build /src/bin/ ./bin/
+COPY --from=park-box-build /src/admin/dist ./admin/dist
+COPY --from=park-box-build /src/assistants ./assistants
+COPY --from=park-box-build /src/skills ./skills
+COPY --from=park-box-deps /deps/node_modules ./node_modules
+COPY --from=model-stage /m/out/Xenova ./models/Xenova
+COPY --from=go-builder /out/wiki /out/corpapp ./bin/
+COPY --from=dl /out/bin/scode ./bin/scode
+COPY --from=park-box-build /src/box-build.json ./box-build.json
+ENV PATH=/app/bin:/usr/local/bin:/usr/bin:/bin MOSS_MODELS_DIR=/app/models PARK_BOX_BUILD_FILE=/app/box-build.json
+CMD ["node", "bin/moss-server.mjs", "start"]

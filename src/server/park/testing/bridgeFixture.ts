@@ -6,7 +6,7 @@ import { basename, join, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { SqliteDriver } from '../../db/driver.js'
 import { HttpError, writeJson } from '../../httpRespond.js'
-import { handleInternalParkRoute, recordParkAudit } from '../internalRoutes.js'
+import { handleInternalParkRoute, recordParkAudit, parkAuditContext } from '../internalRoutes.js'
 import { handlePublicParkRoute } from '../publicRoutes.js'
 import { ParkStore } from '../store.js'
 import { ensureIdentitySchema } from '../../identity/identityRepository.js'
@@ -16,6 +16,7 @@ import { ParkCaptcha } from '../captcha.js'
 import { FakeAgentChannel } from './fakeAgentChannel.js'
 import { appendAgentInquiry } from '../agentInquiry.js'
 import { recordSessionSearch } from '../parkAgentRoutes.js'
+import { saveConsultationSources } from '../consultationSources.js'
 import { extractLeadSignal } from '../rules.js'
 import type { DocumentStore } from '../../documentStore.js'
 import { ManagedImageStore } from '../../configuration/managedImageStore.js'
@@ -191,7 +192,9 @@ agentChannel.beforeSend = async () => {
   const index = Number(sent.mossSessionId.replace('fake-agent-', '')) - 1
   const anonymousSessionId = agentChannel.created[index]?.anonymousSessionId
   if (!anonymousSessionId) return
-  const refs = [{ name: '算力政策.md', version: 'wiki-fixture', section: '第 1 行' }]
+  const refs = await saveConsultationSources(store.db, 'park-1', anonymousSessionId,
+    [{ file: '算力政策.md', document_id: policyDocument.id, wiki_id: initialWiki.id, version: 'wiki-fixture', line_no: 1, end_line: 1, line: '算力服务可申请，具体以园区审核为准。' }],
+    [{ source: { id: policyDocument.id, fileName: '算力政策.md', nodeName: '政策文件', sizeBytes: 1 }, version: 'wiki-fixture', markdown: '算力服务可申请，具体以园区审核为准。' }])
   recordSessionSearch(sent.mossSessionId, { count: 1, refs, at: Date.now() })
   const config = await store.config('park-1')
   const redactionConfig = JSON.parse(config?.redaction_config || '{}') as { extra_terms?: string[]; summary_max_length?: number }
@@ -330,7 +333,7 @@ const server = http.createServer((req, res) => {
         })
     } catch (error) {
       if (error instanceof HttpError && path.startsWith('/api/v1/parks/')) {
-        await recordParkAudit(store, 'park-1', path, req.method ?? 'GET', error.statusCode, actor, error.message)
+        await recordParkAudit(store, 'park-1', path, req.method ?? 'GET', error.statusCode, actor, error.message, parkAuditContext(req))
       }
       throw error
     }

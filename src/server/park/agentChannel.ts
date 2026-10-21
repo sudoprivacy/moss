@@ -27,7 +27,7 @@ export class ParkRuntimeAgentChannel implements ParkAgentChannel {
 
   async createSession(input: { orgId: string; assistantId: string; anonymousSessionId: string }): Promise<string> {
     const created = await this.runtime.createSession({
-      cwd: process.cwd(),
+      cwd: process.env.PARK_BOX_WORKSPACE_DIR || process.cwd(),
       dangerouslySkipPermissions: false,
       userId: 'park-public-consultation',
       orgId: input.orgId,

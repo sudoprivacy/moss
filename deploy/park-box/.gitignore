@@ -1,0 +1,5 @@
+configuration/
+*.tar
+*.tar.gz
+*.sig
+__pycache__/

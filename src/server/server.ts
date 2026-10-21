@@ -4,11 +4,14 @@ import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { ParkStore } from './park/store.js'
 import { handlePublicParkRoute } from './park/publicRoutes.js'
 import { ManagedImageStore } from './configuration/managedImageStore.js'
-import { handleInternalParkRoute, recordParkAudit } from './park/internalRoutes.js'
+import { handleInternalParkRoute, recordParkAudit, parkAuditContext } from './park/internalRoutes.js'
 import { dispatchParkAgentApi } from './park/parkAgentRoutes.js'
 import { ParkPhoneVerification, type ParkSmsSender } from './park/phoneVerification.js'
 import { ParkCaptcha } from './park/captcha.js'
 import { boxOperationsFromEnvironment } from './park/boxOperations.js'
+import { assertBoxAvailable, handleBoxInternalRoute } from './park/boxInternalRoutes.js'
+import { probeBoxBusiness } from './park/boxBusinessProbes.js'
+import { recordBoxDatabaseRevision } from './park/boxVersion.js'
 import { ParkRuntimeAgentChannel, type ParkAgentChannel } from './park/agentChannel.js'
 import { PARK_PUBLIC_SESSION_SOURCE, parkPublicSessionMessages } from './park/mossSessions.js'
 import { processExpiredParkSessions } from './park/publicRoutes.js'
@@ -2073,12 +2076,15 @@ export function startServer(
     process.env.PARK_CAPTCHA_HMAC_KEY,
     acceptanceCaptchaCode ? () => acceptanceCaptchaCode : undefined,
   )
-  const parkBoxOperations = boxOperationsFromEnvironment(config.rootDir)
+  const parkBoxOperations = boxOperationsFromEnvironment(config.rootDir, {
+    healthProbe: () => computeReadiness(config, runtime, { isDraining: () => draining }),
+    businessProbe: () => parkOrgId ? probeBoxBusiness(parkStore, documentStore, authService, parkOrgId, false) : Promise.resolve({ configured: false }),
+  })
   const parkAgentChannel = parkAgentChannelOverride ?? new ParkRuntimeAgentChannel(runtime)
   const parkOrgId = process.env.PARK_ORG_ID?.trim() || null
   const parkSkillEntries = loadParkSkillEntries()
   let parkReady: Promise<void> | null = null
-  const ensureParkReady = () => (parkReady ??= parkStore.init())
+  const ensureParkReady = () => (parkReady ??= parkStore.init().then(() => recordBoxDatabaseRevision(parkStore.db)))
   const parkLeadTimer = setInterval(() => {
     if (parkReady) void parkStore.processLeadJobs().catch(error => logger.error(String(error)))
   }, 10_000)
@@ -2557,6 +2563,11 @@ export function startServer(
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
       const pathname = canonicalAgentTemplatePath(url.pathname)
+      if (pathname.startsWith('/internal/park-box/')) {
+        await ensureParkReady()
+        if (await handleBoxInternalRoute(req, res, pathname, { store: parkStore, orgId: parkOrgId, auth: authService, documents: documentStore, channel: parkAgentChannel })) return
+      }
+      if ((pathname.startsWith('/public/') || pathname.startsWith('/api/v1/parks/')) && !pathname.includes('/admin/operations')) await assertBoxAvailable(req)
       if (pathname.startsWith('/api/v1/auth/') || pathname === '/api/v1/client/local-runtime') res.setHeader('Cache-Control', 'no-store')
       const isHead = req.method === 'HEAD'
 
@@ -3699,7 +3710,7 @@ export function startServer(
           if (await handleInternalParkRoute(req, res, pathname, auth, { store: parkStore, orgId: parkOrgId, authService, readBody: readJsonBody, boxOperations: parkBoxOperations, documentStore, parkSkillEntries, managedImages: parkImages })) return
         } catch (error) {
           if (parkOrgId && error instanceof HttpError && error.statusCode >= 400) {
-            await recordParkAudit(parkStore, parkOrgId, pathname, req.method ?? 'GET', error.statusCode, auth.userId, error.message)
+            await recordParkAudit(parkStore, parkOrgId, pathname, req.method ?? 'GET', error.statusCode, auth.userId, error.message, parkAuditContext(req))
           }
           throw error
         }

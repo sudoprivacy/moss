@@ -120,12 +120,16 @@ if (onlyNode && ['win32', 'darwin'].includes(process.platform) && !process.env.C
 
 
 // admin/dist（由 moss server 直接挂载到 /admin）
-ensureAdminBuildDependencies()
-build('admin/dist', [
-  'run',
-  '--cwd', 'admin',
-  'build',
-])
+if (!process.argv.includes('--skip-admin')) {
+  ensureAdminBuildDependencies()
+  build('admin/dist', [
+    'run',
+    '--cwd', 'admin',
+    'build',
+  ])
+} else if (!existsSync('admin/dist/index.html')) {
+  throw new Error('--skip-admin requires an existing admin build')
+}
 
 const external = [
   // The owner validator loads packaged JSON schemas relative to its module.

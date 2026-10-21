@@ -16,9 +16,9 @@ import { getParkWikiSources } from './wikiSources.js'
 import { saveParkLogo } from './logoUpload.js'
 import { validatePolicyUpload } from './policyUpload.js'
 import { DEFAULT_REDACTION_SUMMARY_LENGTH } from './rules.js'
-import { presentParkAudit, recordParkAudit, type ParkAuditDetails } from './audit.js'
+import { parkAuditContext, presentStoredParkAudit, recordParkAudit, type ParkAuditDetails } from './audit.js'
 
-export { recordParkAudit } from './audit.js'
+export { recordParkAudit, parkAuditContext } from './audit.js'
 
 export interface InternalRouteDeps {
   store: ParkStore
@@ -78,10 +78,17 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
   const parkId = route[1]!
   if (parkId !== deps.orgId || auth.orgId !== parkId) throw new HttpError(403, 'Park access denied')
   const suffix = route[2] ?? ''
+  const context = parkAuditContext(req)
+  const readBody = async () => {
+    const body = await deps.readBody(req)
+    const requested = body.file_name ?? body.name ?? body.question ?? body.label
+    if (typeof requested === 'string') context.requestedName = str(requested, 300)
+    return body
+  }
   const role = await deps.store.role(parkId, auth.userId)
   const audit = async (status: number, details: ParkAuditDetails = {}) => {
     const actorName = await deps.authService.getUserName?.(auth.userId)
-    await recordParkAudit(deps.store, parkId, pathname, req.method!, status, auth.userId, undefined, { ...details, actorName })
+    await recordParkAudit(deps.store, parkId, pathname, req.method!, status, auth.userId, undefined, { ...context, ...details, actorName })
   }
   const presentLead = async (lead: Awaited<ReturnType<ParkStore['listLeads']>>[number]) => {
     const [session, contact] = await Promise.all([
@@ -107,7 +114,8 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
     const targetId = suffix.split('/')[1]!
     const target = await deps.authService.getUserOrNull(targetId, parkId, auth)
     if (!target || target.status !== 'active') throw new HttpError(404, 'User is unavailable')
-    const body = await deps.readBody(req)
+    Object.assign(context, { resourceId: targetId, objectName: target.displayName?.trim() || target.name })
+    const body = await readBody()
     if (!ROLES.includes(body.park_role as ParkRole)) throw new HttpError(400, 'Invalid park role')
     await deps.store.grantRole(parkId, targetId, body.park_role as ParkRole, auth.userId)
     await audit(200, { resourceId: targetId, objectName: target.displayName?.trim() || target.name })
@@ -159,6 +167,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
     const leadId = leadRoute[1]!
     const lead = await deps.store.lead(parkId, leadId)
     if (!lead) throw new HttpError(404, 'Lead not found')
+    Object.assign(context, { resourceId: leadId, objectName: `线索（${leadId}）` })
     if (req.method === 'GET' && !leadRoute[2]) {
       const [contact, followUps, inquiries] = await Promise.all([
         deps.store.contact(parkId, leadId), deps.store.followUps(parkId, leadId),
@@ -176,7 +185,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
     }
     if (req.method === 'POST' && leadRoute[2] === 'follow-ups') {
       if (lead.owner_id !== auth.userId) throw new HttpError(403, 'Lead must be claimed by the actor')
-      const body = await deps.readBody(req)
+      const body = await readBody()
       const note = str(body.note, 2000)
       if (!note) throw new HttpError(400, 'Follow-up note is required')
       const id = await deps.store.addFollowUp(parkId, leadId, auth.userId, note, str(body.outcome, 80) || null)
@@ -187,7 +196,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
     }
     if (req.method === 'PATCH' && !leadRoute[2]) {
       if (lead.owner_id !== auth.userId) throw new HttpError(403, 'Lead must be claimed by the actor')
-      const body = await deps.readBody(req)
+      const body = await readBody()
       const status = str(body.status) as LeadStatus
       if (!['converted', 'invalid', 'closed'].includes(status)) throw new HttpError(400, 'Invalid closing status')
       if (!(await deps.store.closeLead(parkId, leadId, auth.userId, status as 'converted' | 'invalid' | 'closed'))) throw new HttpError(409, 'Lead is not available for closing')
@@ -201,7 +210,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
   if (suffix === 'admin/config') {
     if (req.method === 'GET') { writeJson(res, 200, await deps.store.config(parkId)); return true }
     if (req.method === 'PUT') {
-      const body = await deps.readBody(req)
+      const body = await readBody()
       if (body.service_catalog !== undefined && !Array.isArray(body.service_catalog)) throw new HttpError(400, 'Service catalog must be a list')
       let savedLogo: { filename: string; publicPath: string } | undefined
       if (body.logo_upload !== undefined) {
@@ -237,7 +246,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
   }
   if (suffix === 'admin/policy/tree/nodes' && req.method === 'POST') {
     const documentStore = requireDocumentStore()
-    const body = await deps.readBody(req)
+    const body = await readBody()
     const name = str(body.name, 120)
     if (!name) throw new HttpError(400, 'Node name is required')
     const parentId = body.parent_id === null ? null : str(body.parent_id, 100) || null
@@ -259,13 +268,15 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
   }
   if (policyDocs && req.method === 'POST') {
     const documentStore = requireDocumentStore()
-    const body = await deps.readBody(req)
+    const body = await readBody()
     const fileName = str(body.file_name, 255)
     const mimeType = str(body.mime_type, 120) || 'application/octet-stream'
     const contentBase64 = typeof body.content_base64 === 'string' ? body.content_base64 : ''
     if (!fileName || !contentBase64) throw new HttpError(400, 'file_name and content_base64 are required')
     const content = Buffer.from(contentBase64, 'base64')
-    if (!(await documentStore.getNode(policyDocs[1]!, parkId))) throw new HttpError(404, 'Node not found')
+    const parent = await documentStore.getNode(policyDocs[1]!, parkId)
+    if (!parent) throw new HttpError(404, 'Node not found')
+    Object.assign(context, { parentId: parent.id, parentName: parent.name })
     await validatePolicyUpload(fileName, content)
     const document = await documentStore.uploadDocument({
       orgId: parkId, nodeId: policyDocs[1]!, fileName, mimeType, content, uploadedBy: auth.userId,
@@ -279,6 +290,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
     const documentId = policyDocQuery[1]!
     const document = await documentStore.getDocument(documentId, parkId)
     if (!document) throw new HttpError(404, 'Document not found')
+    Object.assign(context, { resourceId: document.id, objectName: document.fileName })
     const node = await documentStore.getNode(document.nodeId, parkId)
     writeJson(res, 200, { ...document, node_name: node?.name ?? '' })
     return true
@@ -288,6 +300,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
     const documentStore = requireDocumentStore()
     const document = await documentStore.getDocument(policyDocDelete[1]!, parkId)
     if (!document) throw new HttpError(404, 'Document not found')
+    Object.assign(context, { resourceId: document.id, objectName: document.fileName })
     const node = await documentStore.getNode(document.nodeId, parkId)
     await deps.store.rememberDocument(parkId, { id: document.id, fileName: document.fileName, nodeName: node?.name ?? '', sizeBytes: document.sizeBytes })
     await documentStore.deleteDocument(policyDocDelete[1]!, parkId)
@@ -299,7 +312,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
   }
   if (suffix === 'admin/policy/wikis' && req.method === 'POST') {
     const documentStore = requireDocumentStore()
-    const body = await deps.readBody(req)
+    const body = await readBody()
     const name = str(body.name, 150)
     const sourceDocumentIds = Array.isArray(body.source_document_ids)
       ? body.source_document_ids.filter((item): item is string => typeof item === 'string')
@@ -317,9 +330,11 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
   const policyWiki = /^admin\/policy\/wikis\/([^/]+)$/.exec(suffix)
   if (policyWiki && req.method === 'PATCH') {
     const documentStore = requireDocumentStore()
-    const body = await deps.readBody(req)
+    const body = await readBody()
     const wikiId = policyWiki[1]!
-    if (!(await documentStore.getWiki(wikiId, parkId))) throw new HttpError(404, 'Wiki not found')
+    const existing = await documentStore.getWiki(wikiId, parkId)
+    if (!existing) throw new HttpError(404, 'Wiki not found')
+    Object.assign(context, { resourceId: existing.id, objectName: existing.name })
     const sourceDocumentIds = Array.isArray(body.source_document_ids)
       ? body.source_document_ids.filter((item): item is string => typeof item === 'string')
       : undefined
@@ -342,6 +357,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
     const wikiId = policyWikiBuild[1]!
     const wiki = await documentStore.getWiki(wikiId, parkId)
     if (!wiki) throw new HttpError(404, 'Wiki not found')
+    Object.assign(context, { resourceId: wiki.id, objectName: wiki.name })
     const job = await documentStore.createBuildJob({ wikiId, triggeredBy: auth.userId })
     await documentStore.setWikiBuildResult(wikiId, { status: 'pending' })
     await audit(200, { resourceId: wiki.id, objectName: wiki.name })
@@ -369,7 +385,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
   if (suffix === 'admin/quick-questions') {
     if (req.method === 'GET') { writeJson(res, 200, await deps.store.quickQuestions(parkId)); return true }
     if (req.method === 'POST') {
-      const body = await deps.readBody(req)
+      const body = await readBody()
       const question = str(body.question, 300)
       if (!question) throw new HttpError(400, 'Question is required')
       const id = await deps.store.putQuickQuestion(parkId, { id: str(body.id, 100) || undefined,
@@ -381,6 +397,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
   const questionDelete = /^admin\/quick-questions\/([^/]+)$/.exec(suffix)
   if (questionDelete && req.method === 'DELETE') {
     const question = (await deps.store.quickQuestions(parkId)).find(row => row.id === questionDelete[1])
+    if (question) Object.assign(context, { resourceId: question.id, objectName: question.question })
     if (!(await deps.store.deleteQuickQuestion(parkId, questionDelete[1]!))) throw new HttpError(404, 'Question not found')
     await audit(204, { resourceId: questionDelete[1], objectName: str(question?.question) || undefined })
     res.writeHead(204); res.end(); return true
@@ -395,7 +412,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
       writeJson(res, 200, { value, ...(field === 'assistant_config' ? { status: config.assistant_status } : {}) }); return true
     }
     if (req.method === 'PUT') {
-      const body = await deps.readBody(req)
+      const body = await readBody()
       const value = objectValue(body.value ?? {})
       const patch = { [field]: JSON.stringify(value) } as Record<typeof field, string> & { assistant_status?: string }
       if (field === 'assistant_config') {
@@ -437,7 +454,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
       writeJson(res, 200, { public_url: process.env.PARK_PUBLIC_URL ?? null, links }); return true
     }
     if (req.method === 'POST') {
-      const body = await deps.readBody(req)
+      const body = await readBody()
       const channel = str(body.channel, 60); const label = str(body.label, 120)
       if (!/^[a-z0-9_-]{1,60}$/.test(channel) || !label) throw new HttpError(400, 'Invalid channel or label')
       const id = randomUUID()
@@ -451,6 +468,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
   const linkDelete = /^admin\/public-links\/([^/]+)$/.exec(suffix)
   if (linkDelete && req.method === 'DELETE') {
     const link = await deps.store.db.get<{ label: string; channel: string }>('SELECT label, channel FROM park_public_links WHERE org_id = ? AND id = ?', [parkId, linkDelete[1]!])
+    if (link) Object.assign(context, { resourceId: linkDelete[1], objectName: `${link.label}（${link.channel}）` })
     const result = await deps.store.deletePublicLink(parkId, linkDelete[1]!)
     if (result === 'missing') throw new HttpError(404, 'Public link not found')
     if (result === 'enabled') throw new HttpError(409, 'Disable the public link before deleting it')
@@ -477,21 +495,31 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
     for (const row of rows) {
       if (!row.actor_name?.trim() && row.actor_user_id && !names.has(row.actor_user_id)) names.set(row.actor_user_id, await deps.authService.getUserName?.(row.actor_user_id))
     }
-    writeJson(res, 200, rows.map(({ request_data_json, ...row }) => ({
+    writeJson(res, 200, await Promise.all(rows.map(async ({ request_data_json, ...row }) => ({
       ...row, actor_name: row.actor_name?.trim() || (row.actor_user_id ? names.get(row.actor_user_id) : undefined) || null,
-      ...presentParkAudit({ ...row, request_data_json }),
-    }))); return true
+      ...await presentStoredParkAudit(deps.store, parkId, { ...row, request_data_json }),
+    })))); return true
   }
   if (suffix === 'admin/operations' && req.method === 'GET') {
     if (!deps.boxOperations) throw new HttpError(503, 'Box operations are unavailable')
     writeJson(res, 200, await deps.boxOperations.status()); return true
   }
-  const operation = /^admin\/operations\/(backup|restore|verify-upgrade|upgrade|rollback|reindex)$/.exec(suffix)
+  const taskRoute = /^admin\/operations\/tasks\/([a-f0-9-]+)$/.exec(suffix)
+  if (taskRoute && req.method === 'GET') {
+    if (!deps.boxOperations) throw new HttpError(503, 'Box operations are unavailable')
+    writeJson(res, 200, await deps.boxOperations.task(taskRoute[1]!)); return true
+  }
+  const operation = /^admin\/operations\/(backup|restore|verify-upgrade|upgrade|rollback|reindex|model-check)$/.exec(suffix)
   if (operation && req.method === 'POST') {
     if (!deps.boxOperations) throw new HttpError(503, 'Box operations are unavailable')
-    const body = await deps.readBody(req)
+    const body = await readBody()
     const name = str(body.name, 255)
     const action = operation[1]!
+    if (deps.boxOperations.usesAgent) {
+      const task = await deps.boxOperations.submit(action, parkId, auth.userId, str(body.request_id, 128), name)
+      await audit(202, { objectName: name || '园区盒子' })
+      writeJson(res, 202, task); return true
+    }
     const result = action === 'backup' ? await deps.boxOperations.backup()
       : action === 'restore' ? await deps.boxOperations.restore(name)
       : action === 'verify-upgrade' ? await deps.boxOperations.verifyUpgrade(name)

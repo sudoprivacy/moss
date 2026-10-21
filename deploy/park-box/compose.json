@@ -1,0 +1,54 @@
+{
+  "name": "park-box",
+  "services": {
+    "initialize": {
+      "image": "park-box-operations:1", "profiles": ["setup"],
+      "entrypoint": ["python", "bootstrap.py"],
+      "volumes": ["park-data:/box", "operations-socket:/socket", "./configuration:/config"], "networks": ["box"]
+    },
+    "operations": {
+      "image": "park-box-operations:1",
+      "restart": "unless-stopped",
+      "volumes": ["/var/run/docker.sock:/var/run/docker.sock", "park-data:/box", "operations-state:/state", "operations-socket:/socket", "./configuration/agent.json:/config/agent.json:ro", "./configuration/upgrade-public.pem:/config/upgrade-public.pem:ro"],
+      "networks": ["box"]
+    },
+    "nexus": {
+      "image": "park-box-nexus:current",
+      "restart": "unless-stopped",
+      "command": ["--advertise-addr", "nexus:2126", "--no-tls", "--insecure-no-auth", "--data-dir", "/box/home/nexus/data", "--identity-dir", "/box/home/nexus/identity", "--plugin-dir", "/app/bin/nexus/plugins"],
+      "environment": {"NEXUS_DATA_DIR": "/box/home/nexus/data"},
+      "volumes": ["park-data:/box"],
+      "networks": ["box"]
+    },
+    "moss": {
+      "image": "park-box-moss:current",
+      "restart": "unless-stopped",
+      "ports": ["127.0.0.1:${PARK_BOX_MOSS_PORT:-44174}:43127"],
+      "environment": {
+        "MOSS_HOME": "/box/home", "CLAUDE_CONFIG_DIR": "/box/home", "HOME": "/box/home", "MOSS_SERVER_CONFIG": "/box/config/server.json",
+        "MOSS_SERVER_URL": "http://moss:43127", "MOSS_PUBLIC_BASE_URL": "http://localhost:${PARK_BOX_MOSS_PORT:-44174}",
+        "MOSS_NEXUS_MODE": "external", "MOSS_NEXUS_ENDPOINT": "http://nexus:2126", "MOSS_INSTANCE_ID": "park-box",
+        "MOSS_AUTH_PROXY_HOST": "0.0.0.0", "MOSS_AUTH_PROXY_URL": "http://moss:12013",
+        "PARK_BOX_AGENT_SOCKET": "/socket/agent.sock", "PARK_BOX_MAINTENANCE_FILE": "/state/maintenance.json", "PARK_BOX_WORKSPACE_DIR": "/box/workspaces", "PARK_BOX_RUNNER_READY_TIMEOUT_MS": "120000"
+      },
+      "entrypoint": ["node", "/box/config/start-moss.mjs"],
+      "volumes": ["park-data:/box", "operations-state:/state:ro", "operations-socket:/socket:ro"],
+      "networks": ["box"]
+    },
+    "park": {
+      "image": "park-box-park:current",
+      "restart": "unless-stopped",
+      "ports": ["127.0.0.1:${PARK_BOX_PORT:-44176}:4176"],
+      "environment": {"MOSS_BASE_URL": "http://moss:43127", "PARK_PUBLIC_ORIGIN": "http://localhost:${PARK_BOX_PORT:-44176}", "PARK_SESSION_DB": "/box/park/sessions.sqlite"},
+      "entrypoint": ["node", "/box/config/start-park.mjs"],
+      "volumes": ["park-data:/box"],
+      "networks": ["box"]
+    }
+  },
+  "volumes": {
+    "park-data": {"name": "park-box-data"},
+    "operations-state": {"name": "park-box-operations-state"},
+    "operations-socket": {"name": "park-box-operations-socket"}
+  },
+  "networks": {"box": {"name": "park-box-network"}}
+}

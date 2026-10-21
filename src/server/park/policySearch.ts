@@ -1,14 +1,5 @@
-import { createHash } from 'node:crypto'
-import { readFile, realpath } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
-import type { WikiSourceSnapshot } from '../wikiSourceSnapshot.js'
 import { HttpError } from '../httpRespond.js'
-
-interface SourceMeta {
-  wikiId: string
-  builtAt: number
-  sourceDocuments: WikiSourceSnapshot[]
-}
+import { readPolicySources, type VerifiedPolicySource } from './policySources.js'
 
 export interface PolicyMatch {
   file: string
@@ -40,26 +31,10 @@ function sections(markdown: string): Array<{ start: number; end: number; text: s
 }
 
 /** Read one complete published source generation; never fall back to live uploads. */
-export async function searchParkPolicySources(wikiPath: string, wikiId: string, query: string): Promise<PolicyMatch[]> {
+export async function searchParkPolicySources(wikiPath: string, wikiId: string, query: string, onSources?: (matches: PolicyMatch[], bodies: VerifiedPolicySource[]) => Promise<void>): Promise<PolicyMatch[]> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const raw = await readFile(join(wikiPath, '_moss_meta.json'), 'utf8')
-      const meta = JSON.parse(raw) as SourceMeta
-      if (meta.wikiId !== wikiId || !Number.isFinite(meta.builtAt) || !Array.isArray(meta.sourceDocuments)) throw new Error('Invalid source metadata')
-      const sources: Array<{ source: WikiSourceSnapshot; markdown: string }> = []
-      for (const source of meta.sourceDocuments) {
-        if (!source.markdownPath || !source.markdownSha256) throw new Error('政策原文映射缺失，请重新构建知识库')
-        if (source.markdownPath !== `_sources/${source.id}.md`) throw new Error('Invalid source path')
-        const root = await realpath(wikiPath)
-        const file = await realpath(resolve(wikiPath, source.markdownPath))
-        const rel = relative(root, file)
-        if (isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) throw new Error('Invalid source path')
-        const bytes = await readFile(file)
-        if (createHash('sha256').update(bytes).digest('hex') !== source.markdownSha256) throw new Error('政策正文校验失败，请重新构建知识库')
-        sources.push({ source, markdown: bytes.toString('utf8') })
-      }
-      // A concurrent publish must not produce a response mixing generations.
-      if (raw !== await readFile(join(wikiPath, '_moss_meta.json'), 'utf8')) continue
+      const sources = await readPolicySources(wikiPath, wikiId)
       const terms = queryTerms(query)
       const ranked = sources.map(item => {
         const title = `${item.source.fileName}\n${item.markdown.split(/\r?\n/).find(line => /^#\s/.test(line)) ?? ''}`.toLowerCase()
@@ -83,10 +58,11 @@ export async function searchParkPolicySources(wikiPath: string, wikiId: string, 
         seen.add(hash)
         for (const section of sections(item.markdown)) {
           matches.push({ file: item.source.fileName, document_id: item.source.id, wiki_id: wikiId,
-            version: `wiki-${new Date(meta.builtAt).toISOString()}`, line_no: section.start,
+            version: item.version, line_no: section.start,
             end_line: section.end, line: section.text })
         }
       }
+      await onSources?.(matches, sources)
       return matches
     } catch (error) {
       if (attempt === 2) throw new HttpError(503, error instanceof Error ? error.message : 'Policy source unavailable')

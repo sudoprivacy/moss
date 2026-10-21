@@ -7,6 +7,7 @@ import {
   withOrganizationResources,
 } from "../catalog/organizationResources.js";
 import { searchParkPolicySources, type PolicyMatch } from './policySearch.js';
+import { saveConsultationSources, type ConsultationSource } from './consultationSources.js';
 import { appendAgentInquiry, isValidAgentIntent } from "./agentInquiry.js";
 import type { LeadSignal } from "./rules.js";
 import type { ParkStore } from "./store.js";
@@ -33,7 +34,7 @@ export interface ParkAgentRouteResult {
 
 interface SessionSearchRecord {
   count: number;
-  refs: Array<{ name: string; version: string; section: string }>;
+  refs: ConsultationSource[];
   at: number;
 }
 
@@ -202,16 +203,19 @@ async function searchPolicyWikis(
   deps: ParkAgentRouteDeps,
   grant: ParkAgentGrant,
   query: string,
-): Promise<PolicyMatch[]> {
+): Promise<{ matches: PolicyMatch[]; refs: ConsultationSource[] }> {
   const wikiIds = await resolveEnabledWikiIds(deps, grant);
   if (!wikiIds.length) throw new HttpError(503, 'Policy knowledge base is unavailable');
   const matches: PolicyMatch[] = [];
+  const refs: ConsultationSource[] = [];
   for (const wikiId of wikiIds) {
     const wiki = await deps.documentStore.getWiki(wikiId, grant.parkOrgId);
     if (!wiki) throw new HttpError(503, 'Policy knowledge base is unavailable');
-    matches.push(...await searchParkPolicySources(wiki.storagePath, wikiId, query));
+    matches.push(...await searchParkPolicySources(wiki.storagePath, wikiId, query, async (hits, bodies) => {
+      refs.push(...await saveConsultationSources(deps.store.db, grant.parkOrgId, grant.anonymousSessionId, hits, bodies));
+    }));
   }
-  return matches;
+  return { matches, refs };
 }
 
 /**
@@ -233,16 +237,10 @@ export async function dispatchParkAgentApi(
   if (method === "GET" && pathname === "/api/v1/agent/park/policies/search") {
     const query = (url.searchParams.get("q") ?? "").trim().slice(0, 500);
     if (!query) throw new HttpError(400, "q is required");
-    const matches = await searchPolicyWikis(deps, grant, query);
+    const { matches, refs } = await searchPolicyWikis(deps, grant, query);
     recordSessionSearch(grant.agentSessionId, {
       count: matches.length,
-      refs: matches
-        .slice(0, 20)
-        .map((match) => ({
-          name: match.file,
-          version: match.version,
-          section: `第 ${match.line_no} 行`,
-        })),
+      refs,
       at: Date.now(),
     });
     return {

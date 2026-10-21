@@ -1,6 +1,15 @@
 import type { DbDriver } from '../db/driver.js'
 
 const TABLES = [
+  `CREATE TABLE IF NOT EXISTS park_source_bodies (
+    org_id TEXT NOT NULL, sha256 TEXT NOT NULL, markdown TEXT NOT NULL,
+    PRIMARY KEY (org_id, sha256)
+  )`,
+  `CREATE TABLE IF NOT EXISTS park_session_sources (
+    id TEXT PRIMARY KEY, org_id TEXT NOT NULL, session_id TEXT NOT NULL,
+    wiki_id TEXT NOT NULL, document_id TEXT NOT NULL, version TEXT NOT NULL,
+    file_name TEXT NOT NULL, body_sha256 TEXT NOT NULL, ranges_json TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS park_document_history (
     org_id TEXT NOT NULL, document_id TEXT NOT NULL, file_name TEXT NOT NULL,
     node_name TEXT NOT NULL, size_bytes BIGINT NOT NULL,

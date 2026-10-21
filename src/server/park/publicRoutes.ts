@@ -8,6 +8,7 @@ import type { ParkPhoneVerification } from "./phoneVerification.js";
 import type { ParkCaptcha } from "./captcha.js";
 import type { ParkAgentChannel } from "./agentChannel.js";
 import { takeSessionSearch } from "./parkAgentRoutes.js";
+import { readConsultationPreview } from './consultationSources.js';
 import { ManagedImageError, type ManagedImageStore } from '../configuration/managedImageStore.js'
 
 const COOKIE_NAME = "park_session";
@@ -466,6 +467,12 @@ export async function handlePublicParkRoute(
     }
     await deps.phoneVerification.send(session.id, phone);
     writeJson(res, 200, { sent: true, expires_in: 300 });
+    return true;
+  }
+  const preview = /^\/public\/sessions\/([^/]+)\/sources\/([^/]+)\/preview$/.exec(pathname);
+  if (preview && req.method === 'GET') {
+    const session = await ownedSession(deps, req, preview[1]!);
+    writeJson(res, 200, await readConsultationPreview(deps.store.db, deps.orgId, session.id, preview[2]!));
     return true;
   }
   const match = /^\/public\/sessions\/([^/]+)\/(messages|contact)$/.exec(

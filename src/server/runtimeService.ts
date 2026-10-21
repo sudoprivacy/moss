@@ -2618,9 +2618,13 @@ export class RuntimeService {
     try {
       const readyTimeoutMs = session.runtime.type === 'k8s'
         ? ((this.options.config.k8s?.podReadyTimeoutSec ?? 90) + 30) * 1000
-        : 5_000
+        : session.runtime.type === 'host' && process.env.PARK_BOX_RUNNER_READY_TIMEOUT_MS
+          ? Number(process.env.PARK_BOX_RUNNER_READY_TIMEOUT_MS)
+          : 5_000
+      if (!Number.isSafeInteger(readyTimeoutMs) || readyTimeoutMs < 5_000 || readyTimeoutMs > 300_000) throw new Error('Runner readiness timeout must be between 5000 and 300000 milliseconds')
       await waitForRunnerReady(attachPath, statusPath, stderrLogPath, readyTimeoutMs)
     } catch (err) {
+      child.kill('SIGTERM')
       // Runner failed to come up. Its child.once('close') will still fire
       // (the process is going to exit), so releaseGuard runs once. We just
       // propagate the error.
