@@ -6,6 +6,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AuthService } from '../auth/service.js'
+import { IdentityRepository } from '../identity/identityRepository.js'
 import { AuthCenterDb, hashPassword } from '../authCenter/db.js'
 import { createCatalogTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
 import { dispatchAgentInventory } from './inventoryRoutes.js'
@@ -131,7 +132,11 @@ void test('inventory gateway enforces real AuthCenter identity, owner, departmen
     root = await login('root')
   const switched = (await auth.verifyAccessToken((await auth.switchOrg(root, 'org-b')).access_token))!
   const outbound: { zone: string; path: string; body: InventoryCommand | null }[] = []
-  const rows = [asset(), asset('asset-b', 'bob'), asset('asset-c', 'charlie', 'zone-b')]
+  const unclaimed = asset('asset-unclaimed')
+  unclaimed.metadata.owner_user_id = null
+  unclaimed.metadata_digest = `sha256:${createHash('sha256').update(stableJson(unclaimed.metadata)).digest('hex')}`
+  unclaimed.status = 'discovered'
+  const rows = [asset(), asset('asset-b', 'bob'), asset('asset-c', 'charlie', 'zone-b'), unclaimed]
   t.mock.method(globalThis, 'fetch', (url: string, init: Parameters<RegistryRequest>[1]) => {
     const target = new URL(url),
       zone = init.headers['X-Nexus-Zone-ID']
@@ -141,7 +146,15 @@ void test('inventory gateway enforces real AuthCenter identity, owner, departmen
     const body = init.body ? (JSON.parse(init.body) as InventoryCommand) : null
     outbound.push({ zone, path: target.pathname, body })
     if (body) {
-      const result = asset(body.asset_id, body.kind === 'SaveAsset' ? body.metadata.owner_user_id : 'alice', zone)
+      const result = asset(
+        body.asset_id,
+        body.kind === 'SaveAsset'
+          ? (body.metadata.owner_user_id ?? undefined)
+          : body.kind === 'ClaimAsset'
+            ? body.owner_user_id
+            : 'alice',
+        zone,
+      )
       result.revision = body.expected_revision + 1
       return Promise.resolve(Response.json(result))
     }
@@ -163,7 +176,8 @@ void test('inventory gateway enforces real AuthCenter identity, owner, departmen
           items: rows.filter(
             (row) =>
               row.owner_zone === zone &&
-              (!target.searchParams.has('owner') || row.metadata.owner_user_id === target.searchParams.get('owner')),
+              (!target.searchParams.has('owner') ||
+                (row.metadata.owner_user_id ?? '') === target.searchParams.get('owner')),
           ),
           next_cursor: null,
         }),
@@ -183,7 +197,7 @@ void test('inventory gateway enforces real AuthCenter identity, owner, departmen
     (await service.list(alice)).items.map((row) => row.id),
     ['asset-a'],
   )
-  assert.equal((await service.list(admin)).items.length, 2)
+  assert.equal((await service.list(admin)).items.length, 3)
   assert.deepEqual(
     (await service.list(switched)).items.map((row) => row.id),
     ['asset-c'],
@@ -191,6 +205,19 @@ void test('inventory gateway enforces real AuthCenter identity, owner, departmen
   assert.equal((await call(bob, '/assets/asset-a')).status, 404)
   assert.equal((await call(bob, '/assets/asset-a/history')).status, 404)
   assert.equal((await call(alice, '/assets/asset-c')).status, 404)
+  assert.equal((await call(alice, '/assets/asset-unclaimed')).status, 404)
+  assert.deepEqual((await service.discovered(alice)).items, [
+    { id: 'asset-unclaimed', revision: 1, name: 'Support', platform: 'dify', external_domain: false },
+  ])
+  assert.equal((await service.discovered(switched)).items.length, 0)
+  const claim = { kind: 'ClaimAsset', asset_id: 'asset-unclaimed', expected_revision: 1, request_id: randomUUID() }
+  assert.equal((await call(bob, '/commands', 'POST', claim)).status, 200)
+  assert.equal(outbound.at(-1)?.body?.kind, 'ClaimAsset')
+  assert.equal((outbound.at(-1)?.body as { owner_user_id: string }).owner_user_id, 'bob')
+  assert.equal((await call(bob, '/commands', 'POST', { ...claim, owner_user_id: 'alice' })).status, 400)
+  assert.equal((await call(bob, '/commands', 'POST', { ...claim, asset_id: 'asset-a' })).status, 409)
+  assert.equal((await call(alice, '/sources')).status, 403)
+  assert.equal((await call(alice, '/discover', 'POST', { source_id: 'catalog' })).status, 403)
   const beforeReads = outbound.length
   await service.get(alice, 'asset-a')
   await service.history(alice, 'asset-a')
@@ -241,6 +268,50 @@ void test('inventory gateway enforces real AuthCenter identity, owner, departmen
     (await service.members(switched)).items.map((row) => row.id),
     ['charlie'],
   )
+  const previousOrigins = process.env.MOSS_AGENT_DISCOVERY_ORIGINS
+  const secrets = new Map<string, string>()
+  process.env.MOSS_AGENT_DISCOVERY_ORIGINS = JSON.stringify({ 'org-a': ['http://127.0.0.1:19999'] })
+  try {
+    const withSources = auth.createAgentInventoryService({
+      putSecret: async (namespace, key, value) => {
+        secrets.set(namespace + '/' + key, value)
+      },
+      getSecret: async (namespace, key) => ({
+        value: secrets.get(namespace + '/' + key) ?? null,
+        status: 'enabled',
+        version: 1,
+      }),
+      deleteSecret: async (namespace, key) => {
+        secrets.delete(namespace + '/' + key)
+      },
+    })
+    const source = await withSources.createSource(admin, {
+      name: 'Local discovery',
+      kind: 'dify',
+      origin: 'http://127.0.0.1:19999',
+      scope: 'workspace-a',
+      external_domain: false,
+      api_key: 'synthetic-console-token',
+      csrf_token: 'synthetic-csrf',
+    })
+    assert.equal(secrets.size, 1)
+    assert.ok([...secrets.keys()][0].startsWith('org:org-a:agent-discovery:'))
+    const sourceList = await withSources.listSources(admin)
+    assert.equal(sourceList.items.length, 1)
+    assert.ok(!JSON.stringify(sourceList).includes('synthetic-console-token'))
+    await assert.rejects(withSources.listSources(alice), /ADMIN_REQUIRED/)
+    await assert.rejects(withSources.disableSource(switched, source.id), /DISCOVERY_SOURCE_NOT_FOUND/)
+    assert.equal((await withSources.listSources(switched)).items.length, 0)
+    await withSources.disableSource(admin, source.id)
+    assert.equal((await withSources.listSources(admin)).items[0].enabled, false)
+    assert.equal((await withSources.discover(admin, { source_id: source.id })).error, 'DISCOVERY_SOURCE_DISABLED')
+    const audits = await new IdentityRepository(authDb.driver).listOperationAudits({ orgId: 'org-a', limit: 100, offset: 0 })
+    assert.equal(audits.items.filter(row => row.resourceId === source.id).length, 2)
+    assert.ok(!JSON.stringify(audits).includes('synthetic-console-token'))
+  } finally {
+    if (previousOrigins === undefined) delete process.env.MOSS_AGENT_DISCOVERY_ORIGINS
+    else process.env.MOSS_AGENT_DISCOVERY_ORIGINS = previousOrigins
+  }
   // A role or status revoked after token issuance is checked again at the gateway.
   await authDb.updateUser('admin-a', { role: 'user' })
   assert.equal((await service.access(admin)).can_manage, false)

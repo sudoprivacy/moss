@@ -2065,7 +2065,7 @@ export function startServer(
   }) : null
 
   const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient, runtime.serverInstanceId) : null
-  const agentInventory = authService.createAgentInventoryService()
+  const agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined)
   const externalStoreReady = externalProviders?.ownership.ready ?? Promise.resolve()
   let isStopped = false
 

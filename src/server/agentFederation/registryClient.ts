@@ -1,6 +1,7 @@
 import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import Ajv2020 from 'ajv/dist/2020.js'
+import type { PlatformDiscoveryPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { assertResourceRef } from '@sudo/contracts/common/v1/resource-ref'
 import schema from '../../../contracts/agent-registry/v1alpha1/schema.json' with { type: 'json' }
 import { AGENT_REGISTRY_API, type CommandResult, type PrincipalRef, type RegistryWire, type Resolution, type SignedVersion, type VersionItem, type VersionsPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
@@ -29,6 +30,7 @@ ajv.addKeyword({ keyword: 'discriminator', valid: true })
 ajv.addSchema({ $id: RESOURCE_REF_ID, sudoResourceRef: true })
 ajv.addSchema(schema)
 const validators = {
+  PlatformDiscoveryPage: ajv.compile<PlatformDiscoveryPage>({ $ref: `${schema.$id}#/$defs/PlatformDiscoveryPage` }),
   SignedVersion: ajv.compile<SignedVersion>({ $ref: `${schema.$id}#/$defs/SignedVersion` }),
   CommandResult: ajv.compile<CommandResult>({ $ref: `${schema.$id}#/$defs/CommandResult` }),
   VersionsPage: ajv.compile<VersionsPage>({ $ref: `${schema.$id}#/$defs/VersionsPage` }),
@@ -38,9 +40,13 @@ const validators = {
   AssetRecord: ajv.compile<AssetRecord>({ $ref: `${schema.$id}#/$defs/AssetRecord` }),
   AssetPage: ajv.compile<AssetPage>({ $ref: `${schema.$id}#/$defs/AssetPage` }),
   AssetHistory: ajv.compile<AssetHistory>({ $ref: `${schema.$id}#/$defs/AssetHistory` }),
-  InventoryCommand: ajv.compile<InventoryCommand>({ oneOf: ['SaveAsset', 'ObserveAsset', 'SubmitAsset', 'ReviewAsset', 'SuspendAsset', 'LinkAsset', 'MergeAsset', 'RecordAcceptance'].map(name => ({ $ref: `${schema.$id}#/$defs/${name}` })) }),
+  InventoryCommand: ajv.compile<InventoryCommand>({ oneOf: ['SaveAsset', 'ObserveAsset', 'ClaimAsset', 'SubmitAsset', 'ReviewAsset', 'SuspendAsset', 'LinkAsset', 'MergeAsset', 'RecordAcceptance'].map(name => ({ $ref: `${schema.$id}#/$defs/${name}` })) }),
 }
 const hash = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+export function parsePlatformDiscoveryPage(value: unknown): PlatformDiscoveryPage {
+  if (!validators.PlatformDiscoveryPage(value)) fail('DISCOVERY_RESPONSE_INVALID', 502)
+  return value as PlatformDiscoveryPage
+}
 function fail(code: string, status = 503): never { throw new ExternalProviderError(status, code) }
 export function parseInventoryCommand(value: unknown): InventoryCommand {
   if (!validators.InventoryCommand(value) || Buffer.byteLength(JSON.stringify(value)) > 65536) fail('INVALID_INVENTORY_COMMAND', 400)
@@ -174,7 +180,7 @@ export class ProductRegistryClient {
     if (!validators.AssetPage(value)) fail('REGISTRY_RESPONSE_INVALID')
     for (const row of value.items) {
       this.inventoryRecord(row, orgId)
-      if (owner !== undefined && row.metadata.owner_user_id !== owner) fail('REGISTRY_RESPONSE_INVALID')
+      if (owner !== undefined && (row.metadata.owner_user_id ?? '') !== owner) fail('REGISTRY_RESPONSE_INVALID')
     }
     if (value.items.some((row, i) => row.id <= (i ? value.items[i - 1].id : after))
       || (value.next_cursor !== null && (!value.items.length || value.next_cursor !== value.items.at(-1)!.id))) fail('REGISTRY_RESPONSE_INVALID')

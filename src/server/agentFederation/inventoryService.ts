@@ -5,9 +5,12 @@ import { object } from '../externalProviders/administration.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import { parseInventoryCommand, type ProductRegistryClient } from './registryClient.js'
 import type { InventoryAssetView, InventoryPageView } from './inventoryViews.js'
+import { discoveryDigest, discoveryId, discoverySourceKey, type DiscoveryResult } from './inventoryDiscovery.js'
+import type { InventorySources } from './inventorySources.js'
 
 export interface InventoryServiceOptions {
   registry?: ProductRegistryClient
+  sources?: InventorySources
   catalog: Pick<CatalogRepository, 'getAgent'>
   authorize: (actor: AuthContext) => Promise<{ canManage: boolean }>
   member: (orgId: string, userId: string) => Promise<{ id: string; departmentId: string | null } | null>
@@ -75,12 +78,12 @@ export class AgentInventoryService {
   private async present(orgId: string, rows: AssetRecord[]): Promise<InventoryAssetView[]> {
     const labels = await this.options.labels(
       orgId,
-      [...new Set(rows.map((row) => row.metadata.owner_user_id))],
+      [...new Set(rows.map((row) => row.metadata.owner_user_id).filter((id): id is string => !!id))],
       [...new Set(rows.map((row) => row.metadata.department_id).filter((id): id is string => !!id))],
     )
     return rows.map((row) => ({
       ...row,
-      owner_display_name: labels.users.get(row.metadata.owner_user_id) ?? null,
+      owner_display_name: labels.users.get(row.metadata.owner_user_id ?? '') ?? null,
       department_display_name: labels.departments.get(row.metadata.department_id ?? '') ?? null,
     }))
   }
@@ -104,6 +107,107 @@ export class AgentInventoryService {
     await this.readable(actor, id, canManage)
     return this.registry(actor.orgId).inventoryHistory(actor.orgId, id, after)
   }
+  async discovered(actor: AuthContext, after = '') {
+    await this.options.authorize(actor)
+    if (after) identifier(after)
+    const page = await this.registry(actor.orgId).inventoryList(actor.orgId, after, '')
+    // Members see only claimable names and source classifications, not other owners' asset metadata.
+    return {
+      items: page.items
+        .filter((row) => row.status === 'discovered')
+        .map((row) => ({
+          id: row.id,
+          revision: row.revision,
+          name: row.metadata.name,
+          platform: row.metadata.source_platform,
+          external_domain: row.external_domain,
+        })),
+      next_cursor: page.next_cursor,
+    }
+  }
+  private async sources(actor: AuthContext) {
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    if (!this.options.sources) fail('DISCOVERY_NOT_CONFIGURED', 503)
+    return this.options.sources
+  }
+  async listSources(actor: AuthContext) {
+    return (await this.sources(actor)).list(actor.orgId)
+  }
+  async createSource(actor: AuthContext, body: unknown) {
+    return (await this.sources(actor)).create(actor, body)
+  }
+  async disableSource(actor: AuthContext, id: string) {
+    await (await this.sources(actor)).disable(actor, identifier(id))
+    return { disabled: true }
+  }
+  async discover(actor: AuthContext, input: unknown): Promise<DiscoveryResult> {
+    const sources = await this.sources(actor),
+      body = object(input, ['source_id']),
+      id = identifier(body.source_id)
+    const result: DiscoveryResult = {
+      source_id: id,
+      scanned: 0,
+      created: 0,
+      updated: 0,
+      unchanged: 0,
+      complete: false,
+      boundary: '',
+    }
+    try {
+      const registry = this.registry(actor.orgId),
+        scan = await sources.scan(actor.orgId, id)
+      result.boundary = scan.boundary
+      const bySource = new Map<string, AssetRecord>()
+      let after = ''
+      do {
+        const page = await registry.inventoryList(actor.orgId, after)
+        for (const row of page.items) bySource.set(discoverySourceKey(row.metadata), row)
+        if (bySource.size > 10000) fail('DISCOVERY_SCAN_LIMIT')
+        if (!page.next_cursor) break
+        after = page.next_cursor
+      } while (true)
+      for (const item of scan.items) {
+        // A revoked admin or disabled source cannot continue a multi-record import.
+        await this.sources(actor)
+        await sources.assertEnabled(actor.orgId, id)
+        const key = discoverySourceKey(item.metadata),
+          current = bySource.get(key)
+        result.scanned++
+        if (
+          current?.status === 'merged' ||
+          current?.observations.some(
+            (o) =>
+              o.source === item.observation.source &&
+              o.source_id === item.observation.source_id &&
+              o.record_id === item.observation.record_id &&
+              o.snapshot_digest === item.observation.snapshot_digest &&
+              o.external_domain === item.observation.external_domain,
+          )
+        ) {
+          result.unchanged++
+          continue
+        }
+        const assetId = current?.id ?? `discovered-${key}`
+        const command = parseInventoryCommand({
+          api_version: AGENT_REGISTRY_API,
+          kind: 'ObserveAsset',
+          asset_id: assetId,
+          request_id: discoveryId([actor.orgId, actor.userId, assetId, current?.revision ?? 0, discoveryDigest(item)]),
+          expected_revision: current?.revision ?? 0,
+          initiated_by: actor.userId,
+          ...item,
+        })
+        const saved = await registry.inventoryCommand(actor.orgId, command)
+        bySource.set(key, saved)
+        if (current) result.updated++
+        else result.created++
+      }
+      result.complete = true
+    } catch (error) {
+      result.error = error instanceof ExternalProviderError ? error.code : 'DISCOVERY_UNAVAILABLE'
+    }
+    return result
+  }
   async command(actor: AuthContext, input: unknown) {
     const { canManage } = await this.options.authorize(actor)
     const body = object(input, [
@@ -118,12 +222,14 @@ export class AgentInventoryService {
       'target_asset_id',
       'target_revision',
     ])
-    const kinds = ['SaveAsset', 'SubmitAsset', 'ReviewAsset', 'SuspendAsset', 'MergeAsset', 'LinkAsset']
+    const kinds = ['SaveAsset', 'SubmitAsset', 'ReviewAsset', 'SuspendAsset', 'MergeAsset', 'LinkAsset', 'ClaimAsset']
     if (typeof body.kind !== 'string' || !kinds.includes(body.kind)) fail('INVALID_INVENTORY_COMMAND')
-    if (!canManage && !['SaveAsset', 'SubmitAsset'].includes(body.kind)) fail('ADMIN_REQUIRED', 403)
+    if (!canManage && !['SaveAsset', 'SubmitAsset', 'ClaimAsset'].includes(body.kind)) fail('ADMIN_REQUIRED', 403)
     const id = identifier(body.asset_id)
     const registry = this.registry(actor.orgId)
     const { catalog_id, ...fields } = body
+    const claimant = body.kind === 'ClaimAsset' ? await this.options.member(actor.orgId, actor.userId) : null
+    if (body.kind === 'ClaimAsset' && !claimant) fail('INVALID_MEMBER')
     let principal
     if (body.kind === 'LinkAsset') {
       const catalogId = identifier(catalog_id)
@@ -135,10 +241,21 @@ export class AgentInventoryService {
       ...fields,
       api_version: AGENT_REGISTRY_API,
       initiated_by: actor.userId,
+      ...(claimant ? { owner_user_id: claimant.id, department_id: claimant.departmentId } : {}),
       ...(principal ? { principal } : {}),
     })
     const current =
-      command.expected_revision === 0 && command.kind === 'SaveAsset' ? null : await this.readable(actor, id, canManage)
+      command.expected_revision === 0 && command.kind === 'SaveAsset'
+        ? null
+        : command.kind === 'ClaimAsset'
+          ? await registry.inventoryGet(actor.orgId, id)
+          : await this.readable(actor, id, canManage)
+    if (
+      command.kind === 'ClaimAsset' &&
+      current?.metadata.owner_user_id &&
+      current.metadata.owner_user_id !== actor.userId
+    )
+      fail('AGENT_ASSET_ALREADY_CLAIMED', 409)
     if (command.kind === 'SaveAsset') {
       if (!canManage && command.metadata.owner_user_id !== actor.userId) fail('AGENT_ASSET_OWNER_FORBIDDEN', 403)
     }
@@ -149,6 +266,7 @@ export class AgentInventoryService {
           ? current?.metadata
           : null
     if (checkedMetadata) {
+      if (!checkedMetadata.owner_user_id) fail('AGENT_ASSET_OWNER_REQUIRED')
       const owner = await this.options.member(actor.orgId, checkedMetadata.owner_user_id)
       if (!owner) fail('INVALID_MEMBER')
       // Department attribution is authoritative AuthCenter membership, never a browser claim.

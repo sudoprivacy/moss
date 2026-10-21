@@ -1,4 +1,5 @@
 import { dcClient } from './client'
+import type { DiscoverySource, DiscoveryResult } from '../../../src/server/agentFederation/inventoryViews'
 import type {
   AssetHistory,
   InventoryWire,
@@ -15,6 +16,15 @@ type PublicCommand<T> = T extends { kind: 'SaveAsset' | 'SubmitAsset' | 'ReviewA
 export type InventoryInput =
   | PublicCommand<InventoryWire>
   | { kind: 'LinkAsset'; asset_id: string; request_id: string; expected_revision: number; catalog_id: string }
+  | { kind: 'ClaimAsset'; asset_id: string; request_id: string; expected_revision: number }
+export interface DiscoveredAsset {
+  id: string
+  revision: number
+  name: string
+  platform: string
+  external_domain: boolean
+}
+export type { DiscoverySource, DiscoveryResult }
 export interface InventoryAccess {
   can_manage: boolean
   configured: boolean
@@ -53,6 +63,14 @@ export function createInventoryApi(client: Client = dcClient, signal?: () => Abo
         `/members?q=${encodeURIComponent(q)}&after=${encodeURIComponent(after)}`,
       ),
     command: (body: InventoryInput) => call<AssetRecord>('/commands', body),
+    discovered: (after = '') =>
+      call<{ items: DiscoveredAsset[]; next_cursor: string | null }>(`/discovered?after=${encodeURIComponent(after)}`),
+    sources: () =>
+      call<{ items: DiscoverySource[]; allowed_origins: string[]; credentials_available: boolean }>('/sources'),
+    createSource: (body: Omit<DiscoverySource, 'id' | 'enabled'> & { api_key: string; csrf_token?: string }) =>
+      call<DiscoverySource>('/sources', body),
+    disableSource: (id: string) => call<{ disabled: boolean }>(`/sources/${encodeURIComponent(id)}/disable`, {}),
+    discover: (source_id: string) => call<DiscoveryResult>('/discover', { source_id }),
   }
 }
 

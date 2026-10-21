@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Download, Plus, RefreshCw, X } from 'lucide-react'
+import { AgentDiscoverySection } from './agent-discovery-section'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -258,7 +259,7 @@ function ScopedInventory({ query }: { query: string }) {
         row.metadata.owner_user_id,
         row.metadata.source_platform,
         row.metadata.source_agent_id,
-      ].some((value) => value.toLowerCase().includes(query.toLowerCase())),
+      ].some((value) => (value ?? '').toLowerCase().includes(query.toLowerCase())),
   )
   if (loading) return <p role="status">正在读取智能体台账…</p>
 
@@ -313,6 +314,7 @@ function ScopedInventory({ query }: { query: string }) {
           {notice}
         </p>
       )}
+      {access?.configured && <AgentDiscoverySection api={api} access={access} onChange={reload} />}
       {!access?.configured ? (
         <Alert>
           <AlertDescription>当前组织尚未开通统一台账，请联系组织管理员配置 Registry。</AlertDescription>
@@ -359,7 +361,7 @@ function ScopedInventory({ query }: { query: string }) {
                       </p>
                     </td>
                     <td className="p-3 break-all">
-                      {asset.owner_display_name ?? asset.metadata.owner_user_id}
+                      {asset.owner_display_name ?? asset.metadata.owner_user_id ?? '待认领'}
                       <p className="mt-1 text-xs text-muted-foreground">
                         {asset.department_display_name ?? asset.metadata.department_id ?? '未分配部门'}
                       </p>
@@ -552,7 +554,7 @@ function ScopedInventory({ query }: { query: string }) {
                           <select
                             required
                             className={selectClass}
-                            value={draft.owner_user_id}
+                            value={draft.owner_user_id ?? ''}
                             onChange={(event) => {
                               const owner = members.find((item) => item.id === event.target.value)
                               if (owner) changeDraft({ owner_user_id: owner.id, department_id: owner.department_id })
@@ -560,7 +562,7 @@ function ScopedInventory({ query }: { query: string }) {
                           >
                             <option value="">选择当前组织成员</option>
                             {draft.owner_user_id && !members.some((member) => member.id === draft.owner_user_id) && (
-                              <option value={draft.owner_user_id}>{draft.owner_user_id}</option>
+                              <option value={draft.owner_user_id ?? ''}>{draft.owner_user_id}</option>
                             )}
                             {members.map((member) => (
                               <option key={member.id} value={member.id}>
@@ -582,7 +584,7 @@ function ScopedInventory({ query }: { query: string }) {
                       </div>
                     ) : (
                       <Field label="负责人">
-                        <Input readOnly value={user?.displayName || user?.name || draft.owner_user_id} />
+                        <Input readOnly value={user?.displayName || user?.name || draft.owner_user_id || ''} />
                       </Field>
                     )}
                     <Field label="所属部门（来自账号资料）">

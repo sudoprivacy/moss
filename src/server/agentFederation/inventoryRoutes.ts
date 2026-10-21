@@ -21,6 +21,13 @@ export async function dispatchAgentInventory(
       data = await service.members(actor, url.searchParams.get('after') ?? '', url.searchParams.get('q') ?? '')
     else if (method === 'GET' && path === `${base}/assets`)
       data = await service.list(actor, url.searchParams.get('after') ?? '')
+    else if (method === 'GET' && path === `${base}/discovered`)
+      data = await service.discovered(actor, url.searchParams.get('after') ?? '')
+    else if (method === 'GET' && path === `${base}/sources`) data = await service.listSources(actor)
+    else if (method === 'POST' && path === `${base}/sources`) data = await service.createSource(actor, body)
+    else if (method === 'POST' && path === `${base}/discover`) data = await service.discover(actor, body)
+    else if (method === 'POST' && /^\/api\/v1\/agent-inventory\/sources\/[A-Za-z0-9-]+\/disable$/.test(path))
+      data = await service.disableSource(actor, path.split('/').at(-2)!)
     else if (method === 'GET' && match)
       data = match[2]
         ? await service.history(actor, match[1], Number(url.searchParams.get('after') ?? 0))

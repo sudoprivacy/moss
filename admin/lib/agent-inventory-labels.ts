@@ -50,6 +50,19 @@ export function inventoryError(error: unknown): string {
     AGENT_ACCEPTANCE_ISSUER_FORBIDDEN: '验收签发者已撤销，需要重新验收。',
     INVALID_INVENTORY_COMMAND: '登记内容不完整或不符合格式，请检查各项输入。',
     INVENTORY_EXPORT_LIMIT: '导出超过一万条，请缩小范围后重试。',
+    AGENT_ASSET_ALREADY_CLAIMED: '此资产已被认领，请刷新查看负责人。',
+    AGENT_ASSET_OWNER_REQUIRED: '请先认领或指定有效负责人，再提交登记。',
+    DISCOVERY_ORIGIN_NOT_APPROVED: '服务地址未获当前组织批准，请由部署管理员配置发现来源地址。',
+    DISCOVERY_SCOPE_MISMATCH: '来源返回的工作区或账户与配置不一致，已拒绝导入。',
+    DISCOVERY_SOURCE_DISABLED: '发现来源已停用或服务地址已撤销。',
+    DISCOVERY_UPSTREAM_UNAVAILABLE: '无法读取来源，请检查服务状态、控制台访问令牌及读取权限。',
+    DISCOVERY_CREDENTIAL_UNAVAILABLE: '来源凭据已不可用，请重新添加发现来源。',
+    DISCOVERY_RESPONSE_INVALID: '来源响应不符合支持的清单格式，请核对平台版本。',
+    DISCOVERY_PAGINATION_INVALID: '来源分页结果不一致，未声明扫描完整。',
+    DISCOVERY_SCAN_LIMIT: '来源超出单次扫描限制，请缩小工作区或扫描范围。',
+    DISCOVERY_SOURCE_LIMIT: '最多启用 20 个来源，请先停用不再使用的来源。',
+    INVALID_DISCOVERY_SOURCE: '发现来源配置不完整，请检查名称、范围和访问令牌。',
+    CREDENTIAL_STORAGE_UNAVAILABLE: '密钥库不可用，无法保存发现来源凭据。',
   }
   return labels[code ?? ''] ?? '台账操作未完成，请刷新核对状态后重试。'
 }

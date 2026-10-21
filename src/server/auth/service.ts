@@ -1,5 +1,6 @@
 import { registryFromEnvironment } from '../agentFederation/registryConfiguration.js'
 import { AgentInventoryService } from '../agentFederation/inventoryService.js'
+import { InventorySources } from '../agentFederation/inventorySources.js'
 import { ExternalProviderService } from '../externalProviders/service.js'
 import { ExternalTaskStore } from '../externalProviders/store.js'
 import { ExternalProviderError, pilotPolicyFromEnvironment } from '../externalProviders/policy.js'
@@ -694,9 +695,10 @@ export class AuthService {
     })
   }
 
-  createAgentInventoryService(): AgentInventoryService {
+  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort): AgentInventoryService {
     return new AgentInventoryService({
       registry: registryFromEnvironment(), catalog: new CatalogRepository(this.db.driver),
+      sources: new InventorySources({ db: this.db.driver, identities: this.identityRepository, catalog: new CatalogRepository(this.db.driver), secrets }),
       authorize: async actor => {
         const user = await this.getUserPinnedOrSuperAdmin(actor.userId, actor.orgId)
         if (user?.status !== 'active') throw new ExternalProviderError(401, 'USER_NOT_ACTIVE')
