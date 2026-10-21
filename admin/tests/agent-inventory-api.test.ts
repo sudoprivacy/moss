@@ -50,3 +50,17 @@ test('hosted management uses scoped endpoints and never submits a task owner ove
     { path: '/api/v1/agent-inventory/hosted/tasks/task-a/close', body: { note: 'Reviewed unknown result and cleanup.' } },
   ])
 })
+
+test('suspension status reads stay read-only and retry contains no identity override', async () => {
+  const calls: { method: string; path: string; body?: unknown }[] = []
+  const api = createInventoryApi({
+    get: async <T>(path: string): Promise<T> => { calls.push({ method: 'GET', path }); return { success: true, data: null } as T },
+    post: async <T>(path: string, body?: unknown): Promise<T> => { calls.push({ method: 'POST', path, body }); return { success: true, data: null } as T },
+  })
+  await api.suspension('asset:a')
+  await api.suspension('asset:a', true)
+  assert.deepEqual(calls, [
+    { method: 'GET', path: '/api/v1/agent-inventory/assets/asset%3Aa/suspension' },
+    { method: 'POST', path: '/api/v1/agent-inventory/assets/asset%3Aa/suspension', body: {} },
+  ])
+})

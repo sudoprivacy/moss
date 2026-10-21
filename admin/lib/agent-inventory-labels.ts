@@ -102,6 +102,8 @@ export function inventoryError(error: unknown): string {
     REGISTRY_NOT_CONFIGURED: '当前服务尚未配置统一台账。',
     REGISTRY_ORGANIZATION_UNCONFIGURED: '当前组织尚未开通统一台账。',
     REGISTRY_INVENTORY_SCHEMA_REQUIRED: '台账数据库尚未初始化，请由运维执行显式初始化。',
+    AGENT_SUSPENSION_ACTIVE: '智能体处于停用状态。回收确认后请重新提交审核，才可恢复使用。',
+    AGENT_SUSPENSION_PENDING: '停用回收尚未确认，请在详情中核对进度。',
     AGENT_ASSET_REVISION_CONFLICT: '记录已被更新，请刷新后重新操作。',
     AGENT_ASSET_IDENTITY_CONFLICT: '该来源智能体已登记，或标识冲突。请刷新台账确认。',
     REGISTRY_IDEMPOTENCY_CONFLICT: '本次操作内容已变化，请关闭窗口并重新操作。',

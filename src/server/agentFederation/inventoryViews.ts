@@ -42,3 +42,22 @@ export interface HostedUnknownPage {
     cleanup: 'not_started' | 'pending' | 'confirmed' | 'unknown'; error_code: string | null }[]
   next_cursor: string | null
 }
+
+export interface AssetSuspensionView {
+  id: string
+  asset_id: string
+  requested_by: string
+  requested_at: number
+  updated_at: number
+  status: 'pending' | 'confirmed' | 'failed'
+  entry: 'closed_locally' | 'confirmed'
+  identity: 'pending' | 'confirmed'
+  model: 'pending' | 'confirmed' | 'not_configured'
+  hosted: 'pending' | 'confirmed' | 'not_configured'
+  grants: number
+  model_calls: number
+  hosted_tasks: number
+  external_tasks: { accepted: number; in_flight: number; unknown: number } | null
+  external_cancellation: 'unsupported'
+  error_code: string | null
+}

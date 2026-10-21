@@ -1,3 +1,4 @@
+import { initializeAssetControls, assertAssetOpen } from '../agentFederation/assetControlStore.js'
 import { describeExternalAgent } from './description.js'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 import { ExternalProviderAdministration, object, type AdministrationOptions } from './administration.js'
@@ -19,6 +20,7 @@ import { ExternalExecutionOwnership } from '../agentFederation/executionOwnershi
 import { DURABLE_AGENT_HTTP_API } from '../../../contracts/agent-http/v1alpha2/contract.js'
 
 export class ExternalProviderService {
+  private readonly controlsReady: Promise<void>
   private readonly timer: ReturnType<typeof setInterval>
   private readonly executions = new Map<string, Promise<void>>()
   private readonly controllers = new Set<AbortController>()
@@ -31,6 +33,7 @@ export class ExternalProviderService {
   private closing = false
   private readonly adapters: ReturnType<typeof createRuntimeRegistry>
   constructor(readonly store: ExternalTaskStore, private readonly options: AdministrationOptions, serverInstanceId?: string) {
+    this.controlsReady = store.ready.then(() => initializeAssetControls(store.db))
     this.releases = new RegistryReleases(store, options.registry)
     this.registryMigration = new RegistryMigration(this.releases, { maintenance: options.registryMaintenance ?? false, backupDirectory: options.registryBackupDirectory })
     this.ownership = new ExternalExecutionOwnership(store, serverInstanceId)
@@ -259,6 +262,21 @@ export class ExternalProviderService {
     }
   }
 
+  /** Stop unstarted work; remote cancellation is deliberately not asserted. */
+  async suspendCatalog(operator: ExternalActor, catalogId: string) {
+    await this.controlsReady
+    const rows = await this.store.db.all(`SELECT t.id, t.status FROM external_tasks t JOIN external_session_bindings x ON x.id = t.session_id WHERE t.org_id = ? AND x.agent_id = ? AND t.status IN ('accepted', 'dispatching', 'running', 'unknown') ORDER BY t.id LIMIT 10001`, [operator.orgId, catalogId])
+    if (rows.length > 10000) throw new ExternalProviderError(503, 'EXTERNAL_TASK_SCAN_INCOMPLETE')
+    for (const row of rows) if (row.status === 'accepted') await this.store.mutate(String(row.id), task => {
+      if (task.status !== 'accepted') return false
+      task.status = task.task_contract_version ? 'failed' : 'rejected'
+      task.error_code = 'AGENT_SUSPENSION_ACTIVE'
+      return 'status'
+    })
+    const current = await this.store.db.all(`SELECT t.status, COUNT(*) AS count FROM external_tasks t JOIN external_session_bindings x ON x.id = t.session_id WHERE t.org_id = ? AND x.agent_id = ? GROUP BY t.status`, [operator.orgId, catalogId])
+    const count = (status: string) => Number(current.find(row => row.status === status)?.count ?? 0)
+    return { accepted: count('accepted'), in_flight: count('dispatching') + count('running'), unknown: count('unknown') }
+  }
   async waitForTask(id: string): Promise<void> { await this.executions.get(id) }
 
   private startTask(id: string) {
@@ -370,6 +388,8 @@ export class ExternalProviderService {
   }
 
   private async executable(actor: ExternalActor, binding: Binding, context?: { policy: PilotPolicy; agents: Map<string, CatalogAgent>; connections: Map<string, IntegrationConnection> }): Promise<void> {
+    await this.controlsReady
+    await assertAssetOpen(this.store.db, actor.orgId, undefined, binding.id)
     this.adapters.get(binding.provider_kind ?? 'dify')
     if (binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
     assertPilot(context?.policy ?? await this.administration.effectivePolicy(actor), actor.orgId, binding.endpoint)

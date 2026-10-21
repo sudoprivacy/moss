@@ -1,3 +1,4 @@
+import { AgentAssetSuspension } from './agent-asset-suspension'
 import { AgentHostedUnknownTasks } from './agent-hosted-unknown-tasks'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Download, Plus, RefreshCw, X } from 'lucide-react'
@@ -227,7 +228,7 @@ function ScopedInventory({ query }: { query: string }) {
       const result = await api.command(command)
       detailGeneration.current++
       setDialog(null)
-      setDetails(null)
+      setDetails(dialog.action === 'suspend' ? result : null)
       setHistory(null)
       setNotice(`已保存：${result.metadata.name}，${assetStatuses[result.status]}。`)
       await reload()
@@ -783,7 +784,7 @@ function ScopedInventory({ query }: { query: string }) {
                 </p>
               )}
               {dialog?.action === 'suspend' && (
-                <p className="text-sm">停用台账关联的发布与后续 Registry 解析。在途任务不会因此被标记为远端已取消。</p>
+                <p className="text-sm">关闭受控调用入口，并持续核对任务身份、模型凭证和托管运行资源的回收进度。在途远端任务保留真实状态，不会被直接标记为已取消。</p>
               )}
               {dialog?.action === 'link' && (
                 <>
@@ -899,6 +900,7 @@ function ScopedInventory({ query }: { query: string }) {
                 <Badge variant="outline">{riskLabels[details.risk]}</Badge>
               </div>
               <p>{details.metadata.purpose}</p>
+              {access?.can_manage && <AgentAssetSuspension key={details.id} api={api} assetId={details.id} />}
               <dl className="grid gap-2 break-all sm:grid-cols-[8rem_1fr]">
                 <dt>台账 ID／修订</dt>
                 <dd>

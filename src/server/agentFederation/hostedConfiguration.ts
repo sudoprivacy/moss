@@ -75,7 +75,7 @@ export async function hostedFromEnvironment(db: DbDriver, registry?: ProductRegi
       ? new HostedTaskCoordinator(new HostedTaskStore(db), ownerId, registry, gateway, runner,
         (org, resource, model) => resources.some(r => r.orgId === org && r.id === resource && r.model === model)) : undefined
     await taskCoordinator?.store.ready
-    return { coordinator, taskCoordinator, close: async () => { await taskCoordinator?.close(); await coordinator.close(); await Promise.all([...relays.values()].map(r => r.relay.close())) } }
+    return { coordinator, taskCoordinator, gateway, close: async () => { await taskCoordinator?.close(); await coordinator.close(); await Promise.all([...relays.values()].map(r => r.relay.close())) } }
   } catch {
     await Promise.all([...relays.values()].map(r => r.relay.close().catch(() => {})))
     throw new ExternalProviderError(500, 'HOSTED_CONFIGURATION_INVALID')

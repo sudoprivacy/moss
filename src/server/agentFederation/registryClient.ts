@@ -133,6 +133,11 @@ export class ProductRegistryClient {
     if (!validators.PrincipalRef(principal)) fail('REGISTRY_CONFIGURATION_INVALID', 500)
     return principal
   }
+  catalogId(orgId: string, principal: PrincipalRef): string {
+    const id = principal.agent_name.startsWith('external-') ? principal.agent_name.slice(9) : ''
+    if (!id || this.principal(orgId, id).trust_domain !== principal.trust_domain) fail('REGISTRY_PRINCIPAL_SCOPE_MISMATCH', 409)
+    return id
+  }
   private path(ref: PrincipalRef): string { return `/${encodeURIComponent(ref.trust_domain)}/${encodeURIComponent(ref.agent_name)}` }
   verifyVersion(value: unknown, orgId: string, expected: PrincipalRef, version?: string): SignedVersion {
     if (!validators.SignedVersion(value) || value.algorithm !== 'Ed25519') fail('REGISTRY_SIGNATURE_INVALID')

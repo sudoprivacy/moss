@@ -1,3 +1,5 @@
+import { AssetSuspensions } from '../agentFederation/assetSuspension.js'
+import type { ExecutionModelGateway } from '../agentFederation/executionModelGateway.js'
 import { HostedTaskService } from '../agentFederation/hostedTaskService.js'
 import { HostedReleases } from '../agentFederation/hostedReleases.js'
 import type { RegistryReleases } from '../agentFederation/registryReleases.js'
@@ -713,9 +715,11 @@ export class AuthService {
     return { ...runtime, tasks, close: async () => { await tasks?.close(); await runtime.close() } }
   }
 
-  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort, hosted?: HostedEvaluationCoordinator, releases?: RegistryReleases, tasks?: HostedTaskService): AgentInventoryService {
+  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort, hosted?: HostedEvaluationCoordinator, releases?: RegistryReleases, tasks?: HostedTaskService, gateway?: ExecutionModelGateway, external?: ExternalProviderService): AgentInventoryService {
+    const registry = registryFromEnvironment()
+    const suspensions = registry ? new AssetSuspensions(this.db.driver, registry, { gateway, tasks, external }) : undefined
     return new AgentInventoryService({
-      registry: registryFromEnvironment(), catalog: new CatalogRepository(this.db.driver), hosted, tasks,
+      registry, suspensions, catalog: new CatalogRepository(this.db.driver), hosted, tasks,
       releases: releases ? new HostedReleases(new CatalogRepository(this.db.driver), releases) : undefined,
       sources: new InventorySources({ db: this.db.driver, identities: this.identityRepository, catalog: new CatalogRepository(this.db.driver), secrets }),
       authorize: async actor => {

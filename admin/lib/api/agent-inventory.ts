@@ -1,3 +1,5 @@
+import type { AssetSuspensionView } from '../../../src/server/agentFederation/inventoryViews'
+export type { AssetSuspensionView }
 import type { HostedUnknownPage } from '../../../src/server/agentFederation/inventoryViews'
 export type { HostedUnknownPage }
 import { dcClient } from './client'
@@ -97,6 +99,7 @@ export function createInventoryApi(client: Client = dcClient, signal?: () => Abo
     command: (body: InventoryInput) => call<AssetRecord>('/commands', body),
     discovered: (after = '') =>
       call<{ items: DiscoveredAsset[]; next_cursor: string | null }>(`/discovered?after=${encodeURIComponent(after)}`),
+    suspension: (assetId: string, retry = false) => call<AssetSuspensionView | null>(`/assets/${encodeURIComponent(assetId)}/suspension`, retry ? {} : undefined),
     sources: () =>
       call<{ items: DiscoverySource[]; allowed_origins: string[]; credentials_available: boolean }>('/sources'),
     createSource: (body: Omit<DiscoverySource, 'id' | 'enabled'> & { api_key: string; csrf_token?: string }) =>

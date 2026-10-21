@@ -1,3 +1,4 @@
+import { initializeAssetControls, lockAssetGate, assertAssetOpen } from './assetControlStore.js'
 import { randomUUID } from "node:crypto";
 import {
   NexusWriteRejected,
@@ -177,7 +178,7 @@ export class ExecutionModelGateway {
     CREATE TABLE IF NOT EXISTS agent_model_grant_limits (
       org_id TEXT NOT NULL, grant_id TEXT NOT NULL, reserved INTEGER NOT NULL,
       PRIMARY KEY(org_id, grant_id)
-    );`);
+    );`).then(() => initializeAssetControls(db));
   }
   private resource(orgId: string, id: string) {
     const resource = this.resources.get(JSON.stringify([orgId, id]));
@@ -205,6 +206,9 @@ export class ExecutionModelGateway {
         call.answer = previous.answer;
         call.error = previous.error;
       }
+      if (previous.routerToken && call.routerToken && previous.routerToken.id !== call.routerToken.id)
+        fail("MODEL_CALL_TOKEN_CONFLICT", 409);
+      call.routerToken ??= previous.routerToken;
       if (previous.routerToken && !previous.tokenCleanupPending)
         call.tokenCleanupPending = false;
       if (
@@ -259,6 +263,7 @@ export class ExecutionModelGateway {
       consumption: [],
     };
     return this.db.transaction(async () => {
+      await lockAssetGate(this.db, orgId, grant.request.asset_id);
       await this.db.run(
         "INSERT INTO agent_model_calls(id, org_id, call_id, grant_id, request_digest, document) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(org_id, call_id) DO NOTHING",
         [
@@ -332,6 +337,11 @@ export class ExecutionModelGateway {
     let dispatched = false;
     let dispatchError: unknown;
     try {
+      await assertAssetOpen(this.db, orgId, call.assetId);
+      // Persist uncertainty BEFORE the remote create. A process may die before
+      // either a token or an error response becomes visible.
+      call.tokenCleanupPending = true;
+      await this.save(call);
       const issued = await resource.router.issue(
         call.id,
         resource.model,
@@ -340,6 +350,7 @@ export class ExecutionModelGateway {
       call.routerToken = issued.token;
       call.tokenCleanupPending = true;
       await this.save(call);
+      await assertAssetOpen(this.db, orgId, call.assetId);
       const current = await this.authorize(orgId, body, token);
       const remaining =
         Math.min(current.grant.expires_at, issued.token.expiresAt) - Date.now();
@@ -363,6 +374,7 @@ export class ExecutionModelGateway {
           // Authorization may change while Nexus evaluates content. Check again
           // immediately before the only Router dispatch; no cached decision.
           const live = await this.authorize(orgId, body, token);
+          await assertAssetOpen(this.db, orgId, call.assetId);
           if (
             Math.min(live.grant.expires_at, issued.token.expiresAt) <=
             Date.now()
@@ -453,6 +465,44 @@ export class ExecutionModelGateway {
     const ids = Array.from({ length: 32 }, (_, i) => `${taskId}:${i + 1}`);
     const rows = await this.db.all(`SELECT document FROM agent_model_calls WHERE org_id = ? AND call_id IN (${ids.map(() => "?").join(",")}) ORDER BY id`, [orgId, ...ids]);
     return rows.map(row => JSON.parse(String(row.document)) as ExecutionModelCall);
+  }
+  /** Revocation only. Does not re-execute or claim that an in-flight model was cancelled. */
+  async suspendAsset(orgId: string, assetId: string): Promise<{ calls: number; pending: number }> {
+    await this.ready;
+    let after = "", calls = 0, pending = 0;
+    for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+      const extract = this.db.kind === 'postgres' ? "document::jsonb ->> 'assetId'" : "json_extract(document, '$.assetId')";
+      const rows = await this.db.all(`SELECT id, document FROM agent_model_calls WHERE org_id = ? AND (${extract}) = ? AND id > ? ORDER BY id LIMIT 100`, [orgId, assetId, after]);
+      for (const row of rows) {
+        const call = JSON.parse(String(row.document)) as ExecutionModelCall;
+        calls++;
+        try { if (!await this.stopCall(call)) pending++; } catch { pending++; }
+      }
+      if (rows.length < 100) return { calls, pending };
+      after = String(rows.at(-1)!.id);
+    }
+    return { calls, pending: pending + 1 }; // incomplete scan never reports confirmation
+  }
+  private async stopCall(call: ExecutionModelCall): Promise<boolean> {
+    const resource = this.resource(call.orgId, call.resource);
+    if (call.status === 'preparing' || call.status === 'dispatching') {
+      call.status = 'unknown';
+      call.error = 'AGENT_SUSPENDED_DURING_MODEL_CALL';
+      call.tokenCleanupPending = true;
+      await this.save(call);
+    }
+    if (!call.routerToken && call.tokenCleanupPending) {
+      const recovered = await resource.router.recover(call.id, call.model, call.grantExpiresAt);
+      if (recovered) call.routerToken = recovered;
+      else if (Date.now() > call.grantExpiresAt + 1000) call.tokenCleanupPending = false;
+      await this.save(call);
+    }
+    if (call.routerToken && call.tokenCleanupPending) {
+      await resource.router.disable(call.routerToken);
+      call.tokenCleanupPending = false;
+      await this.save(call);
+    }
+    return !call.tokenCleanupPending;
   }
   async reconcile(orgId: string, callId: string): Promise<ExecutionModelCall> {
     await this.ready;

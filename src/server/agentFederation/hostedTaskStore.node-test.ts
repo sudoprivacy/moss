@@ -272,3 +272,13 @@ void test('restart before visible IAM issuance can close only after a durable re
   await f.store.closeUnknown(actor, f.task.id, 'Request fence confirmed; outcome remains unknown')
   assert.equal((await f.store.get(actor, f.task.id)).status, 'unknown')
 })
+
+void test('hosted admission made before suspension cannot be revived by a later restoration', async t => {
+  const db = new SqliteDriver(new DatabaseSync(':memory:')); t.after(() => db.close())
+  const store = await fixture(db)
+  await db.run('INSERT INTO agent_asset_gates(org_id, asset_id, generation) VALUES (?, ?, ?)', [actor.orgId, 'asset-a', 1])
+  // generation survives clearing a completed stop's operation_id during explicit approval.
+  await assert.rejects(store.create(actor, request(), { ...admission(), controlRevision: 0 }), { code: 'AGENT_SUSPENSION_CHANGED' })
+  assert.equal(Number((await db.get('SELECT COUNT(*) AS n FROM tasks'))?.n), 0)
+  assert.equal((await store.create(actor, request(), { ...admission(), controlRevision: 1 })).status, 'accepted')
+})

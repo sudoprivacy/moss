@@ -945,3 +945,23 @@ void test('usage describes adapter guarantees without promoting them to identity
   for (const field of ['attachments', 'resource_refs', 'tools'] as const) assert.equal(durable.usage?.[field], 'unsupported')
   assert.equal('execution' in durable, false)
 })
+
+void test('asset suspension scopes task observations through canonical session bindings and never invents remote cancellation', async () => {
+  const f = await setup(), binding = await f.store.binding(actor, f.registered.id)
+  const queued = await f.store.create(actor, f.request(), binding, 2000)
+  const remote = await f.store.create(actor, f.request(), binding, 2000)
+  const unknown = await f.store.create(actor, f.request(), binding, 2000)
+  await f.store.mutate(remote.id, task => { task.status = 'running'; return 'status' })
+  await f.store.mutate(unknown.id, task => { task.status = 'unknown'; return 'status' })
+  await f.driver.run('INSERT INTO agent_asset_gates(org_id, asset_id, catalog_id, operation_id) VALUES (?, ?, ?, ?)', [actor.orgId, 'asset-a', binding.id, 'suspension-a'])
+  const before = f.calls.length
+  assert.deepEqual(await f.service.suspendCatalog({ ...actor, userId: 'admin' }, binding.id), { accepted: 0, in_flight: 1, unknown: 1 })
+  assert.equal((await f.store.task(actor, queued.id)).status, 'rejected')
+  assert.equal((await f.store.task(actor, remote.id)).status, 'running')
+  assert.equal((await f.store.task(actor, unknown.id)).status, 'unknown')
+  assert.equal((await f.store.task(actor, remote.id)).cancellation.status, 'unsupported')
+  assert.deepEqual(await f.service.suspendCatalog({ orgId: 'org-b', userId: 'admin' }, binding.id), { accepted: 0, in_flight: 0, unknown: 0 })
+  const blocked = await f.service.create(actor, syntheticTaskSubmission(f.request()))
+  assert.equal(blocked.status, 'rejected'); assert.equal(blocked.error_code, 'AGENT_SUSPENSION_ACTIVE')
+  assert.equal(f.calls.length, before)
+})

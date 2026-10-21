@@ -1,3 +1,4 @@
+import { assertAssetOpen, assetControlRevision } from './assetControlStore.js'
 import { projectHostedTaskEvidence } from './hostedTaskEvidence.js'
 import type { HostedAgent } from '../../../contracts/task/v1alpha1/contract.js'
 import { randomUUID } from 'node:crypto'
@@ -38,19 +39,22 @@ export class HostedTaskService {
     const item = await this.options.catalog.getAgent(id, actor.orgId)
     if (!item || item.providerBinding?.executionMode !== 'internal_hosted' || !item.enabled || item.status !== 'approved'
       || !item.visibleTo?.user_ids?.includes(actor.userId) || typeof item.providerBinding.assetId !== 'string') fail('AGENT_NOT_FOUND', 404)
+    await this.store.ready
+    const controlRevision = await assetControlRevision(this.store.db, actor.orgId, item.providerBinding.assetId)
+    await assertAssetOpen(this.store.db, actor.orgId, item.providerBinding.assetId)
     const expected = await this.options.releases.catalogFor(actor, item.providerBinding.assetId)
     if (!expected || expected.id !== id) fail('HOSTED_CATALOG_IDENTITY_CONFLICT')
     const asset = await this.options.registry.inventoryGet(actor.orgId, item.providerBinding.assetId)
     if (asset.status !== 'approved' || !['L2', 'L3'].includes(asset.actual_level) || asset.metadata.hosting !== 'internal_hosted'
       || !asset.metadata.owner_user_id || !await this.options.activeMember({ orgId: actor.orgId, userId: asset.metadata.owner_user_id })) fail('HOSTED_ASSET_NOT_ADMITTED')
-    return { item, asset }
+    return { item, asset, controlRevision }
   }
   private async select(actor: ExternalActor, id: string, version?: string, channel?: string) {
-    const { item, asset } = await this.executable(actor, id)
+    const { item, asset, controlRevision } = await this.executable(actor, id)
     const release = await this.options.registry.resolve(actor.orgId, this.options.registry.principal(actor.orgId, id), { version, channel })
     const artifact = await this.options.releases.artifactFor(actor, item, release.version)
     if (artifact.metadata_digest !== asset.metadata_digest) fail('HOSTED_RELEASE_ARTIFACT_MISMATCH')
-    return { item, asset, release, artifact }
+    return { item, asset, release, artifact, controlRevision }
   }
   async create(actor: ExternalActor, value: unknown) {
     await this.authorize(actor)
@@ -85,7 +89,7 @@ export class HostedTaskService {
     const policy = { profile: 'hosted-synthetic-text/v1', organization: actor.orgId, catalog_id: input.agent.catalog_id,
       catalog_updated_at: selected?.item.updatedAt ?? null, metadata_digest: selected?.asset.metadata_digest ?? null,
       artifact_id: selected?.artifact.id ?? null, spec_digest: selected?.artifact.spec_digest ?? null, runtime_authority_id: runtimeId ?? null }
-    const task = await this.store.create(actor, input, { assetId: selected?.asset.id ?? 'unresolved', policySnapshot: policy,
+    const task = await this.store.create(actor, input, { assetId: selected?.asset.id ?? 'unresolved', ...(code === 'ALLOWED' ? { controlRevision: selected?.controlRevision } : {}), policySnapshot: policy,
       principal: selected?.release.version.manifest.principal ?? catalogPrincipal(input.agent.catalog_id), timeoutMs: 270000,
       resolution: task => {
         const base = { api_version: TASK_API, kind: 'TaskExecutionResolution' as const, resolution_id: randomUUID(), task_id: task.id,
@@ -123,6 +127,23 @@ export class HostedTaskService {
       try { await this.dispatch(entry.actor, entry.task.id) }
       catch (error) { if (!(error instanceof ExternalProviderError)) throw error }
     }
+  }
+  /** Called only by the persisted, organization-admin-authorized suspension operation. */
+  async suspendAsset(operator: ExternalActor, assetId: string) {
+    let pending = 0, tasks = 0
+    for (const entry of await this.store.forAsset(operator.orgId, assetId)) {
+      tasks++
+      try {
+        let task = entry.task
+        if (['accepted', 'dispatching', 'running'].includes(task.status)) {
+          await this.store.auditManagement(operator, entry.actor, task.id, 'suspend')
+          task = await this.coordinator.cancel(entry.actor, task.id)
+        }
+        if (task.status === 'unknown' && task.cleanup !== 'confirmed') task = await this.coordinator.reconcile(entry.actor, task.id)
+        if (['accepted', 'dispatching', 'running'].includes(task.status) || ['pending', 'unknown'].includes(task.cleanup)) pending++
+      } catch { pending++ }
+    }
+    return { tasks, pending }
   }
   async evidence(actor: ExternalActor, id: string, cursor = 0) {
     await this.authorize(actor)

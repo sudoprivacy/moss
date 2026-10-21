@@ -2072,7 +2072,9 @@ export function startServer(
   const hostedReady = authService.createHostedEvaluationRuntime(runtime.serverInstanceId, externalProviders?.releases).then(async value => {
     if (isStopped) { await value?.close(); return }
     hostedEvaluations = value
-    agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, value?.coordinator, externalProviders?.releases, value?.tasks)
+    await agentInventory.close()
+    agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, value?.coordinator, externalProviders?.releases, value?.tasks, value?.gateway, externalProviders ?? undefined)
+    agentInventory.start()
   })
   const externalStoreReady = Promise.all([externalProviders?.ownership.ready ?? Promise.resolve(), hostedReady])
 
@@ -11530,6 +11532,7 @@ export function startServer(
       if (isStopped) throw new Error('Server stopped before initialization completed')
       server.listen(config.port, config.host)
     }).catch(error => {
+      void agentInventory.close().catch(() => {})
       void hostedEvaluations?.close().catch(() => {})
       void externalProviders?.close().catch(() => {})
       onError(error instanceof Error ? error : new Error('External provider task store initialization failed'))
@@ -11653,6 +11656,7 @@ export function startServer(
     stop: async () => {
       isStopped = true
       await hostedReady.catch(() => {})
+      await agentInventory.close()
       await hostedEvaluations?.close()
       await externalProviders?.close()
       wikiJobExecutor.stop()

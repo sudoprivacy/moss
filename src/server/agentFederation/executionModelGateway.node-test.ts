@@ -371,3 +371,44 @@ void test("revocation while content inspection runs blocks production dispatch a
   assert.equal(f.state.issued, 1);
   assert.equal(f.state.models, 0);
 });
+
+void test('suspension during delayed Router token creation stays pending until the late token is disabled', async t => {
+  const f = await setup(t)
+  let release!: () => void, started!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  const begun = new Promise<void>(resolve => { started = resolve })
+  const original = f.router.issue.bind(f.router)
+  f.router.issue = async (...args) => { started(); await waiting; return original(...args) }
+  const invocation = f.gateway.invoke('org-a', f.body, f.token)
+  await begun
+  await f.db.run('UPDATE agent_asset_gates SET operation_id = ? WHERE org_id = ? AND asset_id = ?', ['suspension-a', 'org-a', 'asset-a'])
+  const stopped = await f.gateway.suspendAsset('org-a', 'asset-a')
+  assert.equal(stopped.pending, 1)
+  assert.equal(f.state.issued, 0)
+  release()
+  const result = await invocation
+  assert.equal(result.status, 'unknown')
+  assert.equal(f.state.models, 0)
+  assert.equal(f.state.issued, 1)
+  assert.equal([...f.tokens.values()][0].status, 2)
+  assert.equal((await f.gateway.suspendAsset('org-a', 'asset-a')).pending, 0)
+  await assert.rejects(f.gateway.invoke('org-a', { ...f.body, call_id: randomUUID() }, f.token), /AGENT_SUSPENSION_ACTIVE/)
+  assert.equal(f.state.issued, 1)
+})
+void test('suspension recovers an already-created token when its response is still in flight', async t => {
+  const f = await setup(t)
+  let release!: () => void, started!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  const begun = new Promise<void>(resolve => { started = resolve })
+  const original = f.router.issue.bind(f.router)
+  f.router.issue = async (...args) => { const issued = await original(...args); started(); await waiting; return issued }
+  const invocation = f.gateway.invoke('org-a', f.body, f.token)
+  await begun
+  await f.db.run('UPDATE agent_asset_gates SET operation_id = ? WHERE org_id = ? AND asset_id = ?', ['suspension-a', 'org-a', 'asset-a'])
+  const stopped = await f.gateway.suspendAsset('org-a', 'asset-a')
+  assert.equal(stopped.pending, 0)
+  assert.equal([...f.tokens.values()][0].status, 2)
+  release(); await invocation
+  assert.equal(f.state.models, 0)
+  assert.equal((await f.gateway.suspendAsset('org-a', 'asset-a')).pending, 0)
+})

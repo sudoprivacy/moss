@@ -1,3 +1,4 @@
+import type { AssetSuspensions } from './assetSuspension.js'
 import type { HostedTaskService } from './hostedTaskService.js'
 import type { HostedReleases } from './hostedReleases.js'
 import type { HostedEvaluationCoordinator } from './hostedEvaluationCoordinator.js'
@@ -15,6 +16,7 @@ import type { RegisterHostedArtifact, RegisterEvaluationDataset } from '../../..
 
 export interface InventoryServiceOptions {
   registry?: ProductRegistryClient
+  suspensions?: AssetSuspensions
   tasks?: HostedTaskService
   hosted?: HostedEvaluationCoordinator
   releases?: HostedReleases
@@ -44,6 +46,14 @@ const identifier = (value: unknown): string => {
 /** Authenticated management gateway. Never accepts an end-user's attestation or IAM grant. */
 export class AgentInventoryService {
   constructor(private readonly options: InventoryServiceOptions) {}
+  start() { this.options.suspensions?.start() }
+  async close() { await this.options.suspensions?.close() }
+  async suspension(actor: AuthContext, id: string, retry = false) {
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    await this.readable(actor, identifier(id), true)
+    if (!this.options.suspensions) fail('AGENT_SUSPENSION_UNAVAILABLE', 503)
+    return retry ? this.options.suspensions.retry(actor.orgId, id) : this.options.suspensions.get(actor.orgId, id)
+  }
   private registry(orgId: string): ProductRegistryClient {
     if (!this.options.registry) fail('REGISTRY_NOT_CONFIGURED', 503)
     this.options.registry.scope(orgId)
@@ -453,6 +463,14 @@ export class AgentInventoryService {
       if ((checkedMetadata.department_id ?? null) !== owner.departmentId) fail('AGENT_DEPARTMENT_MISMATCH')
     }
     if (command.kind === 'MergeAsset') await this.readable(actor, command.target_asset_id, true)
-    return (await this.present(actor.orgId, [await registry.inventoryCommand(actor.orgId, command)]))[0]
+    if (command.kind === 'SuspendAsset') {
+      if (!this.options.suspensions || !current) fail('AGENT_SUSPENSION_UNAVAILABLE', 503)
+      return (await this.present(actor.orgId, [await this.options.suspensions.request(actor, command, current)]))[0]
+    }
+    const restore = command.kind === 'ReviewAsset' && command.decision === 'approve'
+      ? await this.options.suspensions?.assertRestorable(actor.orgId, id) : undefined
+    const result = await registry.inventoryCommand(actor.orgId, command)
+    if (restore !== undefined) await this.options.suspensions?.restored(actor.orgId, id, restore)
+    return (await this.present(actor.orgId, [result]))[0]
   }
 }

@@ -1,3 +1,4 @@
+import { initializeAssetControls, lockAssetGate, assetControlRevision } from './assetControlStore.js'
 import type { HostedUnknownPage } from './inventoryViews.js'
 import { randomUUID } from 'node:crypto'
 import type { HostedEventsPage, HostedSession, HostedTask, HostedTaskEvent, TaskRecord, SubmitTask, TaskExecutionResolution } from '../../../contracts/task/v1alpha1/contract.js'
@@ -17,6 +18,7 @@ export interface HostedTaskUpdate {
   cleanup?: 'pending' | 'confirmed' | 'unknown'
 }
 export interface HostedTaskAdmission {
+  controlRevision?: number
   assetId: string
   policySnapshot: unknown
   resolution: (task: HostedTask) => TaskExecutionResolution
@@ -28,7 +30,7 @@ export interface HostedTaskAdmission {
 export class HostedTaskStore {
   readonly ready: Promise<void>
   constructor(readonly db: DbDriver) {
-    this.ready = initializeExternalTaskPersistence(db).then(() => db.transaction(async () => {
+    this.ready = initializeExternalTaskPersistence(db).then(() => initializeAssetControls(db)).then(() => db.transaction(async () => {
       if (db.kind === 'postgres') await db.get("SELECT pg_advisory_xact_lock(hashtextextended('moss-hosted-task-schema-v1', 0))")
       await db.exec(`
       CREATE TABLE IF NOT EXISTS product_task_records (
@@ -94,6 +96,10 @@ export class HostedTaskStore {
     return this.db.transaction(async () => {
       const existing = await this.existing(actor, input)
       if (existing) return existing
+      if (admission.controlRevision !== undefined) {
+        await lockAssetGate(this.db, actor.orgId, admission.assetId)
+        if (await assetControlRevision(this.db, actor.orgId, admission.assetId) !== admission.controlRevision) fail('AGENT_SUSPENSION_CHANGED')
+      }
       if (!Number.isSafeInteger(admission.timeoutMs) || admission.timeoutMs < 100 || admission.timeoutMs > 300_000) fail('HOSTED_TASK_ADMISSION_INVALID', 500)
       await this.db.run('INSERT INTO hosted_task_capacity(org_id) VALUES (?) ON CONFLICT(org_id) DO NOTHING', [actor.orgId])
       await this.db.run('UPDATE hosted_task_capacity SET org_id = org_id WHERE org_id = ?', [actor.orgId])
@@ -339,6 +345,15 @@ export class HostedTaskStore {
     }), next_cursor: rows.length > 50 ? String(rows[49].id) : null }
   }
   /** Called only after current organization-admin authorization; owner is read from durable state. */
+  async forAsset(orgId: string, assetId: string) {
+    await this.ready
+    const extract = this.db.kind === 'postgres' ? "t.document::jsonb ->> 'asset_id'" : "json_extract(t.document, '$.asset_id')"
+    const rows = await this.db.all(`SELECT t.* FROM tasks t JOIN sessions s ON s.session_id = t.session_id
+      WHERE t.org_id = ? AND s.org_id = t.org_id AND s.user_id = t.user_id AND s.runtime_type = 'hosted'
+      AND (${extract}) = ? ORDER BY t.id LIMIT 10001`, [orgId, assetId])
+    if (rows.length > 10000) fail('HOSTED_TASK_SCAN_INCOMPLETE', 503)
+    return rows.map(row => ({ actor: { orgId, userId: String(row.user_id) }, task: this.project(row) }))
+  }
   async managementOwner(orgId: string, id: string): Promise<ExternalActor> {
     await this.ready
     const row = await this.db.get(`SELECT t.user_id FROM tasks t JOIN sessions s ON s.session_id = t.session_id
@@ -346,7 +361,7 @@ export class HostedTaskStore {
     if (!row) fail('TASK_NOT_FOUND', 404)
     return { orgId, userId: String(row.user_id) }
   }
-  async auditManagement(operator: ExternalActor, owner: ExternalActor, id: string, action: 'reconcile' | 'close') {
+  async auditManagement(operator: ExternalActor, owner: ExternalActor, id: string, action: 'reconcile' | 'close' | 'suspend') {
     if (operator.orgId !== owner.orgId) fail('TASK_NOT_FOUND', 404)
     const task = await this.get(owner, id)
     await this.db.run(`INSERT INTO session_events(event_id, session_id, attempt_id, event_type, payload_json, created_at)
