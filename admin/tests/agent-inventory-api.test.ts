@@ -34,3 +34,19 @@ test('inventory export preserves missing costs and covers every page without dup
   const duplicate = { list: async () => ({ api_version: 'agent-registry.sudo.dev/v1alpha1' as const, kind: 'AgentAssetPage' as const, items: [row('a')], next_cursor: 'a' }) }
   await assert.rejects(exportInventory(duplicate, new AbortController().signal), /INVALID_ASSET_CURSOR/)
 })
+
+test('hosted management uses scoped endpoints and never submits a task owner override', async () => {
+  const calls: { path: string; body?: unknown }[] = []
+  const api = createInventoryApi({
+    get: async <T>(path: string): Promise<T> => { calls.push({ path }); return { success: true, data: { items: [], next_cursor: null } } as T },
+    post: async <T>(path: string, body?: unknown): Promise<T> => { calls.push({ path, body }); return { success: true, data: { task_id: 'task-a', status: 'unknown', cleanup: 'confirmed' } } as T },
+  })
+  await api.hostedUnknown('task-a')
+  await api.hostedTaskAction('task-a', 'reconcile')
+  await api.hostedTaskAction('task-a', 'close', 'Reviewed unknown result and cleanup.')
+  assert.deepEqual(calls, [
+    { path: '/api/v1/agent-inventory/hosted/tasks/unknown?after=task-a' },
+    { path: '/api/v1/agent-inventory/hosted/tasks/task-a/reconcile', body: {} },
+    { path: '/api/v1/agent-inventory/hosted/tasks/task-a/close', body: { note: 'Reviewed unknown result and cleanup.' } },
+  ])
+})

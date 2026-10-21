@@ -1,3 +1,5 @@
+import type { HostedUnknownPage } from '../../../src/server/agentFederation/inventoryViews'
+export type { HostedUnknownPage }
 import { dcClient } from './client'
 import type { DiscoverySource, DiscoveryResult } from '../../../src/server/agentFederation/inventoryViews'
 import type {
@@ -43,6 +45,7 @@ export interface DiscoveredAsset {
 export type { DiscoverySource, DiscoveryResult }
 export interface InventoryAccess {
   can_manage: boolean
+  hosted_tasks_available?: boolean
   configured: boolean
   user_id: string
   department_id: string | null
@@ -81,6 +84,8 @@ export function createInventoryApi(client: Client = dcClient, signal?: () => Abo
     return result.data
   }
   return {
+    hostedUnknown: (after = '') => call<HostedUnknownPage>(`/hosted/tasks/unknown${after ? `?after=${encodeURIComponent(after)}` : ''}`),
+    hostedTaskAction: (id: string, action: 'reconcile' | 'close', note?: string) => call<{ task_id: string; status: 'unknown'; cleanup: string }>(`/hosted/tasks/${encodeURIComponent(id)}/${action}`, action === 'close' ? { note } : {}),
     access: () => call<InventoryAccess>('/access'),
     list: (after = '') => call<AssetPage>(`/assets?after=${encodeURIComponent(after)}`),
     get: (id: string) => call<AssetRecord>(`/assets/${encodeURIComponent(id)}`),

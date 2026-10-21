@@ -132,3 +132,28 @@ void test('unverified consumption and unknown dispatch remain pending; traces pa
   await assert.rejects(f.service.evidence(actor, task.id, 103), { code: 'INVALID_CURSOR' })
   await assert.rejects(f.service.evidence(actor, task.id, -1), { code: 'INVALID_CURSOR' })
 })
+
+void test('organization admin can close a departed owner unknown task with separate operator audit, never granting execution', async t => {
+  const { AgentInventoryService } = await import('./inventoryService.js')
+  const { dispatchAgentInventory } = await import('./inventoryRoutes.js')
+  const f = await fixture(t), task = await f.service.create(actor, f.request())
+  await f.driver.run('UPDATE tasks SET status = ?, document = ? WHERE id = ?', ['unknown', JSON.stringify({ ...task, status: 'unknown', cleanup: 'unknown' }), task.id])
+  f.state.active = false
+  const admin = { ...actor, userId: 'admin-a', role: 'admin', scopes: ['admin:users'] } as import('../auth/token.js').AuthContext
+  const inventory = new AgentInventoryService({ tasks: f.service, catalog: f.catalog, authorize: async a => ({ canManage: a.role === 'admin' }),
+    member: async () => null, members: async () => [], labels: async () => ({ users: new Map(), departments: new Map() }) })
+  const url = (suffix: string) => new URL(`http://localhost/api/v1/agent-inventory/hosted/tasks/${suffix}`)
+  assert.equal((await dispatchAgentInventory(inventory, { ...admin, role: 'user' } as never, 'GET', url('unknown'), {})).status, 403)
+  assert.equal((await inventory.hostedUnknown(admin)).items[0].user_id, actor.userId)
+  await assert.rejects(inventory.hostedTaskAction({ ...admin, orgId: 'foreign' }, task.id, 'close', { note: 'Reviewed unknown result and cleanup.' }), { code: 'TASK_NOT_FOUND' })
+  await assert.rejects(inventory.hostedTaskAction(admin, task.id, 'close', { note: 'Reviewed unknown result and cleanup.' }), { code: 'HOSTED_CLEANUP_UNCONFIRMED' })
+  await assert.rejects(inventory.hostedTaskAction(admin, task.id, 'close', { note: 'Reviewed unknown result and cleanup.', user_id: 'other' }), { code: 'INVALID_ADMIN_INPUT' })
+  await f.store.confirmCleanup(actor, task.id, task.attempt_id!)
+  const response = await dispatchAgentInventory(inventory, admin, 'POST', url(`${task.id}/close`), { note: 'Reviewed unknown result and cleanup.' })
+  assert.equal(response.status, 200)
+  assert.equal((await f.store.get(actor, task.id)).status, 'unknown')
+  assert.equal((await inventory.hostedUnknown(admin)).items.length, 0)
+  const audit = JSON.parse(String((await f.driver.get("SELECT payload_json FROM session_events WHERE event_type = 'hosted.reconciled'"))!.payload_json))
+  assert.equal(audit.user_id, admin.userId); assert.equal(audit.task_user_id, actor.userId); assert.equal(audit.performed_as, 'org_admin')
+  assert.equal(f.state.starts, 1)
+})

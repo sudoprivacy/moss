@@ -36,3 +36,9 @@ export interface DiscoveryResult {
   boundary: string
   error?: string
 }
+
+export interface HostedUnknownPage {
+  items: { task_id: string; session_id: string; catalog_id: string; asset_id: string; user_id: string; updated_at: number;
+    cleanup: 'not_started' | 'pending' | 'confirmed' | 'unknown'; error_code: string | null }[]
+  next_cursor: string | null
+}

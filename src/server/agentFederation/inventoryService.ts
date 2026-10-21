@@ -1,3 +1,4 @@
+import type { HostedTaskService } from './hostedTaskService.js'
 import type { HostedReleases } from './hostedReleases.js'
 import type { HostedEvaluationCoordinator } from './hostedEvaluationCoordinator.js'
 import type { StartHostedEvaluation, CreateMigrationPolicy } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
@@ -14,6 +15,7 @@ import type { RegisterHostedArtifact, RegisterEvaluationDataset } from '../../..
 
 export interface InventoryServiceOptions {
   registry?: ProductRegistryClient
+  tasks?: HostedTaskService
   hosted?: HostedEvaluationCoordinator
   releases?: HostedReleases
   sources?: InventorySources
@@ -63,11 +65,32 @@ export class AgentInventoryService {
     const member = await this.options.member(actor.orgId, actor.userId)
     return {
       can_manage: access.canManage,
+      hosted_tasks_available: access.canManage && !!this.options.tasks,
       configured,
       user_id: actor.userId,
       department_id: member?.departmentId ?? null,
       can_own: !!member,
     }
+  }
+  private async managedTasks(actor: AuthContext) {
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    if (!this.options.tasks) fail('HOSTED_TASKS_UNAVAILABLE', 503)
+    return this.options.tasks
+  }
+  async hostedUnknown(actor: AuthContext, after = '') {
+    const tasks = await this.managedTasks(actor)
+    return tasks.store.unknowns(actor.orgId, after)
+  }
+  async hostedTaskAction(actor: AuthContext, id: string, action: 'reconcile' | 'close', body: unknown) {
+    const tasks = await this.managedTasks(actor)
+    const input = object(body, action === 'close' ? ['note'] : [])
+    if (action === 'close' && (typeof input.note !== 'string' || input.note.trim().length < 10 || input.note.length > 2000)) fail('INVALID_RECONCILIATION')
+    const owner = await tasks.store.managementOwner(actor.orgId, identifier(id))
+    const task = await tasks.store.get(owner, id)
+    if (task.status !== 'unknown') fail('HOSTED_RECONCILIATION_CONFLICT', 409)
+    await tasks.store.auditManagement(actor, owner, id, action)
+    const result = action === 'close' ? await tasks.store.closeUnknown(owner, id, input.note as string, actor) : await tasks.coordinator.reconcile(owner, id)
+    return { task_id: result.id, status: result.status, cleanup: result.cleanup }
   }
   async members(actor: AuthContext, after = '', search = '') {
     if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)

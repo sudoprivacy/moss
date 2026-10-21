@@ -1,3 +1,4 @@
+import type { HostedUnknownPage } from './inventoryViews.js'
 import { randomUUID } from 'node:crypto'
 import type { HostedEventsPage, HostedSession, HostedTask, HostedTaskEvent, TaskRecord, SubmitTask, TaskExecutionResolution } from '../../../contracts/task/v1alpha1/contract.js'
 import type { DbDriver, SqlRow } from '../db/driver.js'
@@ -325,7 +326,35 @@ export class HostedTaskStore {
     })
   }
   /** Closing acknowledges uncertainty. It never changes the outcome or enables this session again. */
-  async closeUnknown(actor: ExternalActor, id: string, note: string): Promise<HostedTask> {
+  async unknowns(orgId: string, after = ''): Promise<HostedUnknownPage> {
+    await this.ready
+    if (after && !/^[A-Za-z0-9_-]{1,100}$/.test(after)) fail('INVALID_CURSOR', 400)
+    const rows = await this.db.all(`SELECT t.* FROM tasks t JOIN sessions s ON s.session_id = t.session_id
+      WHERE t.org_id = ? AND s.org_id = t.org_id AND s.user_id = t.user_id AND s.runtime_type = 'hosted'
+        AND t.status = 'unknown' AND s.desired_state <> 'stopped' AND t.id > ? ORDER BY t.id LIMIT 51`, [orgId, after])
+    return { items: rows.slice(0, 50).map(row => {
+      const task = this.project(row)
+      return { task_id: task.id, session_id: task.session_id, catalog_id: task.catalog_id, asset_id: task.asset_id,
+        user_id: String(row.user_id), updated_at: task.updated_at, cleanup: task.cleanup, error_code: task.error_code }
+    }), next_cursor: rows.length > 50 ? String(rows[49].id) : null }
+  }
+  /** Called only after current organization-admin authorization; owner is read from durable state. */
+  async managementOwner(orgId: string, id: string): Promise<ExternalActor> {
+    await this.ready
+    const row = await this.db.get(`SELECT t.user_id FROM tasks t JOIN sessions s ON s.session_id = t.session_id
+      WHERE t.org_id = ? AND t.id = ? AND s.org_id = t.org_id AND s.user_id = t.user_id AND s.runtime_type = 'hosted'`, [orgId, id])
+    if (!row) fail('TASK_NOT_FOUND', 404)
+    return { orgId, userId: String(row.user_id) }
+  }
+  async auditManagement(operator: ExternalActor, owner: ExternalActor, id: string, action: 'reconcile' | 'close') {
+    if (operator.orgId !== owner.orgId) fail('TASK_NOT_FOUND', 404)
+    const task = await this.get(owner, id)
+    await this.db.run(`INSERT INTO session_events(event_id, session_id, attempt_id, event_type, payload_json, created_at)
+      VALUES (?, ?, ?, 'hosted.management_requested', ?, ?)`, [randomUUID(), task.session_id, task.attempt_id,
+      JSON.stringify({ task_id: id, operator_user_id: operator.userId, task_user_id: owner.userId, org_id: operator.orgId, action }), await this.now()])
+  }
+  async closeUnknown(actor: ExternalActor, id: string, note: string, operator?: ExternalActor): Promise<HostedTask> {
+    if (operator && operator.orgId !== actor.orgId) fail('TASK_NOT_FOUND', 404)
     if (typeof note !== 'string' || note.trim().length < 10 || note.length > 2000) fail('INVALID_RECONCILIATION', 400)
     await this.ready
     return this.db.transaction(async () => {
@@ -334,7 +363,7 @@ export class HostedTaskStore {
       const eventId = `hosted-reconciliation:${id}`
       await this.db.run(`INSERT INTO session_events(event_id, session_id, attempt_id, event_type, payload_json, created_at)
         VALUES (?, ?, ?, 'hosted.reconciled', ?, ?) ON CONFLICT(event_id) DO NOTHING`, [eventId, task.session_id, task.attempt_id,
-        JSON.stringify({ task_id: id, user_id: actor.userId, note: note.trim(), outcome: 'unknown' }), await this.now()])
+        JSON.stringify({ task_id: id, user_id: operator?.userId ?? actor.userId, task_user_id: actor.userId, performed_as: operator ? 'org_admin' : 'task_owner', note: note.trim(), outcome: 'unknown' }), await this.now()])
       await this.db.run("UPDATE sessions SET desired_state = 'stopped', status = 'detached' WHERE session_id = ?", [task.session_id])
       return task
     })

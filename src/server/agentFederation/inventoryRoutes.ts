@@ -22,8 +22,11 @@ export async function dispatchAgentInventory(
     const evaluation = /^\/api\/v1\/agent-inventory\/hosted\/evaluations\/([A-Za-z0-9_.:@-]+)(?:\/(cases|resume|stop|reconcile|compare))?$/.exec(path)
     const policies = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/migration-policies$/.exec(path)
     const comparison = /^\/api\/v1\/agent-inventory\/hosted\/migration\/comparisons\/([A-Za-z0-9_.:@-]+)$/.exec(path)
+    const managedTask = /^\/api\/v1\/agent-inventory\/hosted\/tasks\/([\w-]+)\/(reconcile|close)$/.exec(path)
     let data
     if (method === 'GET' && path === `${base}/access`) data = await service.access(actor)
+    else if (method === 'GET' && path === `${base}/hosted/tasks/unknown`) data = await service.hostedUnknown(actor, url.searchParams.get('after') ?? '')
+    else if (method === 'POST' && managedTask) data = await service.hostedTaskAction(actor, managedTask[1], managedTask[2] as 'reconcile' | 'close', body)
     else if (method === 'GET' && path === `${base}/members`)
       data = await service.members(actor, url.searchParams.get('after') ?? '', url.searchParams.get('q') ?? '')
     else if (method === 'GET' && path === `${base}/assets`)

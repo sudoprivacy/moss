@@ -1,3 +1,4 @@
+import { AgentHostedUnknownTasks } from './agent-hosted-unknown-tasks'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Download, Plus, RefreshCw, X } from 'lucide-react'
 import { AgentDiscoverySection } from './agent-discovery-section'
@@ -316,6 +317,7 @@ function ScopedInventory({ query }: { query: string }) {
           {notice}
         </p>
       )}
+      {access?.can_manage && access.hosted_tasks_available && <AgentHostedUnknownTasks api={api} />}
       {access?.configured && <AgentDiscoverySection api={api} access={access} onChange={reload} />}
       {!access?.configured ? (
         <Alert>

@@ -2072,7 +2072,7 @@ export function startServer(
   const hostedReady = authService.createHostedEvaluationRuntime(runtime.serverInstanceId, externalProviders?.releases).then(async value => {
     if (isStopped) { await value?.close(); return }
     hostedEvaluations = value
-    agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, value?.coordinator, externalProviders?.releases)
+    agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, value?.coordinator, externalProviders?.releases, value?.tasks)
   })
   const externalStoreReady = Promise.all([externalProviders?.ownership.ready ?? Promise.resolve(), hostedReady])
 

@@ -713,9 +713,9 @@ export class AuthService {
     return { ...runtime, tasks, close: async () => { await tasks?.close(); await runtime.close() } }
   }
 
-  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort, hosted?: HostedEvaluationCoordinator, releases?: RegistryReleases): AgentInventoryService {
+  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort, hosted?: HostedEvaluationCoordinator, releases?: RegistryReleases, tasks?: HostedTaskService): AgentInventoryService {
     return new AgentInventoryService({
-      registry: registryFromEnvironment(), catalog: new CatalogRepository(this.db.driver), hosted,
+      registry: registryFromEnvironment(), catalog: new CatalogRepository(this.db.driver), hosted, tasks,
       releases: releases ? new HostedReleases(new CatalogRepository(this.db.driver), releases) : undefined,
       sources: new InventorySources({ db: this.db.driver, identities: this.identityRepository, catalog: new CatalogRepository(this.db.driver), secrets }),
       authorize: async actor => {
