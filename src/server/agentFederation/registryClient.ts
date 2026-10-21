@@ -1,6 +1,7 @@
 import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import Ajv2020 from 'ajv/dist/2020.js'
+import type { EvaluationDataset, EvaluationDatasetPage, RegisterEvaluationDataset } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { PlatformDiscoveryPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { DifyTextPlan, HostedArtifact, HostedArtifactPage, RegisterHostedArtifact } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { CheckExecutionGrant, ExecutionAuthorization, ExecutionGrant, ExecutionGrantPage, ExecutionGrantResult, IssueExecutionGrant } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
@@ -37,6 +38,9 @@ ajv.addKeyword({ keyword: 'discriminator', valid: true })
 ajv.addSchema({ $id: RESOURCE_REF_ID, sudoResourceRef: true })
 ajv.addSchema(schema)
 const validators = {
+  EvaluationDataset: ajv.compile<EvaluationDataset>({ $ref: `${schema.$id}#/$defs/EvaluationDataset` }),
+  EvaluationDatasetPage: ajv.compile<EvaluationDatasetPage>({ $ref: `${schema.$id}#/$defs/EvaluationDatasetPage` }),
+  RegisterEvaluationDataset: ajv.compile<RegisterEvaluationDataset>({ $ref: `${schema.$id}#/$defs/RegisterEvaluationDataset` }),
   DifyTextPlan: ajv.compile<DifyTextPlan>({ $ref: `${schema.$id}#/$defs/DifyTextPlan` }),
   HostedArtifact: ajv.compile<HostedArtifact>({ $ref: `${schema.$id}#/$defs/HostedArtifact` }),
   HostedArtifactPage: ajv.compile<HostedArtifactPage>({ $ref: `${schema.$id}#/$defs/HostedArtifactPage` }),
@@ -161,7 +165,7 @@ export class ProductRegistryClient {
         const fieldPath = (body as { detail?: { path?: unknown } })?.detail?.path
         if (response.status === 400 && typeof code === 'string' && /^DIFY_[A-Z_]{1,64}$/.test(code)
           && typeof fieldPath === 'string' && /^[A-Za-z0-9_.$\[\]]{1,160}$/.test(fieldPath)) throw new DifySourceError(code, fieldPath)
-        if (typeof code === 'string' && /^(HOSTED_|DIFY_|EXECUTION_|AGENT_|REGISTRY_|CHANNEL_|PRINCIPAL_|IMMUTABLE_|INVALID_|AMBIGUOUS_)[A-Z_]{1,64}$/.test(code)) fail(code, [400, 401, 403, 404, 409, 413].includes(response.status) ? response.status : 503)
+        if (typeof code === 'string' && /^(EVALUATION_|HOSTED_|DIFY_|EXECUTION_|AGENT_|REGISTRY_|CHANNEL_|PRINCIPAL_|IMMUTABLE_|INVALID_|AMBIGUOUS_)[A-Z_]{1,64}$/.test(code)) fail(code, [400, 401, 403, 404, 409, 413].includes(response.status) ? response.status : 503)
         fail('REGISTRY_REQUEST_FAILED')
       }
       return body
@@ -249,6 +253,35 @@ export class ProductRegistryClient {
   }
   async hostedGet(orgId: string, id: string): Promise<HostedArtifact> {
     return this.hostedArtifact(orgId, await this.call(orgId, `/hosted/artifacts/${encodeURIComponent(id)}`), undefined, id)
+  }
+  private evaluationDataset(orgId: string, value: unknown, assetId?: string, id?: string): EvaluationDataset {
+    if (!validators.EvaluationDataset(value) || value.zone !== this.scope(orgId).zoneId
+      || (assetId !== undefined && value.asset_id !== assetId) || (id !== undefined && value.id !== id)
+      || new Set(value.dataset.cases.map(row => row.id)).size !== value.dataset.cases.length
+      || value.dataset_digest !== hash(Buffer.from(stableJson(value.dataset)))) fail('EVALUATION_RESPONSE_INVALID')
+    // Semantics are fixed by the owner exact-strip-v1 profile, not supplied by callers.
+    const rubric = { id: 'exact-strip-v1', comparison: 'strip-leading-trailing-ASCII-whitespace-U0009-U000D-U0020-exact-case-sensitive', denominator: 'all-cases-including-errors', aggregation: 'passed-cases/total-cases' }
+    if (value.rubric_digest !== hash(Buffer.from(stableJson(rubric)))) fail('EVALUATION_RESPONSE_INVALID')
+    return value
+  }
+  async evaluationDatasetRegister(orgId: string, command: RegisterEvaluationDataset): Promise<EvaluationDataset> {
+    const normalized = { api_version: AGENT_REGISTRY_API, kind: 'RegisterEvaluationDataset', ...command,
+      dataset: { input_scope: 'synthetic_text', rubric: 'exact-strip-v1', ...command.dataset } }
+    if (!validators.RegisterEvaluationDataset(normalized) || Buffer.byteLength(JSON.stringify(normalized)) > 600000) fail('INVALID_EVALUATION_DATASET', 400)
+    const value = this.evaluationDataset(orgId, await this.call(orgId, '/hosted/datasets', normalized), command.asset_id)
+    if (value.metadata_digest !== command.metadata_digest || value.initiated_by !== command.initiated_by || !isDeepStrictEqual(value.dataset, normalized.dataset)) fail('EVALUATION_RESPONSE_INVALID')
+    return value
+  }
+  async evaluationDatasetGet(orgId: string, id: string): Promise<EvaluationDataset> {
+    return this.evaluationDataset(orgId, await this.call(orgId, `/hosted/datasets/${encodeURIComponent(id)}`), undefined, id)
+  }
+  async evaluationDatasetList(orgId: string, assetId: string, after = ''): Promise<EvaluationDatasetPage> {
+    const value = await this.call(orgId, `/hosted/datasets?${new URLSearchParams({ asset_id: assetId, after })}`)
+    if (!validators.EvaluationDatasetPage(value)) fail('EVALUATION_RESPONSE_INVALID')
+    for (const row of value.items) this.evaluationDataset(orgId, row, assetId)
+    if (value.items.some((row, i) => row.id <= (i ? value.items[i - 1].id : after))
+      || (value.next_cursor !== null && value.next_cursor !== value.items.at(-1)?.id)) fail('EVALUATION_RESPONSE_INVALID')
+    return value
   }
   private executionGrant(value: unknown, orgId: string, id?: string): ExecutionGrant {
     if (!validators.ExecutionGrant(value) || value.zone !== this.scope(orgId).zoneId || (id !== undefined && value.id !== id)

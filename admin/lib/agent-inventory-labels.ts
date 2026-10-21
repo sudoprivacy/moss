@@ -30,6 +30,12 @@ export const recommendationLabels: Record<string, string> = {
 export function inventoryError(error: unknown): string {
   const code = error instanceof ApiRequestError ? error.code : error instanceof Error ? error.message : ''
   const labels: Record<string, string> = {
+    EVALUATION_SCHEMA_REQUIRED: '评测数据库尚未初始化，请由部署管理员执行显式初始化。',
+    EVALUATION_VERSION_CONFLICT: '同名同版本的评测集已存在，请使用新版本号。',
+    EVALUATION_IDEMPOTENCY_CONFLICT: '此次提交内容已变化，请重新编辑后提交。',
+    EVALUATION_ASSET_NOT_ADMITTED: '台账资料或状态已变化，请刷新后重新核对。',
+    EVALUATION_DATASET_LIMIT: '评测集超过大小限制，请减少样本或缩短内容。',
+    INVALID_EVALUATION_DATASET: '请检查评测集名称、版本和样本；每个样本必须包含输入和预期结果。',
     HOSTED_SCHEMA_REQUIRED: '托管制品数据库尚未初始化，请由部署管理员执行显式初始化。',
     HOSTED_ASSET_NOT_ADMITTED: '台账资料或状态已变化，请刷新后核对负责人、模型资源和托管位置。',
     HOSTED_SOURCE_MISMATCH: '源文件、模型或输出上限与镜像描述不一致，请重新构建并核对制品。',

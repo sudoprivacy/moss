@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { createInventoryApi, type AssetRecord, type HostedArtifact, type HostedImage, type DifyTextPlan } from '@/lib/api/agent-inventory'
+import { AgentEvaluationDatasets } from './agent-evaluation-datasets'
 import { inventoryError } from '@/lib/agent-inventory-labels'
 
 export function AgentHostedArtifacts({ asset, canManage, onClose }: { asset: AssetRecord; canManage: boolean; onClose: () => void }) {
@@ -93,6 +94,7 @@ export function AgentHostedArtifacts({ asset, canManage, onClose }: { asset: Ass
         </article>)}
         {cursor && <Button variant="outline" disabled={busy} onClick={() => void perform(async () => { const page = await api.hostedList(asset.id, cursor); setRecords(previous => [...previous, ...page.items.filter(item => !previous.some(row => row.id === item.id))]); setCursor(page.next_cursor) })}>加载更多</Button>}
       </section>
+      <AgentEvaluationDatasets key={asset.id} asset={asset} canManage={editable} />
     </DialogContent>
   </Dialog>
 }

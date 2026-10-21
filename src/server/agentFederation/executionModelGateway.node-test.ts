@@ -9,9 +9,10 @@ import type {
   CheckExecutionGrant,
 } from "../../../contracts/agent-registry/v1alpha1/contract.gen.js";
 import { ExecutionModelGateway } from "./executionModelGateway.js";
+import { NexusModelRelay } from "./nexusModelRelay.js";
 import { AgentRouterClient } from "./routerAgentClient.js";
 
-async function setup(t: TestContext) {
+async function setup(t: TestContext, contentPath = false) {
   const db = new SqliteDriver(new DatabaseSync(":memory:"));
   t.after(() => db.close());
   const digest = "sha256:" + "a".repeat(64),
@@ -48,6 +49,9 @@ async function setup(t: TestContext) {
     issued: 0,
     models: 0,
     denySecond: false,
+    denyThird: false,
+    redact: false,
+    prompts: [] as string[],
     modelFailure: false,
     issueAmbiguous: false,
     disableFailure: false,
@@ -134,7 +138,8 @@ async function setup(t: TestContext) {
         request.token !== token ||
         grant.status !== "active" ||
         request.task_id !== "task-a" ||
-        (state.denySecond && state.checks === 2)
+        (state.denySecond && state.checks === 2) ||
+        (state.denyThird && state.checks === 3)
       )
         throw new ExternalProviderError(401, "EXECUTION_INACTIVE");
       return {
@@ -145,6 +150,28 @@ async function setup(t: TestContext) {
       };
     },
   };
+  let relayUrl = "";
+  const relay = contentPath
+    ? new NexusModelRelay(
+        "synthetic-mount-" + "x".repeat(32),
+        async (_target, body, _signal, _context, requestId) => {
+          if (state.redact) (body as any).messages[0].content = "[REDACTED]";
+          return fetch(`${relayUrl}/chat/completions`, {
+            method: "POST",
+            headers: {
+              authorization: "Bearer synthetic-mount-" + "x".repeat(32),
+              "content-type": "application/json",
+              "x-request-id": requestId!,
+            },
+            body: JSON.stringify(body),
+          });
+        },
+      )
+    : undefined;
+  if (relay) {
+    relayUrl = await relay.listen();
+    t.after(() => relay.close());
+  }
   const gateway = new ExecutionModelGateway(db, registry, [
     {
       orgId: "org-a",
@@ -153,6 +180,17 @@ async function setup(t: TestContext) {
       endpoint: "http://127.0.0.1:12345/v1",
       maxOutputTokens: 64,
       router,
+      ...(relay
+        ? {
+            contentPath: {
+              relay,
+              target: {
+                nexus_endpoint: "https://nexus.example",
+                model_mount: "/model",
+              },
+            },
+          }
+        : {}),
       request: async (_input, init) => {
         state.models++;
         assert.equal(
@@ -160,6 +198,7 @@ async function setup(t: TestContext) {
           "Bearer sk-" + "x".repeat(48),
         );
         const body = JSON.parse(String(init?.body));
+        state.prompts.push(body.messages[0].content);
         assert.equal(body.model, "test-model");
         assert.equal(body.stream, false);
         if (state.modelFailure)
@@ -306,5 +345,29 @@ void test("production runs cannot bypass the existing Nexus content-enforced mod
     /MODEL_CONTENT_PATH_NOT_CONFIGURED/,
   );
   assert.equal(f.state.issued, 0);
+  assert.equal(f.state.models, 0);
+});
+
+void test("production content path preserves redaction and rechecks IAM immediately before Router", async (t) => {
+  const f = await setup(t, true);
+  f.grant.request.mode = "run";
+  f.state.redact = true;
+  const result = await f.gateway.invoke("org-a", f.body, f.token);
+  assert.equal(result.status, "completed");
+  assert.equal(f.state.checks, 3);
+  assert.deepEqual(f.state.prompts, ["[REDACTED]"]);
+  assert.equal(result.ledgerStatus, "router_verified");
+});
+void test("revocation while content inspection runs blocks production dispatch and replay", async (t) => {
+  const f = await setup(t, true);
+  f.grant.request.mode = "run";
+  f.state.denyThird = true;
+  const result = await f.gateway.invoke("org-a", f.body, f.token);
+  assert.equal(result.status, "rejected");
+  assert.equal(result.error, "EXECUTION_INACTIVE");
+  assert.equal(f.state.models, 0);
+  assert.equal(result.tokenCleanupPending, false);
+  await f.gateway.invoke("org-a", f.body, f.token);
+  assert.equal(f.state.issued, 1);
   assert.equal(f.state.models, 0);
 });

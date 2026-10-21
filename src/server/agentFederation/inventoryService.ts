@@ -7,7 +7,7 @@ import { parseInventoryCommand, type ProductRegistryClient } from './registryCli
 import type { InventoryAssetView, InventoryPageView } from './inventoryViews.js'
 import { discoveryDigest, discoveryId, discoverySourceKey, type DiscoveryResult } from './inventoryDiscovery.js'
 import type { InventorySources } from './inventorySources.js'
-import type { RegisterHostedArtifact } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { RegisterHostedArtifact, RegisterEvaluationDataset } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 
 export interface InventoryServiceOptions {
   registry?: ProductRegistryClient
@@ -129,6 +129,22 @@ export class AgentInventoryService {
     return this.registry(actor.orgId).hostedRegister(actor.orgId, {
       ...input, api_version: AGENT_REGISTRY_API, kind: 'RegisterHostedArtifact', initiated_by: actor.userId,
     } as RegisterHostedArtifact)
+  }
+  async datasetList(actor: AuthContext, id: string, after = '') {
+    const { canManage } = await this.options.authorize(actor)
+    await this.readable(actor, id, canManage)
+    if (after) identifier(after)
+    return this.registry(actor.orgId).evaluationDatasetList(actor.orgId, id, after)
+  }
+  async datasetRegister(actor: AuthContext, body: unknown) {
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    const input = object(body, ['request_id', 'asset_id', 'metadata_digest', 'dataset'])
+    const asset = await this.readable(actor, identifier(input.asset_id), true)
+    if (asset.metadata_digest !== input.metadata_digest) fail('EVALUATION_ASSET_NOT_ADMITTED', 409)
+    if (!asset.metadata.owner_user_id || !(await this.options.member(actor.orgId, asset.metadata.owner_user_id))) fail('INVALID_MEMBER', 409)
+    return this.registry(actor.orgId).evaluationDatasetRegister(actor.orgId, {
+      ...input, api_version: AGENT_REGISTRY_API, kind: 'RegisterEvaluationDataset', initiated_by: actor.userId,
+    } as RegisterEvaluationDataset)
   }
   async discovered(actor: AuthContext, after = '') {
     await this.options.authorize(actor)

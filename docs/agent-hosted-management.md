@@ -42,3 +42,16 @@ DSL 校验、登记成功和不支持节点的报错。
 - 完成 IM、工具网关、成本展示、原生样例及 1.1 的其余 AM/R 项。
 
 部署镜像和源制品管理是本期运行所必需的服务能力；桌面安装包和签名继续后置。
+
+## Versioned migration datasets
+
+The same hosted-artifact dialog now includes “迁移评测集”. A manager creates a
+name/version and one or more synthetic-text input/expected-output pairs. The
+immutable owner API binds these to the current asset metadata and the
+`exact-strip-v1` rubric. Owners can read their datasets; other users cannot read
+another owner's sample content. Only authenticated managers can write, with the
+actual authenticated user supplied by Moss. Identical request replay is safe;
+changing an existing name/version is rejected and requires a new version.
+
+The form stores inputs and expected results. It does not yet provide a completed
+migration-evaluation task or automatically publish/raise the asset grade.

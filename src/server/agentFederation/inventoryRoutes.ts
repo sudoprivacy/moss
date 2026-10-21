@@ -36,6 +36,8 @@ export async function dispatchAgentInventory(
         : await service.get(actor, match[1])
     else if (method === 'POST' && path === `${base}/commands`) data = await service.command(actor, body)
     else if (method === 'GET' && hosted) data = await service.hostedList(actor, hosted[1], url.searchParams.get('after') ?? '')
+    else if (method === 'GET' && /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/datasets$/.test(path)) data = await service.datasetList(actor, path.split('/')[5], url.searchParams.get('after') ?? '')
+    else if (method === 'POST' && path === `${base}/hosted/datasets`) data = await service.datasetRegister(actor, body)
     else if (method === 'POST' && path === `${base}/hosted/dify/inspect`) data = await service.hostedInspect(actor, body)
     else if (method === 'POST' && path === `${base}/hosted/artifacts`) data = await service.hostedRegister(actor, body)
     else throw new ExternalProviderError(404, 'NOT_FOUND')

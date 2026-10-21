@@ -1,4 +1,10 @@
 import { randomUUID } from "node:crypto";
+import {
+  NexusWriteRejected,
+  type NexusWriteReceipt,
+} from "./provider/nexusWriteRejection.js";
+import type { NexusModelRelay } from "./nexusModelRelay.js";
+import type { NexusModelTarget } from "./provider/runtime.js";
 import type { ExecutionGrant } from "../../../contracts/agent-registry/v1alpha1/contract.gen.js";
 import type { DbDriver } from "../db/driver.js";
 import { ExternalProviderError } from "../externalProviders/policy.js";
@@ -24,6 +30,7 @@ export interface ExecutionModelResource {
   router: AgentRouterClient;
   request?: RouterRequest;
   allowedAddresses?: readonly string[];
+  contentPath?: { relay: NexusModelRelay; target: NexusModelTarget };
 }
 interface ModelInput {
   messages: { role: "system" | "user" | "assistant"; content: string }[];
@@ -57,6 +64,7 @@ export interface ExecutionModelCall {
   updatedAt: number;
   answer?: string;
   error?: string;
+  contentRejection?: NexusWriteReceipt;
   routerToken?: AgentRouterToken;
   tokenCleanupPending: boolean;
   ledgerStatus: "pending" | "router_verified";
@@ -296,8 +304,10 @@ export class ExecutionModelGateway {
     orgId: string,
     value: unknown,
     token: string,
+    cancellation?: AbortSignal,
   ): Promise<ExecutionModelCall> {
     await this.ready;
+    if (cancellation?.aborted) fail("EXECUTION_CANCELLED", 409);
     if (!token || token.length > 8192 || /[\r\n]/.test(token))
       fail("EXECUTION_TOKEN_INVALID", 401);
     const fields = object(value, [
@@ -311,15 +321,16 @@ export class ExecutionModelGateway {
     const resource = this.resource(orgId, String(fields.resource)),
       body = parse(value, resource);
     const auth = await this.authorize(orgId, body, token);
-    // This transport is currently qualified for isolated evaluation only. Run
-    // mode must use the existing Nexus content-enforced model path before enablement.
-    if (auth.grant.request.mode !== "evaluation")
+    // Production calls must traverse Nexus; evaluation can explicitly use the
+    // isolated direct path to establish a pre-migration baseline.
+    if (auth.grant.request.mode !== "evaluation" && !resource.contentPath)
       fail("MODEL_CONTENT_PATH_NOT_CONFIGURED", 503);
     const reservation = await this.reserve(orgId, body, auth.grant, resource),
       call = reservation.call;
     // Replays never dispatch again, including a crash with an unfinished record.
     if (!reservation.created) return call;
     let dispatched = false;
+    let dispatchError: unknown;
     try {
       const issued = await resource.router.issue(
         call.id,
@@ -335,25 +346,58 @@ export class ExecutionModelGateway {
       if (remaining <= 0) fail("EXECUTION_EXPIRED", 401);
       call.status = "dispatching";
       await this.save(call);
-      dispatched = true;
-      const response = await resource.request!(
-        `${resource.endpoint}/chat/completions`,
-        {
-          method: "POST",
-          redirect: "error",
-          signal: AbortSignal.timeout(Math.min(remaining, 120000)),
-          headers: {
-            Authorization: `Bearer ${issued.key}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            ...body.input,
-            model: resource.model,
-            stream: false,
-          }),
-        },
-      );
+      const signal = AbortSignal.any([
+        AbortSignal.timeout(Math.min(remaining, 120000)),
+        ...(cancellation ? [cancellation] : []),
+      ]);
+      const requestBody = {
+        ...body.input,
+        model: resource.model,
+        stream: false,
+      };
+      const forward = async (
+        approvedBody: Record<string, unknown>,
+        dispatchSignal: AbortSignal,
+      ) => {
+        try {
+          // Authorization may change while Nexus evaluates content. Check again
+          // immediately before the only Router dispatch; no cached decision.
+          const live = await this.authorize(orgId, body, token);
+          if (
+            Math.min(live.grant.expires_at, issued.token.expiresAt) <=
+            Date.now()
+          )
+            fail("EXECUTION_EXPIRED", 401);
+          dispatchSignal.throwIfAborted();
+          dispatched = true;
+          return await resource.request!(
+            `${resource.endpoint}/chat/completions`,
+            {
+              method: "POST",
+              redirect: "error",
+              signal: dispatchSignal,
+              headers: {
+                Authorization: `Bearer ${issued.key}`,
+                "Content-Type": "application/json",
+                Accept: "application/json",
+              },
+              body: JSON.stringify(approvedBody),
+            },
+          );
+        } catch (error) {
+          dispatchError = error;
+          throw error;
+        }
+      };
+      const response = resource.contentPath
+        ? await resource.contentPath.relay.invoke(
+            resource.contentPath.target,
+            requestBody,
+            signal,
+            { clientId: orgId, providerRunId: call.id },
+            forward,
+          )
+        : await forward(requestBody, signal);
       if (!response.ok) {
         await response.body?.cancel();
         fail("MODEL_EXECUTION_UNCONFIRMED", 502);
@@ -363,9 +407,13 @@ export class ExecutionModelGateway {
       await this.save(call);
     } catch (error) {
       call.status = dispatched ? "unknown" : "rejected";
+      const cause = dispatchError ?? error;
+      if (cause instanceof NexusWriteRejected && !dispatched)
+        call.contentRejection = cause.receipt;
       call.error =
-        error instanceof ExternalProviderError
-          ? error.code
+        cause instanceof ExternalProviderError ||
+        cause instanceof NexusWriteRejected
+          ? cause.code
           : dispatched
             ? "MODEL_EXECUTION_UNCONFIRMED"
             : "MODEL_PREPARATION_FAILED";
