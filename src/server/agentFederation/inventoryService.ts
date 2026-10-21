@@ -1,3 +1,4 @@
+import type { HostedReleases } from './hostedReleases.js'
 import type { HostedEvaluationCoordinator } from './hostedEvaluationCoordinator.js'
 import type { StartHostedEvaluation, CreateMigrationPolicy } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { AGENT_REGISTRY_API, type AssetRecord } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
@@ -14,6 +15,7 @@ import type { RegisterHostedArtifact, RegisterEvaluationDataset } from '../../..
 export interface InventoryServiceOptions {
   registry?: ProductRegistryClient
   hosted?: HostedEvaluationCoordinator
+  releases?: HostedReleases
   sources?: InventorySources
   catalog: Pick<CatalogRepository, 'getAgent'>
   authorize: (actor: AuthContext) => Promise<{ canManage: boolean }>
@@ -116,6 +118,47 @@ export class AgentInventoryService {
     await this.readable(actor, id, canManage)
     if (after) identifier(after)
     return this.registry(actor.orgId).hostedList(actor.orgId, id, after)
+  }
+  async hostedReleases(actor: AuthContext, assetId: string, after = '') {
+    const { canManage } = await this.options.authorize(actor)
+    await this.readable(actor, identifier(assetId), canManage)
+    if (after) identifier(after)
+    if (!this.options.releases) fail('REGISTRY_NOT_CONFIGURED', 503)
+    return this.options.releases.list(actor, assetId, after)
+  }
+  async hostedReleaseAction(actor: AuthContext, assetId: string, body: unknown) {
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    await this.readable(actor, identifier(assetId), true)
+    const releases = this.options.releases
+    if (!releases) fail('REGISTRY_NOT_CONFIGURED', 503)
+    const action = body && typeof body === 'object' && 'action' in body ? body.action : undefined
+    const closing = body && typeof body === 'object' && ((action === 'visibility' && 'enabled' in body && body.enabled === false)
+      || (action === 'decide' && 'decision' in body && body.decision === 'revoked'))
+    if (!closing) await this.evaluationManage(actor, assetId)
+    if (action === 'enroll') { object(body, ['action']); return releases.enroll(actor, assetId) }
+    if (action === 'publish') {
+      const input = object(body, ['action', 'artifact_id', 'version'])
+      if (typeof input.version !== 'string') fail('INVALID_RELEASE_INPUT')
+      return releases.publish(actor, assetId, identifier(input.artifact_id), input.version)
+    }
+    if (action === 'decide') {
+      const input = object(body, ['action', 'version', 'decision', 'reason', 'expires_at'])
+      if (typeof input.version !== 'string' || typeof input.reason !== 'string' || !['approved', 'revoked'].includes(String(input.decision))) fail('INVALID_RELEASE_INPUT')
+      return releases.decide(actor, assetId, input.version, input.decision as 'approved' | 'revoked', input.reason, input.expires_at as number | undefined)
+    }
+    if (action === 'channel') {
+      const input = object(body, ['action', 'version', 'channel', 'revision', 'reason'])
+      if (typeof input.version !== 'string' || typeof input.reason !== 'string') fail('INVALID_RELEASE_INPUT')
+      return releases.promote(actor, assetId, input.version, input.channel as 'stable' | 'canary', input.revision as number, input.reason)
+    }
+    if (action === 'visibility') {
+      const input = object(body, ['action', 'enabled', 'user_ids'])
+      if (typeof input.enabled !== 'boolean' || !Array.isArray(input.user_ids) || input.user_ids.length > 500) fail('INVALID_RELEASE_INPUT')
+      const users = [...new Set(input.user_ids.map(identifier))]
+      if (input.enabled && (await Promise.all(users.map(id => this.options.member(actor.orgId, id)))).some(user => !user)) fail('INVALID_MEMBER')
+      return releases.visibility(actor, assetId, input.enabled, users)
+    }
+    fail('INVALID_RELEASE_INPUT')
   }
   async hostedInspect(actor: AuthContext, body: unknown) {
     if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)

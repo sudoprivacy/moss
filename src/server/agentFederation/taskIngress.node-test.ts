@@ -229,7 +229,7 @@ void test('source identity remains explicitly unverified and strong-audit tasks 
   const task = await f.run(), record = await f.store.taskRecord(f.actor, task.id)
   assert.equal(task.source_identity_evidence, 'unverified')
   assert.equal((await f.store.runBinding(f.actor, task.id))?.source_identity_evidence, 'unverified')
-  if (record?.resolution.status !== 'accepted') assert.fail('expected accepted synthetic task')
+  if (record?.resolution.status !== 'accepted' || record.resolution.execution_mode !== 'external_hosted') assert.fail('expected accepted synthetic external task')
   assert.equal(record.resolution.agent.source_identity_evidence, 'unverified')
   assert.equal(record.resolution.agent.claimed_app_id, f.manifest.external_agent_id)
   assert.equal(record.resolution.agent.claimed_workspace_id, 'custom-http')
@@ -414,4 +414,37 @@ void test('durable rejection reason survives accepted Task admission and persist
     assert.equal((await f.store.history(f.actor, task.session_id))[0].error_code, task.error_code)
     assert.equal(f.calls.length, 1)
   }
+})
+
+void test('hosted Task resolution pins an artifact without accepting external Provider fields or fabricated evidence', async () => {
+  const { parseTaskRecord } = await import('./taskContract.js')
+  const principal = { trust_domain: 'agents.example', agent_name: 'hosted-helper' }
+  const hash = `sha256:${'a'.repeat(64)}`, now = new Date().toISOString()
+  const record = {
+    api_version: TASK_API, kind: 'TaskRecord',
+    spec: { api_version: TASK_API, kind: 'TaskSpec', task_id: 'task-a', session_id: 'session-a', created_at: now,
+      requested_by: { subject_type: 'user', subject_id: 'user-a' }, agent: { principal, requested_version: 'v1' },
+      request_source: 'interactive', input: { instruction: '6 * 7', resource_refs: [] }, workspace_refs: [], requested_mode: 'private',
+      data_classification: 'synthetic', required_capabilities: [], constraints: { idempotency_key: 'hosted-request-a' } },
+    resolution: { api_version: TASK_API, kind: 'TaskExecutionResolution', resolution_id: 'resolution-a', task_id: 'task-a',
+      reason_code: 'ALLOWED', reason: 'Accepted hosted task', policy_version: 'hosted-text-v1', policy_snapshot_digest: hash, decided_at: now,
+      status: 'accepted', attempt_id: 'attempt-a', execution_mode: 'internal_hosted', resolved_runtime: 'hosted_artifact', runtime_authority_id: hash, resolution_mode: 'default',
+      governance_org_id: 'org-a', catalog_id: 'catalog-a', asset_id: 'asset-a', artifact_id: 'artifact-a', metadata_digest: hash,
+      agent: { principal, version: 'v1', source_digest: hash, version_evidence: 'immutable_hosted_artifact', release_digest: hash,
+        registry: { authority: 'nexus_registry', principal, registration_digest: hash, signing_key_id: hash, evidence: 'signed_registration_only' } },
+      artifact: { spec_digest: hash, image_id: hash, dependency_lock_digest: hash, profile: 'langgraph-stdio-v1' },
+      limits: { timeout_ms: 120000, max_model_calls: 2 } },
+  }
+  assert.equal(parseTaskRecord(record).resolution.status, 'accepted')
+  for (const change of [
+    { provider_kind: 'dify' }, { binding_id: 'fake-provider' }, { resolved_runtime: 'external_provider' },
+    { agent: { ...record.resolution.agent, version_evidence: 'source_snapshot_only' } },
+    { agent: { ...record.resolution.agent, registry: undefined } },
+    { agent: { ...record.resolution.agent, release_digest: `sha256:${'b'.repeat(64)}` } },
+    { artifact: { ...record.resolution.artifact, image_id: 'image:latest' } },
+    { limits: { timeout_ms: 300001, max_model_calls: 2 } },
+  ]) assert.throws(() => parseTaskRecord({ ...record, resolution: { ...record.resolution, ...change } }), /INVALID_TASK_RECORD|TASK_RECORD_MISMATCH/)
+  assert.throws(() => parseTaskRecord({ ...record, resolution: { ...record.resolution, agent: { ...record.resolution.agent,
+    registry: { ...record.resolution.agent.registry, principal: { ...principal, agent_name: 'different' } } } } }), /TASK_RECORD_MISMATCH/)
+  assert.throws(() => parseTaskRecord({ ...record, spec: { ...record.spec, required_capabilities: ['verified_source_identity'] } }), /TASK_RECORD_MISMATCH/)
 })

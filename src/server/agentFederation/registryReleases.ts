@@ -43,6 +43,7 @@ export class RegistryReleases {
   }
   async isRegistry(actor: ExternalActor, id: string): Promise<boolean> { return Boolean(await this.active(actor, id)) }
   async command(actor: ExternalActor, id: string, input: Omit<RegistryCommand, 'request_id'> & Record<string, unknown>) {
+    await this.ready
     if (!this.client) fail('REGISTRY_UNAVAILABLE', 503)
     // The caller owns authorization. Record the actual Moss actor separately from the Nexus service credential.
     const operation = { actor, catalog_id: id, command: input }

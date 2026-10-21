@@ -16,6 +16,7 @@ export async function dispatchAgentInventory(
     const base = '/api/v1/agent-inventory',
       path = url.pathname
     const match = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)(\/history)?$/.exec(path)
+    const release = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/releases$/.exec(path)
     const hosted = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/artifacts$/.exec(path)
     const evaluations = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/evaluations$/.exec(path)
     const evaluation = /^\/api\/v1\/agent-inventory\/hosted\/evaluations\/([A-Za-z0-9_.:@-]+)(?:\/(cases|resume|stop|reconcile|compare))?$/.exec(path)
@@ -39,6 +40,8 @@ export async function dispatchAgentInventory(
         ? await service.history(actor, match[1], Number(url.searchParams.get('after') ?? 0))
         : await service.get(actor, match[1])
     else if (method === 'POST' && path === `${base}/commands`) data = await service.command(actor, body)
+    else if (method === 'GET' && release) data = await service.hostedReleases(actor, release[1], url.searchParams.get('after') ?? '')
+    else if (method === 'POST' && release) data = await service.hostedReleaseAction(actor, release[1], body)
     else if (method === 'GET' && hosted) data = await service.hostedList(actor, hosted[1], url.searchParams.get('after') ?? '')
     else if (method === 'GET' && /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/datasets$/.test(path)) data = await service.datasetList(actor, path.split('/')[5], url.searchParams.get('after') ?? '')
     else if (method === 'GET' && policies) data = await service.migrationPolicies(actor, policies[1], url.searchParams.get('after') ?? '')

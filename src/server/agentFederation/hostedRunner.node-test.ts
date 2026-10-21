@@ -108,3 +108,19 @@ void test("abort stops a live supervisor instead of accepting an incomplete resu
   setTimeout(() => c.abort(), 50);
   await assert.rejects(active, /HOSTED_RESULT_UNCONFIRMED/);
 });
+
+void test('cleanup accepts only an exact supervisor receipt and never an execution result', async t => {
+  const executionId = 'a'.repeat(32), authority = 'sha256:' + 'a'.repeat(64)
+  for (const [frame, allowed] of [
+    [{ kind: 'cleanup_confirmed', execution_id: executionId, runtime_authority_id: authority }, true],
+    [{ kind: 'cleanup_confirmed', execution_id: 'b'.repeat(32) }, false],
+    [{ kind: 'completed', answer: '42', model_calls: 0 }, false],
+    [{ kind: 'cleanup_confirmed', execution_id: executionId, extra: true }, false],
+  ] as const) {
+    const runner = await fixture(t, prelude + `function handle(frame){if(frame.kind!=='reconcile'||frame.execution_id!==${JSON.stringify(executionId)})process.exit(2);send(${JSON.stringify(frame)});process.exit(0)}`)
+    if (allowed) await runner.reconcile(artifact, executionId, authority)
+    else await assert.rejects(runner.reconcile(artifact, executionId, authority), /HOSTED_CLEANUP_UNCONFIRMED/)
+  }
+  const runner = await fixture(t, '')
+  await assert.rejects(runner.reconcile(artifact, '../foreign', authority), /HOSTED_EXECUTION_ID_INVALID/)
+})

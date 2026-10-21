@@ -1,3 +1,4 @@
+import { dispatchHostedTask, isHostedTaskRoute } from './agentFederation/hostedTaskRoutes.js'
 import { dispatchExternalProvider, isExternalProviderRoute } from './externalProviders/routes.js'
 import { dispatchAgentInventory, isAgentInventoryRoute } from './agentFederation/inventoryRoutes.js'
 import { ExternalProviderError } from './externalProviders/policy.js'
@@ -2067,11 +2068,11 @@ export function startServer(
   const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient, runtime.serverInstanceId) : null
   let isStopped = false
   let hostedEvaluations: Awaited<ReturnType<typeof authService.createHostedEvaluationRuntime>>
-  let agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined)
-  const hostedReady = authService.createHostedEvaluationRuntime().then(async value => {
+  let agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, undefined, externalProviders?.releases)
+  const hostedReady = authService.createHostedEvaluationRuntime(runtime.serverInstanceId, externalProviders?.releases).then(async value => {
     if (isStopped) { await value?.close(); return }
     hostedEvaluations = value
-    agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, value?.coordinator)
+    agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, value?.coordinator, externalProviders?.releases)
   })
   const externalStoreReady = Promise.all([externalProviders?.ownership.ready ?? Promise.resolve(), hostedReady])
 
@@ -3905,10 +3906,11 @@ export function startServer(
         return
       }
 
-      if (isExternalProviderRoute(pathname)) {
+      if (isExternalProviderRoute(pathname) || isHostedTaskRoute(pathname)) {
         res.setHeader('Cache-Control', 'no-store')
-        const result = await dispatchExternalProvider(externalProviders, auth, req.method ?? 'GET', url,
-          req.method === 'POST' ? await readJsonBody(req) : {}, () => {
+        const body = req.method === 'POST' ? await readJsonBody(req) : {}
+        const result = await dispatchHostedTask(hostedEvaluations?.tasks, runtime.store.driver, auth, req.method ?? 'GET', url, body)
+          ?? await dispatchExternalProvider(externalProviders, auth, req.method ?? 'GET', url, body, () => {
             if (!['admin', 'super_admin'].includes(auth!.role)) throw new ExternalProviderError(403, 'ADMIN_REQUIRED')
             try { authService.requireScope(auth!, 'admin:users') } catch { throw new ExternalProviderError(403, 'ADMIN_REQUIRED') }
           }, () => {

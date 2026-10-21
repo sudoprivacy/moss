@@ -2026,10 +2026,10 @@ export class RuntimeService {
     } = {},
   ): Promise<AttemptRecord> {
     session = (await this.store.getSession(session.sessionId)) ?? session
-    if (session.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
-    if (['external', 'hosted'].includes(session.runtime.type)) throw new ResourceAccessError(409, 'Use the task API for this session')
     if (this.draining) throw new ServerDrainingError()
     if (this.upgradingOwners.has(session.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
+    if (session.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
+    if (session.runtime?.type === 'external' || session.runtime?.type === 'hosted') throw new ResourceAccessError(409, 'Use the task API for this session')
     const scope = await this.resourceScope(session)
     return withOrganizationResources(scope, async () => {
       await this.assertWithinTokenQuota(session.userId, session.orgId)

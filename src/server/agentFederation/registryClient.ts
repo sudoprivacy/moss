@@ -195,7 +195,7 @@ export class ProductRegistryClient {
     const query = new URLSearchParams({ path: ref.path, encoding: 'base64', ...(minRevision ? { min_revision: minRevision } : {}) })
     const result = await this.call(orgId, `/read?${query}`, undefined, '/api/v2/files') as { content?: unknown; encoding?: unknown }
     if (typeof result?.content !== 'string' || result.encoding !== 'base64') fail('REGISTRY_RESOURCE_INVALID')
-    const content = base64(result.content, 180_000)
+    const content = base64(result.content, 750_000)
     if (hash(content) !== ref.digest) fail('REGISTRY_RESOURCE_DIGEST_MISMATCH')
     try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(content)) } catch { fail('REGISTRY_RESOURCE_INVALID') }
   }
@@ -467,10 +467,20 @@ export class ProductRegistryClient {
     return value
   }
   async putSnapshot(orgId: string, ref: Record<string, unknown>, snapshot: unknown): Promise<void> {
+    const content = Buffer.from(stableJson(snapshot))
+    if (content.length > 128 * 1024) fail('REGISTRY_RESOURCE_DIGEST_MISMATCH')
+    await this.putSnapshotContent(orgId, { ...ref }, content)
+  }
+  /** Keep the owner bytes that were evaluated; JS reserialization changes Python floats. */
+  async putHostedSnapshot(orgId: string, ref: Record<string, unknown>, artifact: HostedArtifact): Promise<void> {
+    const validated = this.hostedArtifact(orgId, artifact)
+    if (ref.digest !== validated.spec_digest) fail('REGISTRY_RESOURCE_DIGEST_MISMATCH')
+    await this.putSnapshotContent(orgId, { ...ref }, base64(validated.spec_payload_base64, 750000))
+  }
+  private async putSnapshotContent(orgId: string, ref: Record<string, unknown>, content: Buffer): Promise<void> {
     assertResourceRef(ref)
     if (ref.zone_id !== this.scope(orgId).zoneId || typeof ref.path !== 'string' || !ref.path.startsWith('/agent-snapshots/')) fail('REGISTRY_REFERENCE_MISMATCH')
-    const content = Buffer.from(stableJson(snapshot))
-    if (content.length > 128 * 1024 || hash(content) !== ref.digest) fail('REGISTRY_RESOURCE_DIGEST_MISMATCH')
+    if (content.length > 562_500 || hash(content) !== ref.digest) fail('REGISTRY_RESOURCE_DIGEST_MISMATCH')
     try { await this.readSnapshot(orgId, ref); return } catch (error) {
       if (!(error instanceof ExternalProviderError) || error.code !== 'REGISTRY_RESOURCE_NOT_FOUND') throw error
     }

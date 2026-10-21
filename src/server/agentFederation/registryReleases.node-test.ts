@@ -94,7 +94,7 @@ void test('legacy migration resumes after network failure and preserves IDs whil
   assert.equal(record.resolution.agent.registry?.authority, 'nexus_registry')
   assert.equal(record.resolution.agent.principal.trust_domain, 'agents.example')
   const altered = structuredClone(record)
-  if (altered.resolution.status === 'accepted') delete altered.resolution.agent.registry
+  if (altered.resolution.status === 'accepted' && altered.resolution.execution_mode === 'external_hosted') delete altered.resolution.agent.registry
   await f.db.run('UPDATE product_task_records SET document = ? WHERE task_id = ?', [JSON.stringify(altered), task.id])
   await assert.rejects(f.store.taskRecord(actor, task.id), { code: 'TASK_RECORD_MISMATCH' })
 })

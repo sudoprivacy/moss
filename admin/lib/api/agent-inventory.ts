@@ -1,6 +1,7 @@
 import { dcClient } from './client'
 import type { DiscoverySource, DiscoveryResult } from '../../../src/server/agentFederation/inventoryViews'
 import type {
+  VersionsPage,
   CreateMigrationPolicy,
   MigrationPolicy,
   MigrationPolicyPage,
@@ -52,6 +53,17 @@ export interface InventoryMember {
   name: string
   department_id: string | null
 }
+export interface HostedReleaseView {
+  linked: boolean
+  catalog: { id: string; enabled: boolean; status: string; visible_to: { user_ids?: string[] } | null } | null
+  registry: VersionsPage | null
+}
+export type HostedReleaseAction =
+  | { action: 'enroll' }
+  | { action: 'publish'; artifact_id: string; version: string }
+  | { action: 'decide'; version: string; decision: 'approved' | 'revoked'; reason: string; expires_at?: number }
+  | { action: 'channel'; version: string; channel: 'stable' | 'canary'; revision: number; reason: string }
+  | { action: 'visibility'; enabled: boolean; user_ids: string[] }
 interface Client {
   get<T>(path: string, options?: Partial<RequestInit>): Promise<T>
   post<T>(path: string, body?: unknown, options?: Partial<RequestInit>): Promise<T>
@@ -86,6 +98,8 @@ export function createInventoryApi(client: Client = dcClient, signal?: () => Abo
       call<DiscoverySource>('/sources', body),
     disableSource: (id: string) => call<{ disabled: boolean }>(`/sources/${encodeURIComponent(id)}/disable`, {}),
     discover: (source_id: string) => call<DiscoveryResult>('/discover', { source_id }),
+    hostedReleases: (assetId: string, after = '') => call<HostedReleaseView>(`/assets/${encodeURIComponent(assetId)}/releases?after=${encodeURIComponent(after)}`),
+    hostedReleaseAction: (assetId: string, body: HostedReleaseAction) => call<unknown>(`/assets/${encodeURIComponent(assetId)}/releases`, body),
     hostedList: (assetId: string, after = '') => call<HostedArtifactPage>(`/assets/${encodeURIComponent(assetId)}/artifacts?after=${encodeURIComponent(after)}`),
     datasetList: (assetId: string, after = '') => call<EvaluationDatasetPage>(`/assets/${encodeURIComponent(assetId)}/datasets?after=${encodeURIComponent(after)}`),
     evaluationList: (assetId: string, after = '') => call<HostedEvaluationPage>(`/assets/${encodeURIComponent(assetId)}/evaluations?after=${encodeURIComponent(after)}`),

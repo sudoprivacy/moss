@@ -1,3 +1,6 @@
+import { HostedTaskService } from '../agentFederation/hostedTaskService.js'
+import { HostedReleases } from '../agentFederation/hostedReleases.js'
+import type { RegistryReleases } from '../agentFederation/registryReleases.js'
 import { hostedFromEnvironment } from '../agentFederation/hostedConfiguration.js'
 import type { HostedEvaluationCoordinator } from '../agentFederation/hostedEvaluationCoordinator.js'
 import { registryFromEnvironment } from '../agentFederation/registryConfiguration.js'
@@ -697,11 +700,23 @@ export class AuthService {
     })
   }
 
-  createHostedEvaluationRuntime() { return hostedFromEnvironment(this.db.driver, registryFromEnvironment()) }
+  async createHostedEvaluationRuntime(ownerId?: string, releases?: RegistryReleases) {
+    const registry = registryFromEnvironment()
+    const runtime = await hostedFromEnvironment(this.db.driver, registry, ownerId)
+    if (!runtime) return undefined
+    const catalog = new CatalogRepository(this.db.driver)
+    const tasks = runtime.taskCoordinator && registry && releases ? new HostedTaskService(runtime.taskCoordinator, {
+      catalog, registry, releases: new HostedReleases(catalog, releases),
+      activeMember: async actor => (await this.db.getUserByIdAndOrg(actor.userId, actor.orgId))?.status === 'active',
+    }) : undefined
+    tasks?.startMaintenance()
+    return { ...runtime, tasks, close: async () => { await tasks?.close(); await runtime.close() } }
+  }
 
-  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort, hosted?: HostedEvaluationCoordinator): AgentInventoryService {
+  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort, hosted?: HostedEvaluationCoordinator, releases?: RegistryReleases): AgentInventoryService {
     return new AgentInventoryService({
       registry: registryFromEnvironment(), catalog: new CatalogRepository(this.db.driver), hosted,
+      releases: releases ? new HostedReleases(new CatalogRepository(this.db.driver), releases) : undefined,
       sources: new InventorySources({ db: this.db.driver, identities: this.identityRepository, catalog: new CatalogRepository(this.db.driver), secrets }),
       authorize: async actor => {
         const user = await this.getUserPinnedOrSuperAdmin(actor.userId, actor.orgId)

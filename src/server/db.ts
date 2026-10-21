@@ -1,5 +1,5 @@
 import { SESSION_SCHEMA } from './storage/sessionSchema.js'
-import { isExternalHosted } from './catalog/executionMode.js'
+import { isManagedHosted } from './catalog/executionMode.js'
 import { ensureOrganizationResourceSchema } from './catalog/organizationResourceSchema.js'
 import { randomUUID } from 'crypto'
 import { mkdirSync } from 'fs'
@@ -3013,17 +3013,17 @@ export class DirectConnectStore {
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
     const rows = await this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants ${where} ORDER BY created_at DESC`, params as SqlParam[])
     // Hosted providers share Catalog storage but have no native template or rules artifact.
-    return rows.filter(row => !isExternalHosted(parseJsonObject(row.provider_binding)))
+    return rows.filter(row => !isManagedHosted(parseJsonObject(row.provider_binding)))
   }
 
   async getTenantAssistant(id: string, orgId?: string): Promise<SqlRow | null> {
     const row = await this.driver.get<SqlRow>(`SELECT * FROM tenant_assistants WHERE id = ?${orgId ? " AND org_id = ? AND source_type = 'tenant'" : ''}`, orgId ? [id, orgId] : [id])
-    return row && !isExternalHosted(parseJsonObject(row.provider_binding)) ? row : null
+    return row && !isManagedHosted(parseJsonObject(row.provider_binding)) ? row : null
   }
 
   async getTenantAssistantByName(name: string, orgId?: string): Promise<SqlRow | null> {
     const rows = await this.driver.all<SqlRow>(`SELECT * FROM tenant_assistants WHERE name = ?${orgId ? ' AND org_id = ?' : ''}`, orgId ? [name, orgId] : [name])
-    return rows.find(row => !isExternalHosted(parseJsonObject(row.provider_binding))) ?? null
+    return rows.find(row => !isManagedHosted(parseJsonObject(row.provider_binding))) ?? null
   }
 
   async createTenantAssistant(row: {

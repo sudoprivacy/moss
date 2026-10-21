@@ -169,7 +169,7 @@ export class ExternalTaskStore {
     const policySnapshot = JSON.parse(String(row.policy_snapshot))
     if (record.spec.task_id !== task.id || record.spec.session_id !== task.session_id || record.spec.requested_by.subject_id !== actor.userId
       || resolution.policy_snapshot_digest !== digest(canonicalTaskJson(policySnapshot))
-      || (resolution.status === 'accepted' && (resolution.attempt_id !== task.attempt_id || resolution.governance_org_id !== actor.orgId
+      || (resolution.status === 'accepted' && (resolution.execution_mode !== 'external_hosted' || resolution.attempt_id !== task.attempt_id || resolution.governance_org_id !== actor.orgId
         || resolution.binding_id !== task.agent_id || resolution.agent.source_digest !== task.source_digest
         || canonicalTaskJson(resolution.agent.registry ?? null) !== canonicalTaskJson(policySnapshot.registry ?? null)))) throw new ExternalProviderError(500, 'TASK_RECORD_MISMATCH')
     return record

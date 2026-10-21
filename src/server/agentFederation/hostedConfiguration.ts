@@ -1,3 +1,5 @@
+import { HostedTaskCoordinator } from './hostedTaskCoordinator.js'
+import { HostedTaskStore } from './hostedTaskStore.js'
 import { readFileSync, statSync } from 'node:fs'
 import type { DbDriver } from '../db/driver.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
@@ -22,7 +24,7 @@ function secret(path: unknown): string {
   return value
 }
 /** Deployment assembly only; artifacts, datasets and runs are managed through the UI. */
-export async function hostedFromEnvironment(db: DbDriver, registry?: ProductRegistryClient) {
+export async function hostedFromEnvironment(db: DbDriver, registry?: ProductRegistryClient, ownerId?: string) {
   const path = process.env.MOSS_AGENT_HOSTED_CONFIG_FILE
   if (!path) return undefined
   const relays = new Map<string, { relay: NexusModelRelay; targets: ReturnType<typeof nexusModelTargets> }>()
@@ -69,7 +71,11 @@ export async function hostedFromEnvironment(db: DbDriver, registry?: ProductRegi
     const coordinator = new HostedEvaluationCoordinator(registry, gateway, runner,
       (org, resource, model) => resources.some(r => r.orgId === org && r.id === resource && r.model === model),
       (org, asset) => sources.get(JSON.stringify([org, asset])))
-    return { coordinator, close: async () => { await coordinator.close(); await Promise.all([...relays.values()].map(r => r.relay.close())) } }
+    const taskCoordinator = ownerId && process.env.MOSS_AGENT_HOSTED_TASKS_ENABLED === '1'
+      ? new HostedTaskCoordinator(new HostedTaskStore(db), ownerId, registry, gateway, runner,
+        (org, resource, model) => resources.some(r => r.orgId === org && r.id === resource && r.model === model)) : undefined
+    await taskCoordinator?.store.ready
+    return { coordinator, taskCoordinator, close: async () => { await taskCoordinator?.close(); await coordinator.close(); await Promise.all([...relays.values()].map(r => r.relay.close())) } }
   } catch {
     await Promise.all([...relays.values()].map(r => r.relay.close().catch(() => {})))
     throw new ExternalProviderError(500, 'HOSTED_CONFIGURATION_INVALID')

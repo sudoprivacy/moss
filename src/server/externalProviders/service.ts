@@ -249,7 +249,7 @@ export class ExternalProviderService {
     await this.authorize(actor)
     const task = await this.store.task(actor, id)
     const record = await this.store.taskRecord(actor, id), run = await this.store.runBinding(actor, id)
-    const selected = record?.resolution.status === 'accepted' ? record.resolution.agent : undefined
+    const selected = record?.resolution.status === 'accepted' && record.resolution.execution_mode === 'external_hosted' ? record.resolution.agent : undefined
     return { api_version: EXTERNAL_PROVIDER_API, kind: 'ExternalTaskEvidence', task_id: task.id, session_id: task.session_id, attempt_id: task.attempt_id, status: task.status,
       ...(selected ? { selection: { version: selected.version, source_digest: selected.source_digest, release_digest: selected.release_digest,
         resolved_from_channel: selected.resolved_from_channel, channel_revision: selected.channel_revision,

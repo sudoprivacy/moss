@@ -84,3 +84,40 @@ void test('management gateway denies member writes and foreign owner reads befor
   await assert.rejects(service.hostedList(actor, 'asset-a'), { code: 'AGENT_ASSET_NOT_FOUND' })
   assert.equal(artifactCalls, 0)
 })
+
+void test('hosted publication stores exact evaluated bytes, reads back and refuses altered or foreign input before writes', async () => {
+  const artifact = record(), content = artifact.spec_payload_base64
+  const ref = { ...fixture.version.manifest.spec_ref, zone_id: 'zone-a', path: '/agent-snapshots/hosted/asset-a/v1.json', digest: artifact.spec_digest }
+  const files = new Map<string, string>(); let writes = 0, calls = 0, corruptRead = false
+  const registry = client(async (target, init) => {
+    calls++
+    const url = new URL(target), body = init.body ? JSON.parse(init.body) : undefined
+    const path = String(body?.path ?? url.searchParams.get('path'))
+    if (url.pathname.endsWith('/mkdir')) return Response.json({ created: true })
+    if (url.pathname.endsWith('/write')) {
+      assert.equal(body.if_none_match, true); assert.equal(body.encoding, 'base64')
+      assert.equal(body.content, content); assert.equal(files.has(path), false)
+      writes++; files.set(path, body.content)
+      return Response.json({ revision: 'revision-1' })
+    }
+    assert.ok(url.pathname.endsWith('/read'))
+    return files.has(path) ? Response.json({ content: corruptRead ? Buffer.from('{}').toString('base64') : files.get(path), encoding: 'base64' })
+      : Response.json({ detail: 'missing' }, { status: 404 })
+  })
+  await registry.putHostedSnapshot('org-a', ref, artifact)
+  assert.equal(writes, 1)
+  assert.ok(Buffer.from(files.get(ref.path)!, 'base64').toString().includes('"temperature":0.0,'))
+  await registry.putHostedSnapshot('org-a', ref, artifact)
+  assert.equal(writes, 1, 'immutable replay does not write again')
+  const before = calls
+  for (const changed of [{ ...artifact, zone: 'zone-b' }, { ...artifact, spec_digest: hash('different') },
+    { ...artifact, image: { ...artifact.image, model_name: 'changed' } }]) {
+    await assert.rejects(registry.putHostedSnapshot('org-a', ref, changed), { code: 'HOSTED_RESPONSE_INVALID' })
+  }
+  await assert.rejects(registry.putHostedSnapshot('org-a', { ...ref, digest: hash('different') }, artifact), { code: 'REGISTRY_RESOURCE_DIGEST_MISMATCH' })
+  await assert.rejects(registry.putHostedSnapshot('org-a', { ...ref, zone_id: 'zone-b' }, artifact), { code: 'REGISTRY_REFERENCE_MISMATCH' })
+  assert.equal(calls, before)
+  corruptRead = true
+  await assert.rejects(registry.putHostedSnapshot('org-a', ref, artifact), { code: 'REGISTRY_RESOURCE_DIGEST_MISMATCH' })
+  assert.equal(writes, 1, 'corrupted immutable content is never overwritten')
+})
