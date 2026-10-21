@@ -51,7 +51,7 @@ export class HostedTaskCoordinator {
     timer.unref()
     let runtimeAuthorityId: string | undefined
     let runningArtifact: Awaited<ReturnType<ProductRegistryClient['hostedGet']>> | undefined
-    let grantId: string | undefined, grantRequested = false, grantAssetId: string | undefined, entered = false, cleaned = true, answer: string | undefined, errorCode: string | null = null
+    let grantId: string | undefined, grantRequested = false, entered = false, cleaned = true, answer: string | undefined, errorCode: string | null = null
     const fresh = async () => {
       signal.throwIfAborted()
       await reauthorize()
@@ -81,7 +81,7 @@ export class HostedTaskCoordinator {
       if (await this.runner.identity() !== resolution.runtime_authority_id) fail('HOSTED_RUNTIME_AUTHORITY_MISMATCH')
       if (!this.configured(actor.orgId, artifact.image.model_resource, artifact.image.model_name)) fail('HOSTED_MODEL_NOT_CONFIGURED', 503)
       await fresh()
-      grantRequested = true; grantAssetId = asset.id
+      grantRequested = true
       const issued = await this.registry.executionIssue(actor.orgId, { api_version: 'agent-registry.sudo.dev/v1alpha1', kind: 'IssueExecutionGrant',
         request_id: `hosted-${task.attempt_id}`, asset_id: asset.id, metadata_digest: resolution.metadata_digest, spec_digest: artifact.spec_digest,
         task_id: id, initiated_by: actor.userId, mode: 'run', version: resolution.agent.version, dataset_digest: null,
@@ -126,19 +126,7 @@ export class HostedTaskCoordinator {
         }
       } catch { cleaned = false; errorCode = 'HOSTED_MODEL_RECONCILIATION_PENDING' }
       try {
-        if (grantRequested && !grantId) {
-          // Recover only the owner record, never the one-time key or the execution.
-          let after = ''
-          for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
-            const page = await this.registry.executionList(actor.orgId, grantAssetId, after)
-            const found = page.items.find(g => g.request.request_id === `hosted-${task.attempt_id}` && g.request.task_id === id)
-            if (found) { grantId = found.id; break }
-            if (!page.next_cursor) break
-            after = page.next_cursor
-          }
-          if (!grantId) { cleaned = false; errorCode = 'HOSTED_IAM_ISSUANCE_UNCONFIRMED' }
-        }
-        if (grantId && (await this.registry.executionRevoke(actor.orgId, grantId)).cleanup_pending) {
+        if (grantRequested && (await this.registry.executionRevokeRequest(actor.orgId, `hosted-${task.attempt_id}`, id)).cleanup_pending) {
           cleaned = false; errorCode = 'HOSTED_IAM_CLEANUP_PENDING'
         }
       } catch { cleaned = false; errorCode = 'HOSTED_IAM_CLEANUP_PENDING' }
@@ -171,19 +159,8 @@ export class HostedTaskCoordinator {
       }
     } catch { confirmed = false }
     try {
-      let grantId = await this.store.grant(actor, id)
-      if (!grantId) {
-        let after = ''
-        for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
-          const page = await this.registry.executionList(actor.orgId, resolution.asset_id, after)
-          const found = page.items.find(g => g.request.request_id === `hosted-${task.attempt_id}` && g.request.task_id === id)
-          if (found) { grantId = found.id; break }
-          if (!page.next_cursor) break
-          after = page.next_cursor
-        }
-      }
-      // An unseen issuance may still commit later. Absence does not prove revocation.
-      if (!grantId || (await this.registry.executionRevoke(actor.orgId, grantId)).cleanup_pending) confirmed = false
+      // A durable request fence closes an unseen issuance across restart/issuer rotation.
+      if ((await this.registry.executionRevokeRequest(actor.orgId, `hosted-${task.attempt_id}`, id)).cleanup_pending) confirmed = false
     } catch { confirmed = false }
     return confirmed ? this.store.confirmCleanup(actor, id, task.attempt_id) : this.store.get(actor, id)
   }

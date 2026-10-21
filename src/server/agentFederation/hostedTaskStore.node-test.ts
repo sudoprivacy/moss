@@ -146,7 +146,11 @@ async function coordinatorFixture(t: { after: (fn: () => Promise<void>) => void 
     },
     executionAuthorize: async () => { control.authorized++ },
     executionList: async () => ({ items: control.lostVisible ? [{ id: 'grant-a', request: issued.request }] : [], next_cursor: null }),
-    executionRevoke: async () => { control.revokes++; return { cleanup_pending: control.cleanupPending } },
+    executionRevokeRequest: async (_org: string, requestId: string, taskId: string) => {
+      control.revokes++; assert.equal(requestId, `hosted-${task.attempt_id}`); assert.equal(taskId, task.id)
+      if (!control.lostVisible) throw new Error('controlled fence response loss')
+      return { cleanup_pending: control.cleanupPending }
+    },
   }
   const gateway = {
     invoke: async () => { await control.beforeModel(); return { status: 'completed', answer: '42' } },
@@ -196,12 +200,12 @@ void test('hosted coordinator refuses low grade, changed source and withdrawn ca
     assert.equal((await f.store.get(actor, f.task.id)).status, 'failed')
   }
 })
-void test('hosted coordinator recovers ambiguous grant metadata solely for revoke and never repeats issuance', async t => {
+void test('hosted coordinator fences ambiguous issuance without retry and retains unknown when the fence response is lost', async t => {
   for (const visible of [true, false]) {
     const f = await coordinatorFixture(t); f.control.issueLost = true; f.control.lostVisible = visible
     await f.coordinator.start(actor, f.task.id, async () => {}); await f.coordinator.wait(f.task.id)
     assert.equal(f.control.grants, 1); assert.equal(f.control.runs, 0)
-    assert.equal(f.control.revokes, visible ? 1 : 0)
+    assert.equal(f.control.revokes, 1)
     assert.equal((await f.store.get(actor, f.task.id)).status, visible ? 'failed' : 'unknown')
   }
 })
@@ -252,4 +256,19 @@ void test('reconciliation preserves unknown output and closes only after all aut
   assert.equal((await f.store.history(actor, f.task.session_id))[0].status, 'unknown')
   await assert.rejects(f.store.create(actor, request(f.task.session_id), admission()), { code: 'SESSION_BUSY_OR_AGENT_MISMATCH' })
   assert.equal(f.control.runs, 1); assert.equal(f.control.grants, 1)
+})
+
+void test('restart before visible IAM issuance can close only after a durable request fence, without creating a grant', async t => {
+  const f = await coordinatorFixture(t)
+  await f.store.claim(actor, f.task.id, 'owner-a')
+  await f.store.db.run('UPDATE hosted_attempt_leases SET lease_until = 0 WHERE attempt_id = ?', [f.task.attempt_id])
+  await f.store.recoverExpired()
+  f.control.lostVisible = false
+  assert.equal((await f.coordinator.reconcile(actor, f.task.id)).cleanup, 'unknown')
+  f.control.lostVisible = true
+  const recovered = await f.coordinator.reconcile(actor, f.task.id)
+  assert.equal(recovered.status, 'unknown'); assert.equal(recovered.cleanup, 'confirmed')
+  assert.equal(f.control.grants, 0); assert.equal(f.control.runs, 0)
+  await f.store.closeUnknown(actor, f.task.id, 'Request fence confirmed; outcome remains unknown')
+  assert.equal((await f.store.get(actor, f.task.id)).status, 'unknown')
 })

@@ -5,7 +5,7 @@ import Ajv2020 from 'ajv/dist/2020.js'
 import type { EvaluationDataset, EvaluationDatasetPage, RegisterEvaluationDataset } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { PlatformDiscoveryPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { DifyTextPlan, HostedArtifact, HostedArtifactPage, RegisterHostedArtifact } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
-import type { CheckExecutionGrant, ExecutionAuthorization, ExecutionGrant, ExecutionGrantPage, ExecutionGrantResult, IssueExecutionGrant } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { RevokeExecutionRequest, ExecutionRequestRevocation, CheckExecutionGrant, ExecutionAuthorization, ExecutionGrant, ExecutionGrantPage, ExecutionGrantResult, IssueExecutionGrant } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { assertResourceRef } from '@sudo/contracts/common/v1/resource-ref'
 import schema from '../../../contracts/agent-registry/v1alpha1/schema.json' with { type: 'json' }
 import { AGENT_REGISTRY_API, type CommandResult, type PrincipalRef, type RegistryWire, type Resolution, type SignedVersion, type VersionItem, type VersionsPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
@@ -39,6 +39,8 @@ ajv.addKeyword({ keyword: 'discriminator', valid: true })
 ajv.addSchema({ $id: RESOURCE_REF_ID, sudoResourceRef: true })
 ajv.addSchema(schema)
 const validators = {
+  RevokeExecutionRequest: ajv.compile<RevokeExecutionRequest>({ $ref: `${schema.$id}#/$defs/RevokeExecutionRequest` }),
+  ExecutionRequestRevocation: ajv.compile<ExecutionRequestRevocation>({ $ref: `${schema.$id}#/$defs/ExecutionRequestRevocation` }),
   ObserveSourceEvaluation: ajv.compile<ObserveSourceEvaluation>({ $ref: `${schema.$id}#/$defs/ObserveSourceEvaluation` }),
   CreateMigrationPolicy: ajv.compile<CreateMigrationPolicy>({ $ref: `${schema.$id}#/$defs/CreateMigrationPolicy` }),
   MigrationPolicy: ajv.compile<MigrationPolicy>({ $ref: `${schema.$id}#/$defs/MigrationPolicy` }),
@@ -449,6 +451,20 @@ export class ProductRegistryClient {
     }
     if (value.items.some((row, i) => row.id <= (i ? value.items[i - 1].id : after))
       || (value.next_cursor !== null && (!value.items.length || value.next_cursor !== value.items.at(-1)!.id))) fail('EXECUTION_RESPONSE_INVALID')
+    return value
+  }
+  async executionRevokeRequest(orgId: string, requestId: string, taskId: string): Promise<ExecutionRequestRevocation> {
+    const command: RevokeExecutionRequest = { api_version: AGENT_REGISTRY_API, kind: 'RevokeExecutionRequest', request_id: requestId, task_id: taskId }
+    if (!validators.RevokeExecutionRequest(command)) fail('INVALID_EXECUTION_REQUEST', 400)
+    const value = await this.call(orgId, '/execution/requests/revoke', command)
+    if (!validators.ExecutionRequestRevocation(value) || value.zone !== this.scope(orgId).zoneId || value.request_id !== requestId
+      || value.task_id !== taskId || value.fenced_at > Date.now() + 5000 || value.grants.length > 64
+      || new Set(value.grants.map(row => row.id)).size !== value.grants.length
+      || value.cleanup_pending !== value.grants.some(row => row.cleanup_pending)) fail('EXECUTION_RESPONSE_INVALID')
+    for (const row of value.grants) {
+      this.executionGrant(row, orgId)
+      if (row.status !== 'revoked' || row.request.request_id !== requestId || row.request.task_id !== taskId) fail('EXECUTION_RESPONSE_INVALID')
+    }
     return value
   }
   async executionRevoke(orgId: string, id: string): Promise<ExecutionGrant> {

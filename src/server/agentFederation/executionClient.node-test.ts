@@ -173,3 +173,26 @@ void test("execution failures are normalized and cleanup pending remains visible
     true,
   );
 });
+
+void test('request revocation validates durable fence scope and cleanup across credential rotation', async () => {
+  const response = { kind: 'ExecutionRequestRevocation', zone: 'zone-a', request_id: command.request_id,
+    task_id: command.task_id, fenced_at: Date.now(), stopped_by: 'user:rotated', grants: [] as ExecutionGrant[], cleanup_pending: false }
+  let value: unknown = response
+  const client = new ProductRegistryClient({ ...options, request: async (url, init) => {
+    assert.equal(new URL(url).pathname, '/api/v2/product-agents/execution/requests/revoke')
+    assert.equal(init.method, 'POST')
+    assert.equal(JSON.parse(init.body!).task_id, command.task_id)
+    return Response.json(value)
+  } })
+  assert.equal((await client.executionRevokeRequest('org', command.request_id, command.task_id)).cleanup_pending, false)
+  for (const patch of [
+    { zone: 'other' }, { task_id: 'other' }, { request_id: 'other' }, { cleanup_pending: true },
+    { fenced_at: Date.now() + 60000 }, { grants: [grant()] },
+    { api_key: 'must-not-be-exposed' },
+  ]) {
+    value = { ...response, ...patch }
+    await assert.rejects(client.executionRevokeRequest('org', command.request_id, command.task_id), /EXECUTION_RESPONSE_INVALID/)
+  }
+  value = { ...response, grants: [{ ...grant(), status: 'revoked', cleanup_pending: true }], cleanup_pending: true }
+  assert.equal((await client.executionRevokeRequest('org', command.request_id, command.task_id)).cleanup_pending, true)
+})
