@@ -37,6 +37,10 @@ function integer(value: unknown): number {
 /** Uses SudoRouter's actual token and ledger authority. Caller supplies no attribution headers. */
 export class AgentRouterClient {
   private readonly root: string;
+  /** Identifies this configured ledger authority; account/log IDs alone are not globally unique. */
+  get authorityId(): string {
+    return `sha256:${createHash("sha256").update(this.root).digest("hex")}`;
+  }
   constructor(
     private readonly options: {
       baseUrl: string;

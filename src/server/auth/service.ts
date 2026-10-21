@@ -1,5 +1,6 @@
 import { assertAgentToolManager } from '../agentFederation/toolGatewayRoutes.js'
 import { AgentToolGateway } from '../agentFederation/toolGateway.js'
+import { AgentUsageReports } from '../agentFederation/usageReport.js'
 import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
 import { AssetSuspensions } from '../agentFederation/assetSuspension.js'
 import type { ExecutionModelGateway } from '../agentFederation/executionModelGateway.js'
@@ -741,6 +742,7 @@ export class AuthService {
     const suspensions = registry ? new AssetSuspensions(this.db.driver, registry, { gateway, tasks, external }) : undefined
     return new AgentInventoryService({
       registry, suspensions, catalog: new CatalogRepository(this.db.driver), hosted, tasks,
+      usage: gateway ? new AgentUsageReports(this.db.driver, gateway.ready) : undefined,
       releases: releases ? new HostedReleases(new CatalogRepository(this.db.driver), releases) : undefined,
       sources: new InventorySources({ db: this.db.driver, identities: this.identityRepository, catalog: new CatalogRepository(this.db.driver), secrets }),
       authorize: async actor => {

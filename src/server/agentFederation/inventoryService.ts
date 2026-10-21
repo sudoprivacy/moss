@@ -1,4 +1,5 @@
 import type { AssetSuspensions } from './assetSuspension.js'
+import { usageWindow, type AgentUsageReports } from './usageReport.js'
 import type { HostedTaskService } from './hostedTaskService.js'
 import type { HostedReleases } from './hostedReleases.js'
 import type { HostedEvaluationCoordinator } from './hostedEvaluationCoordinator.js'
@@ -17,6 +18,7 @@ import type { RegisterHostedArtifact, RegisterEvaluationDataset } from '../../..
 export interface InventoryServiceOptions {
   registry?: ProductRegistryClient
   suspensions?: AssetSuspensions
+  usage?: AgentUsageReports
   tasks?: HostedTaskService
   hosted?: HostedEvaluationCoordinator
   releases?: HostedReleases
@@ -48,6 +50,16 @@ export class AgentInventoryService {
   constructor(private readonly options: InventoryServiceOptions) {}
   start() { this.options.suspensions?.start() }
   async close() { await this.options.suspensions?.close() }
+  async usage(actor: AuthContext, params: URLSearchParams) {
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    this.registry(actor.orgId)
+    if (!this.options.usage) fail('AGENT_USAGE_UNAVAILABLE', 503)
+    const report = await this.options.usage.read(actor.orgId, usageWindow(params))
+    const ids = [...new Set(report.groups.map(g => g.department_id).filter((id): id is string => !!id))]
+    const labels = await this.options.labels(actor.orgId, [], ids)
+    for (const group of report.groups) group.department_name = labels.departments.get(group.department_id ?? '') ?? null
+    return report
+  }
   async suspension(actor: AuthContext, id: string, retry = false) {
     if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
     await this.readable(actor, identifier(id), true)
@@ -76,6 +88,7 @@ export class AgentInventoryService {
     return {
       can_manage: access.canManage,
       hosted_tasks_available: access.canManage && !!this.options.tasks,
+      usage_available: access.canManage && !!this.options.usage,
       configured,
       user_id: actor.userId,
       department_id: member?.departmentId ?? null,

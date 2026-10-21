@@ -41,6 +41,10 @@ export const recommendationLabels: Record<string, string> = {
 export function inventoryError(error: unknown): string {
   const code = error instanceof ApiRequestError ? error.code : error instanceof Error ? error.message : ''
   const labels: Record<string, string> = {
+    INVALID_USAGE_WINDOW: '请选择有效时间范围，单次最长 31 天。',
+    AGENT_USAGE_UNAVAILABLE: '当前部署尚未配置任务模型计量。',
+    AGENT_USAGE_REPORT_LIMIT: '此范围超过 2000 次模型调用，请缩短时间范围。',
+    AGENT_USAGE_EVIDENCE_INVALID: '计量记录存在归属或账单冲突，未输出统计结果，请联系管理员核对。',
     HOSTED_RESOURCE_LIMITS_UNAVAILABLE: '执行节点无法落实内存、交换空间或进程数量限制。请部署管理员检查容器运行环境，当前任务不会启动。',
     HOSTED_CLEANUP_UNCONFIRMED: '尚未确认执行容器已清理，请核对执行节点后再关闭会话。',
     REGISTRY_RESOURCE_NOT_FOUND: '未找到版本快照或 Nexus 文件接口。请检查文件服务部署后重试相同版本。',

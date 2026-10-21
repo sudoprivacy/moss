@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { AgentAssetSuspension } from './agent-asset-suspension'
 import { AgentHostedUnknownTasks } from './agent-hosted-unknown-tasks'
+import { AgentUsageReport } from './agent-usage-report'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Download, Plus, RefreshCw, X } from 'lucide-react'
 import { AgentDiscoverySection } from './agent-discovery-section'
@@ -321,6 +322,7 @@ function ScopedInventory({ query }: { query: string }) {
         </p>
       )}
       {access?.can_manage && access.hosted_tasks_available && <AgentHostedUnknownTasks api={api} />}
+      {access?.can_manage && access.usage_available && <AgentUsageReport api={api} />}
       {access?.configured && <AgentDiscoverySection api={api} access={access} onChange={reload} />}
       {!access?.configured ? (
         <Alert>
@@ -919,7 +921,7 @@ function ScopedInventory({ query }: { query: string }) {
                 <dt>模型路径</dt>
                 <dd>{details.metadata.model_paths?.join('、') || '未申报'}</dd>
                 <dt>成本</dt>
-                <dd>等待 Router 可信计量；缺失数据不记为零。</dd>
+                <dd>通过台账“成本与用量”查看 Router 已核对额度；缺失数据不记为零。</dd>
                 <dt>风险说明</dt>
                 <dd>{details.metadata.risk_note || '无补充'}</dd>
               </dl>

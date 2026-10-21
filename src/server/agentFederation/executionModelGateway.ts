@@ -7,6 +7,7 @@ import {
 import type { NexusModelRelay } from "./nexusModelRelay.js";
 import type { NexusModelTarget } from "./provider/runtime.js";
 import type { ExecutionGrant } from "../../../contracts/agent-registry/v1alpha1/contract.gen.js";
+import type { AssetMetadata } from "../../../contracts/agent-registry/v1alpha1/contract.gen.js";
 import type { DbDriver } from "../db/driver.js";
 import { ExternalProviderError } from "../externalProviders/policy.js";
 import { contentDigest } from "./provider/protocol.js";
@@ -57,6 +58,9 @@ export interface ExecutionModelCall {
   grantExpiresAt: number;
   ownerUserId: string;
   departmentId: string | null;
+  /** Historical owner metadata, captured only when it matches the verified grant. */
+  attribution?: { metadataDigest: string; sourcePlatform: AssetMetadata['source_platform']; assetName: string };
+  routerAuthorityId?: string;
   resource: string;
   model: string;
   mode: "run" | "evaluation";
@@ -147,7 +151,7 @@ export class ExecutionModelGateway {
     private readonly registry: Pick<
       ProductRegistryClient,
       "scope" | "executionAuthorize"
-    >,
+    > & Partial<Pick<ProductRegistryClient, "inventoryGet">>,
     resources: ExecutionModelResource[],
   ) {
     for (const resource of resources) {
@@ -178,7 +182,11 @@ export class ExecutionModelGateway {
     CREATE TABLE IF NOT EXISTS agent_model_grant_limits (
       org_id TEXT NOT NULL, grant_id TEXT NOT NULL, reserved INTEGER NOT NULL,
       PRIMARY KEY(org_id, grant_id)
-    );`).then(() => initializeAssetControls(db));
+    );`).then(async () => {
+      const created = db.kind === 'postgres' ? "CAST(document::jsonb ->> 'createdAt' AS BIGINT)" : "CAST(json_extract(document, '$.createdAt') AS INTEGER)";
+      await db.exec(`CREATE INDEX IF NOT EXISTS agent_model_calls_report ON agent_model_calls(org_id, (${created}));`);
+      await initializeAssetControls(db);
+    });
   }
   private resource(orgId: string, id: string) {
     const resource = this.resources.get(JSON.stringify([orgId, id]));
@@ -241,6 +249,16 @@ export class ExecutionModelGateway {
     resource: ExecutionModelResource,
   ) {
     const fingerprint = contentDigest(body);
+    let attribution: ExecutionModelCall['attribution'];
+    if (this.registry.inventoryGet) {
+      try {
+        const asset = await this.registry.inventoryGet(orgId, grant.request.asset_id);
+        if (asset.id === grant.request.asset_id && asset.owner_zone === grant.zone && asset.metadata_digest === grant.request.metadata_digest
+          && asset.metadata.owner_user_id === grant.owner_user_id && (asset.metadata.department_id ?? null) === grant.department_id) {
+          attribution = { metadataDigest: asset.metadata_digest, sourcePlatform: asset.metadata.source_platform, assetName: asset.metadata.name };
+        }
+      } catch { /* Missing metadata is disclosed, never replaced by client attribution or guessed later. */ }
+    }
     const call: ExecutionModelCall = {
       id: randomUUID(),
       callId: body.call_id,
@@ -251,6 +269,8 @@ export class ExecutionModelGateway {
       specDigest: grant.request.spec_digest,
       ownerUserId: grant.owner_user_id,
       departmentId: grant.department_id,
+      ...(attribution ? { attribution } : {}),
+      routerAuthorityId: resource.router.authorityId,
       grantExpiresAt: grant.expires_at,
       resource: resource.id,
       model: resource.model,

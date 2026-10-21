@@ -26,6 +26,7 @@ export async function dispatchAgentInventory(
     const managedTask = /^\/api\/v1\/agent-inventory\/hosted\/tasks\/([\w-]+)\/(reconcile|close)$/.exec(path)
     let data
     if (method === 'GET' && path === `${base}/access`) data = await service.access(actor)
+    else if (method === 'GET' && path === `${base}/usage`) data = await service.usage(actor, url.searchParams)
     else if (method === 'GET' && path === `${base}/hosted/tasks/unknown`) data = await service.hostedUnknown(actor, url.searchParams.get('after') ?? '')
     else if (suspension && (method === 'GET' || method === 'POST')) {
       if (method === 'POST' && (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length)) throw new ExternalProviderError(400, 'INVALID_SUSPENSION')

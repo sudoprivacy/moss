@@ -7,6 +7,7 @@ import { ExternalProviderError } from "../externalProviders/policy.js";
 import type {
   ExecutionGrant,
   CheckExecutionGrant,
+  AssetRecord,
 } from "../../../contracts/agent-registry/v1alpha1/contract.gen.js";
 import { ExecutionModelGateway } from "./executionModelGateway.js";
 import { NexusModelRelay } from "./nexusModelRelay.js";
@@ -57,6 +58,8 @@ async function setup(t: TestContext, contentPath = false) {
     disableFailure: false,
     wrongLedger: false,
     noLedger: false,
+    metadataChanged: false,
+    metadataUnavailable: false,
   };
   const tokens = new Map<number, any>();
   const router = new AgentRouterClient({
@@ -130,6 +133,12 @@ async function setup(t: TestContext, contentPath = false) {
     },
   });
   const registry = {
+    inventoryGet: async (org: string, id: string): Promise<AssetRecord> => {
+      assert.equal(org, 'org-a'); assert.equal(id, grant.request.asset_id)
+      if (state.metadataUnavailable) throw new Error('owner temporarily unavailable')
+      return { id, owner_zone: grant.zone, metadata_digest: state.metadataChanged ? 'sha256:' + 'b'.repeat(64) : grant.request.metadata_digest,
+        metadata: { owner_user_id: grant.owner_user_id, department_id: grant.department_id, source_platform: 'dify', name: 'Reviewed name' } } as AssetRecord
+    },
     scope: () => ({ zoneId: "zone-a", trustDomain: "agents.example" }),
     executionAuthorize: async (org: string, request: CheckExecutionGrant) => {
       state.checks++;
@@ -223,6 +232,20 @@ async function setup(t: TestContext, contentPath = false) {
   await gateway.ready;
   return { db, gateway, state, body, token, grant, router, tokens };
 }
+
+void test('model usage captures matching owner metadata and Router authority once; changed/missing metadata stays unknown', async t => {
+  const first = await setup(t)
+  const call = await first.gateway.invoke('org-a', first.body, first.token)
+  assert.equal(call.routerAuthorityId, first.router.authorityId)
+  assert.deepEqual(call.attribution, { metadataDigest: first.grant.request.metadata_digest, sourcePlatform: 'dify', assetName: 'Reviewed name' })
+  first.state.metadataChanged = true
+  assert.deepEqual((await first.gateway.invoke('org-a', first.body, first.token)).attribution, call.attribution, 'replay cannot rewrite historical attribution')
+  for (const field of ['metadataChanged', 'metadataUnavailable'] as const) {
+    const env = await setup(t); env.state[field] = true
+    const missing = await env.gateway.invoke('org-a', env.body, env.token)
+    assert.equal(missing.status, 'completed'); assert.equal(missing.attribution, undefined)
+  }
+})
 
 void test("scoped model gateway persists attribution without secrets and never redispatches replay", async (t) => {
   const f = await setup(t),
