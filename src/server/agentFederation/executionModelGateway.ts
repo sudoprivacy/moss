@@ -448,6 +448,12 @@ export class ExecutionModelGateway {
     return call;
   }
   /** Management gateway only; authorization belongs to the enclosing admin route. */
+  async taskCalls(orgId: string, taskId: string): Promise<ExecutionModelCall[]> {
+    await this.ready;
+    const ids = Array.from({ length: 32 }, (_, i) => `${taskId}:${i + 1}`);
+    const rows = await this.db.all(`SELECT document FROM agent_model_calls WHERE org_id = ? AND call_id IN (${ids.map(() => "?").join(",")}) ORDER BY id`, [orgId, ...ids]);
+    return rows.map(row => JSON.parse(String(row.document)) as ExecutionModelCall);
+  }
   async reconcile(orgId: string, callId: string): Promise<ExecutionModelCall> {
     await this.ready;
     const row = await this.db.get(

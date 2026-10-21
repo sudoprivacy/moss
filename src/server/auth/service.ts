@@ -1,3 +1,5 @@
+import { hostedFromEnvironment } from '../agentFederation/hostedConfiguration.js'
+import type { HostedEvaluationCoordinator } from '../agentFederation/hostedEvaluationCoordinator.js'
 import { registryFromEnvironment } from '../agentFederation/registryConfiguration.js'
 import { AgentInventoryService } from '../agentFederation/inventoryService.js'
 import { InventorySources } from '../agentFederation/inventorySources.js'
@@ -695,9 +697,11 @@ export class AuthService {
     })
   }
 
-  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort): AgentInventoryService {
+  createHostedEvaluationRuntime() { return hostedFromEnvironment(this.db.driver, registryFromEnvironment()) }
+
+  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort, hosted?: HostedEvaluationCoordinator): AgentInventoryService {
     return new AgentInventoryService({
-      registry: registryFromEnvironment(), catalog: new CatalogRepository(this.db.driver),
+      registry: registryFromEnvironment(), catalog: new CatalogRepository(this.db.driver), hosted,
       sources: new InventorySources({ db: this.db.driver, identities: this.identityRepository, catalog: new CatalogRepository(this.db.driver), secrets }),
       authorize: async actor => {
         const user = await this.getUserPinnedOrSuperAdmin(actor.userId, actor.orgId)

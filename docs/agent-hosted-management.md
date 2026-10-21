@@ -53,5 +53,6 @@ another owner's sample content. Only authenticated managers can write, with the
 actual authenticated user supplied by Moss. Identical request replay is safe;
 changing an existing name/version is rejected and requires a new version.
 
-The form stores inputs and expected results. It does not yet provide a completed
-migration-evaluation task or automatically publish/raise the asset grade.
+The form stores inputs and expected results. The adjacent hosted evaluation panel
+now runs registered artifacts against them; see [hosted evaluations](agent-hosted-evaluations.md).
+A completed migration comparison and publication/grade admission remain separate requirements.

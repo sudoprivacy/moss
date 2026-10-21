@@ -1,3 +1,5 @@
+import type { HostedEvaluationCoordinator } from './hostedEvaluationCoordinator.js'
+import type { StartHostedEvaluation } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { AGENT_REGISTRY_API, type AssetRecord } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { AuthContext } from '../auth/token.js'
 import type { CatalogRepository } from '../catalog/catalogRepository.js'
@@ -11,6 +13,7 @@ import type { RegisterHostedArtifact, RegisterEvaluationDataset } from '../../..
 
 export interface InventoryServiceOptions {
   registry?: ProductRegistryClient
+  hosted?: HostedEvaluationCoordinator
   sources?: InventorySources
   catalog: Pick<CatalogRepository, 'getAgent'>
   authorize: (actor: AuthContext) => Promise<{ canManage: boolean }>
@@ -145,6 +148,51 @@ export class AgentInventoryService {
     return this.registry(actor.orgId).evaluationDatasetRegister(actor.orgId, {
       ...input, api_version: AGENT_REGISTRY_API, kind: 'RegisterEvaluationDataset', initiated_by: actor.userId,
     } as RegisterEvaluationDataset)
+  }
+  private async evaluationManage(actor: AuthContext, assetId: string) {
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    const asset = await this.readable(actor, identifier(assetId), true)
+    if (!asset.metadata.owner_user_id || !(await this.options.member(actor.orgId, asset.metadata.owner_user_id))) fail('INVALID_MEMBER', 409)
+    return asset
+  }
+  async evaluationList(actor: AuthContext, id: string, after = '') {
+    const { canManage } = await this.options.authorize(actor)
+    await this.readable(actor, id, canManage)
+    if (after) identifier(after)
+    return this.registry(actor.orgId).evaluationList(actor.orgId, id, after)
+  }
+  async evaluationGet(actor: AuthContext, id: string) {
+    const { canManage } = await this.options.authorize(actor)
+    const run = await this.registry(actor.orgId).evaluationGet(actor.orgId, identifier(id))
+    await this.readable(actor, run.asset_id, canManage)
+    return run
+  }
+  async evaluationCases(actor: AuthContext, id: string, after = '') {
+    await this.evaluationGet(actor, id)
+    if (after) identifier(after)
+    return this.registry(actor.orgId).evaluationCases(actor.orgId, id, after)
+  }
+  async evaluationStart(actor: AuthContext, body: unknown) {
+    const input = object(body, ['request_id', 'asset_id', 'metadata_digest', 'artifact_id', 'dataset_id', 'timeout_seconds', 'max_model_calls'])
+    const asset = await this.evaluationManage(actor, identifier(input.asset_id))
+    if (asset.metadata_digest !== input.metadata_digest) fail('EVALUATION_ASSET_NOT_ADMITTED', 409)
+    if (!this.options.hosted) fail('HOSTED_NOT_CONFIGURED', 503)
+    return this.options.hosted.start(actor.orgId, {
+      ...input, api_version: AGENT_REGISTRY_API, kind: 'StartHostedEvaluation', initiated_by: actor.userId,
+    } as StartHostedEvaluation, async () => { await this.evaluationManage(actor, asset.id) })
+  }
+  async evaluationAction(actor: AuthContext, id: string, action: 'resume' | 'stop' | 'reconcile', body: unknown) {
+    object(body, [])
+    // Authenticate the manager before loading any result from the owner service.
+    if (!(await this.options.authorize(actor)).canManage) fail('ADMIN_REQUIRED', 403)
+    const registry = this.registry(actor.orgId), run = await registry.evaluationGet(actor.orgId, identifier(id))
+    await this.readable(actor, run.asset_id, true)
+    // Cleanup must remain possible after the asset's owner has left the organization.
+    if (action === 'stop') return this.options.hosted ? this.options.hosted.stop(actor.orgId, id) : registry.evaluationStop(actor.orgId, id)
+    if (action === 'reconcile') return this.options.hosted ? this.options.hosted.reconcile(actor.orgId, id) : registry.evaluationReconcile(actor.orgId, id)
+    if (!this.options.hosted) fail('HOSTED_NOT_CONFIGURED', 503)
+    await this.options.hosted.resume(actor.orgId, id, async () => { await this.evaluationManage(actor, run.asset_id) })
+    return registry.evaluationGet(actor.orgId, id)
   }
   async discovered(actor: AuthContext, after = '') {
     await this.options.authorize(actor)

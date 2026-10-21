@@ -17,6 +17,8 @@ export async function dispatchAgentInventory(
       path = url.pathname
     const match = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)(\/history)?$/.exec(path)
     const hosted = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/artifacts$/.exec(path)
+    const evaluations = /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/evaluations$/.exec(path)
+    const evaluation = /^\/api\/v1\/agent-inventory\/hosted\/evaluations\/([A-Za-z0-9_.:@-]+)(?:\/(cases|resume|stop|reconcile))?$/.exec(path)
     let data
     if (method === 'GET' && path === `${base}/access`) data = await service.access(actor)
     else if (method === 'GET' && path === `${base}/members`)
@@ -37,6 +39,11 @@ export async function dispatchAgentInventory(
     else if (method === 'POST' && path === `${base}/commands`) data = await service.command(actor, body)
     else if (method === 'GET' && hosted) data = await service.hostedList(actor, hosted[1], url.searchParams.get('after') ?? '')
     else if (method === 'GET' && /^\/api\/v1\/agent-inventory\/assets\/([A-Za-z0-9_.:@-]+)\/datasets$/.test(path)) data = await service.datasetList(actor, path.split('/')[5], url.searchParams.get('after') ?? '')
+    else if (method === 'GET' && evaluations) data = await service.evaluationList(actor, evaluations[1], url.searchParams.get('after') ?? '')
+    else if (method === 'GET' && evaluation && !evaluation[2]) data = await service.evaluationGet(actor, evaluation[1])
+    else if (method === 'GET' && evaluation?.[2] === 'cases') data = await service.evaluationCases(actor, evaluation[1], url.searchParams.get('after') ?? '')
+    else if (method === 'POST' && evaluation && ['resume', 'stop', 'reconcile'].includes(evaluation[2])) data = await service.evaluationAction(actor, evaluation[1], evaluation[2] as 'resume' | 'stop' | 'reconcile', body)
+    else if (method === 'POST' && path === `${base}/hosted/evaluations`) data = await service.evaluationStart(actor, body)
     else if (method === 'POST' && path === `${base}/hosted/datasets`) data = await service.datasetRegister(actor, body)
     else if (method === 'POST' && path === `${base}/hosted/dify/inspect`) data = await service.hostedInspect(actor, body)
     else if (method === 'POST' && path === `${base}/hosted/artifacts`) data = await service.hostedRegister(actor, body)

@@ -16,6 +16,14 @@ type ModelClient = Pick<NexusVfsClient, 'write' | 'streamReadAt' | 'close'>
 const LIMIT = 2 * 1024 * 1024
 const unconfirmed = () => new AgentProtocolError(502, 'MODEL_EXECUTION_UNCONFIRMED')
 
+// A co-loaded protobuf consumer can disable Long support. Accept only lossless
+// numeric offsets; never coerce rounded uint64 values or arbitrary objects.
+function replyOffset(value: unknown): string {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value)
+  if (typeof value === 'string' && /^(0|[1-9]\d{0,19})$/.test(value) && BigInt(value) <= 18446744073709551615n) return value
+  throw unconfirmed()
+}
+
 /** A route is configuration, not evidence of a content gate or user delegation. */
 export function nexusModelTargets(config: NexusModelConfig): NexusModelTarget[] {
   const endpoint = new URL(config.endpoint)
@@ -77,13 +85,14 @@ export function nexusModelExchange(config: NexusModelConfig, createClient?: () =
           if (offset === '0' && replyNotCreated(error)) { await delay(50, undefined, { signal }); continue }
           throw error
         }
-        if (!/^\d{1,20}$/.test(frame.nextOffset) || BigInt(frame.nextOffset) < BigInt(offset)) throw unconfirmed()
+        const nextOffset = replyOffset(frame.nextOffset)
+        if (BigInt(nextOffset) < BigInt(offset)) throw unconfirmed()
         if (!frame.data.length) {
-          if (frame.nextOffset !== offset) throw unconfirmed()
+          if (nextOffset !== offset) throw unconfirmed()
           await delay(25, undefined, { signal }); continue
         }
-        if (frame.nextOffset === offset || ++records > 32768) throw unconfirmed()
-        offset = frame.nextOffset
+        if (nextOffset === offset || ++records > 32768) throw unconfirmed()
+        offset = nextOffset
         size += frame.data.length
         if (size > LIMIT) throw unconfirmed()
         if (frame.data[0] === 0) {

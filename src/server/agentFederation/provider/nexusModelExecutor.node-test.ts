@@ -79,6 +79,28 @@ void test('reply startup NOT_FOUND retries only observation, never the prompt wr
   assert.equal(f.writes.length, 1); assert.equal(attempts, 5)
 })
 
+void test('numeric protobuf offsets preserve empty polling and never repeat the write', async () => {
+  const f = fixture(), read = f.client.streamReadAt
+  let attempts = 0
+  f.client.streamReadAt = async (...args) => {
+    if (++attempts <= 2) return { data: Buffer.alloc(0), nextOffset: 0 as unknown as string, eof: false, timedOut: true }
+    const frame = await read(...args)
+    return { ...frame, nextOffset: Number(frame.nextOffset) as unknown as string }
+  }
+  assert.equal(await f.execute(makeAgent(), [], 'test', AbortSignal.timeout(2000), context), '42')
+  assert.equal(f.writes.length, 1)
+  assert.deepEqual(f.reads.map(row => row.offset), ['0', '1', '2'])
+})
+
+void test('unsafe or noncanonical protobuf offsets cannot manufacture completion', async () => {
+  for (const nextOffset of [Number.MAX_SAFE_INTEGER + 1, -1, 0.5, Infinity, NaN, null, {}, '01', '-1', '18446744073709551616']) {
+    const f = fixture()
+    f.client.streamReadAt = async () => ({ data: response(), nextOffset: nextOffset as string, eof: false, timedOut: false })
+    await assert.rejects(f.execute(makeAgent(), [], 'test', AbortSignal.timeout(1000), context), { code: 'MODEL_EXECUTION_UNCONFIRMED' })
+    assert.equal(f.writes.length, 1)
+  }
+})
+
 void test('lost write acknowledgement, permission errors and malformed reply preserve uncertainty and hide diagnostics', async () => {
   for (const failure of ['write', 'read', 'malformed', 'error', 'tagless', 'offset', 'oversized'] as const) {
     const f = fixture(failure === 'malformed' ? [Buffer.from('private invalid JSON')] : failure === 'error' ? [json({ type: 'error', message: 'secret upstream credential' })] : failure === 'tagless' ? [body()] : failure === 'oversized' ? [response(), Buffer.alloc(2 * 1024 * 1024 + 1)] : undefined)

@@ -2065,9 +2065,15 @@ export function startServer(
   }) : null
 
   const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient, runtime.serverInstanceId) : null
-  const agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined)
-  const externalStoreReady = externalProviders?.ownership.ready ?? Promise.resolve()
   let isStopped = false
+  let hostedEvaluations: Awaited<ReturnType<typeof authService.createHostedEvaluationRuntime>>
+  let agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined)
+  const hostedReady = authService.createHostedEvaluationRuntime().then(async value => {
+    if (isStopped) { await value?.close(); return }
+    hostedEvaluations = value
+    agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, value?.coordinator)
+  })
+  const externalStoreReady = Promise.all([externalProviders?.ownership.ready ?? Promise.resolve(), hostedReady])
 
   // Zone 管理面（§8.8）：/v2 未配置时 client 为 null——binding 列表等只读
   // 本地的操作仍可用，涉及 Nexus 的操作返回 503（显式未配置，不静默）。
@@ -11522,6 +11528,7 @@ export function startServer(
       if (isStopped) throw new Error('Server stopped before initialization completed')
       server.listen(config.port, config.host)
     }).catch(error => {
+      void hostedEvaluations?.close().catch(() => {})
       void externalProviders?.close().catch(() => {})
       onError(error instanceof Error ? error : new Error('External provider task store initialization failed'))
     })
@@ -11643,6 +11650,8 @@ export function startServer(
     ready,
     stop: async () => {
       isStopped = true
+      await hostedReady.catch(() => {})
+      await hostedEvaluations?.close()
       await externalProviders?.close()
       wikiJobExecutor.stop()
       sourceSyncWorker.stop()

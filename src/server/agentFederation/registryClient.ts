@@ -1,3 +1,4 @@
+import type { StartHostedEvaluation, HostedEvaluationRun, HostedEvaluationCase, HostedEvaluationPage, HostedEvaluationCasePage, HostedEvaluationClaim, EvaluationCaseLease, CompleteHostedEvaluationCase } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import Ajv2020 from 'ajv/dist/2020.js'
@@ -38,6 +39,15 @@ ajv.addKeyword({ keyword: 'discriminator', valid: true })
 ajv.addSchema({ $id: RESOURCE_REF_ID, sudoResourceRef: true })
 ajv.addSchema(schema)
 const validators = {
+  StartHostedEvaluation: ajv.compile<StartHostedEvaluation>({ $ref: `${schema.$id}#/$defs/StartHostedEvaluation` }),
+  HostedEvaluationRun: ajv.compile<HostedEvaluationRun>({ $ref: `${schema.$id}#/$defs/HostedEvaluationRun` }),
+  HostedEvaluationCase: ajv.compile<HostedEvaluationCase>({ $ref: `${schema.$id}#/$defs/HostedEvaluationCase` }),
+  HostedEvaluationPage: ajv.compile<HostedEvaluationPage>({ $ref: `${schema.$id}#/$defs/HostedEvaluationPage` }),
+  HostedEvaluationCasePage: ajv.compile<HostedEvaluationCasePage>({ $ref: `${schema.$id}#/$defs/HostedEvaluationCasePage` }),
+  HostedEvaluationClaim: ajv.compile<HostedEvaluationClaim>({ $ref: `${schema.$id}#/$defs/HostedEvaluationClaim` }),
+  EvaluationCaseLease: ajv.compile<EvaluationCaseLease>({ $ref: `${schema.$id}#/$defs/EvaluationCaseLease` }),
+  CompleteHostedEvaluationCase: ajv.compile<CompleteHostedEvaluationCase>({ $ref: `${schema.$id}#/$defs/CompleteHostedEvaluationCase` }),
+
   EvaluationDataset: ajv.compile<EvaluationDataset>({ $ref: `${schema.$id}#/$defs/EvaluationDataset` }),
   EvaluationDatasetPage: ajv.compile<EvaluationDatasetPage>({ $ref: `${schema.$id}#/$defs/EvaluationDatasetPage` }),
   RegisterEvaluationDataset: ajv.compile<RegisterEvaluationDataset>({ $ref: `${schema.$id}#/$defs/RegisterEvaluationDataset` }),
@@ -282,6 +292,78 @@ export class ProductRegistryClient {
     if (value.items.some((row, i) => row.id <= (i ? value.items[i - 1].id : after))
       || (value.next_cursor !== null && value.next_cursor !== value.items.at(-1)?.id)) fail('EVALUATION_RESPONSE_INVALID')
     return value
+  }
+  private evaluationRun(orgId: string, value: unknown, assetId?: string, id?: string): HostedEvaluationRun {
+    if (!validators.HostedEvaluationRun(value) || value.zone !== this.scope(orgId).zoneId
+      || (assetId !== undefined && value.asset_id !== assetId) || (id !== undefined && value.id !== id)
+      || value.queued_cases + value.running_cases + value.finished_cases !== value.total_cases
+      || value.passed_cases > value.finished_cases || value.running_cases > 1
+      || value.status !== (!value.queued_cases && !value.running_cases ? 'finished' : value.queued_cases === value.total_cases ? 'queued' : 'running')) fail('EVALUATION_RESPONSE_INVALID')
+    return value
+  }
+  private evaluationCase(value: unknown, runId: string): HostedEvaluationCase {
+    if (!validators.HostedEvaluationCase(value) || value.run_id !== runId
+      || (value.trace_digest != null && value.trace_digest !== hash(Buffer.from(stableJson(value.trace))))
+      || (value.passed && value.status !== 'succeeded')
+      || (value.status === 'succeeded' && (value.answer == null || !value.cleanup_confirmed || !value.iam_cleanup_confirmed))) fail('EVALUATION_RESPONSE_INVALID')
+    return value
+  }
+  async evaluationStart(orgId: string, command: StartHostedEvaluation): Promise<HostedEvaluationRun> {
+    const normalized = { api_version: AGENT_REGISTRY_API, kind: 'StartHostedEvaluation', timeout_seconds: 120, max_model_calls: 1, ...command }
+    if (!validators.StartHostedEvaluation(normalized)) fail('INVALID_EVALUATION_REQUEST', 400)
+    const value = this.evaluationRun(orgId, await this.call(orgId, '/hosted/evaluations', normalized), command.asset_id)
+    for (const key of ['metadata_digest', 'artifact_id', 'dataset_id', 'initiated_by', 'timeout_seconds', 'max_model_calls'] as const)
+      if (value[key] !== normalized[key]) fail('EVALUATION_RESPONSE_INVALID')
+    return value
+  }
+  async evaluationGet(orgId: string, id: string): Promise<HostedEvaluationRun> {
+    return this.evaluationRun(orgId, await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(id)}`), undefined, id)
+  }
+  async evaluationList(orgId: string, assetId: string, after = ''): Promise<HostedEvaluationPage> {
+    const value = await this.call(orgId, `/hosted/evaluations?${new URLSearchParams({ asset_id: assetId, after })}`)
+    if (!validators.HostedEvaluationPage(value)) fail('EVALUATION_RESPONSE_INVALID')
+    for (const row of value.items) this.evaluationRun(orgId, row, assetId)
+    this.evaluationCursor(value, after)
+    return value
+  }
+  private evaluationCursor(value: {items: {id: string}[]; next_cursor: string | null}, after: string) {
+    if (value.items.some((row, i) => row.id <= (i ? value.items[i - 1].id : after))
+      || (value.next_cursor !== null && value.next_cursor !== value.items.at(-1)?.id)) fail('EVALUATION_RESPONSE_INVALID')
+  }
+  async evaluationCases(orgId: string, runId: string, after = ''): Promise<HostedEvaluationCasePage> {
+    const value = await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(runId)}/cases?${new URLSearchParams({ after })}`)
+    if (!validators.HostedEvaluationCasePage(value)) fail('EVALUATION_RESPONSE_INVALID')
+    for (const row of value.items) this.evaluationCase(row, runId)
+    this.evaluationCursor(value, after)
+    return value
+  }
+  async evaluationClaim(orgId: string, runId: string): Promise<HostedEvaluationClaim | null> {
+    const value = await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(runId)}/claim`, {})
+    if (value === null) return null
+    if (!validators.HostedEvaluationClaim(value) || value.case.status !== 'running') fail('EVALUATION_RESPONSE_INVALID')
+    this.evaluationCase(value.case, runId)
+    return value
+  }
+  async evaluationGrant(orgId: string, runId: string, command: EvaluationCaseLease): Promise<ExecutionGrantResult> {
+    if (!validators.EvaluationCaseLease(command)) fail('INVALID_EVALUATION_REQUEST', 400)
+    const value = await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(runId)}/grant`, command)
+    if (!validators.ExecutionGrantResult(value)) fail('EVALUATION_RESPONSE_INVALID')
+    this.executionGrant(value.grant, orgId)
+    if (value.grant.request.task_id !== command.case_id || value.grant.request.request_id !== `evaluation-${command.case_id}`
+      || (value.api_key != null && (value.grant.status !== 'active' || !/^sk-[A-Za-z0-9_-]{16,}$/.test(value.api_key)))) fail('EVALUATION_RESPONSE_INVALID')
+    return value
+  }
+  async evaluationComplete(orgId: string, runId: string, command: CompleteHostedEvaluationCase): Promise<HostedEvaluationCase> {
+    if (!validators.CompleteHostedEvaluationCase(command)) fail('INVALID_EVALUATION_REQUEST', 400)
+    const value = this.evaluationCase(await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(runId)}/complete`, command), runId)
+    if (value.id !== command.case_id || value.status !== command.status) fail('EVALUATION_RESPONSE_INVALID')
+    return value
+  }
+  async evaluationReconcile(orgId: string, runId: string): Promise<HostedEvaluationRun> {
+    return this.evaluationRun(orgId, await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(runId)}/reconcile`, {}), undefined, runId)
+  }
+  async evaluationStop(orgId: string, runId: string): Promise<HostedEvaluationRun> {
+    return this.evaluationRun(orgId, await this.call(orgId, `/hosted/evaluations/${encodeURIComponent(runId)}/stop`, {}), undefined, runId)
   }
   private executionGrant(value: unknown, orgId: string, id?: string): ExecutionGrant {
     if (!validators.ExecutionGrant(value) || value.zone !== this.scope(orgId).zoneId || (id !== undefined && value.id !== id)

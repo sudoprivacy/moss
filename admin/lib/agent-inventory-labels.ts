@@ -30,6 +30,22 @@ export const recommendationLabels: Record<string, string> = {
 export function inventoryError(error: unknown): string {
   const code = error instanceof ApiRequestError ? error.code : error instanceof Error ? error.message : ''
   const labels: Record<string, string> = {
+    EVALUATION_RUN_SCHEMA_REQUIRED: '评测运行数据库尚未初始化，请由部署管理员执行显式初始化。',
+    HOSTED_NOT_CONFIGURED: '当前环境尚未配置托管执行服务。',
+    HOSTED_MODEL_NOT_CONFIGURED: '此制品使用的模型尚未连接托管执行环境。',
+    HOSTED_RUNTIME_UNAVAILABLE: '托管运行环境不可用，请核对镜像和执行服务。',
+    EVALUATION_CASE_IN_PROGRESS: '已有用例正在执行；请刷新查看结果，超时后可核对。',
+    EVALUATION_CLEANUP_UNCONFIRMED: '上一个用例的运行环境或凭证清理尚未确认，已阻止继续执行。',
+    EVALUATION_CAPACITY_LIMIT: '待执行评测已达到容量上限，请先完成或停止已有评测。',
+    EVALUATION_CASE_INTERRUPTED: '执行确认超时，结果保持未知，不会自动重发。',
+    EVALUATION_STOPPED: '评测已停止，未开始的用例已关闭。',
+    HOSTED_RESULT_UNCONFIRMED: '未能确认运行结果，请核对执行记录。',
+    MODEL_EXECUTION_UNCONFIRMED: '模型可能已执行并计费，但返回结果未确认。此用例不会重发，请核对模型调用和账单。',
+    MODEL_CALL_INTERRUPTED: '模型调用确认中断，结果保持未知。核对账单不会重新执行模型。',
+    HOSTED_MODEL_UNCONFIRMED: '模型未返回可确认的结果，此用例不会重发。',
+    MODEL_RECONCILIATION_PENDING: '模型调用或凭证清理尚未确认，请核对后再继续。',
+    EVALUATION_IAM_CLEANUP_PENDING: '执行凭证回收尚未确认，请再次核对。',
+    EVALUATION_CREDENTIAL_UNAVAILABLE: '一次性执行凭证已无法取回；此用例不会重新运行。',
     EVALUATION_SCHEMA_REQUIRED: '评测数据库尚未初始化，请由部署管理员执行显式初始化。',
     EVALUATION_VERSION_CONFLICT: '同名同版本的评测集已存在，请使用新版本号。',
     EVALUATION_IDEMPOTENCY_CONFLICT: '此次提交内容已变化，请重新编辑后提交。',

@@ -1,6 +1,10 @@
 import { dcClient } from './client'
 import type { DiscoverySource, DiscoveryResult } from '../../../src/server/agentFederation/inventoryViews'
 import type {
+  HostedEvaluationRun,
+  HostedEvaluationPage,
+  HostedEvaluationCasePage,
+  StartHostedEvaluation,
   AssetHistory,
   InventoryWire,
   AssetMetadata,
@@ -80,6 +84,11 @@ export function createInventoryApi(client: Client = dcClient, signal?: () => Abo
     discover: (source_id: string) => call<DiscoveryResult>('/discover', { source_id }),
     hostedList: (assetId: string, after = '') => call<HostedArtifactPage>(`/assets/${encodeURIComponent(assetId)}/artifacts?after=${encodeURIComponent(after)}`),
     datasetList: (assetId: string, after = '') => call<EvaluationDatasetPage>(`/assets/${encodeURIComponent(assetId)}/datasets?after=${encodeURIComponent(after)}`),
+    evaluationList: (assetId: string, after = '') => call<HostedEvaluationPage>(`/assets/${encodeURIComponent(assetId)}/evaluations?after=${encodeURIComponent(after)}`),
+    evaluationGet: (runId: string) => call<HostedEvaluationRun>(`/hosted/evaluations/${encodeURIComponent(runId)}`),
+    evaluationCases: (runId: string, after = '') => call<HostedEvaluationCasePage>(`/hosted/evaluations/${encodeURIComponent(runId)}/cases?after=${encodeURIComponent(after)}`),
+    evaluationStart: (body: Omit<StartHostedEvaluation, 'api_version' | 'kind' | 'initiated_by'>) => call<HostedEvaluationRun>('/hosted/evaluations', body),
+    evaluationAction: (runId: string, action: 'resume' | 'stop' | 'reconcile') => call<HostedEvaluationRun>(`/hosted/evaluations/${encodeURIComponent(runId)}/${action}`, {}),
     datasetRegister: (body: { request_id: string; asset_id: string; metadata_digest: string; dataset: EvaluationDatasetInput }) => call<EvaluationDataset>('/hosted/datasets', body),
     hostedInspect: (source: string) => call<DifyTextPlan>('/hosted/dify/inspect', { source }),
     hostedRegister: (body: { request_id: string; asset_id: string; metadata_digest: string; image: HostedImage; dify_source: string | null }) => call<HostedArtifact>('/hosted/artifacts', body),
