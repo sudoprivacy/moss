@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/nexi-lab/nexus",
-  "revision": "a075256bb0306fa45958ad9161b4a30879e474c3",
+  "revision": "3107bc5f6123a23b0137503a3dbe8e9b21c52ddc",
   "semanticOwner": "nexus",
   "maturity": "experimental-registration-authority",
   "apiVersion": "agent-registry.sudo.dev/v1alpha1",

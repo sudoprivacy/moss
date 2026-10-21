@@ -2,6 +2,8 @@ import { readFileSync, statSync } from 'node:fs'
 import type { DbDriver } from '../db/driver.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import { object } from '../externalProviders/administration.js'
+import { LangGraphSourceBaseline } from './langgraphSourceBaseline.js'
+import type { SourceBaselineRunner } from './hostedEvaluationCoordinator.js'
 import { DifySourceBaseline } from './difySourceBaseline.js'
 import { HostedEvaluationCoordinator } from './hostedEvaluationCoordinator.js'
 import { HostedRunner, type HostedRunnerConfig } from './hostedRunner.js'
@@ -76,10 +78,19 @@ export async function hostedFromEnvironment(db: DbDriver, registry?: ProductRegi
 
 /** Only deployment-reviewed original runtimes may be used as migration baselines. */
 export function configuredSourceBaselines(value: unknown, registry: ProductRegistryClient) {
-  const result = new Map<string, DifySourceBaseline>()
+  const result = new Map<string, SourceBaselineRunner>()
   if (value === undefined) return result
   if (!Array.isArray(value) || value.length > 64) throw new Error('invalid source baselines')
   for (const raw of value) {
+    if (raw && typeof raw === 'object' && 'profile' in raw && raw.profile === 'langgraph-source-v1') {
+      const c = object(raw, ['profile', 'orgId', 'assetId', 'python', 'entry', 'project'])
+      if (typeof c.orgId !== 'string' || typeof c.assetId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$/.test(c.assetId)) throw new Error('invalid source baseline')
+      registry.scope(c.orgId)
+      const key = JSON.stringify([c.orgId, c.assetId])
+      if (result.has(key)) throw new Error('duplicate source baseline')
+      result.set(key, new LangGraphSourceBaseline({python: c.python, entry: c.entry, project: c.project} as any))
+      continue
+    }
     const c = object(raw, ['profile', 'orgId', 'assetId', 'origin', 'appId', 'workspaceId', 'apiKeyFile', 'consoleTokenFile', 'csrfTokenFile'])
     if (c.profile !== 'dify-service-api-v1' || typeof c.orgId !== 'string' || typeof c.assetId !== 'string'
       || !/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$/.test(c.assetId) || typeof c.origin !== 'string'

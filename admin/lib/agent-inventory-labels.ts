@@ -30,6 +30,11 @@ export const recommendationLabels: Record<string, string> = {
 export function inventoryError(error: unknown): string {
   const code = error instanceof ApiRequestError ? error.code : error instanceof Error ? error.message : ''
   const labels: Record<string, string> = {
+    EVALUATION_SOURCE_RUNTIME_INVALID: '原工程运行环境或协议不符合当前支持范围，请检查部署配置。',
+    EVALUATION_SOURCE_EXECUTION_FAILED: '原工程执行未确认完成，请查看已保存的调用记录；已开始的用例不会自动重发。',
+    AGENT_MIGRATION_COMPARISON_REQUIRED: 'L2 验收必须关联已保存的迁移对比，独立评测或人工填写的分数不能代替。',
+    AGENT_MIGRATION_COMPARISON_MISMATCH: '验收报告与迁移对比、镜像或评测集不一致，或对比未通过。',
+
     EVALUATION_NOT_SETTLED: '所有用例结束并确认执行与凭证清理后才能固定阈值或生成对比；请先核对未知结果。',
     EVALUATION_POLICY_REQUIRED: '此托管运行未预先绑定迁移阈值，不能补挂；请按已保存阈值创建新的候选运行。',
     EVALUATION_POLICY_MISMATCH: '迁移阈值与当前资产、制品或评测集不一致，请重新选择。',
