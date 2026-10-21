@@ -35,15 +35,15 @@ export class ExternalExecutionOwnership {
   }
   async candidates(): Promise<string[]> {
     await this.ready
-    return (await this.store.db.all(`SELECT t.id FROM tasks t LEFT JOIN external_attempt_leases l ON l.attempt_id = t.attempt_id
+    return (await this.store.db.all(`SELECT t.id FROM external_tasks t LEFT JOIN external_attempt_leases l ON l.attempt_id = t.attempt_id
       WHERE t.status IN ('accepted', 'dispatching', 'running') AND t.deadline_at > ? AND (l.attempt_id IS NULL OR l.lease_until <= ?)
       ORDER BY t.deadline_at, t.id LIMIT 32`, [await this.store.databaseNow(), await this.store.databaseNow()])).map(row => String(row.id))
   }
   async claim(id: string): Promise<OwnedExternalTask | null> {
     await this.ready
     return this.store.db.transaction(async () => {
-      await this.store.db.run('UPDATE tasks SET sequence = sequence WHERE id = ?', [id])
-      const row = await this.store.db.get('SELECT org_id, user_id FROM tasks WHERE id = ?', [id])
+      await this.store.db.run('UPDATE tasks SET sequence = sequence WHERE id = ? AND id IN (SELECT id FROM external_tasks)', [id])
+      const row = await this.store.db.get('SELECT org_id, user_id FROM external_tasks WHERE id = ?', [id])
       if (!row) return null
       const actor = { orgId: String(row.org_id), userId: String(row.user_id) }
       let task = await this.store.task(actor, id)
@@ -84,7 +84,7 @@ export class ExternalExecutionOwnership {
     return Boolean(await this.store.db.run(`UPDATE external_attempt_leases SET lease_until = ?
       WHERE attempt_id = ? AND token = ? AND lease_until > ? AND EXISTS
       (SELECT 1 FROM session_attempts a JOIN sessions s ON s.current_attempt_id = a.attempt_id
-        JOIN tasks t ON t.attempt_id = a.attempt_id WHERE a.attempt_id = external_attempt_leases.attempt_id
+        JOIN external_tasks t ON t.attempt_id = a.attempt_id WHERE a.attempt_id = external_attempt_leases.attempt_id
         AND a.server_instance_id = ? AND t.status IN ('dispatching', 'running') AND t.deadline_at > ?)`,
     [now + EXTERNAL_EXECUTION_LEASE_MS, fence.attemptId, fence.token, now, fence.ownerId, now]))
   }

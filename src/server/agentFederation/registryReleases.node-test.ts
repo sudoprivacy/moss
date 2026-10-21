@@ -133,7 +133,7 @@ void test('migration rejects live or unreconciled tasks, changed source and corr
   const original = await f.migration.plan(actor, f.binding.id)
   await f.store.saveBinding({ ...f.binding, revision: 2 })
   await assert.rejects(f.migration.apply(actor, f.binding.id, { plan_digest: original.plan_digest, old_writers_stopped: true }), { code: 'REGISTRY_MIGRATION_PLAN_CHANGED' })
-  await f.db.run("INSERT INTO sessions(session_id,transcript_session_id,org_id,user_id,role,scopes_json,cwd,runtime_type,status,desired_state,transcript_path,created_at,last_active_at) VALUES ('session-1','session-1','org-1','reviewer','user','[]','','external_provider','running','running','',1,1)")
+  await f.db.run("INSERT INTO sessions(session_id,transcript_session_id,org_id,user_id,role,scopes_json,cwd,runtime_type,status,desired_state,transcript_path,created_at,last_active_at) VALUES ('session-1','session-1','org-1','reviewer','user','[]','','external','active','active','',1,1)")
   await f.db.run("INSERT INTO tasks(id,org_id,user_id,session_id,idempotency_key,request_hash,status,deadline_at,sequence,document) VALUES ('active-task','org-1','reviewer','session-1','active-key','hash','running',9999999999999,1,?)", [JSON.stringify({ agent_id: f.binding.id })])
   const plan = await f.migration.plan(actor, f.binding.id)
   assert.equal(plan.active_tasks, 1)

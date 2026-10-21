@@ -92,3 +92,30 @@ Dify 的原平台版本证据是执行前后观察到的发布快照，不是远
 运行器先读取原工程源码并生成摘要、依赖版本列表与自身摘要，创建基线时固定这些信息；子进程再次核对后直接编译已检查的源码字节。原工程进程不继承管理进程的密钥环境，模型请求通过有调用上限的 IPC 回调走真实 IAM、Nexus 出口与 Router。结果在进程正常退出且清理确认后才可成功。此原工程环境不是 L2 沙箱，不能用来执行未审阅上传代码或生产敏感数据；迁移后的候选仍在原有严格容器运行器中执行。
 
 同一管理页面实际完成 LangGraph 原工程6/6 → 固定最低100%／最大下降0百分点 → 托管候选6/6；前后12次模型调用均为实际模型运行并核对 Router 账单。测试资产与评测集由隔离实验初始化准备，运行、固定阈值和生成对比均通过管理页面操作。
+
+## Task runtime rollout boundary
+
+The next hosted execution profile uses canonical Moss `tasks`, `sessions`,
+`session_attempts` and `session_events`; it does not create a second task store or
+pretend that a Docker artifact is an external HTTP Provider. `hosted` sessions
+map to the `hosted_artifact` engine and cannot start or attach native scode
+runners. Native recovery/listing accepts only its four owned runtimes.
+
+External task readers and maintenance use the `external_tasks` read view, scoped
+by canonical session runtime and matching organization/user. Updates also check
+that scope before acquiring a task row lock. Request-key lookup deliberately
+remains global across runtimes: a changed body conflicts, and an external-only
+caller cannot project a hosted record as an ExternalTask. Timeout, execution
+claim, reconciliation and retention cannot touch other runtime records.
+
+The view is an additive, idempotent initialization on a canonical database.
+Legacy task-table cutover still requires the explicit maintenance migration.
+Before enabling hosted task creation, upgrade every controller sharing the
+canonical database: older controllers do not contain these runtime filters.
+This storage preparation alone does not enable hosted publication, Work calls,
+or qualify hosted task recovery/HA.
+
+Validation: shared SQLite/PostgreSQL isolation scenarios preserve hosted task,
+session, attempt and event bytes through external reads, recovery, timeout,
+retention and restart; the existing PostgreSQL external controller SIGKILL and
+independent-pool regressions exercise their original runtime only.

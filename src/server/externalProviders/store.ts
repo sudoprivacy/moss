@@ -155,7 +155,7 @@ export class ExternalTaskStore {
 
   async existingRequest(actor: ExternalActor, key: string, requestHash: string): Promise<ExternalTask | null> {
     await this.ready
-    const row = await this.db.get<TaskRow>('SELECT * FROM tasks WHERE org_id = ? AND user_id = ? AND idempotency_key = ?', [actor.orgId, actor.userId, key])
+    const row = await this.db.get<TaskRow>(`SELECT t.*, s.runtime_type AS task_runtime FROM tasks t JOIN sessions s ON s.session_id = t.session_id WHERE t.org_id = ? AND t.user_id = ? AND t.idempotency_key = ?`, [actor.orgId, actor.userId, key])
     if (!row) return null
     if (row.request_hash !== requestHash) throw new ExternalProviderError(409, 'IDEMPOTENCY_CONFLICT')
     return this.project(row)
@@ -184,7 +184,7 @@ export class ExternalTaskStore {
       await this.db.run('UPDATE external_pilot_capacity SET org_id = org_id WHERE org_id = ?', [actor.orgId])
       const existing = await this.existingRequest(actor, input.idempotency_key, hash)
       if (existing) return existing
-      const capacity = await this.db.get('SELECT COUNT(*) AS total FROM tasks WHERE org_id = ?', [actor.orgId])
+      const capacity = await this.db.get('SELECT COUNT(*) AS total FROM external_tasks WHERE org_id = ?', [actor.orgId])
       if (Number(capacity?.total) >= MAX_PILOT_TASKS_PER_ORG) throw new ExternalProviderError(429, 'PILOT_TASK_CAPACITY_REACHED')
       // Reserve the idempotency key before touching a session. ON CONFLICT also serializes concurrent retries on PG.
       const id = randomUUID(), sessionId = input.session_id ?? randomUUID(), now = Date.now()
@@ -208,7 +208,7 @@ export class ExternalTaskStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(org_id, user_id, idempotency_key) DO NOTHING`,
       [id, actor.orgId, actor.userId, sessionId, input.idempotency_key, hash, task.status, task.deadline_at, JSON.stringify({ ...task, _checkpoint_sequence: 1 })])
       if (!inserted) {
-        const existing = await this.db.get<TaskRow>('SELECT * FROM tasks WHERE org_id = ? AND user_id = ? AND idempotency_key = ?', [actor.orgId, actor.userId, input.idempotency_key])
+        const existing = await this.db.get<TaskRow>(`SELECT t.*, s.runtime_type AS task_runtime FROM tasks t JOIN sessions s ON s.session_id = t.session_id WHERE t.org_id = ? AND t.user_id = ? AND t.idempotency_key = ?`, [actor.orgId, actor.userId, input.idempotency_key])
         if (!existing || existing.request_hash !== hash) throw new ExternalProviderError(409, 'IDEMPOTENCY_CONFLICT')
         return this.project(existing)
       }
@@ -228,11 +228,11 @@ export class ExternalTaskStore {
         await this.session(actor, sessionId)
         throw new ExternalProviderError(409, 'SESSION_BUSY_OR_AGENT_MISMATCH')
       }
-      const count = await this.db.get('SELECT COUNT(*) AS total FROM tasks WHERE session_id = ?', [sessionId])
+      const count = await this.db.get('SELECT COUNT(*) AS total FROM external_tasks WHERE session_id = ?', [sessionId])
       if (Number(count?.total) > 200) throw new ExternalProviderError(409, 'SESSION_TASK_LIMIT')
       // The session row is locked above. Creation order is independent of deadlines and wall-clock changes.
       task.session_sequence = Number(count?.total)
-      await this.db.run('UPDATE tasks SET document = ? WHERE id = ?', [JSON.stringify({ ...task, _checkpoint_sequence: 1 }), id])
+      await this.db.run('UPDATE tasks SET document = ? WHERE id = ? AND id IN (SELECT id FROM external_tasks)', [JSON.stringify({ ...task, _checkpoint_sequence: 1 }), id])
       if (admission) {
         const record = parseTaskRecord(admission.record(task))
         await this.db.run('INSERT INTO product_task_records(task_id, org_id, user_id, document, policy_snapshot) VALUES (?, ?, ?, ?, ?)', [id, actor.orgId, actor.userId, JSON.stringify(record), JSON.stringify(admission.policySnapshot)])
@@ -252,7 +252,7 @@ export class ExternalTaskStore {
 
   async sessionVersion(actor: ExternalActor, sessionId: string): Promise<string | undefined> {
     await this.session(actor, sessionId)
-    const first = await this.db.get(`SELECT t.id FROM tasks t JOIN session_attempts a ON a.attempt_id = t.attempt_id
+    const first = await this.db.get(`SELECT t.id FROM external_tasks t JOIN session_attempts a ON a.attempt_id = t.attempt_id
       JOIN product_task_records r ON r.task_id = t.id WHERE t.session_id = ? ORDER BY a.generation LIMIT 1`, [sessionId])
     if (!first) return undefined
     const record = await this.taskRecord(actor, String(first.id))
@@ -261,13 +261,13 @@ export class ExternalTaskStore {
 
   async sessions(actor: ExternalActor): Promise<ExternalSession[]> {
     await this.ready
-    const rows = await this.db.all<SessionRow>("SELECT * FROM external_sessions s WHERE org_id = ? AND user_id = ? AND EXISTS (SELECT 1 FROM tasks t WHERE t.session_id = s.id AND NOT EXISTS (SELECT 1 FROM external_pilot_retention r WHERE r.task_id = t.id AND r.retired_at IS NOT NULL)) ORDER BY updated_at DESC, id LIMIT 100", [actor.orgId, actor.userId])
+    const rows = await this.db.all<SessionRow>("SELECT * FROM external_sessions s WHERE org_id = ? AND user_id = ? AND EXISTS (SELECT 1 FROM external_tasks t WHERE t.session_id = s.id AND NOT EXISTS (SELECT 1 FROM external_pilot_retention r WHERE r.task_id = t.id AND r.retired_at IS NOT NULL)) ORDER BY updated_at DESC, id LIMIT 100", [actor.orgId, actor.userId])
     return rows.map(row => ({ id: row.id, agent_id: row.agent_id, agent_name: row.agent_name, title: row.title, active_task_id: row.active_task_id, created_at: Number(row.created_at), updated_at: Number(row.updated_at) }))
   }
 
   async history(actor: ExternalActor, sessionId: string): Promise<ExternalTask[]> {
     await this.session(actor, sessionId)
-    const rows = await this.db.all<TaskRow>('SELECT * FROM tasks t WHERE session_id = ? AND NOT EXISTS (SELECT 1 FROM external_pilot_retention r WHERE r.task_id = t.id AND r.retired_at IS NOT NULL) LIMIT 200', [sessionId])
+    const rows = await this.db.all<TaskRow>('SELECT * FROM external_tasks t WHERE session_id = ? AND NOT EXISTS (SELECT 1 FROM external_pilot_retention r WHERE r.task_id = t.id AND r.retired_at IS NOT NULL) LIMIT 200', [sessionId])
     const tasks = await this.projectMany(rows)
     return tasks.sort((a, b) => {
       if (a.session_sequence !== undefined && b.session_sequence !== undefined) return a.session_sequence - b.session_sequence
@@ -280,7 +280,7 @@ export class ExternalTaskStore {
 
   async task(actor: ExternalActor, id: string): Promise<ExternalTask> {
     await this.ready
-    const row = await this.db.get<TaskRow>('SELECT * FROM tasks WHERE id = ? AND org_id = ? AND user_id = ?', [id, actor.orgId, actor.userId])
+    const row = await this.db.get<TaskRow>('SELECT * FROM external_tasks WHERE id = ? AND org_id = ? AND user_id = ?', [id, actor.orgId, actor.userId])
     if (!row) throw new ExternalProviderError(404, 'TASK_NOT_FOUND')
     return this.project(row)
   }
@@ -289,7 +289,7 @@ export class ExternalTaskStore {
     await this.ready
     // The row fixes a committed sequence horizon. Later appends are excluded from
     // both the snapshot projection and the page; ordinary reads acquire no write lock.
-    const row = await this.db.get<TaskRow>('SELECT * FROM tasks WHERE id = ? AND org_id = ? AND user_id = ?', [id, actor.orgId, actor.userId])
+    const row = await this.db.get<TaskRow>('SELECT * FROM external_tasks WHERE id = ? AND org_id = ? AND user_id = ?', [id, actor.orgId, actor.userId])
     if (!row) throw new ExternalProviderError(404, 'TASK_NOT_FOUND')
     const horizon = Number(row.sequence)
     if (JSON.parse(row.document)._retired) throw new ExternalProviderError(410, 'TASK_HISTORY_EXPIRED')
@@ -320,6 +320,7 @@ export class ExternalTaskStore {
   }
 
   private async project(row: TaskRow, loaded?: SqlRow[]): Promise<ExternalTask> {
+    if (row.task_runtime !== 'external') throw new ExternalProviderError(409, 'TASK_RUNTIME_MISMATCH')
     if (JSON.parse(row.document)._retired) throw new ExternalProviderError(410, 'TASK_HISTORY_EXPIRED')
     const { _checkpoint_sequence: checkpoint = Number(row.sequence), ...task } = JSON.parse(row.document) as Checkpoint
     if (![EXTERNAL_PROVIDER_API, 'external-provider.sudo.dev/v1alpha4', 'external-provider.sudo.dev/v1alpha3'].includes(task.api_version)) task.raw_answer_freshness = 'legacy_checkpoint'
@@ -337,15 +338,15 @@ export class ExternalTaskStore {
 
   async unresolved(orgId: string): Promise<ExternalTask[]> {
     await this.ready
-    const rows = await this.db.all<TaskRow>("SELECT * FROM tasks t WHERE org_id = ? AND status = 'unknown' AND NOT EXISTS (SELECT 1 FROM external_pilot_reconciliations r WHERE r.task_id = t.id) ORDER BY deadline_at DESC LIMIT 100", [orgId])
+    const rows = await this.db.all<TaskRow>("SELECT * FROM external_tasks t WHERE org_id = ? AND status = 'unknown' AND NOT EXISTS (SELECT 1 FROM external_pilot_reconciliations r WHERE r.task_id = t.id) ORDER BY deadline_at DESC LIMIT 100", [orgId])
     return (await this.projectMany(rows)).filter(task => !task.reconciliation)
   }
 
   async reconcileUnknown(actor: ExternalActor, id: string, note: string): Promise<ExternalTask> {
     await this.ready
     return this.db.transaction(async () => {
-      await this.db.run('UPDATE tasks SET sequence = sequence WHERE id = ? AND org_id = ?', [id, actor.orgId])
-      const row = await this.db.get<TaskRow>('SELECT * FROM tasks WHERE id = ? AND org_id = ?', [id, actor.orgId])
+      await this.db.run('UPDATE tasks SET sequence = sequence WHERE id = ? AND id IN (SELECT id FROM external_tasks) AND org_id = ?', [id, actor.orgId])
+      const row = await this.db.get<TaskRow>('SELECT * FROM external_tasks WHERE id = ? AND org_id = ?', [id, actor.orgId])
       if (!row) throw new ExternalProviderError(404, 'TASK_NOT_FOUND')
       const task = await this.project(row)
       if (task.status !== 'unknown') throw new ExternalProviderError(409, 'TASK_NOT_UNKNOWN')
@@ -355,7 +356,7 @@ export class ExternalTaskStore {
       if (task.attempt_id) await this.db.run("UPDATE session_attempts SET runtime_state = 'lost', last_heartbeat_at = ? WHERE attempt_id = ?", [task.reconciliation.created_at, task.attempt_id])
       task.updated_at = Date.now()
       const sequence = Number(row.sequence) + 1
-      await this.db.run('UPDATE tasks SET sequence = ?, document = ? WHERE id = ?', [sequence, JSON.stringify({ ...task, _checkpoint_sequence: sequence }), id])
+      await this.db.run('UPDATE tasks SET sequence = ?, document = ? WHERE id = ? AND id IN (SELECT id FROM external_tasks)', [sequence, JSON.stringify({ ...task, _checkpoint_sequence: sequence }), id])
       await this.appendEvent(task, sequence, this.event(task, sequence, 'status'))
       await this.db.run('INSERT INTO external_pilot_admin_audit(id, org_id, user_id, action, resource_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), actor.orgId, actor.userId, 'task.unknown_closed', id, Date.now()])
       // Closing records human verification, never success/cancellation. Keep the old
@@ -367,8 +368,8 @@ export class ExternalTaskStore {
   async mutate(id: string, change: (task: ExternalTask) => ExternalTaskEvent['type'] | false, fence?: ExecutionFence): Promise<ExternalTask | null> {
     await this.ready
     return this.db.transaction(async () => {
-      await this.db.run('UPDATE tasks SET sequence = sequence WHERE id = ?', [id])
-      const row = await this.db.get<TaskRow>('SELECT * FROM tasks WHERE id = ?', [id])
+      await this.db.run('UPDATE tasks SET sequence = sequence WHERE id = ? AND id IN (SELECT id FROM external_tasks)', [id])
+      const row = await this.db.get<TaskRow>('SELECT * FROM external_tasks WHERE id = ?', [id])
       if (!row) return null
       const task = await this.project(row)
       if (fence && !await this.owns(task, fence)) return null
@@ -385,8 +386,8 @@ export class ExternalTaskStore {
       const previous = JSON.parse(row.document) as Checkpoint
       const checkpoint = previous._checkpoint_sequence ?? Number(row.sequence)
       const saveCheckpoint = isTerminal(task.status) || sequence - checkpoint >= 64 || Math.abs(task.answer.length - previous.answer.length) >= 8192 || Math.abs(task.raw_answer.length - previous.raw_answer.length) >= 8192
-      if (saveCheckpoint) await this.db.run('UPDATE tasks SET status = ?, sequence = ?, document = ? WHERE id = ?', [task.status, sequence, JSON.stringify({ ...task, _checkpoint_sequence: sequence }), id])
-      else await this.db.run('UPDATE tasks SET status = ?, sequence = ? WHERE id = ?', [task.status, sequence, id])
+      if (saveCheckpoint) await this.db.run('UPDATE tasks SET status = ?, sequence = ?, document = ? WHERE id = ? AND id IN (SELECT id FROM external_tasks)', [task.status, sequence, JSON.stringify({ ...task, _checkpoint_sequence: sequence }), id])
+      else await this.db.run('UPDATE tasks SET status = ?, sequence = ? WHERE id = ? AND id IN (SELECT id FROM external_tasks)', [task.status, sequence, id])
       await this.syncAttempt(task)
       await this.appendEvent(task, sequence, this.event(task, sequence, type, before, rawBefore))
       if (task.provider_refs.conversation_id) await this.db.run('UPDATE external_session_bindings SET conversation_id = ? WHERE id = ? AND active_task_id = ?', [task.provider_refs.conversation_id, task.session_id, id])
@@ -406,13 +407,13 @@ export class ExternalTaskStore {
     if (task.attempt_id !== fence.attemptId) return false
     return Boolean(await this.db.get(`SELECT a.attempt_id FROM session_attempts a
       JOIN sessions s ON s.current_attempt_id = a.attempt_id JOIN external_attempt_leases l ON l.attempt_id = a.attempt_id
-      WHERE a.attempt_id = ? AND a.server_instance_id = ? AND l.token = ? AND l.lease_until > ? AND s.session_id = ?`,
+      WHERE s.runtime_type = 'external' AND a.backend_type = 'external' AND a.attempt_id = ? AND a.server_instance_id = ? AND l.token = ? AND l.lease_until > ? AND s.session_id = ?`,
     [fence.attemptId, fence.ownerId, fence.token, await this.databaseNow(), task.session_id]))
   }
 
   async invocationContext(task: ExternalTask, fence: ExecutionFence, initial: { provider_session_id: string | null; end_user: string }) {
     return this.db.transaction(async () => {
-      await this.db.run('UPDATE tasks SET sequence = sequence WHERE id = ?', [task.id])
+      await this.db.run('UPDATE tasks SET sequence = sequence WHERE id = ? AND id IN (SELECT id FROM external_tasks)', [task.id])
       if (!await this.owns(task, fence)) throw new ExternalProviderError(409, 'EXECUTION_OWNERSHIP_LOST')
       const row = await this.db.get('SELECT invocation_context FROM external_attempt_leases WHERE attempt_id = ?', [fence.attemptId])
       if (row?.invocation_context) return JSON.parse(String(row.invocation_context)) as typeof initial
@@ -429,7 +430,7 @@ export class ExternalTaskStore {
     await this.db.run(`INSERT INTO session_attempts(attempt_id, session_id, generation, backend_type, runtime_state, resume_transcript_session_id, started_at)
       VALUES (?, ?, ?, 'external', ?, ?, ?) ON CONFLICT(attempt_id) DO NOTHING`, [task.attempt_id, task.session_id, Number(generation?.generation) + 1, attemptState(task.status), task.session_id, task.created_at])
     await this.db.run('UPDATE session_attempts SET runtime_state = ?, last_heartbeat_at = ?, stopped_at = ? WHERE attempt_id = ?', [attemptState(task.status), task.updated_at, isTerminal(task.status) ? task.updated_at : null, task.attempt_id])
-    await this.db.run('UPDATE tasks SET attempt_id = ? WHERE id = ?', [task.attempt_id, task.id])
+    await this.db.run('UPDATE tasks SET attempt_id = ? WHERE id = ? AND id IN (SELECT id FROM external_tasks)', [task.attempt_id, task.id])
     await this.db.run("INSERT INTO external_attempt_leases(attempt_id, token, lease_until) VALUES (?, '', 0) ON CONFLICT(attempt_id) DO NOTHING", [task.attempt_id])
     await this.db.run(`UPDATE sessions SET current_attempt_id = ?, status = ? WHERE session_id = ? AND EXISTS
       (SELECT 1 FROM external_session_bindings x WHERE x.id = sessions.session_id AND x.active_task_id = ?)`,
@@ -455,7 +456,7 @@ export class ExternalTaskStore {
 
   async expire(now = Date.now()): Promise<void> {
     await this.ready
-    const rows = await this.db.all('SELECT id FROM tasks WHERE status IN (?, ?, ?) AND deadline_at <= ? LIMIT 100', ['accepted', 'dispatching', 'running', now])
+    const rows = await this.db.all('SELECT id FROM external_tasks WHERE status IN (?, ?, ?) AND deadline_at <= ? LIMIT 100', ['accepted', 'dispatching', 'running', now])
     for (const row of rows) await this.mutate(String(row.id), task => {
       if (task.deadline_at > now || !['accepted', 'dispatching', 'running'].includes(task.status)) return false
       task.status = task.status === 'accepted' ? task.task_contract_version ? 'failed' : 'rejected' : 'unknown'

@@ -42,7 +42,7 @@ export class RegistryMigration {
     }))
     const source = { catalog_id: id, org_id: actor.orgId, name: binding.name, binding_revision: binding.revision ?? 1,
       principal: client.principal(actor.orgId, id), authority_id: client.identity(actor.orgId), items, channels, channel_events }
-    const count = await store.db.get(`SELECT COUNT(*) AS total FROM tasks t WHERE t.org_id = ?
+    const count = await store.db.get(`SELECT COUNT(*) AS total FROM external_tasks t WHERE t.org_id = ?
       AND ${store.db.kind === 'postgres' ? "t.document::jsonb ->> 'agent_id'" : "json_extract(t.document, '$.agent_id')"} = ?
       AND (t.status NOT IN ('succeeded', 'failed', 'rejected', 'unknown') OR (t.status = 'unknown'
         AND NOT EXISTS (SELECT 1 FROM external_pilot_reconciliations r WHERE r.task_id = t.id)))`, [actor.orgId, id])

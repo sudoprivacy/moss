@@ -4,7 +4,7 @@ import type { WebSocket } from 'ws'
 import type { SessionIndexEntry } from './types.js'
 import type { CohostSessionBinding } from './runtime/cohostSessionRepository.js'
 
-export type SessionRuntimeType = 'host' | 'docker' | 'k8s' | 'cohost' | 'external'
+export type SessionRuntimeType = 'host' | 'docker' | 'k8s' | 'cohost' | 'external' | 'hosted'
 
 export type SessionRuntimeOptions = {
   type?: SessionRuntimeType
@@ -53,7 +53,7 @@ export type SessionRuntimeOptions = {
 
 export type SessionRuntimeInfo = {
   type: SessionRuntimeType
-  engine: 'scode' | 'external_provider'
+  engine: 'scode' | 'external_provider' | 'hosted_artifact'
   scodePath?: string
   model?: string
   dockerImage?: string

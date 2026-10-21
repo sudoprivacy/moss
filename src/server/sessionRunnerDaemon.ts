@@ -131,7 +131,7 @@ export class SessionRunnerDaemon {
   }
 
   constructor(private readonly manifest: RunnerManifest, store: DirectConnectStore) {
-    if (manifest.session.runtime.type === 'external' || manifest.session.runtime.engine === 'external_provider') throw new Error('External sessions cannot launch a native session runner')
+    if (['external', 'hosted'].includes(manifest.session.runtime.type) || ['external_provider', 'hosted_artifact'].includes(manifest.session.runtime.engine)) throw new Error('Task-managed sessions cannot launch a native session runner')
     this.#store = store
     this.#applicationHello = new ApplicationHelloReplayBuffer(
       manifest.session.sessionId,
@@ -516,7 +516,7 @@ export class SessionRunnerDaemon {
   }
 
   #runnerHello(): Extract<RunnerServerMessage, { type: 'hello' }> {
-    if (this.manifest.session.runtime.type === 'external') throw new Error('External sessions cannot attach to a native session runner')
+    if (this.manifest.session.runtime.type === 'external' || this.manifest.session.runtime.type === 'hosted') throw new Error('Task-managed sessions cannot attach to a native session runner')
     return {
       type: 'hello',
       attemptId: this.manifest.attempt.attemptId,

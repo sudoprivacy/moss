@@ -46,6 +46,8 @@ export class RuntimeBackend implements SessionBackend {
   async spawn(options: BackendSpawnOptions): Promise<BackendHandle> {
     const runtimeType = options.runtime?.type || this.#defaultRuntime.type || 'host'
 
+    if (!['host', 'docker', 'k8s', 'cohost'].includes(runtimeType)) throw new Error('Task-managed sessions cannot launch a native runtime backend')
+
     const mergedOptions: BackendSpawnOptions = {
       ...options,
       runtime: {

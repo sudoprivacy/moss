@@ -68,6 +68,7 @@ function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
 
 function mapRuntime(row: SqlRow): SessionRuntimeInfo {
   const rawType = String(row.runtime_type)
+  if (rawType === 'hosted') return { type: 'hosted', engine: 'hosted_artifact' }
   if (rawType === 'external') return { type: 'external', engine: 'external_provider' }
   const type: SessionRuntimeInfo['type'] =
     rawType === 'docker'
@@ -2125,13 +2126,13 @@ export class DirectConnectStore {
     const placeholders = states.map(() => '?').join(',')
     const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM session_attempts
-      WHERE backend_type != 'external' AND runtime_state IN (${placeholders})
+      WHERE backend_type IN ('host', 'docker', 'k8s', 'cohost') AND runtime_state IN (${placeholders})
     `, states)
     return rows.map(mapAttempt)
   }
 
   async listSessionRecords(filter: SessionListFilter): Promise<SessionRecord[]> {
-    const clauses = ['org_id = ?', "runtime_type != 'external'"]
+    const clauses = ['org_id = ?', "runtime_type IN ('host', 'docker', 'k8s', 'cohost')"]
     const values: Array<string | number> = [filter.orgId]
     if (filter.userId) {
       clauses.push('user_id = ?')
@@ -2177,7 +2178,7 @@ export class DirectConnectStore {
       SELECT *
       FROM sessions
       WHERE desired_state = 'active'
-        AND runtime_type != 'external'
+        AND runtime_type IN ('host', 'docker', 'k8s', 'cohost')
         AND deleted_at IS NULL
         AND status IN ('creating', 'active', 'detached', 'lost', 'failed')
       ORDER BY last_active_at DESC
@@ -2202,7 +2203,7 @@ export class DirectConnectStore {
       FROM sessions s
       JOIN session_attempts a ON a.attempt_id = s.current_attempt_id
       WHERE s.desired_state = 'active'
-        AND s.runtime_type != 'external'
+        AND s.runtime_type IN ('host', 'docker', 'k8s', 'cohost')
         AND s.deleted_at IS NULL
         AND s.status IN ('creating', 'active', 'detached', 'lost', 'failed')
         AND a.server_instance_id IS NOT NULL
