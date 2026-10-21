@@ -54,3 +54,9 @@ runtime cannot confirm removal of the old worker. `HostedAgent`, `HostedSession`
 and `HostedEventsPage` describe the product directory/history projections for
 this runtime. Cancellation is a request until worker, IAM and Router cleanup are
 confirmed; recovery cannot turn unknown output into success.
+
+## Hosted task evidence (read only)
+
+`GET /api/v1/tasks/{id}/evidence?cursor=0` returns `HostedTaskEvidence` to the active task owner, even if the directory entry is subsequently disabled. It does not publish, reauthorize a run, rotate credentials, reconcile, or contact Router. The fixed release comes from the persisted admission decision. Trace is paged in at most 100 entries, bounded by the response's task sequence, and labelled `worker_reported`; it is not an independent attestation. Re-fetch from cursor 0 for a fresh projection. Concurrent execution may add ledger facts after the captured task sequence; this is a read model, not a cross-authority atomic snapshot.
+
+Usage explicitly states `sudorouter` authority and `router_quota` units, not monetary cost. Only verified ledger entries contribute to verified subtotals; they are deduplicated by Router account plus ledger ID and checked against the call's token, model, organization, task, artifact and mode. Conflicting duplicates fail closed. Pending/unknown calls or an unfinished task never imply final zero usage. No model answer, request body, raw Router credential/token, grant credential, private resource or full event task snapshot appears in this projection. Platform/department reporting remains a separate aggregation capability.

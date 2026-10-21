@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { createInventoryApi, type AssetRecord, type HostedArtifact, type HostedReleaseAction, type HostedReleaseView, type InventoryMember } from '@/lib/api/agent-inventory'
-import { inventoryError } from '@/lib/agent-inventory-labels'
+import { hostedArtifactAdmitted, inventoryError } from '@/lib/agent-inventory-labels'
 
 export function AgentHostedReleases({ asset, artifacts, canManage }: { asset: AssetRecord; artifacts: HostedArtifact[]; canManage: boolean }) {
   const controller = useRef(new AbortController())
@@ -16,7 +16,7 @@ export function AgentHostedReleases({ asset, artifacts, canManage }: { asset: As
   const [users, setUsers] = useState<string[]>([]), [members, setMembers] = useState<InventoryMember[]>([])
   const [search, setSearch] = useState(''), [memberCursor, setMemberCursor] = useState<string | null>(null)
   const admitted = asset.status === 'approved' && ['L2', 'L3'].includes(asset.actual_level)
-  const candidates = artifacts.filter(item => item.metadata_digest === asset.metadata_digest)
+  const candidates = artifacts.filter(item => hostedArtifactAdmitted(asset, item))
   useEffect(() => {
     if (controller.current.signal.aborted) controller.current = new AbortController()
     const current = controller.current

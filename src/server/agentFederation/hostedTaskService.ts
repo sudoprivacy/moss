@@ -1,3 +1,4 @@
+import { projectHostedTaskEvidence } from './hostedTaskEvidence.js'
 import type { HostedAgent } from '../../../contracts/task/v1alpha1/contract.js'
 import { randomUUID } from 'node:crypto'
 import type { CatalogAgent, CatalogRepository } from '../catalog/catalogRepository.js'
@@ -122,6 +123,14 @@ export class HostedTaskService {
       try { await this.dispatch(entry.actor, entry.task.id) }
       catch (error) { if (!(error instanceof ExternalProviderError)) throw error }
     }
+  }
+  async evidence(actor: ExternalActor, id: string, cursor = 0) {
+    await this.authorize(actor)
+    const task = await this.store.get(actor, id)
+    const [record, calls, trace] = await Promise.all([
+      this.store.record(actor, id), this.coordinator.evidenceCalls(actor, id), this.store.tracePage(actor, id, cursor, task.sequence),
+    ])
+    return projectHostedTaskEvidence(actor, task, record, calls, trace)
   }
   private describe(item: CatalogAgent, release: Resolution, artifact: HostedArtifact): HostedAgent {
     return { api_version: TASK_API, kind: 'HostedAgent', id: item.id, name: item.name, description: item.description,

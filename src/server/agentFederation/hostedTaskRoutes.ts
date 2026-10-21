@@ -38,6 +38,7 @@ export async function dispatchHostedTask(service: HostedTaskService | undefined,
     else if (session && method === 'GET') data = await service.store.history(actor, session[1])
     else if (path === '/api/v1/tasks' && method === 'POST') { data = await service.create(actor, body); status = 202 }
     else if (taskPath && method === 'GET' && !taskPath[2]) data = await service.store.get(actor, taskPath[1])
+    else if (taskPath && method === 'GET' && taskPath[2] === 'evidence') data = await service.evidence(actor, taskPath[1], Number(url.searchParams.get('cursor') ?? 0))
     else if (taskPath && method === 'GET' && taskPath[2] === 'specification') data = await service.store.record(actor, taskPath[1])
     else if (taskPath && method === 'GET' && taskPath[2] === 'events') data = await service.store.events(actor, taskPath[1], Number(url.searchParams.get('cursor') ?? 0))
     else if (taskPath && method === 'POST' && taskPath[2] === 'cancel') { object(body, []); data = await service.coordinator.cancel(actor, taskPath[1]) }

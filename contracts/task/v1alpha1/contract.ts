@@ -139,3 +139,27 @@ export interface HostedEventsPage {
   next_cursor: number
   has_more: boolean
 }
+
+/** Read-only evidence projection. Usage is Router quota, never an invented currency. */
+export interface HostedTaskEvidence {
+  api_version: typeof TASK_API
+  kind: 'HostedTaskEvidence'
+  task_id: string
+  task_sequence: number
+  captured_at: number
+  cleanup: HostedTask['cleanup']
+  release: { version: string; artifact_id: string; spec_digest: string; image_id: string; registration_digest: string } | null
+  usage: {
+    authority: 'sudorouter'
+    unit: 'router_quota'
+    status: 'pending' | 'verified' | 'not_invoked'
+    verified_quota: number
+    verified_prompt_tokens: number
+    verified_completion_tokens: number
+    pending_calls: number
+    calls: { id: string; model: string; status: 'preparing' | 'dispatching' | 'completed' | 'rejected' | 'unknown'; ledger_status: 'pending' | 'router_verified'; token_cleanup: 'pending' | 'confirmed'; ledger_entries: number }[]
+  }
+  trace: { sequence: number; created_at: number; node: string; phase: 'started' | 'completed'; origin: 'worker_reported' }[]
+  trace_next_cursor: number
+  trace_has_more: boolean
+}

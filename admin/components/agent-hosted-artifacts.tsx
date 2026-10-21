@@ -8,7 +8,7 @@ import { createInventoryApi, type AssetRecord, type HostedArtifact, type HostedI
 import { AgentHostedReleases } from './agent-hosted-releases'
 import { AgentHostedEvaluations } from './agent-hosted-evaluations'
 import { AgentEvaluationDatasets } from './agent-evaluation-datasets'
-import { inventoryError } from '@/lib/agent-inventory-labels'
+import { hostedArtifactAdmitted, inventoryError } from '@/lib/agent-inventory-labels'
 
 export function AgentHostedArtifacts({ asset, canManage, onClose }: { asset: AssetRecord; canManage: boolean; onClose: () => void }) {
   const controller = useRef(new AbortController())
@@ -89,7 +89,7 @@ export function AgentHostedArtifacts({ asset, canManage, onClose }: { asset: Ass
         <h3 className="font-medium">已登记制品</h3>
         {!records.length && <p className="text-sm text-muted-foreground">{busy ? '正在加载…' : '尚无托管制品。'}</p>}
         {records.map(record => <article className="space-y-2 rounded-lg border p-3" key={record.id}>
-          <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium">{record.image.model_name}</span><Badge variant="outline">已登记 · 待运行验收</Badge></div>
+          <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium">{record.image.model_name}</span><Badge variant="outline">{hostedArtifactAdmitted(asset, record) ? '验收有效 · 可审核发布' : '已登记 · 待有效验收'}</Badge></div>
           <p className="text-xs text-muted-foreground">{new Date(record.created_at).toLocaleString()} · {record.image.profile}</p>
           {record.metadata_digest !== asset.metadata_digest && <p className="text-sm text-amber-700">台账已变更，此制品对应旧版资料，执行前需要重新核对。</p>}
           <details className="text-xs"><summary className="cursor-pointer">版本与镜像信息</summary><dl className="mt-2 space-y-1 break-all"><dt>制品 ID</dt><dd>{record.id}</dd><dt>规格摘要</dt><dd>{record.spec_digest}</dd><dt>镜像摘要</dt><dd>{record.image.image_id}</dd><dt>模型资源</dt><dd>{record.image.model_resource}</dd></dl></details>

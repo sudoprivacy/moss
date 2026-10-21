@@ -339,6 +339,17 @@ export class HostedTaskStore {
       return task
     })
   }
+  async tracePage(actor: ExternalActor, id: string, cursor: number, horizon: number) {
+    await this.get(actor, id)
+    if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > horizon) fail('INVALID_CURSOR', 400)
+    const rows = await this.db.all(`SELECT payload_json FROM session_events WHERE task_id = ? AND event_type = 'task.trace'
+      AND sequence > ? AND sequence <= ? ORDER BY sequence LIMIT 101`, [id, cursor, horizon])
+    const events = rows.slice(0, 100).map(row => parseHostedTaskEvent(JSON.parse(String(row.payload_json))))
+    if (events.some(event => event.task_id !== id || !event.trace)) fail('HOSTED_TASK_EVENT_INVALID', 500)
+    const hasMore = rows.length > 100
+    return { trace: events.map(event => ({ sequence: event.sequence, created_at: event.created_at, ...event.trace! })),
+      trace_next_cursor: hasMore ? events.at(-1)!.sequence : horizon, trace_has_more: hasMore }
+  }
   async events(actor: ExternalActor, id: string, cursor: number): Promise<HostedEventsPage> {
     if (!Number.isSafeInteger(cursor) || cursor < 0) fail('INVALID_CURSOR', 400)
     const task = await this.get(actor, id), horizon = task.sequence

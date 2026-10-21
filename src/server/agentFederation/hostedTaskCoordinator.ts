@@ -20,6 +20,10 @@ export class HostedTaskCoordinator {
     private readonly runner: Pick<HostedRunner, 'run' | 'reconcile' | 'identity'>,
     private readonly configured: (orgId: string, resource: string, model: string) => boolean,
   ) {}
+  async evidenceCalls(actor: ExternalActor, id: string) {
+    await this.store.get(actor, id)
+    return this.gateway.taskCalls(actor.orgId, id)
+  }
   runtimeIdentity() { return this.runner.identity() }
   async start(actor: ExternalActor, id: string, reauthorize: Reauthorize): Promise<void> {
     await reauthorize()

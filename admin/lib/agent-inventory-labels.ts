@@ -1,4 +1,15 @@
 import { ApiRequestError } from './api/client'
+import type { AssetRecord, HostedArtifact } from './api/agent-inventory'
+
+/** Display the exact reviewed artifact; server admission remains authoritative. */
+export function hostedArtifactAdmitted(asset: AssetRecord, artifact: HostedArtifact): boolean {
+  const acceptance = asset.acceptance
+  return asset.status === 'approved' && ['L2', 'L3'].includes(asset.actual_level)
+    && asset.evidence_status === 'current' && !!acceptance && acceptance.expires_at > Date.now()
+    && artifact.asset_id === asset.id && artifact.metadata_digest === asset.metadata_digest
+    && acceptance.metadata_digest === artifact.metadata_digest && acceptance.spec_digest === artifact.spec_digest
+    && acceptance.execution_revision === artifact.image.image_id
+}
 export const assetStatuses: Record<string, string> = {
   discovered: '待认领',
   draft: '草稿',
@@ -30,6 +41,11 @@ export const recommendationLabels: Record<string, string> = {
 export function inventoryError(error: unknown): string {
   const code = error instanceof ApiRequestError ? error.code : error instanceof Error ? error.message : ''
   const labels: Record<string, string> = {
+    HOSTED_RESOURCE_LIMITS_UNAVAILABLE: '执行节点无法落实内存、交换空间或进程数量限制。请部署管理员检查容器运行环境，当前任务不会启动。',
+    HOSTED_CLEANUP_UNCONFIRMED: '尚未确认执行容器已清理，请核对执行节点后再关闭会话。',
+    REGISTRY_RESOURCE_NOT_FOUND: '未找到版本快照或 Nexus 文件接口。请检查文件服务部署后重试相同版本。',
+    REGISTRY_RESOURCE_UNAVAILABLE: 'Nexus 文件服务暂时不可用，请恢复服务后核对版本快照。',
+    REGISTRY_RESOURCE_DIGEST_MISMATCH: '版本快照摘要与制品不一致，已拒绝发布或执行。',
     EVALUATION_SOURCE_RUNTIME_INVALID: '原工程运行环境或协议不符合当前支持范围，请检查部署配置。',
     EVALUATION_SOURCE_EXECUTION_FAILED: '原工程执行未确认完成，请查看已保存的调用记录；已开始的用例不会自动重发。',
     AGENT_MIGRATION_COMPARISON_REQUIRED: 'L2 验收必须关联已保存的迁移对比，独立评测或人工填写的分数不能代替。',
