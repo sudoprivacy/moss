@@ -229,6 +229,10 @@ const nodeSerialOk = run(
   ['tsx', '--test', '--test-concurrency=1'],
   NODE_SERIAL,
 )
+const inventoryUiOk = runPaths('bun:test (inventory UI API)', 'bun', ['test'], [
+  'admin/tests/agent-inventory-api.test.ts',
+  'admin/tests/external-agents-api.test.ts',
+])
 
 const skipped = Object.entries(EXCLUDED)
 if (skipped.length > 0) {
@@ -236,5 +240,5 @@ if (skipped.length > 0) {
   for (const [name, reason] of skipped) console.log(`  ${name} — ${reason}`)
 }
 
-if (!bunOk || !isolatedBunOk || !nodeOk || !extraNodeOk || !nodeSerialOk) process.exit(1)
+if (!bunOk || !isolatedBunOk || !nodeOk || !extraNodeOk || !nodeSerialOk || !inventoryUiOk) process.exit(1)
 console.log('\nserver suite: both runners passed')

@@ -1588,6 +1588,24 @@ export class AuthCenterDb {
     return rows.map(row => ({ id: String(row.id), name: String(row.display_name || row.name || row.email) }))
   }
 
+  async agentInventoryMembersPage(orgId: string, after: string, search: string, limit: number): Promise<{ id: string; name: string; department_id: string | null }[]> {
+    const pattern = `%${search.toLowerCase().replace(/[!%_]/g, value => `!${value}`)}%`
+    const rows = await this.driver.all<SqlRow>(`SELECT id, name, display_name, email, department_id FROM users
+      WHERE org_id = ? AND status = 'active' AND id > ?
+      AND LOWER(COALESCE(display_name, '') || ' ' || COALESCE(name, '') || ' ' || COALESCE(email, '')) LIKE ? ESCAPE '!'
+      ORDER BY id LIMIT ?`, [orgId, after, pattern, limit])
+    return rows.map(row => ({ id: String(row.id), name: String(row.display_name || row.name || row.email), department_id: row.department_id == null ? null : String(row.department_id) }))
+  }
+
+  async agentInventoryLabels(orgId: string, userIds: string[], departmentIds: string[]): Promise<{ users: Map<string, string>; departments: Map<string, string> }> {
+    if (userIds.length > 100 || departmentIds.length > 100) throw new Error('Inventory page size exceeded')
+    const [users, departments] = await Promise.all([
+      userIds.length ? this.driver.all<SqlRow>(`SELECT id, name, display_name, email FROM users WHERE org_id = ? AND id IN (${userIds.map(() => '?').join(',')})`, [orgId, ...userIds]) : [],
+      departmentIds.length ? this.driver.all<SqlRow>(`SELECT id, name FROM departments WHERE org_id = ? AND id IN (${departmentIds.map(() => '?').join(',')})`, [orgId, ...departmentIds]) : [],
+    ])
+    return { users: new Map(users.map(row => [String(row.id), String(row.display_name || row.name || row.email)])), departments: new Map(departments.map(row => [String(row.id), String(row.name)])) }
+  }
+
   async listUsersByOrg(orgId: string): Promise<AuthCenterUser[]> {
     const rows = await this.driver.all<SqlRow>(`
       SELECT * FROM users WHERE org_id = ? ORDER BY created_at ASC

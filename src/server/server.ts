@@ -1,4 +1,5 @@
 import { dispatchExternalProvider, isExternalProviderRoute } from './externalProviders/routes.js'
+import { dispatchAgentInventory, isAgentInventoryRoute } from './agentFederation/inventoryRoutes.js'
 import { ExternalProviderError } from './externalProviders/policy.js'
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
@@ -2064,6 +2065,7 @@ export function startServer(
   }) : null
 
   const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient, runtime.serverInstanceId) : null
+  const agentInventory = authService.createAgentInventoryService()
   const externalStoreReady = externalProviders?.ownership.ready ?? Promise.resolve()
   let isStopped = false
 
@@ -3887,6 +3889,14 @@ export function startServer(
       }
       if (!auth) {
         throw new HttpError(401, 'Unauthorized')
+      }
+
+      if (isAgentInventoryRoute(pathname)) {
+        res.setHeader('Cache-Control', 'no-store')
+        const result = await dispatchAgentInventory(agentInventory, auth, req.method ?? 'GET', url,
+          req.method === 'POST' ? await readJsonBody(req) : {})
+        writeJson(res, result.status, result.body)
+        return
       }
 
       if (isExternalProviderRoute(pathname)) {

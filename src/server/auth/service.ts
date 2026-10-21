@@ -1,7 +1,8 @@
 import { registryFromEnvironment } from '../agentFederation/registryConfiguration.js'
+import { AgentInventoryService } from '../agentFederation/inventoryService.js'
 import { ExternalProviderService } from '../externalProviders/service.js'
 import { ExternalTaskStore } from '../externalProviders/store.js'
-import { pilotPolicyFromEnvironment } from '../externalProviders/policy.js'
+import { ExternalProviderError, pilotPolicyFromEnvironment } from '../externalProviders/policy.js'
 import { migratePhonePasswords } from '../identity/phonePasswordMigration.js'
 import { randomUUID } from 'crypto'
 import { z } from 'zod'
@@ -690,6 +691,23 @@ export class AuthService {
       identities: this.identityRepository,
       uploads,
       buildVisibility: actor => this.buildSudoworkVisibilityFilter(actor),
+    })
+  }
+
+  createAgentInventoryService(): AgentInventoryService {
+    return new AgentInventoryService({
+      registry: registryFromEnvironment(), catalog: new CatalogRepository(this.db.driver),
+      authorize: async actor => {
+        const user = await this.getUserPinnedOrSuperAdmin(actor.userId, actor.orgId)
+        if (user?.status !== 'active') throw new ExternalProviderError(401, 'USER_NOT_ACTIVE')
+        return { canManage: ['admin', 'super_admin'].includes(user.role) && ['admin', 'super_admin'].includes(actor.role) && hasScope(actor.scopes, 'admin:users') }
+      },
+      member: async (orgId, userId) => {
+        const user = await this.db.getUserByIdAndOrg(userId, orgId)
+        return user?.status === 'active' ? { id: user.id, departmentId: user.departmentId } : null
+      },
+      members: (orgId, after, search) => this.db.agentInventoryMembersPage(orgId, after, search, 51),
+      labels: (orgId, users, departments) => this.db.agentInventoryLabels(orgId, users, departments),
     })
   }
 

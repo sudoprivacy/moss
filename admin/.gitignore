@@ -32,3 +32,4 @@ node_modules
 !/tests/organizations-api.test.ts
 
 !/tests/external-agents-api.test.ts
+!/tests/agent-inventory-api.test.ts

@@ -4,10 +4,12 @@ import Ajv2020 from 'ajv/dist/2020.js'
 import { assertResourceRef } from '@sudo/contracts/common/v1/resource-ref'
 import schema from '../../../contracts/agent-registry/v1alpha1/schema.json' with { type: 'json' }
 import { AGENT_REGISTRY_API, type CommandResult, type PrincipalRef, type RegistryWire, type Resolution, type SignedVersion, type VersionItem, type VersionsPage } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
+import type { AssetRecord, AssetPage, AssetHistory, InventoryWire } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import { stableJson } from './provider/protocol.js'
 
 export type RegistryCommand = Extract<RegistryWire, { request_id: string }>
+export type InventoryCommand = Extract<InventoryWire, { request_id: string }>
 export interface RegistryScope { trustDomain: string; zoneId: string }
 export type RegistryRequest = (url: string, init: { method: string; redirect: 'error'; cache: 'no-store'; signal: AbortSignal; headers: Record<string, string>; body?: string }) => Promise<Response>
 export interface RegistryClientOptions {
@@ -33,9 +35,17 @@ const validators = {
   VersionItem: ajv.compile<VersionItem>({ $ref: `${schema.$id}#/$defs/VersionItem` }),
   Resolution: ajv.compile<Resolution>({ $ref: `${schema.$id}#/$defs/Resolution` }),
   PrincipalRef: ajv.compile<PrincipalRef>({ $ref: `${schema.$id}#/$defs/PrincipalRef` }),
+  AssetRecord: ajv.compile<AssetRecord>({ $ref: `${schema.$id}#/$defs/AssetRecord` }),
+  AssetPage: ajv.compile<AssetPage>({ $ref: `${schema.$id}#/$defs/AssetPage` }),
+  AssetHistory: ajv.compile<AssetHistory>({ $ref: `${schema.$id}#/$defs/AssetHistory` }),
+  InventoryCommand: ajv.compile<InventoryCommand>({ oneOf: ['SaveAsset', 'ObserveAsset', 'SubmitAsset', 'ReviewAsset', 'SuspendAsset', 'LinkAsset', 'MergeAsset', 'RecordAcceptance'].map(name => ({ $ref: `${schema.$id}#/$defs/${name}` })) }),
 }
 const hash = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`
 function fail(code: string, status = 503): never { throw new ExternalProviderError(status, code) }
+export function parseInventoryCommand(value: unknown): InventoryCommand {
+  if (!validators.InventoryCommand(value) || Buffer.byteLength(JSON.stringify(value)) > 65536) fail('INVALID_INVENTORY_COMMAND', 400)
+  return value
+}
 function base64(value: string, limit = 90_000): Buffer {
   if (value.length > limit) fail('REGISTRY_SIGNATURE_INVALID')
   const bytes = Buffer.from(value, 'base64')
@@ -143,6 +153,39 @@ export class ProductRegistryClient {
     const content = base64(result.content, 180_000)
     if (hash(content) !== ref.digest) fail('REGISTRY_RESOURCE_DIGEST_MISMATCH')
     try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(content)) } catch { fail('REGISTRY_RESOURCE_INVALID') }
+  }
+  private inventoryRecord(value: unknown, orgId: string, id?: string): AssetRecord {
+    if (!validators.AssetRecord(value) || value.owner_zone !== this.scope(orgId).zoneId || (id !== undefined && value.id !== id)
+      || (value.principal && value.principal.trust_domain !== this.scope(orgId).trustDomain)
+      || value.metadata_digest !== hash(Buffer.from(stableJson(value.metadata)))) fail('REGISTRY_RESPONSE_INVALID')
+    return value
+  }
+  async inventoryCommand(orgId: string, command: InventoryCommand): Promise<AssetRecord> {
+    parseInventoryCommand(command)
+    if (command.kind === 'LinkAsset' && command.principal.trust_domain !== this.scope(orgId).trustDomain) fail('REGISTRY_ORGANIZATION_MISMATCH', 403)
+    return this.inventoryRecord(await this.call(orgId, '/inventory/commands', command), orgId, command.asset_id)
+  }
+  async inventoryGet(orgId: string, id: string): Promise<AssetRecord> {
+    return this.inventoryRecord(await this.call(orgId, `/inventory/assets/${encodeURIComponent(id)}`), orgId, id)
+  }
+  async inventoryList(orgId: string, after = '', owner?: string): Promise<AssetPage> {
+    const query = new URLSearchParams({ after, ...(owner === undefined ? {} : { owner }) })
+    const value = await this.call(orgId, `/inventory/assets?${query}`)
+    if (!validators.AssetPage(value)) fail('REGISTRY_RESPONSE_INVALID')
+    for (const row of value.items) {
+      this.inventoryRecord(row, orgId)
+      if (owner !== undefined && row.metadata.owner_user_id !== owner) fail('REGISTRY_RESPONSE_INVALID')
+    }
+    if (value.items.some((row, i) => row.id <= (i ? value.items[i - 1].id : after))
+      || (value.next_cursor !== null && (!value.items.length || value.next_cursor !== value.items.at(-1)!.id))) fail('REGISTRY_RESPONSE_INVALID')
+    return value
+  }
+  async inventoryHistory(orgId: string, id: string, after = 0): Promise<AssetHistory> {
+    const value = await this.call(orgId, `/inventory/assets/${encodeURIComponent(id)}/history?after=${after}`)
+    if (!validators.AssetHistory(value) || value.asset_id !== id
+      || value.events.some((row, i) => row.revision <= (i ? value.events[i - 1].revision : after))
+      || (value.next_revision !== null && (!value.events.length || value.next_revision !== value.events.at(-1)!.revision))) fail('REGISTRY_RESPONSE_INVALID')
+    return value
   }
   async putSnapshot(orgId: string, ref: Record<string, unknown>, snapshot: unknown): Promise<void> {
     assertResourceRef(ref)

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ExternalAgentsSection from '@/components/external-agents-section'
+import AgentInventorySection from '@/components/agent-inventory-section'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
@@ -102,7 +103,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 
-type AgentHubTab = 'store' | 'exclusive' | 'custom'
+type AgentHubTab = 'store' | 'exclusive' | 'custom' | 'inventory'
 
 type CoreFeature = {
   title: string
@@ -2058,6 +2059,7 @@ export default function AgentHubPage() {
                 className="gap-0"
               >
                 <TabsList>
+                  <TabsTrigger value="inventory">智能体台账</TabsTrigger>
                   <TabsTrigger value="store">
                     智能体库
                     {hubAgents.length > 0 ? (
@@ -2139,6 +2141,7 @@ export default function AgentHubPage() {
 
           <CardContent className="pt-6">
             <Tabs value={activeTab} className="gap-0">
+              <TabsContent value="inventory" className="space-y-4"><AgentInventorySection query={searchQuery} /></TabsContent>
               <TabsContent value="store" className="space-y-4">
                 {storeError ? (
                   <Alert variant="destructive">

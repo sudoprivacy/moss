@@ -28,6 +28,7 @@ const nodeTestFiles = [
   'src/server/agentFederation/provider/nexusModelExecutor.node-test.ts',
   'src/server/agentFederation/releases.node-test.ts',
   'src/server/agentFederation/registryClient.node-test.ts',
+  'src/server/agentFederation/inventoryService.node-test.ts',
   'src/server/agentFederation/registryReleases.node-test.ts',
   'src/server/agentFederation/taskPersistence.node-test.ts',
   'src/server/agentFederation/taskMigrationCli.node-test.ts',
