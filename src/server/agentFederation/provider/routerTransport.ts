@@ -40,14 +40,26 @@ function forbiddenAddress(ip: string): boolean {
   return isIP(ip) === 4 ? forbiddenV4.check(ip, 'ipv4') : ip !== '::1' && forbiddenV6.check(ip, 'ipv6')
 }
 
+/** MCP JSON-only profile: exact endpoint, no discovery redirects, SSE or OAuth retries. */
+export function mcpJsonTransport(endpoint: string, policy: RouterNetworkPolicy = {}): RouterRequest {
+  const target = new URL(endpoint)
+  if (target.href !== endpoint || target.search || target.hash || target.username || target.password) throw new AgentProtocolError(400, 'INVALID_MCP_ENDPOINT')
+  return fixedJsonTransport(endpoint, policy, {}, true)
+}
+
 /** Native HTTP connection pinned to the checked DNS result; no proxy, redirect or connection reuse. */
 export function routerTransport(endpoint: string, policy: RouterNetworkPolicy = {}, dependencies: {
   resolve?: Resolver
   /** Trust roots owned by the composition root, for isolated TLS tests/private PKI. */
   ca?: string
 } = {}): RouterRequest {
+  if (endpoint.endsWith('/')) throw new AgentProtocolError(400, 'INVALID_ROUTER_ENDPOINT')
+  return fixedJsonTransport(`${endpoint}/chat/completions`, policy, dependencies)
+}
+
+function fixedJsonTransport(endpoint: string, policy: RouterNetworkPolicy, dependencies: { resolve?: Resolver; ca?: string }, mcp = false): RouterRequest {
   let target: URL
-  try { target = new URL(`${endpoint}/chat/completions`) } catch { throw new AgentProtocolError(400, 'INVALID_ROUTER_ENDPOINT') }
+  try { target = new URL(endpoint) } catch { throw new AgentProtocolError(400, 'INVALID_ROUTER_ENDPOINT') }
   const hostname = target.hostname.replace(/^\[|\]$/g, '')
   if (!['https:', 'http:'].includes(target.protocol) || target.username || target.password || target.search || target.hash
     || endpoint.endsWith('/') || (target.protocol === 'http:' && !isIP(hostname))) throw new AgentProtocolError(400, 'INVALID_ROUTER_ENDPOINT')
@@ -56,8 +68,10 @@ export function routerTransport(endpoint: string, policy: RouterNetworkPolicy = 
   if (pins && [...pins].some(forbiddenAddress)) throw new AgentProtocolError(400, 'INVALID_ROUTER_NETWORK_POLICY')
   const resolve = dependencies.resolve ?? (name => lookup(name, { all: true, verbatim: true }))
   return async (input, init) => {
-    if (String(input) !== target.href || init?.method !== 'POST' || init.redirect !== 'error'
-      || typeof init.body !== 'string' || Buffer.byteLength(init.body) > 2 * 1024 * 1024) throw new AgentProtocolError(403, 'MODEL_EGRESS_DENIED')
+    if (mcp && String(input) === target.href && init?.method === 'GET') return new Response(null, { status: 405 })
+    const deleting = mcp && init?.method === 'DELETE'
+    if (String(input) !== target.href || (!deleting && init?.method !== 'POST') || init?.redirect !== 'error'
+      || (!deleting && (typeof init.body !== 'string' || Buffer.byteLength(init.body) > 2 * 1024 * 1024))) throw new AgentProtocolError(403, 'MODEL_EGRESS_DENIED')
     const signal = AbortSignal.any([...(init.signal ? [init.signal] : []), AbortSignal.timeout(120_000)])
     let addresses: Address[]
     try {
@@ -87,7 +101,7 @@ export function routerTransport(endpoint: string, policy: RouterNetworkPolicy = 
     return new Promise<Response>((resolveResponse, reject) => {
       const unconfirmed = () => new AgentProtocolError(502, 'MODEL_EXECUTION_UNCONFIRMED')
       const request = (target.protocol === 'https:' ? httpsRequest : httpRequest)(target, {
-        method: 'POST', agent: false, signal,
+        method: deleting ? 'DELETE' : 'POST', agent: false, signal,
         headers: Object.fromEntries(headers),
         // The OS must never perform a second lookup after policy validation.
         lookup: (_name, options, callback) => {
@@ -104,6 +118,9 @@ export function routerTransport(endpoint: string, policy: RouterNetworkPolicy = 
         if (status < 200 || status >= 300) {
           response.destroy(); resolveResponse(new Response(null, { status })); return
         }
+        const session = response.headers['mcp-session-id']
+        if (mcp && session !== undefined && (typeof session !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(session))) { response.destroy(); reject(unconfirmed()); return }
+        if (mcp && (status === 202 || status === 204 || deleting)) { response.destroy(); resolveResponse(new Response(null, { status })); return }
         const chunks: Buffer[] = []
         let size = 0
         response.on('data', (chunk: Buffer) => {
@@ -117,13 +134,13 @@ export function routerTransport(endpoint: string, policy: RouterNetworkPolicy = 
           if (!/^application\/json(?:\s*;|$)/i.test(contentType) || (response.headers['content-encoding'] && response.headers['content-encoding'] !== 'identity')) {
             reject(new AgentProtocolError(502, 'MODEL_OUTPUT_INVALID')); return
           }
-          resolveResponse(new Response(status === 204 || status === 205 ? null : Buffer.concat(chunks), { status, headers: { 'content-type': contentType } }))
+          resolveResponse(new Response(status === 204 || status === 205 ? null : Buffer.concat(chunks), { status, headers: { 'content-type': contentType, ...(mcp && typeof session === 'string' ? { 'mcp-session-id': session } : {}) } }))
         })
       })
       request.on('error', () => reject(unconfirmed()))
       request.on('upgrade', (_response, socket) => { socket.destroy(); reject(unconfirmed()) })
       request.setTimeout(30_000, () => request.destroy())
-      request.end(body)
+      request.end(deleting ? undefined : body)
     })
   }
 }

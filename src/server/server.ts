@@ -1,3 +1,4 @@
+import { dispatchToolManagement, toolInvocationRoute, toolManagementRoute } from './agentFederation/toolGatewayRoutes.js'
 import { dispatchHostedTask, isHostedTaskRoute } from './agentFederation/hostedTaskRoutes.js'
 import { dispatchExternalProvider, isExternalProviderRoute } from './externalProviders/routes.js'
 import { dispatchAgentInventory, isAgentInventoryRoute } from './agentFederation/inventoryRoutes.js'
@@ -2179,6 +2180,16 @@ export function startServer(
       try { return (await authService.listDepartments(orgId)).departments } catch { return [] }
     },
   }) : null
+  const agentTools = authService.createAgentToolManagement(mcpStore, nexusClient ? org => ({
+    getConfigItemByPinyin: async pinyin => {
+      const row = await runtime.store.getConfigItemByPinyin(pinyin, org)
+      if (!row || row.scope !== 'system' || !['bearer', 'basic', 'header'].includes(String(row.scheme))) return null
+      return { pinyin: String(row.pinyin), scheme: row.scheme as 'bearer' | 'basic' | 'header', bearer_prefix: row.bearer_prefix == null ? null : String(row.bearer_prefix),
+        entries: (await runtime.store.getConfigEntries(Number(row.id))).map(entry => ({ config_key: String(entry.config_key) })) }
+    },
+    listSecrets: (namespace, subject) => nexusClient.listSecrets(namespace, subject),
+  }) : undefined)
+  void agentTools?.gateway.store.ready.catch(error => process.stderr.write(`[agent-tools] initialization failed: ${error instanceof Error ? error.name : 'error'}\n`))
   const mcpAdminApi = createMcpAdminApi({
     mcpStore,
     authService,
@@ -3877,6 +3888,23 @@ export function startServer(
         return
       }
 
+      const toolInvocation = toolInvocationRoute.exec(pathname)
+      if (toolInvocation) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method !== 'POST') throw new HttpError(405, 'METHOD_NOT_ALLOWED')
+        if (!agentTools) throw new HttpError(503, 'TOOL_GATEWAY_NOT_CONFIGURED')
+        // Only Nexus task-bound IAM credentials are accepted here. No browser identity override.
+        try {
+          const result = await agentTools.gateway.invoke(toolInvocation[1], await readJsonBody(req), getBearerToken(req) ?? '')
+          writeJson(res, 200, { success: true, data: result })
+        } catch (error) {
+          const status = error instanceof ExternalProviderError ? error.status : 503
+          const code = error instanceof ExternalProviderError ? error.code : 'TOOL_GATEWAY_UNAVAILABLE'
+          writeJson(res, status, { success: false, error: { code, message: code } })
+        }
+        return
+      }
+
       // Document Center v2: SSE build-events route accepts ?token=xxx as
       // a fallback because browser EventSource can't send custom headers.
       // Scope: only this single route; getBearerToken stays header-only
@@ -3898,6 +3926,19 @@ export function startServer(
       }
       if (!auth) {
         throw new HttpError(401, 'Unauthorized')
+      }
+
+      if (toolManagementRoute.test(pathname)) {
+        res.setHeader('Cache-Control', 'no-store')
+        try {
+          const data = await dispatchToolManagement(agentTools, auth, req.method ?? 'GET', pathname, req.method === 'POST' ? await readJsonBody(req) : {})
+          writeJson(res, 200, { success: true, data })
+        } catch (error) {
+          const status = error instanceof ExternalProviderError ? error.status : 503
+          const code = error instanceof ExternalProviderError ? error.code : 'TOOL_GATEWAY_UNAVAILABLE'
+          writeJson(res, status, { success: false, error: { code, message: code } })
+        }
+        return
       }
 
       if (isAgentInventoryRoute(pathname)) {

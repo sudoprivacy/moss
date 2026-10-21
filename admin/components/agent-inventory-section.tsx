@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { AgentAssetSuspension } from './agent-asset-suspension'
 import { AgentHostedUnknownTasks } from './agent-hosted-unknown-tasks'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
@@ -277,6 +278,7 @@ function ScopedInventory({ query }: { query: string }) {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {access?.can_manage && <Button variant="outline" asChild><Link to="/mcp/servers/enterprise">管理工具授权</Link></Button>}
           <Button variant="outline" disabled={busy || !access?.configured} onClick={() => void perform(reload)}>
             <RefreshCw className="mr-2 size-4" />
             刷新台账

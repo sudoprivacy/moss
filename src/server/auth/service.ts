@@ -1,3 +1,6 @@
+import { assertAgentToolManager } from '../agentFederation/toolGatewayRoutes.js'
+import { AgentToolGateway } from '../agentFederation/toolGateway.js'
+import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
 import { AssetSuspensions } from '../agentFederation/assetSuspension.js'
 import type { ExecutionModelGateway } from '../agentFederation/executionModelGateway.js'
 import { HostedTaskService } from '../agentFederation/hostedTaskService.js'
@@ -700,6 +703,24 @@ export class AuthService {
       uploads,
       buildVisibility: actor => this.buildSudoworkVisibilityFilter(actor),
     })
+  }
+
+  createAgentToolManagement(mcp: import('../mcp/db.js').McpStore, secrets?: (org: string) => import('../mcp/authResolver.js').McpAuthSecretsApi) {
+    const registry = registryFromEnvironment()
+    if (!registry) return undefined
+    const gateway = new AgentToolGateway(new ToolGatewayStore(this.db.driver), {
+      registry, mcp, secrets,
+      member: async (orgId, userId) => {
+        const user = await this.db.getUserByIdAndOrg(userId, orgId)
+        if (user?.status !== 'active') return null
+        const departments = await getUserAncestorIds(userId, orgId, (id, org) => this.db.getUserByIdAndOrg(id, org), org => this.db.listDepartmentsByOrg(org))
+        return { isAdmin: false, userId, role: user.role, departmentId: user.departmentId ?? null, visibleDepartmentIds: departments }
+      },
+    })
+    return { gateway, authorize: async (actor: AuthContext) => {
+      const user = await this.getUserPinnedOrSuperAdmin(actor.userId, actor.orgId)
+      assertAgentToolManager(actor, user)
+    } }
   }
 
   async createHostedEvaluationRuntime(ownerId?: string, releases?: RegistryReleases) {
