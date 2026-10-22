@@ -27,7 +27,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { dcClient } from '@/lib/api/client'
-import { createQualityApi, type QualityQuery, type QualityRecord } from '@/lib/api/quality-core'
+import { createQualityApi, QualityApiError, type QualityQuery, type QualityRecord } from '@/lib/api/quality-core'
 import { useAuth } from '@/lib/hooks/use-auth'
 import {
   QUALITY_LABELS,
@@ -105,6 +105,13 @@ const userColumns = [
 const date = (value: Date) =>
   `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
 
+function qualityErrorTitle(code?: string) {
+  if (code === 'QMS_DISABLED') return '质量管理未启用'
+  if (code === 'QMS_INITIALIZING') return '质量管理正在初始化'
+  if (code === 'QMS_INITIALIZATION_FAILED') return '质量管理初始化失败'
+  return '质量数据加载失败'
+}
+
 export default function OperationsQualityPage() {
   const { user, activeOrgId } = useAuth()
   return <QualityWorkspace key={activeOrgId} canManage={user?.role === 'super_admin'} />
@@ -116,7 +123,7 @@ function QualityWorkspace({ canManage }: { canManage: boolean }) {
   const [data, setData] = useState<Row>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError] = useState<{ message: string; code?: string } | null>(null)
   const [start, setStart] = useState(() => date(new Date(Date.now() - 6 * 86400000)))
   const [end, setEnd] = useState(() => date(new Date()))
   const [filters, setFilters] = useState<QualityQuery>({ dimension: 'all' })
@@ -150,7 +157,7 @@ function QualityWorkspace({ canManage }: { canManage: boolean }) {
   const load = useCallback(async () => {
     const id = ++requestId.current
     setLoading(true)
-    setError('')
+    setError(null)
     setData({})
     try {
       const range = qualityDateRange(start, end)
@@ -234,7 +241,12 @@ function QualityWorkspace({ canManage }: { canManage: boolean }) {
       }
       if (id === requestId.current) setData(result)
     } catch (cause) {
-      if (id === requestId.current) setError(cause instanceof Error ? cause.message : '加载质量数据失败')
+      if (id === requestId.current) {
+        setError({
+          message: cause instanceof Error ? cause.message : '加载质量数据失败',
+          ...(cause instanceof QualityApiError && cause.code ? { code: cause.code } : {}),
+        })
+      }
     } finally {
       if (id === requestId.current) setLoading(false)
     }
@@ -454,17 +466,17 @@ function QualityWorkspace({ canManage }: { canManage: boolean }) {
             </div>
           ) : null}
           {error ? (
-            <Alert variant="destructive">
-              <AlertTitle>质量数据加载失败</AlertTitle>
+            <Alert variant={error.code === 'QMS_INITIALIZING' ? 'default' : 'destructive'}>
+              <AlertTitle>{qualityErrorTitle(error.code)}</AlertTitle>
               <AlertDescription>
-                {error}
+                {error.message}
                 <div className="mt-3 flex gap-3">
                   <Button size="sm" variant="outline" onClick={() => void load()}>
                     重试
                   </Button>
                   {canManage ? (
                     <Button asChild size="sm" variant="outline">
-                      <Link to="/settings/server-credentials">检查服务凭据</Link>
+                      <Link to="/settings/platform-config?provider=qms">前往 QMS 配置</Link>
                     </Button>
                   ) : null}
                 </div>

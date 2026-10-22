@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { createQualityApi } from '../lib/api/quality-core'
+import { createQualityApi, QualityApiError } from '../lib/api/quality-core'
 import { qualityDateRange, qualityConfigValues } from '../src/qms-operations'
 import { buildSudoworkConfigPatch } from '../src/sudowork-settings'
 
@@ -34,6 +34,16 @@ describe('quality operations', () => {
       'organization',
     )
     await expect(api.post('system/aggregation/run')).rejects.toThrow('聚合失败')
+  })
+  it('preserves the QMS availability code for actionable admin guidance', async () => {
+    const api = createQualityApi(
+      {
+        get: async () => ({ success: false, error: { code: 'QMS_DISABLED', message: '质量管理未启用' } }),
+        put: async () => ({}), post: async () => ({}), delete: async () => ({}),
+      },
+      'organization',
+    )
+    await expect(api.get('dashboard/overview')).rejects.toEqual(expect.objectContaining<Partial<QualityApiError>>({ code: 'QMS_DISABLED', message: '质量管理未启用' }))
   })
   it('uses exclusive next midnight and rejects inverted date ranges', () => {
     const range = qualityDateRange('2026-09-01', '2026-09-01')

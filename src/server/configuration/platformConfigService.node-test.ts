@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { test, type TestContext } from 'node:test'
 import { AuthCenterDb } from '../authCenter/db.js'
 import { ConfigStore } from '../configStore/configStore.js'
-import { resolveQmsConfig } from '../qms/config.js'
+import { DEFAULT_QMS_API_KEY, resolveQmsConfig } from '../qms/config.js'
 import { serverFileConfigSchema, type ServerConfig } from '../types.js'
 import { PLATFORM_PROVIDERS, type PlatformProvider } from './platformConfigDefinition.js'
 import { ensurePlatformIntegrationSettingsSchema, PlatformIntegrationSettingsRepository } from './platformIntegrationSettingsRepository.js'
@@ -350,7 +350,7 @@ void test('mock SMS exercises registration, one-time code login and organization
 })
 
 
-void test('platform QMS adopts generated keys without restoring retired middleware or encryption settings', async t => {
+void test('platform QMS uses the built-in key without restoring retired credentials or middleware settings', async t => {
   const { legacy, create } = setup(t)
   legacy.qms = {
     config: { enabled: true, apiKeyHeader: 'X-API-Key', encryptionRequired: true },
@@ -363,8 +363,8 @@ void test('platform QMS adopts generated keys without restoring retired middlewa
   legacy.qms.secrets.apiKey = 'automatically-generated-key'
   await service.refreshUnmanaged('qms')
   const qms = (await service.list()).items.find(item => item.id === 'qms')!
-  assert.equal(qms.secrets.apiKey, true)
-  assert.equal(qms.fields.some(field => ['postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem', 'encryptionRequired'].includes(field.key)), false)
+  assert.equal(qms.secrets.apiKey, undefined)
+  assert.equal(qms.fields.some(field => ['apiKey', 'postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem', 'encryptionRequired'].includes(field.key)), false)
   assert.equal(qms.config.encryptionRequired, undefined)
   assert.deepEqual(qms.issues, [])
   await service.save('qms', { expectedVersion: null, config: { enabled: true, encryptionRequired: true }, secrets: { redisUrl: 'redis://stale', privateKeyPem: 'stale' } }, 'root')
@@ -372,7 +372,7 @@ void test('platform QMS adopts generated keys without restoring retired middlewa
   await restarted.initialize()
   legacy.qms.secrets.apiKey = 'stale-environment-key'
   await restarted.refreshUnmanaged('qms')
-  assert.deepEqual(restarted.getActive('qms').secrets, { apiKey: 'automatically-generated-key' })
+  assert.deepEqual(restarted.getActive('qms').secrets, {})
   const config = serverFileConfigSchema().parse({}) as unknown as ServerConfig
   config.dbBackend = 'postgres'
   config.databaseUrl = 'postgresql://existing-moss/database'
@@ -380,7 +380,7 @@ void test('platform QMS adopts generated keys without restoring retired middlewa
   const store = new ConfigStore(null)
   applyPlatformRuntime(restarted, config, store)
   assert.equal(config.qms.enabled, true)
-  assert.equal(config.qms.secrets.apiKey, 'automatically-generated-key')
+  assert.equal(config.qms.secrets.apiKey, DEFAULT_QMS_API_KEY)
   assert.equal(config.qms.queue.maxItems, 10000)
   assert.equal(config.databaseUrl, 'postgresql://existing-moss/database')
   assert.equal('redisUrl' in config.qms.secrets, false)
@@ -389,7 +389,7 @@ void test('platform QMS adopts generated keys without restoring retired middlewa
     process.env.QMS_API_KEY = 'obsolete-env-key'
     process.env.QMS_DEFAULT_API_KEY = 'obsolete-env-alias'
     store.hydrateConfig(config)
-    assert.equal(config.qms.secrets.apiKey, 'automatically-generated-key')
+    assert.equal(config.qms.secrets.apiKey, DEFAULT_QMS_API_KEY)
   } finally {
     if (old.api === undefined) delete process.env.QMS_API_KEY
     else process.env.QMS_API_KEY = old.api
@@ -408,6 +408,7 @@ void test('old managed QMS snapshots do not load retired secrets or break platfo
   await repository.put('platform.v1.qms', { ...record, config: { ...record.config as object, encryptionRequired: true }, secretRefs: {
     postgresUrl: `qms.${saved.version}.postgresUrl`, redisUrl: `qms.${saved.version}.redisUrl`,
     privateKeyPem: `qms.${saved.version}.privateKeyPem`, publicKeyPem: `qms.${saved.version}.publicKeyPem`,
+    apiKey: `qms.${saved.version}.apiKey`,
   } }, 'legacy')
   const restarted = create('old-qms')
   await restarted.initialize()

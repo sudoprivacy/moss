@@ -7,7 +7,7 @@ import { PLATFORM_DEFINITIONS, PLATFORM_PROVIDERS, type PlatformProvider, type P
 export const PLATFORM_SECRET_NAMESPACE = 'moss:platform-config'
 const LEGACY_ROUTER_MODEL_FIELDS = new Set(['modelServiceUrl', 'modelsApiUrl'])
 const RETIRED_QMS_CONFIG_FIELDS = new Set(['encryptionRequired'])
-const RETIRED_QMS_SECRET_FIELDS = new Set(['postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem'])
+const RETIRED_QMS_SECRET_FIELDS = new Set(['postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem', 'apiKey'])
 export interface PlatformVault {
   getSecret(namespace: string, key: string): Promise<{ value: string | null } | null>
   putSecret(namespace: string, key: string, value: string): Promise<unknown>

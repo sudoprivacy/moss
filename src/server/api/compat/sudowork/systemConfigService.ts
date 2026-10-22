@@ -392,7 +392,7 @@ export class SudoworkSystemConfigService {
       if (enabled === 1 && this.options.productImprovementAvailable === false) throw new SudoworkSystemConfigError(400, '平台 QMS 服务未启用或尚未重启生效')
       const runtime = await this.productImprovementRuntime()
       if (enabled === 1 && !runtime.apiKey) {
-        throw new SudoworkSystemConfigError(400, '未配置 QMS_DEFAULT_API_KEY,无法开启产品改进计划')
+        throw new SudoworkSystemConfigError(503, '质量上报凭据暂不可用，请稍后重试')
       }
       const baseurl = value.baseurl === undefined ? undefined : string(value.baseurl).trim().replace(/\/+$/, '')
       if (baseurl) {

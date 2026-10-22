@@ -1,22 +1,38 @@
-import { randomBytes } from 'node:crypto'
-import { setTimeout as delay } from 'node:timers/promises'
-
 import type { DbDriver } from '../db/driver.js'
 import type { ConfigKey } from '../configStore/configStore.js'
-import type { QmsRuntimeConfig } from './config.js'
+import { DEFAULT_QMS_API_KEY, type QmsRuntimeConfig } from './config.js'
 import { QmsAuthorizationError, type QmsAuthorizationService } from './qmsAuthorization.js'
 import type { StartedQmsRuntime } from './qmsRuntime.js'
 import type { QmsLegacyOperationPort } from '../api/compat/sudowork/qmsRoutes.js'
 
+export type QmsAvailability =
+  | { status: 'disabled' }
+  | { status: 'initializing' }
+  | { status: 'ready' }
+  | { status: 'failed' }
+
 /** Keep the routes registered while the optional runtime starts in the background. */
-export function createDeferredQmsRoutes(getRuntime: () => StartedQmsRuntime | undefined, apiKeyHeader: string): {
+export function createDeferredQmsRoutes(
+  getRuntime: () => StartedQmsRuntime | undefined,
+  apiKeyHeader: string,
+  getAvailability: () => QmsAvailability = () => ({ status: 'initializing' }),
+): {
   apiKeyHeader: string
   authorization: Pick<QmsAuthorizationService, 'requireApiKey' | 'adminScope'>
   operations: QmsLegacyOperationPort
 } {
   const current = () => {
     const runtime = getRuntime()
-    if (!runtime) throw new QmsAuthorizationError(503, 'QMS_NOT_CONFIGURED', '质量管理正在初始化或暂不可用，请稍后重试。')
+    if (!runtime) {
+      const availability = getAvailability()
+      if (availability.status === 'disabled') {
+        throw new QmsAuthorizationError(503, 'QMS_DISABLED', '质量管理未启用，请前往平台配置启用 QMS 并重启服务。')
+      }
+      if (availability.status === 'failed') {
+        throw new QmsAuthorizationError(503, 'QMS_INITIALIZATION_FAILED', '质量管理初始化失败，请检查 Moss PostgreSQL 存储并重启服务。')
+      }
+      throw new QmsAuthorizationError(503, 'QMS_INITIALIZING', '质量管理正在初始化，请稍后重试。')
+    }
     return runtime
   }
   return {
@@ -90,28 +106,7 @@ export async function ensureQmsApiKey(options: {
     put(key: ConfigKey, value: string): Promise<void>
   }
 }): Promise<void> {
-  if (!options.config.enabled || options.driver.kind !== 'postgres' || options.config.secrets.apiKey) return
-  for (let attempt = 0; attempt < 100; attempt++) {
-    options.signal?.throwIfAborted()
-    const key = await options.driver.tryRunExclusiveSession('moss:qms:api-key', async () => {
-      options.signal?.throwIfAborted()
-      // A peer may have created the canonical key since this process loaded its vault cache.
-      await options.secrets.refreshKey('server.qms-api-key')
-      options.signal?.throwIfAborted()
-      const existing = options.secrets.get('server.qms-api-key')
-      if (existing) return existing
-      const value = options.secrets.get('qms.default-api-key')
-        || options.secrets.get('client.product-improvement-api-key')
-        || randomBytes(32).toString('base64url')
-      await options.secrets.put('server.qms-api-key', value)
-      return value
-    })
-    options.signal?.throwIfAborted()
-    if (key) {
-      options.config.secrets.apiKey = key
-      return
-    }
-    await delay(100, undefined, { signal: options.signal })
-  }
-  throw new Error('QMS credential initialization is busy; retry startup')
+  if (!options.config.enabled) return
+  options.signal?.throwIfAborted()
+  options.config.secrets.apiKey = DEFAULT_QMS_API_KEY
 }

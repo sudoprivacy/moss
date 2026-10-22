@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import type { ServerConfig } from '../types.js'
 import type { ConfigKey, ConfigStore } from '../configStore/configStore.js'
-import { resolveQmsConfig } from '../qms/config.js'
+import { DEFAULT_QMS_API_KEY, resolveQmsConfig } from '../qms/config.js'
 import type { SudoworkInfrastructureConfig } from '../api/compat/sudowork/systemConfigService.js'
 import { PLATFORM_PROVIDERS, type PlatformProvider, type PlatformValues } from './platformConfigDefinition.js'
 import { PlatformConfigService, type PlatformSnapshot, type PlatformVault, validatePlatformConfig } from './platformConfigService.js'
@@ -96,7 +96,7 @@ export async function legacyPlatformSnapshots(config: ServerConfig, store: Confi
       queueMaxItems: qms.queue.maxItems, queueMaxBytes: qms.queue.maxBytes,
       queueRetryIntervalMs: qms.queue.retryIntervalMs, queueDrainTimeoutMs: qms.queue.drainTimeoutMs,
       perfRetentionDays: qms.retention.perfDays, conversationRetentionDays: qms.retention.conversationDays,
-    }, Object.fromEntries(Object.entries(qms.secrets).map(([key, value]) => [key, value || ''])), 'environment / server.json / Nexus')
+    }, { larkWebhookUrl: qms.secrets.larkWebhookUrl || '', smtpUrl: qms.secrets.smtpUrl || '' }, 'server.json / built-in defaults')
   }
   return result
 }
@@ -113,8 +113,7 @@ export function applyPlatformRuntime(service: PlatformConfigService, config: Ser
   manage('sudorouter', { apiToken: ['server.sudorouter-api-token', 'server.sudorouter-admin-token'] })
   manage('fuiou', { merchantPrivateKey: ['server.fuiou-merchant-private-key'], publicKey: ['server.fuiou-public-key'] })
   manage('dify', { systemToken: ['dify.system-token'], provisionSecret: ['dify.system-secret'], ssoSecret: ['dify.sso-secret'] })
-  manage('qms', { apiKey: ['server.qms-api-key', 'qms.default-api-key', 'client.product-improvement-api-key'],
-    larkWebhookUrl: ['server.qms-lark-webhook-url'], smtpUrl: ['server.qms-smtp-url'] })
+  manage('qms', { larkWebhookUrl: ['server.qms-lark-webhook-url'], smtpUrl: ['server.qms-smtp-url'] })
   store.hydrateConfig(config)
   if (service.isManaged('sms') || (!config.phoneAuth.enabled && config.sudoworkCompatibility.enabled && service.getActive('sms').config.enabled)) {
     const c = service.getActive('sms').config
@@ -153,6 +152,9 @@ export function applyPlatformRuntime(service: PlatformConfigService, config: Ser
       QMS_LARK_WEBHOOK_URL: secrets.larkWebhookUrl, QMS_SMTP_URL: secrets.smtpUrl,
     }, { validateSecrets: false, dbBackend: config.dbBackend })
   }
+  // QMS and Sudowork share one built-in compatibility key. Legacy environment
+  // and Nexus values must not make the server reject the fixed client key.
+  config.qms.secrets.apiKey = DEFAULT_QMS_API_KEY
 }
 
 export function platformInfrastructure(service: PlatformConfigService, legacy: SudoworkInfrastructureConfig): SudoworkInfrastructureConfig {

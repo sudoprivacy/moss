@@ -8,7 +8,14 @@ export interface QualityResponse<T = unknown> {
   events?: QualityRecord[]
   total?: number
   message?: string
-  error?: string | { message?: string }
+  error?: string | { code?: string; message?: string }
+}
+
+export class QualityApiError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message)
+    this.name = 'QualityApiError'
+  }
 }
 
 /** QMS keeps its own envelope; failed operations can also arrive with HTTP 200. */
@@ -26,10 +33,10 @@ export function createQualityApi(
   async function result<T>(pending: Promise<unknown>): Promise<QualityResponse<T>> {
     const response = (await pending) as QualityResponse<T>
     if (response.success === false) {
-      throw new Error(
-        typeof response.error === 'string'
-          ? response.error
-          : response.error?.message || response.message || '质量管理请求失败',
+      const error = response.error
+      throw new QualityApiError(
+        typeof error === 'string' ? error : error?.message || response.message || '质量管理请求失败',
+        typeof error === 'string' ? undefined : error?.code,
       )
     }
     return response
