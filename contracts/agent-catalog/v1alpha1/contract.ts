@@ -51,6 +51,8 @@ export interface CatalogAuditEvent {
   action: string; catalog_id: string | null; source_id: string | null
   candidate_id: string | null; version: string | null; task_id: string | null
   result: 'succeeded' | 'failed' | 'unknown'; reason: string | null
+  context: Pick<CatalogSnapshot, 'protocol' | 'adapter_version' | 'source_revision' | 'source_digest' | 'capabilities'> | null
+  provider_run_id: string | null; provider_response_id: string | null
 }
 export interface CatalogVersionState {
   catalog_id: string; version: string; source_id: string; candidate_id: string | null
@@ -58,3 +60,13 @@ export interface CatalogVersionState {
   provenance: 'candidate' | 'legacy_adopted'
 }
 export interface CatalogPage<T> { api_version: typeof AGENT_CATALOG_API; items: T[]; next_cursor: string | null }
+
+/** Administrator correlation view deliberately excludes user input and output text. */
+export interface CatalogRun {
+  task_id: string; session_id: string; attempt_id: string | null; user_id: string
+  status: string; output_status: string; error_code: string | null; created_at: number; updated_at: number
+  version: string | null; source_digest: string; source_revision: string | null; adapter_version: string | null
+  protocol: string | null; capabilities: CatalogCapabilities | null
+  provider_run_id: string | null; provider_response_id: string | null
+  observability: string | null; version_evidence: string | null
+}

@@ -696,7 +696,10 @@
         "version",
         "task_id",
         "result",
-        "reason"
+        "reason",
+        "context",
+        "provider_run_id",
+        "provider_response_id"
       ],
       "properties": {
         "api_version": {
@@ -805,6 +808,66 @@
               "type": "null"
             }
           ]
+        },
+        "context": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "protocol",
+                "adapter_version",
+                "source_revision",
+                "source_digest",
+                "capabilities"
+              ],
+              "properties": {
+                "protocol": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "adapter_version": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "source_revision": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source_digest": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "capabilities": {
+                  "$ref": "#/definitions/CatalogCapabilities"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "provider_response_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
         }
       }
     },
@@ -864,6 +927,129 @@
           "enum": [
             "candidate",
             "legacy_adopted"
+          ]
+        }
+      }
+    },
+    "CatalogRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "session_id",
+        "user_id",
+        "status",
+        "output_status",
+        "source_digest",
+        "attempt_id",
+        "error_code",
+        "version",
+        "source_revision",
+        "adapter_version",
+        "protocol",
+        "provider_run_id",
+        "provider_response_id",
+        "observability",
+        "version_evidence",
+        "created_at",
+        "updated_at",
+        "capabilities"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "user_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "output_status": {
+          "type": "string"
+        },
+        "source_digest": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adapter_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_response_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observability": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version_evidence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CatalogCapabilities"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
