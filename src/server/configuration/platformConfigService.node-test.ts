@@ -354,7 +354,7 @@ void test('platform QMS uses the built-in key without restoring retired credenti
   const { legacy, create } = setup(t)
   legacy.qms = {
     config: { enabled: true, apiKeyHeader: 'X-API-Key', encryptionRequired: true },
-    secrets: { postgresUrl: 'postgresql://retired/db', redisUrl: 'redis://retired', privateKeyPem: 'unused', publicKeyPem: 'unused' },
+    secrets: { postgresUrl: 'postgresql://retired/db', redisUrl: 'redis://retired', privateKeyPem: 'unused', publicKeyPem: 'unused', larkWebhookUrl: 'https://example.invalid/hook', smtpUrl: 'smtps://example.invalid' },
     sources: {},
   }
   const service = create()
@@ -364,7 +364,7 @@ void test('platform QMS uses the built-in key without restoring retired credenti
   await service.refreshUnmanaged('qms')
   const qms = (await service.list()).items.find(item => item.id === 'qms')!
   assert.equal(qms.secrets.apiKey, undefined)
-  assert.equal(qms.fields.some(field => ['apiKey', 'postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem', 'encryptionRequired'].includes(field.key)), false)
+  assert.equal(qms.fields.some(field => ['apiKeyHeader', 'apiKey', 'larkWebhookUrl', 'smtpUrl', 'postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem', 'encryptionRequired'].includes(field.key)), false)
   assert.equal(qms.config.encryptionRequired, undefined)
   assert.deepEqual(qms.issues, [])
   await service.save('qms', { expectedVersion: null, config: { enabled: true, encryptionRequired: true }, secrets: { redisUrl: 'redis://stale', privateKeyPem: 'stale' } }, 'root')
@@ -409,13 +409,14 @@ void test('old managed QMS snapshots do not load retired secrets or break platfo
     postgresUrl: `qms.${saved.version}.postgresUrl`, redisUrl: `qms.${saved.version}.redisUrl`,
     privateKeyPem: `qms.${saved.version}.privateKeyPem`, publicKeyPem: `qms.${saved.version}.publicKeyPem`,
     apiKey: `qms.${saved.version}.apiKey`,
+    larkWebhookUrl: `qms.${saved.version}.larkWebhookUrl`, smtpUrl: `qms.${saved.version}.smtpUrl`,
   } }, 'legacy')
   const restarted = create('old-qms')
   await restarted.initialize()
   assert.deepEqual(restarted.getActive('qms').secrets, {})
   assert.equal(restarted.getActive('qms').config.encryptionRequired, undefined)
   const check = await restarted.check('qms', { expectedVersion: saved.version, config: { enabled: true, apiKeyHeader: 'bad header' }, secrets: { apiKey: 'valid' } })
-  assert.equal(check.ready, false)
+  assert.equal(check.ready, true)
 })
 
 void test('saved raw Fuiou keys survive restart and equivalent encodings preserve protected key identity', async t => {
