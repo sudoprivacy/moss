@@ -71,3 +71,26 @@ export interface CatalogRun {
   provider_run_id: string | null; provider_response_id: string | null
   observability: string | null; version_evidence: string | null
 }
+
+/** Read models are computed from authoritative releases; never authorize dispatch. */
+export type CatalogDisplayStatus = 'draft' | 'pending_approval' | 'approved' | 'published' | 'active' | 'deprecated' | 'revoked' | 'archived' | 'unavailable'
+export interface CatalogVersionDetail {
+  version: string; source_revision: string | null; source_digest: string; adapter_version: string | null
+  status: CatalogDisplayStatus; approval_status: 'approved' | 'expired' | 'withdrawn' | 'revoked' | 'unapproved'
+  channels: { name: 'stable' | 'canary'; enabled: boolean; revision: number }[]
+  revoke_reason: string | null; can_promote: boolean; promotion_block: string | null
+  evidence_level: 'source_snapshot_only' | 'provider_revision_fenced'; source_identity: 'unverified'
+}
+export interface CatalogEntry {
+  catalog_id: string; name: string; provider: 'dify' | 'http' | 'openai_compatible' | 'mcp' | 'a2a'
+  protocol: string; source: CatalogSource | null; external_agent_id: string; owner_id: string | null
+  org_id: string; zone_id: string | null; execution_mode: 'external_hosted'
+  status: CatalogDisplayStatus; approval_status: CatalogVersionDetail['approval_status'] | 'pending_approval'; admission_error: string | null; is_selectable: boolean
+  published_version: string | null; source_revision: string | null; source_digest: string; adapter_version: string | null
+  capabilities: CatalogCapabilities; observability: 'full' | 'partial' | 'none' | 'unknown'
+  last_run_at: number | null; warning_count: number; has_drift: boolean
+  channels: { name: 'stable' | 'canary'; version: string; enabled: boolean; revision: number }[]
+}
+export interface CatalogRunEvent {
+  sequence: number; at: number; type: string; status: string | null; error_code: string | null
+}
