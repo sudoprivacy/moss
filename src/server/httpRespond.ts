@@ -41,6 +41,13 @@ export function writeError(
   // ServerDrainingError never degrades to a 500. Flat `{ error: <string> }`
   // matches every other writeError branch.
   if (error instanceof SessionStartupError) {
+    // The 503 body is fixed user-safe text; the actual startup failure rides
+    // on `cause` and must reach the server log, or it stays invisible.
+    const cause = error.cause
+    const detail = cause instanceof Error
+      ? `${cause.message}${cause.stack ? `\n${cause.stack}` : ''}`
+      : cause !== undefined ? String(cause) : 'no cause captured'
+    logger.error(`session startup failed (attempt ${error.failure.attemptId}, code ${error.failure.code}): ${detail}`)
     writeJson(res, error.statusCode, { error: error.message, startup: error.failure })
     return
   }

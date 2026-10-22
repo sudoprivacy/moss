@@ -20,6 +20,8 @@ export class SessionStartupError extends Error {
       : isResource
       ? (error.message === 'Bound skill not available' ? 'Bound skill not available. Check the assistant configuration or contact your organization administrator.' : 'Assistant or skill unavailable. Check the configuration or contact your organization administrator.')
       : 'Cloud runtime failed to start. Please retry.'
+    // Keep the original error reachable on `cause` for the server log; the
+    // API-facing message/failure stay the fixed user-safe text.
     super(message, { cause: error })
     this.name = 'SessionStartupError'
     this.statusCode = isResource ? error.statusCode : 503

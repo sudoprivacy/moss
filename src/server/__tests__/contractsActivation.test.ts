@@ -12,24 +12,23 @@ import { runFixtureProcess } from '../testing/fixtureProcess.js'
 const root = resolve(import.meta.dir, '../../..')
 const candidateVersion = '0.2.1'
 const baselineVersion = '0.2.0'
-// Pin target: sudostack feat/contract-zone 68371480fddb7912cfa3b406039f235e15f9e6df ("rebuild the zone-v1
-// release bundle at the 50bc372d anchor" — the derivation-pinned rebuild of
-// 364ce40's candidate; the derived contract artifacts are byte-identical, only
-// the pack tarball and the git anchor move). The 0.2.1 candidate content
-// is the C-era lineage plus the restored zone-v1 family; digests below are the
-// measured values at this revision.
-const contentSha = '68371480fddb7912cfa3b406039f235e15f9e6df'
+// Pin target: sudostack main de257f2f37c7b79817290b55f5e111a87014fe92 (PR #30 merge —
+// "re-pin zone-v1 owners onto the merged mainlines": nexus be4cd39bc as the rebased
+// successor of ffe782f68 on develop, moss a2bbdd90 replacing the dangling c8974192;
+// schema payloads unchanged, only owner rev references moved). Digests below are
+// the measured values at this revision.
+const contentSha = 'de257f2f37c7b79817290b55f5e111a87014fe92'
 const contentShortSha = contentSha.slice(0, 7)
 const mergeSha = 'dc9cf01acf61dff586d292d15710332d35a5f811'
 const previousCandidateContentSha = '30da0ddd953268ff8a9a0f0980276300ab153003'
 const previousActivationSha = '60bd8dda6fb2d348ec8571b9b1a4eaa535e36dc5'
 const retiredPinSha = '45304cf15d1e8d02814e46b7b2fe0b3c30c1709c'
 const dependencySpec = `github:sudoprivacy/sudostack#${contentSha}`
-const lockIntegrity = 'sha512-WpXuLr5N6ELHfbJSlSM5WJXoXvCriAKMyEcQDnnK1qy6dP12kBN+Xf2VTG3SAlOFbvsYIs2ekgqmRNiB5kpzxw=='
+const lockIntegrity = 'sha512-NqTDWe4/v8rHLGatzf+SpfjEo2k9noisYZi3XdfVJ3oyPzvRfxDcUy8wP9i2MO8nUQAM5Z8MKNqZsM6BtfMxJA=='
 const candidateManifestSha256 = '515d49b0d240d8796d2081e103bf25df222fac50e0714e8af423ff5a657fac02'
 const compatibilitySha256 = '8ba808dff0954db2a9a29f9c89cf6c446404d57f62d6a71be8c99f0ddbef4145'
 const baselineSha256 = 'e265062e742d6f4713db73b15d851c8aaa7e12895ab267ed429f226dce1b008c'
-const tarballSha256 = 'f24cda788d46ebbb5d165220d2726f55fcfb8e85e7443406efe83d33fbee3983'
+const tarballSha256 = '6b99cf7befff6ca06145378453cfc73583e9c78dd8204d30d0aa213ca87a6765'
 const serverNodeVersion = '22.22.1'
 
 function readJson<T>(path: string): T {
@@ -202,8 +201,8 @@ describe('@sudo/contracts evaluation pin', () => {
       const [metadata] = JSON.parse(packed.stdout) as PackMetadata[]
       expect(metadata).toEqual(expect.objectContaining({
         files: expect.any(Array),
-        shasum: '5293713805ebeaf813298782bc82e6440f8e37cf',
-        size: 67_436,
+        shasum: '7d88f1933004d30b518d0f5c9836d74087c8f774',
+        size: 67_438,
       }))
       expect(metadata.files).toHaveLength(64)
       expect(sha256(resolve(packDir, metadata.filename))).toBe(tarballSha256)

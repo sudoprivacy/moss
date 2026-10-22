@@ -89,6 +89,17 @@ export function zonesE2eEnvReady(): { ok: boolean; missing: string[] } {
   } else {
     if (!existsSync(join(MOSS_REPO, 'bin', 'moss-server.mjs'))) missing.push('bin/moss-server.mjs not found (run `npm run build` first)')
     if (!existsSync(join(MOSS_REPO, 'bin', 'nexus', 'local-trust'))) missing.push('bin/nexus/local-trust not found (run `npm run build` first)')
+    // scode 探测与运行时 resolveScodeCliPath 同语义：E2E server 不配
+    // scodePath，解析顺序是仓间相对默认位 `<cwd>/../sudocode/scode`，再落
+    // 到 PATH。缺失时 spawn 失败会被包成 503（原始异常此前在服务日志不可
+    // 见），必须在自检提前拦截而非事后误判产品回归。
+    const siblingScode = join(MOSS_REPO, '..', 'sudocode', 'scode')
+    if (!existsSync(siblingScode)) {
+      const probe = spawnSync('scode', ['--version'], { timeout: 15_000, windowsHide: true })
+      if (probe.error) {
+        missing.push(`scode not resolvable: neither ${siblingScode} nor PATH (put scode on PATH or configure scodePath)`)
+      }
+    }
   }
   return { ok: missing.length === 0, missing }
 }

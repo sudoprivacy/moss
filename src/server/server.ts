@@ -11460,6 +11460,14 @@ export function startServer(
         })
       } catch (error) {
         logger.error(error instanceof Error ? error.message : String(error))
+        // SessionStartupError's message is fixed user-safe text; the actual
+        // failure rides on `cause` and would otherwise never reach the log.
+        if (error instanceof SessionStartupError && error.cause !== undefined) {
+          const cause = error.cause
+          logger.error(cause instanceof Error
+            ? `session startup cause: ${cause.message}${cause.stack ? `\n${cause.stack}` : ''}`
+            : `session startup cause: ${String(cause)}`)
+        }
         if (error instanceof SessionStartupError) {
           const body = JSON.stringify({ error: error.message, startup: error.failure })
           socket.end(`HTTP/1.1 ${error.statusCode} Startup Failed\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`)
