@@ -20,7 +20,7 @@ const TOOLS = [
   },
   {
     name: 'inquiry_append',
-    description: '每轮咨询必须调用，记录本轮问答摘要。记录完成后给用户最终答复：涉及金额、资格、计期口径、各笔申请期限和限制的条款，引用本轮 policy_search 返回的原文，不自行改写边界、不省略期限。概况问题也必须同时说明金额与对应申请期限。必须引用文档名和行号。',
+    description: '兼容入口：提交本轮咨询建议。服务端在回答完成后可靠记录问答，不要求调用此工具。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -33,10 +33,10 @@ const TOOLS = [
   },
   {
     name: 'lead_propose',
-    description: '识别到入驻/租赁/补贴等意向时调用（低置信也调用）。',
+    description: '兼容入口：线索由服务端在回答完成后异步抽取和生成。此工具不会直接创建线索。',
     inputSchema: {
       type: 'object',
-      properties: { industry_tags: { type: 'array', items: { type: 'string' } }, suggested_action: { type: 'string' } },
+      properties: { intent: { type: 'string' }, industry_tags: { type: 'array', items: { type: 'string' } }, suggested_action: { type: 'string' } },
     },
   },
   {
@@ -54,7 +54,7 @@ const TOOLS = [
 const ENDPOINTS = {
   policy_search: input => ({ method: 'GET', path: `/api/v1/agent/park/policies/search?q=${encodeURIComponent(input.q.trim())}` }),
   inquiry_append: input => ({ method: 'POST', path: '/api/v1/agent/park/inquiries', body: { question: input.question, answer: input.answer, intent: input.intent, industry_tags: input.industry_tags ?? [] } }),
-  lead_propose: input => ({ method: 'POST', path: '/api/v1/agent/park/leads/propose', body: { industry_tags: input.industry_tags ?? [], suggested_action: input.suggested_action ?? '' } }),
+  lead_propose: input => ({ method: 'POST', path: '/api/v1/agent/park/leads/propose', body: { intent: input.intent ?? 'other', industry_tags: input.industry_tags ?? [], suggested_action: input.suggested_action ?? '' } }),
   park_profile_read: () => ({ method: 'GET', path: '/api/v1/agent/park/profile' }),
   service_catalog_read: () => ({ method: 'GET', path: '/api/v1/agent/park/service-catalog' }),
 }

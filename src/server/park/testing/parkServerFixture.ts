@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
+import WebSocket from 'ws'
 import { createAuthService } from '../../auth/service.js'
 import { getDefaultServerConfig, readServerConfig, ensureServerDirectories } from '../../config.js'
 import { DirectConnectStore } from '../../db.js'
@@ -171,7 +172,7 @@ try {
   assert.equal(contextBody.consent_text, '本园区承诺联系方式仅用于招商对接。')
   assert.match(contextBody.published_policy_version ?? '', /^wiki-\d{4}-\d{2}-\d{2}$/)
 
-  // Anonymous consultation through the agent channel: session creation records
+  // Anonymous consultation through the agent channel: first question records
   // the mapping, the streamed answer flows back, and sources come from the
   // server-recorded policy search hits.
   channel.script = ['根据《算力政策.md》第 2 行：企业可申请园区算力服务。']
@@ -183,9 +184,12 @@ try {
   const cookie = session.headers.get('set-cookie')!.split(';')[0]
   const anonymousId = (await session.json() as { session_id: string }).session_id
   const mapping = await park.db.get<{ moss_session_id: string }>('SELECT moss_session_id FROM park_sessions WHERE id = ?', [anonymousId])
-  assert.ok(mapping?.moss_session_id)
-  assert.equal(channel.created[0]?.assistantId, assistantConfig.assistant_id)
-  recordSessionSearch(mapping!.moss_session_id!, { count: 1, refs: [{ name: '算力政策.md', version: 'wiki-v1', section: '第 2 行' }], at: Date.now() })
+  assert.equal(mapping?.moss_session_id, null)
+  assert.equal(channel.created.length, 0)
+  channel.beforeSend = async () => {
+    const bound = (await park.session(orgId, anonymousId))!.moss_session_id!
+    recordSessionSearch(bound, { count: 1, refs: [{ name: '算力政策.md', version: 'wiki-v1', section: '第 2 行' }], at: Date.now() })
+  }
   const reply = await fetch(`${base}/public/sessions/${anonymousId}/messages`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
     body: JSON.stringify({ message: '算力政策是什么？', client_request_id: randomUUID() }),
@@ -196,13 +200,7 @@ try {
   assert.match(events, /event: sources/)
   assert.match(events, /算力政策\.md/)
   assert.match(events, /event: done/)
-  // The turn is persisted by the agent skill path (simulated as park-tools does).
-  await appendAgentInquiry(park, {
-    orgId, sessionId: anonymousId, question: '算力政策是什么？',
-    answer: '根据《算力政策.md》第 2 行：企业可申请园区算力服务。', intent: 'policy_inquiry',
-    industryTags: [], policyHitCount: 1,
-    sourceRefs: [{ name: '算力政策.md', version: 'wiki-v1', section: '第 2 行' }],
-  })
+  assert.equal((await park.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM park_inquiries'))!.count, 1)
   const history = await fetch(`${base}/public/sessions/${anonymousId}/messages`, { headers: { cookie } })
   assert.equal(history.status, 200)
   assert.match(JSON.stringify(await history.json()), /算力服务/)
@@ -234,6 +232,35 @@ try {
   // Both contact paths persisted their lead records in the real store.
   const leadCount = await park.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM park_leads WHERE org_id = ?', [orgId])
   assert.equal(Number(leadCount?.count), 2)
+
+  // Real HTTP authorization must enforce the park role even for an organization administrator.
+  const rawId = randomUUID()
+  await store.driver.run(`INSERT INTO sessions (session_id, transcript_session_id, org_id, user_id, role, scopes_json,
+    cwd, runtime_type, status, desired_state, transcript_path, source, created_at, last_active_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  [rawId, rawId, orgId, 'park-public-consultation', 'public', '[]', root, 'host', 'ended', 'inactive', join(root, 'raw.jsonl'), 'park_public_consultation', Date.now(), Date.now()])
+  await park.grantRole(orgId, issued.user.id, 'park_leader', issued.user.id)
+  for (const suffix of ['', '/context', '/artifacts', '/startup', '/workspace/tree', '/skills/available']) {
+    const response = await fetch(`${base}/api/v1/sessions/${rawId}${suffix}`, { headers: adminHeaders })
+    assert.equal(response.status, 403, `Leadership raw-session access: ${suffix}`)
+  }
+  for (const path of [`/ws/sessions/${rawId}`, `/ws/internal/sessions/${rawId}`]) {
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const socket = new WebSocket(`${base.replace('http:', 'ws:')}${path}`, {
+        headers: adminHeaders, handshakeTimeout: 5000,
+      })
+      socket.on('error', reject)
+      socket.on('open', () => { socket.terminate(); reject(new Error('Leadership raw-session WebSocket opened')) })
+      socket.on('unexpected-response', (_request, response) => {
+        resolve(response.statusCode)
+        response.resume()
+        socket.terminate()
+      })
+    })
+    assert.equal(status, 403, `Leadership raw-session WebSocket access: ${path}`)
+  }
+  assert.equal((await fetch(`${base}/api/v1/parks/${orgId}/metrics`, { headers: adminHeaders })).status, 200)
+  await park.grantRole(orgId, issued.user.id, 'park_system_operator', issued.user.id)
 
   // Unauthenticated park admin access is rejected and audited.
   const adminPath = `${base}/api/v1/parks/${encodeURIComponent(orgId)}/admin/config`

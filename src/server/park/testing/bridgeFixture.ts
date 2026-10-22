@@ -14,7 +14,7 @@ import { BoxOperations } from '../boxOperations.js'
 import { ParkPhoneVerification } from '../phoneVerification.js'
 import { ParkCaptcha } from '../captcha.js'
 import { FakeAgentChannel } from './fakeAgentChannel.js'
-import { appendAgentInquiry } from '../agentInquiry.js'
+import { ConsultationTurns } from '../consultationTurns.js'
 import { recordSessionSearch } from '../parkAgentRoutes.js'
 import { saveConsultationSources } from '../consultationSources.js'
 import { extractLeadSignal } from '../rules.js'
@@ -71,7 +71,7 @@ const captcha = new ParkCaptcha(store, 'park-e2e-captcha-key-with-more-than-32-c
   return lastCaptchaAnswer
 })
 const agentChannel = new FakeAgentChannel()
-agentChannel.script = ['算力服务可申请，具体以园区审核为准。']
+agentChannel.script = ['根据《算力政策.md》第 1 行：算力服务可申请，具体以园区审核为准。']
 process.env.PARK_PUBLIC_URL = 'http://127.0.0.1:4173/consult'
 await store.init()
 await store.grantRole('park-1', 'leader-1', 'park_leader', 'admin-1')
@@ -196,12 +196,18 @@ agentChannel.beforeSend = async () => {
     [{ file: '算力政策.md', document_id: policyDocument.id, wiki_id: initialWiki.id, version: 'wiki-fixture', line_no: 1, end_line: 1, line: '算力服务可申请，具体以园区审核为准。' }],
     [{ source: { id: policyDocument.id, fileName: '算力政策.md', nodeName: '政策文件', sizeBytes: 1 }, version: 'wiki-fixture', markdown: '算力服务可申请，具体以园区审核为准。' }])
   recordSessionSearch(sent.mossSessionId, { count: 1, refs, at: Date.now() })
-  const config = await store.config('park-1')
-  const redactionConfig = JSON.parse(config?.redaction_config || '{}') as { extra_terms?: string[]; summary_max_length?: number }
-  const inquiryId = await appendAgentInquiry(store, { orgId: 'park-1', sessionId: anonymousSessionId, question: sent.question, answer: agentChannel.script.join(''), intent: 'policy_inquiry', industryTags: [], policyHitCount: 1, sourceRefs: refs, redactionConfig })
-  const signal = extractLeadSignal(sent.question)
-  if (signal.score >= 40) await store.saveLead('park-1', anonymousSessionId, inquiryId, signal)
+  const turns = new ConsultationTurns(store)
+  const turn = await turns.active('park-1', anonymousSessionId)
+  if (turn) await turns.retainSources(turn, refs)
 }
+
+// The browser fixture exercises the production job pipeline with a deterministic extractor.
+const extractionTimer = setInterval(() => {
+  void store.processLeadJobs(async (_orgId, question, previousTopics) => ({
+    signal: extractLeadSignal(question, previousTopics), evidence: { question }, confidence: null,
+  }))
+}, 50)
+extractionTimer.unref()
 
 let statusOverride: SessionStatusOverride | null = null
 interface SessionStatusOverride { closing_at: number | null; closed: boolean }

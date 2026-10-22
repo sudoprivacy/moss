@@ -8,7 +8,8 @@ import {
 } from "../catalog/organizationResources.js";
 import { searchParkPolicySources, type PolicyMatch } from './policySearch.js';
 import { saveConsultationSources, type ConsultationSource } from './consultationSources.js';
-import { appendAgentInquiry, isValidAgentIntent } from "./agentInquiry.js";
+import { isValidAgentIntent } from "./agentInquiry.js";
+import { ConsultationTurns } from './consultationTurns.js'
 import type { LeadSignal } from "./rules.js";
 import type { ParkStore } from "./store.js";
 
@@ -238,6 +239,9 @@ export async function dispatchParkAgentApi(
     const query = (url.searchParams.get("q") ?? "").trim().slice(0, 500);
     if (!query) throw new HttpError(400, "q is required");
     const { matches, refs } = await searchPolicyWikis(deps, grant, query);
+    const turns = new ConsultationTurns(deps.store)
+    const activeTurn = await turns.active(grant.parkOrgId, grant.anonymousSessionId)
+    if (activeTurn) await turns.retainSources(activeTurn, refs)
     recordSessionSearch(grant.agentSessionId, {
       count: matches.length,
       refs,
@@ -261,51 +265,19 @@ export async function dispatchParkAgentApi(
         400,
         "question, answer and a valid intent are required",
       );
-    const search = peekSessionSearch(grant.agentSessionId);
-    const config = await deps.store.config(grant.parkOrgId);
-    const redaction = JSON.parse(config?.redaction_config || "{}") as {
-      extra_terms?: string[];
-      summary_max_length?: number;
-    };
-    const inquiryId = await appendAgentInquiry(deps.store, {
-      orgId: grant.parkOrgId,
-      sessionId: grant.anonymousSessionId,
-      question,
-      answer,
-      intent,
-      industryTags: stringArray(body.industry_tags, 20, 60),
-      policyHitCount: search?.count ?? 0,
-      sourceRefs: search?.refs ?? [],
-      redactionConfig: redaction,
-    });
-    return { status: 201, body: { inquiry_id: inquiryId } };
+    const turns = new ConsultationTurns(deps.store)
+    const activeTurn = await turns.active(grant.parkOrgId, grant.anonymousSessionId)
+    if (!activeTurn) throw new HttpError(409, 'TURN_NOT_RUNNING')
+    await turns.suggest(activeTurn, { intent, industry_tags: stringArray(body.industry_tags, 20, 60) })
+    return { status: 201, body: { inquiry_id: activeTurn.id, recorded_by_server: true } }
   }
 
   if (method === "POST" && pathname === "/api/v1/agent/park/leads/propose") {
-    const body = await deps.readBody(req);
-    const intent = text(body.intent, 60) || "settlement_intent";
-    if (!isValidAgentIntent(intent)) throw new HttpError(400, "Invalid intent");
-    const industryTags = stringArray(body.industry_tags, 20, 60);
-    const search = peekSessionSearch(grant.agentSessionId);
-    const signal = leadSignalFromAgentInput(
-      intent,
-      industryTags,
-      search?.count ?? 0,
-      text(body.suggested_action, 200),
-    );
-    const inquiryId =
-      typeof body.source_inquiry_id === "string"
-        ? text(body.source_inquiry_id, 100)
-        : null;
-    await deps.store.saveLead(
-      grant.parkOrgId,
-      grant.anonymousSessionId,
-      inquiryId,
-      signal,
-    );
-    return { status: 201, body: { proposed: true, score: signal.score } };
+    await deps.readBody(req)
+    const activeTurn = await new ConsultationTurns(deps.store).active(grant.parkOrgId, grant.anonymousSessionId)
+    if (!activeTurn) throw new HttpError(409, 'TURN_NOT_RUNNING')
+    return { status: 202, body: { proposed: false, queued_after_response: true, source_inquiry_id: activeTurn.id } }
   }
-
   if (method === "GET" && pathname === "/api/v1/agent/park/service-catalog") {
     const config = await deps.store.config(grant.parkOrgId);
     return {

@@ -171,6 +171,13 @@ Authorization: Bearer <access_token>
 - `runtime` 仅在 default runtime 为 docker/k8s 时参与判定（`host` 时为 `null`）。
 - `k8s` 仅在 default runtime 为 k8s 时有值。
 
+## Embedded Nexus
+
+Host deployments can isolate the embedded Nexus process from another Moss
+instance by setting `MOSS_NEXUS_GRPC_PORT` and `MOSS_NEXUS_DIR`. The latter
+defaults to `<user-home>/.moss/nexus` and contains the embedded daemon binary,
+startup lock, and durable data.
+
 ## Auth Proxy
 
 An internal HTTP listener that session runtimes fetch credentials through. Not

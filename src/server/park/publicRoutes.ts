@@ -6,10 +6,14 @@ import { extractLeadSignal, redactInquiry } from "./rules.js";
 import type { ParkSessionRow, ParkStore } from "./store.js";
 import type { ParkPhoneVerification } from "./phoneVerification.js";
 import type { ParkCaptcha } from "./captcha.js";
-import type { ParkAgentChannel } from "./agentChannel.js";
+import type { ParkAgentChannel, PreparedParkTurn } from "./agentChannel.js";
 import { takeSessionSearch } from "./parkAgentRoutes.js";
+import { ConsultationTurns, type ConsultationTurn } from './consultationTurns.js'
+import { verifyAnswerCitations } from './verifiedCitations.js'
 import { readConsultationPreview } from './consultationSources.js';
 import { ManagedImageError, type ManagedImageStore } from '../configuration/managedImageStore.js'
+
+import { parkSessionLifecycle, parkIdleMs } from './sessionLifecycle.js'
 
 const COOKIE_NAME = "park_session";
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -105,10 +109,22 @@ async function ownedSession(
 ): Promise<ParkSessionRow> {
   if (!hasSessionCookie(req, id))
     throw new HttpError(401, "Session credential required");
-  const session = await deps.store.session(deps.orgId!, id);
-  if (!session || Number(session.expires_at) <= Date.now())
+  const session = await parkSessionLifecycle(deps.store).usable(deps.orgId!, id);
+  if (!session)
     throw new HttpError(401, "Session expired");
   return session;
+}
+
+async function currentCookieSession(deps: PublicRouteDeps, req: http.IncomingMessage): Promise<ParkSessionRow | undefined> {
+  for (const part of (req.headers.cookie ?? '').split(';')) {
+    const cookie = part.trim();
+    if (!cookie.startsWith(`${COOKIE_NAME}=`)) continue;
+    let id: string;
+    try { id = decodeURIComponent(cookie.slice(COOKIE_NAME.length + 1)); } catch { continue; }
+    const session = await parkSessionLifecycle(deps.store).usable(deps.orgId!, id);
+    if (session) return session;
+  }
+  return undefined;
 }
 
 function publicContext(
@@ -277,6 +293,12 @@ export async function handlePublicParkRoute(
     );
     return true;
   }
+  if (req.method === "GET" && pathname === "/public/consult/session") {
+    const session = await currentCookieSession(deps, req);
+    if (!session) throw new HttpError(401, "Session expired");
+    writeJson(res, 200, { session_id: session.id, expires_at: session.expires_at });
+    return true;
+  }
   if (req.method === "POST" && pathname === "/public/consult/sessions") {
     const body = await deps.readBody(req);
     const requested = text(body.source_channel, 40);
@@ -318,61 +340,14 @@ export async function handlePublicParkRoute(
     )
       await reject(deps, res, null, "subnet_rate", 429, ip.subnet);
     if (deps.agentChannel) {
-      const active = await deps.store.db.get<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM park_sessions WHERE org_id = ? AND expires_at > ?",
-        [deps.orgId, Date.now()],
-      );
-      if (
-        Number(active?.count ?? 0) >= (Number(rate.anonymous_session_max) || 16)
-      ) {
-        await deps.store.recordRejection(
-          deps.orgId!,
-          null,
-          "session_capacity",
-          503,
-          ip.subnet,
-        );
-        throw new HttpError(503, "SESSION_CAPACITY_REACHED");
-      }
+      if (config.assistant_status !== "published") throw new HttpError(503, "Public Assistant is not published");
+      const assistantId = (JSON.parse(config.assistant_config || "{}") as { assistant_id?: unknown }).assistant_id;
+      if (typeof assistantId !== "string" || !assistantId) throw new HttpError(503, "Public Assistant session binding is unavailable");
     }
-    let session: ParkSessionRow;
-    if (deps.agentChannel) {
-      if (config.assistant_status !== "published")
-        throw new HttpError(503, "Public Assistant is not published");
-      const assistantId = (
-        JSON.parse(config.assistant_config || "{}") as {
-          assistant_id?: unknown;
-        }
-      ).assistant_id;
-      if (typeof assistantId !== "string" || !assistantId)
-        throw new HttpError(
-          503,
-          "Public Assistant session binding is unavailable",
-        );
-      const anonymousSession = await deps.store.createSession(
-        deps.orgId!,
-        sourceChannel,
-        SESSION_TTL_MS,
-      );
-      const mossSessionId = await deps.agentChannel.createSession({
-        orgId: deps.orgId!,
-        assistantId,
-        anonymousSessionId: anonymousSession.id,
-      });
-      await deps.store.db.run(
-        "UPDATE park_sessions SET moss_session_id = ? WHERE id = ?",
-        [mossSessionId, anonymousSession.id],
-      );
-      session = (await deps.store.session(deps.orgId!, anonymousSession.id))!;
-    } else
-      session = await deps.store.createSession(
-        deps.orgId!,
-        sourceChannel,
-        SESSION_TTL_MS,
-      );
+    const session = await currentCookieSession(deps, req) ?? await deps.store.createSession(deps.orgId!, sourceChannel, SESSION_TTL_MS);
     res.setHeader(
       "Set-Cookie",
-      `${COOKIE_NAME}=${session.id}; HttpOnly; SameSite=Lax; Path=/public; Max-Age=86400${secureRequest(req) ? "; Secure" : ""}`,
+      `${COOKIE_NAME}=${session.id}; HttpOnly; SameSite=Lax; Path=/public; Max-Age=${Math.max(0, Math.ceil((Number(session.expires_at) - Date.now()) / 1000))}${secureRequest(req) ? "; Secure" : ""}`,
     );
     writeJson(res, 201, {
       session_id: session.id,
@@ -384,13 +359,9 @@ export async function handlePublicParkRoute(
   const statusRoute = /^\/public\/sessions\/([^/]+)\/status$/.exec(pathname);
   if (statusRoute && req.method === "GET" && deps.agentChannel) {
     const session = await ownedSession(deps, req, statusRoute[1]!);
-    const rate = JSON.parse(config.rate_config || "{}") as Record<
-      string,
-      unknown
-    >;
-    const idleMs = (Number(rate.anonymous_session_idle_minutes) || 30) * 60_000;
+    const idleMs = parkIdleMs(config.rate_config);
     writeJson(res, 200, {
-      closing_at: Number(session.last_active_at) + idleMs,
+      closing_at: Math.min(Number(session.expires_at), Number(session.last_active_at) + idleMs),
       closed: false,
     });
     return true;
@@ -503,6 +474,9 @@ export async function handlePublicParkRoute(
     const requestId = text(body.client_request_id, 100);
     if (!question || !/^[0-9a-f-]{36}$/i.test(requestId))
       throw new HttpError(400, "Message and client_request_id are required");
+    const turns = new ConsultationTurns(deps.store)
+    const persisted = await deps.store.db.get('SELECT question_hash FROM park_consultation_turns WHERE org_id = ? AND session_id = ? AND request_id = ?', [deps.orgId, session.id, requestId])
+    if (persisted) await turns.begin(deps.orgId, session.id, requestId, question)
     const existing =
       takeReplay(session.id, requestId) ??
       (await deps.store
@@ -546,29 +520,6 @@ export async function handlePublicParkRoute(
       await reject(deps, res, session.id, "blacklist", 429, ip.subnet);
     if (question.length > maxLength)
       await reject(deps, res, session.id, "message_too_long", 413, ip.subnet);
-    if (
-      Number(session.message_count) >= (Number(rate.session_message_max) || 50)
-    )
-      await reject(
-        deps,
-        res,
-        session.id,
-        "session_message_limit",
-        429,
-        ip.subnet,
-      );
-    if (
-      Number(session.token_budget_used) + question.length >
-      (Number(rate.session_token_budget) || 20_000)
-    )
-      await reject(
-        deps,
-        res,
-        session.id,
-        "session_token_budget",
-        429,
-        ip.subnet,
-      );
     if (exceedsWindow(`box:${deps.orgId}`, Number(rate.box_per_minute) || 120))
       await reject(deps, res, session.id, "box_rate", 429, ip.subnet);
     const isPassed = (await deps.captcha?.isPassed(session.id)) ?? false;
@@ -613,19 +564,61 @@ export async function handlePublicParkRoute(
     if (activeMessages >= (Number(rate.concurrent_max) || 8))
       await reject(deps, res, session.id, "concurrent_limit", 429, ip.subnet);
     activeMessages++;
+    let turn: ConsultationTurn | undefined
+    let prepared: PreparedParkTurn | undefined
     try {
-      if (!deps.agentChannel || !session.moss_session_id)
-        throw new HttpError(503, "Public Assistant is unavailable");
-      if (!(await deps.agentChannel.isAlive(session.moss_session_id))) {
-        await deps.store.db.run(
-          "UPDATE park_sessions SET expires_at = ? WHERE id = ?",
-          [Date.now(), session.id],
-        );
-        throw new HttpError(401, "Session expired");
-      }
+      await parkSessionLifecycle(deps.store).withSession(session.id, async () => {
+        const current = await parkSessionLifecycle(deps.store).usable(deps.orgId!, session.id);
+        if (!current) throw new HttpError(401, "Session expired");
+        Object.assign(session, current);
+        if (
+          Number(session.message_count) >= (Number(rate.session_message_max) || 50)
+        )
+          await reject(
+            deps,
+            res,
+            session.id,
+            "session_message_limit",
+            429,
+            ip.subnet,
+          );
+        if (
+          Number(session.token_budget_used) + question.length >
+          (Number(rate.session_token_budget) || 20_000)
+        )
+          await reject(
+            deps,
+            res,
+            session.id,
+            "session_token_budget",
+            429,
+            ip.subnet,
+          );
+
+        if (await turns.active(deps.orgId!, session.id)) throw new HttpError(409, "TURN_IN_PROGRESS");
+        if (!deps.agentChannel) throw new HttpError(503, "Public Assistant is unavailable");
+        try {
+          prepared = await parkSessionLifecycle(deps.store).prepare(session, deps.agentChannel);
+          const reservation = await turns.begin(deps.orgId!, session.id, requestId, question)
+          if (!reservation.isNew) throw new HttpError(409, reservation.turn.status === 'running' ? 'TURN_IN_PROGRESS' : 'TURN_INTERRUPTED')
+          turn = reservation.turn
+          await deps.store.db.run('UPDATE park_sessions SET last_active_at = ? WHERE org_id = ? AND id = ?', [Date.now(), deps.orgId, session.id]);
+        } catch (error) {
+          if (!turn) {
+            await prepared?.abandon?.();
+            prepared = undefined;
+          } else {
+            await turns.fail(turn, 'PUBLIC_RESPONSE_FAILED');
+            await deps.store.db.run('UPDATE park_sessions SET expires_at = ? WHERE org_id = ? AND id = ?', [Date.now(), deps.orgId, session.id]);
+            if (session.moss_session_id) await deps.agentChannel.terminate(session.moss_session_id);
+          }
+          throw error;
+        }
+      });
+      // Discard legacy session-local hits before sending the next turn.
+      takeSessionSearch(session.moss_session_id ?? '')
       let isStreaming = false;
-      const result = await deps.agentChannel.sendAndStream(
-        session.moss_session_id,
+      const result = await prepared!.send(
         question,
         requestId,
         (value) => {
@@ -638,25 +631,37 @@ export async function handlePublicParkRoute(
           );
         },
       );
-      const search = takeSessionSearch(session.moss_session_id);
-      const sourceRefs = search?.refs ?? [];
+      const search = takeSessionSearch(session.moss_session_id!);
+      const sourceRefs = verifyAnswerCitations(result.answer, [...await turns.sources(turn!), ...(search?.refs ?? [])]);
+      await parkSessionLifecycle(deps.store).withSession(session.id, () => turns.complete(turn!, question, result.answer, sourceRefs))
       storeReplay(session.id, requestId, result.answer, sourceRefs);
-      await deps.store.db.run(
-        "UPDATE park_sessions SET last_active_at = ?, message_count = message_count + 1, token_budget_used = token_budget_used + ? WHERE id = ?",
-        [Date.now(), question.length, session.id],
-      );
       if (isStreaming) {
         res.write(`event: sources\ndata: ${JSON.stringify(sourceRefs)}\n\n`);
         res.write("event: done\ndata: {}\n\n");
         res.end();
       } else sendSse(res, result.answer, sourceRefs);
     } catch (error) {
+      if (error instanceof HttpError && error.message === 'SESSION_CAPACITY_REACHED') {
+        await deps.store.recordRejection(deps.orgId!, session.id, 'session_capacity', 503, ip.subnet);
+        res.setHeader('Retry-After', '30');
+      }
+      if (turn) {
+        await parkSessionLifecycle(deps.store).withSession(session.id, async () => {
+          const state = await deps.store.db.get('SELECT status FROM park_consultation_turns WHERE id = ?', [turn!.id]);
+          if (state?.status === 'running') {
+            await turns.fail(turn!, 'PUBLIC_RESPONSE_FAILED');
+            await deps.store.db.run('UPDATE park_sessions SET expires_at = ? WHERE org_id = ? AND id = ?', [Date.now(), deps.orgId, session.id]);
+            if (session.moss_session_id) await deps.agentChannel?.terminate(session.moss_session_id);
+          }
+        });
+      }
       if (!res.headersSent) throw error;
       res.write(
         'event: error\ndata: {"error":"Public Assistant response failed"}\n\n',
       );
       res.end();
     } finally {
+      prepared?.dispose();
       activeMessages--;
     }
     return true;
@@ -746,31 +751,5 @@ export async function processExpiredParkSessions(
   now = Date.now(),
 ): Promise<number> {
   if (!deps.agentChannel || !deps.orgId) return 0;
-  const rate = JSON.parse(
-    (await deps.store.config(deps.orgId))?.rate_config || "{}",
-  ) as Record<string, unknown>;
-  const idleMs = (Number(rate.anonymous_session_idle_minutes) || 30) * 60_000;
-  const rows = await deps.store.db.all<{
-    id: string;
-    moss_session_id: string | null;
-    last_active_at: number;
-  }>(
-    "SELECT id, moss_session_id, last_active_at FROM park_sessions WHERE org_id = ? AND expires_at > ? AND moss_session_id IS NOT NULL",
-    [deps.orgId, now],
-  );
-  let reclaimed = 0;
-  for (const row of rows) {
-    if (now - Number(row.last_active_at) < idleMs) continue;
-    try {
-      await deps.agentChannel.terminate(row.moss_session_id!);
-    } catch {
-      // A missing agent session still must not keep the park session alive.
-    }
-    await deps.store.db.run(
-      "UPDATE park_sessions SET expires_at = ? WHERE id = ?",
-      [now, row.id],
-    );
-    reclaimed += 1;
-  }
-  return reclaimed;
+  return parkSessionLifecycle(deps.store).reclaim(deps.orgId, deps.agentChannel, now);
 }

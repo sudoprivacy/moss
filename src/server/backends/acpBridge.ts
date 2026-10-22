@@ -122,6 +122,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   // Pending RPC requests waiting for response
   const pendingRpcRequests = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timeoutId: NodeJS.Timeout }>()
   const pendingPromptIds = new Set<string>()
+  let currentTurnRequestId: string | null = null
 
   const pendingPermissions = new Map<string, {
     rpcId: string | number
@@ -538,6 +539,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     }
 
     await artifactFinalization
+    currentTurnRequestId = userUuid
     try {
       await artifacts?.begin(userUuid)
     } catch (error) {
@@ -795,7 +797,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             lastPersistedUuid = assistantUuid
           }
 
-          artifactFinalization = (artifacts?.finish(parsed.result?.stopReason === 'cancelled') ?? Promise.resolve({ changed: [] }))
+          const completedRequestId = currentTurnRequestId
+          const stopReason = parsed.result.stopReason
+          artifactFinalization = (artifacts?.finish(stopReason === 'cancelled') ?? Promise.resolve({ changed: [] }))
             .then(async ({ changed }) => {
               const artifactEvent = { type: 'artifacts', session_id: sessionId, uuid: randomUUID(), v: 1, records: changed, workspace: cwd }
               if (artifacts) {
@@ -803,7 +807,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
                 await writeTranscript({ ...artifactEvent, timestamp: new Date().toISOString() })
               }
               const errors = changed.filter(record => record.error).map(record => `${record.relativePath}: ${record.error}`)
-              emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: errors.length ? 'error' : 'success', is_error: errors.length > 0, errors, usage }) + '\n')
+              const resultEvent = { type: 'result', session_id: sessionId, request_id: completedRequestId,
+                stop_reason: stopReason, status: errors.length || stopReason !== 'end_turn' ? 'error' : 'success',
+                is_error: errors.length > 0 || stopReason !== 'end_turn', errors, usage }
+              await writeTranscript({ ...resultEvent, uuid: randomUUID(), timestamp: new Date().toISOString() })
+              emitStdout(JSON.stringify(resultEvent) + '\n')
             })
             .catch(error => {
               emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: 'error', is_error: true, errors: [`Artifact validation failed: ${String(error)}`] }) + '\n')

@@ -18,6 +18,7 @@ import { searchParkPolicySources, type PolicyMatch } from './policySearch.js'
 import { handlePublicParkRoute } from './publicRoutes.js'
 import { HttpError, writeJson } from '../httpRespond.js'
 import { appendAgentInquiry } from './agentInquiry.js'
+import { ConsultationTurns } from './consultationTurns.js'
 import { presentParkAudit, presentStoredParkAudit, recordParkAudit } from './audit.js'
 import { ensureIdentitySchema } from '../identity/identityRepository.js'
 import { createCatalogTestRepository } from '../testing/compatibilityRepositories.js'
@@ -85,6 +86,8 @@ void test('agent search carries retained source identities through inquiry persi
     vectorOptions: null,
   }
   try {
+    const turns = new ConsultationTurns(store)
+    const { turn } = await turns.begin('park', session.id, 'request', 'policy')
     const url = new URL('http://localhost/api/v1/agent/park/policies/search?q=policy')
     const result = await dispatchParkAgentApi(deps, auth, 'GET', url.pathname, url, {} as never)
     assert.ok(result && result.status === 200)
@@ -96,6 +99,8 @@ void test('agent search carries retained source identities through inquiry persi
     assert.equal(record.refs[0].preview_status, 'available')
     const inquiryUrl = new URL('http://localhost/api/v1/agent/park/inquiries')
     await dispatchParkAgentApi(deps, auth, 'POST', inquiryUrl.pathname, inquiryUrl, {} as never)
+    assert.equal(await driver.get('SELECT id FROM park_inquiries LIMIT 1'), undefined)
+    await turns.complete(turn, 'policy', 'answer', record.refs)
     const row = await driver.get<{ source_refs_json: string }>(
       'SELECT source_refs_json FROM park_inquiries LIMIT 1',
     )

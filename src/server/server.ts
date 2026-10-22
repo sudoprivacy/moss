@@ -2,6 +2,10 @@ import { dispatchExternalProvider, isExternalProviderRoute } from './externalPro
 import { ExternalProviderError } from './externalProviders/policy.js'
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { ParkStore } from './park/store.js'
+import { ConsultationTurns } from './park/consultationTurns.js'
+import { createParkInquiryExtractor } from './park/inquiryExtraction.js'
+import { canReadParkRuntime } from './park/sessionAccess.js'
+import { upgradeParkRecordingInstructions } from './park/publicAssistant.js'
 import { handlePublicParkRoute } from './park/publicRoutes.js'
 import { ManagedImageStore } from './configuration/managedImageStore.js'
 import { handleInternalParkRoute, recordParkAudit, parkAuditContext } from './park/internalRoutes.js'
@@ -2084,9 +2088,27 @@ export function startServer(
   const parkOrgId = process.env.PARK_ORG_ID?.trim() || null
   const parkSkillEntries = loadParkSkillEntries()
   let parkReady: Promise<void> | null = null
-  const ensureParkReady = () => (parkReady ??= parkStore.init().then(() => recordBoxDatabaseRevision(parkStore.db)))
+  const ensureParkReady = () => (parkReady ??= (async () => {
+    await parkStore.init()
+    await recordBoxDatabaseRevision(parkStore.db)
+    if (parkOrgId) {
+      const interrupted = await new ConsultationTurns(parkStore).interruptPending(parkOrgId)
+      for (const sessionId of interrupted) {
+        await parkAgentChannel.terminate(sessionId).catch(() => logger.warn('Could not terminate an expired interrupted park runtime'))
+      }
+      await parkStore.db.run("UPDATE park_lead_jobs SET status = 'queued' WHERE org_id = ? AND status = 'processing'", [parkOrgId])
+      await upgradeParkRecordingInstructions(parkStore.db, parkOrgId, await parkSkillEntries)
+    }
+  })())
+  const inquiryExtractor = createParkInquiryExtractor(authService)
+  const canAccessRuntimeSession = async (auth: AuthContext, session: Parameters<typeof canAccessSession>[1] & { source?: string | null }, scope: string) => {
+    if (!canAccessSession(auth, session, scope)) return false
+    if (session.source !== PARK_PUBLIC_SESSION_SOURCE) return true
+    await ensureParkReady()
+    return canReadParkRuntime(parkStore, auth, session)
+  }
   const parkLeadTimer = setInterval(() => {
-    if (parkReady) void parkStore.processLeadJobs().catch(error => logger.error(String(error)))
+    if (parkReady) void parkReady.then(() => parkStore.processLeadJobs(inquiryExtractor)).catch(error => logger.error(String(error)))
   }, 10_000)
   parkLeadTimer.unref()
   const parkReclaimTimer = setInterval(() => {
@@ -3775,7 +3797,7 @@ export function startServer(
         // ownsAttempt below only proves the attempt lives on THIS instance —
         // it says nothing about the caller, and the LB route param lets any
         // client aim the request at the owner instance.
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
 
@@ -10624,7 +10646,7 @@ export function startServer(
       if (req.method === 'GET' && sessionRuntimeMetadataMatch) {
         const session = await runtime.getSession(sessionRuntimeMetadataMatch[1] || '')
         if (!session) throw new HttpError(404, 'Session not found')
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) throw new HttpError(403, 'Forbidden')
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) throw new HttpError(403, 'Forbidden')
         if (sessionRuntimeMetadataMatch[2] === 'artifacts') {
           writeJson(res, 200, await readArtifacts(artifactManifestPath(session.transcriptPath)))
         } else {
@@ -10642,7 +10664,7 @@ export function startServer(
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
         const context = session.source === PARK_PUBLIC_SESSION_SOURCE
@@ -10674,7 +10696,7 @@ export function startServer(
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
         await respondAfterSessionResume(runtime, sessionId, req, res, async (ready, signal) => {
@@ -10699,7 +10721,7 @@ export function startServer(
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
-        if (!canAccessSession(auth, session, 'sessions:terminate:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:terminate:any')) {
           throw new HttpError(403, 'Forbidden')
         }
         if (session.source === PARK_PUBLIC_SESSION_SOURCE) {
@@ -10715,7 +10737,7 @@ export function startServer(
         const sessionId = sessionWorkspaceTreeMatch[1] || ''
         const session = await runtime.getSession(sessionId)
         if (!session) throw new HttpError(404, 'Session not found')
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
         const root = await readWorkspaceTree(session, {
@@ -10732,7 +10754,7 @@ export function startServer(
         const sessionId = sessionWorkspaceFileMatch[1] || ''
         const session = await runtime.getSession(sessionId)
         if (!session) throw new HttpError(404, 'Session not found')
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
         writeJson(res, 200, await readWorkspaceFilePreview(
@@ -10747,7 +10769,7 @@ export function startServer(
         const sessionId = sessionWorkspaceFileMatch[1] || ''
         const session = await runtime.getSession(sessionId)
         if (!session) throw new HttpError(404, 'Session not found')
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
         const body = await readJsonBody(req)
@@ -10783,7 +10805,7 @@ export function startServer(
         const sessionId = sessionAvailableSkillsMatch[1] || ''
         const session = await runtime.getSession(sessionId)
         if (!session) throw new HttpError(404, 'Session not found')
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
         writeJson(res, 200, { skills: await getSessionAvailableSkills(runtime, sessionId) })
@@ -10797,7 +10819,7 @@ export function startServer(
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
         // Non-blocking: if the runtime is dead we kick off the respawn in the
@@ -10826,7 +10848,7 @@ export function startServer(
         if (!session) {
           throw new HttpError(404, 'Session not found')
         }
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           throw new HttpError(403, 'Forbidden')
         }
         const body = await readJsonBody(req)
@@ -10987,7 +11009,7 @@ export function startServer(
             socket.destroy()
             return
           }
-          if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+          if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
             socket.destroy()
             return
@@ -11041,7 +11063,7 @@ export function startServer(
                   const current = token ? await authService.verifyAccessToken(token) : null
                   const visible = await runtime.getSession(sessionId)
                   return Boolean(current && visible && hasExactScope(current.scopes, 'internal:channel') &&
-                    canAccessSession(current, visible, 'sessions:attach:any'))
+                    await canAccessRuntimeSession(current, visible, 'sessions:attach:any'))
                 },
                 onMessage: data => {
                   if (runtime.isUserRuntimeUpgrading(session.userId)) {
@@ -11101,7 +11123,7 @@ export function startServer(
           socket.destroy()
           return
         }
-        if (!canAccessSession(auth, session, 'sessions:attach:any')) {
+        if (!await canAccessRuntimeSession(auth, session, 'sessions:attach:any')) {
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
           socket.destroy()
           return
@@ -11194,7 +11216,7 @@ export function startServer(
             verify: async () => {
               const current = token ? await authService.verifyAccessToken(token) : null
               const visible = await runtime.getSession(sessionId)
-              return Boolean(current && visible && canAccessSession(current, visible, 'sessions:attach:any'))
+              return Boolean(current && visible && await canAccessRuntimeSession(current, visible, 'sessions:attach:any'))
             },
             onMessage: data => {
               const text = wsDataToText(data)

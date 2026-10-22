@@ -11,6 +11,7 @@ import { DirectConnectStore } from "../db.js";
 import { HttpError, writeJson } from "../httpRespond.js";
 import { extractLeadSignal, redactInquiry } from "./rules.js";
 import { ParkStore } from "./store.js";
+import { ConsultationTurns } from "./consultationTurns.js";
 import {
   handlePublicParkRoute,
   parkIpIdentity,
@@ -241,6 +242,8 @@ void test("park agent tool endpoints authorize via session token context and per
     intent: "settlement_intent",
     industry_tags: ["人工智能", "机器人"],
   };
+  const turns = new ConsultationTurns(store);
+  const { turn } = await turns.begin(orgId, anonymousSession.id, randomUUID(), inquiryBody.question);
   const inquiry = await dispatchParkAgentApi(
     { ...deps, readBody: async () => inquiryBody },
     makeAuth("agent-1", "moss-1"),
@@ -250,6 +253,15 @@ void test("park agent tool endpoints authorize via session token context and per
     {} as never,
   );
   assert.ok(inquiry && inquiry.status === 201);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM park_inquiries').get()!.count, 0);
+  const lead = await dispatchParkAgentApi(
+    { ...deps, readBody: async () => ({ intent: 'settlement_intent' }) },
+    makeAuth('agent-1', 'moss-1'), 'POST', '/api/v1/agent/park/leads/propose',
+    new URL('http://localhost/api/v1/agent/park/leads/propose'), {} as never,
+  );
+  assert.ok(lead && lead.status === 202);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM park_leads').get()!.count, 0);
+  await turns.complete(turn, inquiryBody.question, inquiryBody.answer, peekSessionSearch('moss-1')!.refs);
   const row = db
     .prepare("SELECT * FROM park_inquiries WHERE org_id = ?")
     .get(orgId) as {
@@ -260,41 +272,13 @@ void test("park agent tool endpoints authorize via session token context and per
     client_request_id: string;
   };
   assert.ok(row.redacted_question.includes("[手机号]"));
-  assert.equal(row.intent, "settlement_intent");
-  assert.equal(
-    row.confidence,
-    computeAgentConfidence("settlement_intent", ["人工智能", "机器人"], 2),
-  );
+  assert.equal(row.intent, "一般咨询");
+  assert.equal(row.confidence, 0);
   assert.deepEqual(JSON.parse(row.source_refs_json), [
     { name: "租金减免政策.md", version: "wiki-v1", section: "第 2 行" },
   ]);
-  assert.ok(row.client_request_id.startsWith("agent-"));
+  assert.equal(row.client_request_id, turn.request_id);
 
-  // lead.propose derives a lead without requiring a prior inquiry reference.
-  const leadBody = {
-    intent: "settlement_intent",
-    industry_tags: ["人工智能"],
-    suggested_action: "安排参观",
-  };
-  const lead = await dispatchParkAgentApi(
-    { ...deps, readBody: async () => leadBody },
-    makeAuth("agent-1", "moss-1"),
-    "POST",
-    "/api/v1/agent/park/leads/propose",
-    new URL("http://localhost/api/v1/agent/park/leads/propose"),
-    {} as never,
-  );
-  assert.ok(lead && lead.status === 201);
-  const leadRow = db
-    .prepare("SELECT * FROM park_leads WHERE org_id = ?")
-    .get(orgId) as {
-    source_session_id: string;
-    source_inquiry_id: string | null;
-    score: number;
-  };
-  assert.equal(leadRow.source_session_id, anonymousSession.id);
-  assert.equal(leadRow.source_inquiry_id, null);
-  assert.ok(leadRow.score >= 40);
 });
 
 void test("publishing the public assistant binds the policy wiki and registers the org skill", async () => {
@@ -439,20 +423,15 @@ void test("public consultation streams through the agent channel with server-rec
     assert.equal(created.status, 201);
     const cookie = created.headers.get("set-cookie")!.split(";")[0];
     const session = (await created.json()) as { session_id: string };
-    const row = await driver.get<{ moss_session_id: string }>(
-      "SELECT moss_session_id FROM park_sessions WHERE id = ?",
-      [session.session_id],
-    );
-    const mossSessionId = row?.moss_session_id;
-    assert.ok(mossSessionId);
-    assert.equal(channel.created[0]?.anonymousSessionId, session.session_id);
-    assert.equal(channel.created[0]?.assistantId, "agent-1");
+    assert.equal(channel.created.length, 0);
+    let mossSessionId: string | undefined;
     // Simulate the skill's policy.search recording its hits server-side.
-    recordSessionSearch(mossSessionId!, {
+    channel.beforeSend = async () => { mossSessionId = (await store.session("park-1", session.session_id))!.moss_session_id!; if (channel.sent.length === 1) recordSessionSearch(mossSessionId!, {
       count: 1,
       refs: [{ name: "算力政策.md", version: "wiki-v1", section: "第 2 行" }],
       at: Date.now(),
     });
+    };
     const requestId = randomUUID();
     const ask = () =>
       fetch(`${base}/public/sessions/${session.session_id}/messages`, {
@@ -487,14 +466,14 @@ void test("public consultation streams through the agent channel with server-rec
       })
     ).text();
     assert.doesNotMatch(nextTurn, /算力政策\.md/);
-    // Inquiry rows now come from the agent skill, not the route.
+    // Every completed response is persisted once by the public route.
     assert.equal(
       (
         await driver.get<{ count: number }>(
           "SELECT COUNT(*) AS count FROM park_inquiries",
         )
       )?.count,
-      0,
+      2,
     );
     const updated = await driver.get<{ message_count: number }>(
       "SELECT message_count FROM park_sessions WHERE id = ?",
@@ -508,7 +487,7 @@ void test("public consultation streams through the agent channel with server-rec
   }
 });
 
-void test("idle anonymous sessions are reclaimed and the session capacity is enforced", async () => {
+void test("idle lightweight visitor sessions are reclaimed without starting a runtime", async () => {
   const driver = new SqliteDriver(new DatabaseSync(":memory:"));
   const store = new ParkStore(driver);
   await store.init();
@@ -555,7 +534,8 @@ void test("idle anonymous sessions are reclaimed and the session capacity is enf
     assert.equal(second.status, 201);
     const cookie = second.headers.get("set-cookie")!.split(";")[0];
     const session = (await second.json()) as { session_id: string };
-    assert.equal((await make()).status, 503);
+    assert.equal((await make()).status, 201);
+    assert.equal(channel.created.length, 0);
     // The status endpoint reports the server-authoritative closing time.
     const status = (await (
       await fetch(`${base}/public/sessions/${session.session_id}/status`, {
@@ -568,8 +548,8 @@ void test("idle anonymous sessions are reclaimed and the session capacity is enf
     await driver.run("UPDATE park_sessions SET last_active_at = ?", [
       Date.now() - 31 * 60_000,
     ]);
-    assert.equal(await processExpiredParkSessions(deps), 2);
-    assert.equal(channel.terminated.length, 2);
+    assert.equal(await processExpiredParkSessions(deps), 3);
+    assert.equal(channel.terminated.length, 0);
     const expired = await fetch(
       `${base}/public/sessions/${session.session_id}/status`,
       { headers: { cookie } },
@@ -636,7 +616,7 @@ void test("lead jobs survive processing retries and claim is atomic", async () =
     )?.count,
     1,
   );
-  await store.processLeadJobs();
+  await store.processLeadJobs(async () => ({ signal, evidence: {}, confidence: null }));
   const lead = await store.leadBySession("park-1", session.id);
   assert.ok(lead);
   assert.equal(await store.claimLead("park-1", lead.id, "user-1"), true);
@@ -669,12 +649,14 @@ void test("monthly report uses Shanghai month boundaries and overview channels u
     orgId: "park-1",
     sessionId: session.id,
     requestId: "boundary",
+    inquiryId: randomUUID(),
     question: "入驻",
     answer: "已回答",
     signal,
     sourceRefs: [
       {
-        policy_id: "policy-1",
+        document_id: "policy-1",
+        citation_status: "verified",
         name: "入驻政策",
         version: "v1",
         section: "第一条",
@@ -692,19 +674,19 @@ void test("monthly report uses Shanghai month boundaries and overview channels u
     [lastMinute, session.id],
   );
   assert.equal(
-    (await parkMonthlyReport(store, "park-1", "2026-10")).inquiries,
+    (await parkMonthlyReport(store, "park-1", "2026-10", lastMinute)).inquiries,
     1,
   );
   assert.equal(
-    (await parkMonthlyReport(store, "park-1", "2026-11")).inquiries,
+    (await parkMonthlyReport(store, "park-1", "2026-11", lastMinute)).inquiries,
     0,
   );
   const overview = await parkOverview(store, "park-1", lastMinute);
   assert.deepEqual(overview.channels, [
-    { channel: "campaign-a", sessions: 1, consulted: 1, contacted: 0 },
+    { channel: "campaign-a", sessions: 1, consulted: 1, contacted: 0, converted: 0 },
   ]);
   assert.deepEqual(overview.policy_interest, [
-    { policy: "入驻政策", count: 1 },
+    { document_id: "policy-1", policy: "入驻政策", count: 1 },
   ]);
   await driver.close();
 });
@@ -714,9 +696,9 @@ void test("compliance metrics separate rejection reasons and use inclusive reten
   const store = new ParkStore(driver);
   await store.init();
   await driver.exec(
-    "CREATE TABLE operation_audit_events (org_id TEXT NOT NULL, response_status INTEGER NOT NULL)",
+    "CREATE TABLE operation_audit_events (org_id TEXT NOT NULL, response_status INTEGER NOT NULL, created_at BIGINT NOT NULL DEFAULT 0, path TEXT NOT NULL DEFAULT '')",
   );
-  const now = Date.now();
+  const now = Date.now() + 1000;
   const session = await store.createSession("park-1", "web", 60_000);
   await driver.run("UPDATE park_sessions SET risk_state = ? WHERE id = ?", [
     "challenge_required",
@@ -732,8 +714,8 @@ void test("compliance metrics separate rejection reasons and use inclusive reten
   await store.recordRejection("park-1", session.id, "ip_rate", 429, null);
   for (const status of [401, 403, 500])
     await driver.run(
-      "INSERT INTO operation_audit_events (org_id, response_status) VALUES (?, ?)",
-      ["park-1", status],
+      "INSERT INTO operation_audit_events (org_id, response_status, created_at, path) VALUES (?, ?, ?, ?)",
+      ["park-1", status, now, "/api/v1/parks/park-1/metrics"],
     );
   for (const [index, retention] of [
     now - 1,
@@ -1092,7 +1074,7 @@ void test("public route streams agent answers idempotently and never leaks inter
     const inquiry = await driver.get<{ count: number }>(
       "SELECT COUNT(*) AS count FROM park_inquiries",
     );
-    assert.equal(inquiry?.count, 0);
+    assert.equal(inquiry?.count, 1);
     const noCookie = await fetch(
       `${base}/public/sessions/${session.session_id}/messages`,
     );
@@ -1267,7 +1249,7 @@ void test("public HTTP limits persist distinct box, IP, subnet, blacklist, lengt
   const store = new ParkStore(driver);
   await store.init();
   await driver.exec(
-    "CREATE TABLE operation_audit_events (org_id TEXT NOT NULL, response_status INTEGER NOT NULL)",
+    "CREATE TABLE operation_audit_events (org_id TEXT NOT NULL, response_status INTEGER NOT NULL, created_at BIGINT NOT NULL DEFAULT 0, path TEXT NOT NULL DEFAULT '')",
   );
   let orgId = "rate-box";
   const limitsChannel = new FakeAgentChannel();
@@ -1640,31 +1622,6 @@ void test("public inquiry flows through contact, recruiter actions, leader total
     );
     assert.equal(question.status, 200);
     assert.match(await question.text(), /入驻企业可申请园区算力支持/);
-    // The agent skill records the turn server-side: simulate its calls
-    // (policy search recording + inquiry append) exactly as park-tools would.
-    const journeyQuestion =
-      "我们是人工智能企业，下个月需要 200 平米场地和算力，如何入驻？电话 13812345678";
-    const journeyMapping = await driver.get<{ moss_session_id: string }>(
-      "SELECT moss_session_id FROM park_sessions WHERE id = ?",
-      [session.session_id],
-    );
-    recordSessionSearch(journeyMapping!.moss_session_id!, {
-      count: 1,
-      refs: [{ name: "入驻及算力政策", version: "v1", section: "第一条" }],
-      at: Date.now(),
-    });
-    await appendAgentInquiry(store, {
-      orgId: "journey-park",
-      sessionId: session.session_id,
-      question: journeyQuestion,
-      answer: "根据《入驻及算力政策》第一条：入驻企业可申请园区算力支持。",
-      intent: "settlement_intent",
-      industryTags: ["人工智能"],
-      policyHitCount: 1,
-      sourceRefs: [
-        { name: "入驻及算力政策", version: "v1", section: "第一条" },
-      ],
-    });
     const journeyInquiryId = await driver.get<{ id: string }>(
       "SELECT id FROM park_inquiries WHERE org_id = ? AND session_id = ?",
       ["journey-park", session.session_id],
@@ -1697,7 +1654,7 @@ void test("public inquiry flows through contact, recruiter actions, leader total
           source.section,
         ],
       ),
-      [["入驻及算力政策", "v1", "第一条"]],
+      [],
     );
     const contact = await fetch(
       `${base}/public/sessions/${session.session_id}/contact`,
@@ -2138,3 +2095,164 @@ void test('deleting a policy document cascades out of every wiki source list', a
   await connect.close()
   } finally { await rm(cascadeHome, { recursive: true, force: true }) }
 })
+
+void test('runtime admission serializes startup and recovery, preserves active slots and cleans failed binding', async () => {
+  const driver = new SqliteDriver(new DatabaseSync(':memory:'));
+  const store = new ParkStore(driver);
+  await store.init();
+  await store.putConfig('admission', { display_name: 'Admission', assistant_status: 'published', assistant_config: JSON.stringify({ assistant_id: 'agent' }), rate_config: JSON.stringify({ anonymous_session_max: 1 }) });
+  const { parkSessionLifecycle } = await import('./sessionLifecycle.js');
+  const lifecycle = parkSessionLifecycle(store);
+  const channel = new FakeAgentChannel();
+  const first = await store.createSession('admission', 'web', 86_400_000);
+  const second = await store.createSession('admission', 'web', 86_400_000);
+  try {
+    const results = await Promise.allSettled([lifecycle.prepare(first, channel), lifecycle.prepare(second, channel)]);
+    assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+    const rejected = results.find(result => result.status === 'rejected');
+    assert.ok(rejected?.status === 'rejected');
+    assert.equal(rejected.reason.message, 'SESSION_CAPACITY_REACHED');
+    assert.equal(await channel.runningCount('admission'), 1);
+    assert.equal(channel.created.length, 1);
+    const prepared = await lifecycle.prepare(first, channel);
+    prepared.dispose();
+    channel.idleSessions.add(first.moss_session_id!);
+    const next = await lifecycle.prepare(second, channel);
+    next.dispose();
+    await assert.rejects(lifecycle.prepare(first, channel), /SESSION_CAPACITY_REACHED/);
+    channel.idleSessions.add(second.moss_session_id!);
+    const restored = await lifecycle.prepare(first, channel);
+    restored.dispose();
+    assert.equal(channel.created.length, 2);
+    await driver.run('UPDATE park_sessions SET last_active_at = ?', [Date.now() - 31 * 60_000]);
+    const running = await new ConsultationTurns(store).begin('admission', first.id, randomUUID(), 'still running');
+    assert.equal(await lifecycle.reclaim('admission', channel, Date.now()), 1);
+    assert.ok(await lifecycle.usable('admission', first.id));
+    await new ConsultationTurns(store).fail(running.turn, 'test');
+    assert.equal(await lifecycle.reclaim('admission', channel, Date.now()), 1);
+    const third = await store.createSession('admission', 'web', 86_400_000);
+    const originalRun = driver.run.bind(driver);
+    driver.run = async (sql, params) => {
+      if (sql.startsWith('UPDATE park_sessions SET moss_session_id = ?')) throw new Error('controlled binding failure');
+      return originalRun(sql, params);
+    };
+    await assert.rejects(lifecycle.prepare(third, channel), /controlled binding failure/);
+    assert.equal(await channel.runningCount('admission'), 0);
+    assert.equal((await store.session('admission', third.id))!.moss_session_id, null);
+    driver.run = originalRun;
+    const retry = await lifecycle.prepare(third, channel);
+    retry.dispose();
+    assert.equal(await channel.runningCount('admission'), 1);
+  } finally { await driver.close(); }
+});
+
+void test('public initialization reuses cookie identity without changing attribution or budgets', async () => {
+  const driver = new SqliteDriver(new DatabaseSync(':memory:'));
+  const store = new ParkStore(driver);
+  await store.init();
+  await store.putConfig('reuse', { display_name: 'Reuse', assistant_status: 'published', assistant_config: JSON.stringify({ assistant_id: 'agent' }) });
+  const channel = new FakeAgentChannel();
+  const deps = { store, orgId: 'reuse', agentChannel: channel, readBody: async () => ({ source_channel: 'campaign' }) };
+  const server = http.createServer((req, res) => {
+    void handlePublicParkRoute(req, res, new URL(req.url!, 'http://localhost').pathname, deps).catch(error => writeJson(res, error instanceof HttpError ? error.statusCode : 500, { error: error.message }));
+  });
+  await new Promise<void>(resolve => server.listen(0, resolve));
+  try {
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const base = `http://127.0.0.1:${address.port}`;
+    const first = await fetch(`${base}/public/consult/sessions`, { method: 'POST' });
+    const cookie = first.headers.get('set-cookie')!.split(';')[0];
+    const session = await first.json() as { session_id: string };
+    await driver.run('UPDATE park_sessions SET message_count = 4, token_budget_used = 200 WHERE id = ?', [session.session_id]);
+    const before = (await store.session('reuse', session.session_id))!;
+    const next = await fetch(`${base}/public/consult/sessions`, { method: 'POST', headers: { cookie } });
+    assert.equal((await next.json() as { session_id: string }).session_id, session.session_id);
+    assert.deepEqual(await store.session('reuse', session.session_id), before);
+    assert.equal(channel.created.length, 0);
+    assert.equal((await fetch(`${base}/public/consult/session`, { headers: { cookie } })).status, 200);
+    assert.equal((await fetch(`${base}/public/consult/session`)).status, 401);
+    await driver.run('UPDATE park_sessions SET last_active_at = ? WHERE id = ?', [Date.now() - 31 * 60_000, session.session_id]);
+    assert.equal((await fetch(`${base}/public/consult/session`, { headers: { cookie } })).status, 401);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await driver.close();
+  }
+});
+
+void test('HTTP capacity refusal does not consume a turn and retries after runtime idle release', async () => {
+  const driver = new SqliteDriver(new DatabaseSync(':memory:'));
+  const store = new ParkStore(driver); await store.init();
+  await store.putConfig('capacity-http', { display_name: 'Capacity', assistant_status: 'published', assistant_config: JSON.stringify({ assistant_id: 'agent' }), rate_config: JSON.stringify({ anonymous_session_max: 1 }) });
+  const channel = new FakeAgentChannel(); channel.script = ['answer'];
+  const deps = { store, orgId: 'capacity-http', agentChannel: channel, readBody: async (req: http.IncomingMessage) => { let raw = ''; for await (const chunk of req) raw += String(chunk); return raw ? JSON.parse(raw) as Record<string, unknown> : {}; } };
+  const server = http.createServer((req, res) => { void handlePublicParkRoute(req, res, new URL(req.url!, 'http://localhost').pathname, deps).catch(error => writeJson(res, error instanceof HttpError ? error.statusCode : 500, { error: error.message })); });
+  await new Promise<void>(resolve => server.listen(0, resolve));
+  try {
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const base = `http://127.0.0.1:${address.port}`;
+    const create = async () => { const res = await fetch(`${base}/public/consult/sessions`, { method: 'POST' }); return { cookie: res.headers.get('set-cookie')!.split(';')[0], id: (await res.json() as { session_id: string }).session_id }; };
+    const first = await create(); const second = await create();
+    const ask = (visitor: { cookie: string; id: string }, requestId: string) => fetch(`${base}/public/sessions/${visitor.id}/messages`, { method: 'POST', headers: { cookie: visitor.cookie, 'content-type': 'application/json' }, body: JSON.stringify({ message: 'question', client_request_id: requestId }) });
+    const answer = await ask(first, randomUUID()); assert.match(await answer.text(), /event: done/);
+    const requestId = randomUUID();
+    const blocked = await ask(second, requestId);
+    assert.equal(blocked.status, 503); assert.equal(blocked.headers.get('Retry-After'), '30');
+    assert.equal((await blocked.json() as { error: string }).error, 'SESSION_CAPACITY_REACHED');
+    assert.equal((await driver.get<{ count: number }>('SELECT COUNT(*) AS count FROM park_consultation_turns WHERE session_id = ?', [second.id]))!.count, 0);
+    assert.ok(await store.session('capacity-http', second.id));
+    channel.idleSessions.add((await store.session('capacity-http', first.id))!.moss_session_id!);
+    const retried = await ask(second, requestId); assert.match(await retried.text(), /event: done/);
+    assert.equal((await driver.get<{ count: number }>('SELECT COUNT(*) AS count FROM park_inquiries WHERE session_id = ?', [second.id]))!.count, 1);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await driver.close(); }
+});
+
+void test('prepared runtime uses one connection and cleans a failed startup even when no ID was returned', async () => {
+  const { ParkRuntimeAgentChannel } = await import('./agentChannel.js');
+  const { PassThrough } = await import('node:stream');
+  const socket = new PassThrough();
+  let ensures = 0; const retired: string[] = [];
+  const runtime = {
+    createSession: async () => { throw new Error('startup failed'); },
+    listSessionRecords: async () => [{ sessionId: 'partial', source: 'park_public_consultation', channelChatId: 'visitor', status: 'failed' }, { sessionId: 'unrelated', source: 'wiki-build', channelChatId: 'visitor', status: 'active' }],
+    terminateSession: async (id: string) => { retired.push(id); },
+    ensureSessionReady: async () => { ensures++; return { attempt: {} }; },
+    store: { getCurrentAttempt: async () => ({}) },
+    connectToAttempt: async () => socket,
+  } as unknown as import('../runtimeService.js').RuntimeService;
+  const channel = new ParkRuntimeAgentChannel(runtime);
+  await assert.rejects(channel.createSession({ orgId: 'park', assistantId: 'agent', anonymousSessionId: 'visitor' }), /startup failed/);
+  assert.deepEqual(retired, ['partial']);
+  const prepared = await channel.prepareTurn('runtime', false);
+  const response = prepared.send('question', 'request', () => {});
+  setImmediate(() => {
+    socket.write(JSON.stringify({ type: 'text', text: 'answer' }) + '\n');
+    socket.write(JSON.stringify({ type: 'result', session_id: 'runtime', request_id: 'request', status: 'success' }) + '\n');
+  });
+  assert.equal((await response).answer, 'answer');
+  assert.equal(ensures, 0); prepared.dispose();
+});
+
+void test('expired bound sessions retry failed termination and abandoned preparation releases only its acquired runtime', async () => {
+  const driver = new SqliteDriver(new DatabaseSync(':memory:')); const store = new ParkStore(driver); await store.init();
+  await store.putConfig('cleanup', { display_name: 'Cleanup', assistant_status: 'published', assistant_config: JSON.stringify({ assistant_id: 'agent' }) });
+  const { parkSessionLifecycle } = await import('./sessionLifecycle.js'); const lifecycle = parkSessionLifecycle(store); const channel = new FakeAgentChannel();
+  try {
+    const session = await store.createSession('cleanup', 'web', 86_400_000);
+    const acquired = await lifecycle.prepare(session, channel);
+    await acquired.abandon!();
+    assert.equal(await channel.runningCount('cleanup'), 0);
+    assert.equal((await store.session('cleanup', session.id))!.moss_session_id, null);
+    const active = await lifecycle.prepare((await store.session('cleanup', session.id))!, channel); active.dispose();
+    const reused = await lifecycle.prepare((await store.session('cleanup', session.id))!, channel); await reused.abandon!();
+    assert.equal(await channel.runningCount('cleanup'), 1);
+    await driver.run('UPDATE park_sessions SET expires_at = ? WHERE id = ?', [Date.now() - 1, session.id]);
+    const terminate = channel.terminate.bind(channel); let fail = true;
+    channel.terminate = async id => { if (fail) throw new Error('controlled termination failure'); await terminate(id); };
+    await assert.rejects(lifecycle.reclaim('cleanup', channel, Date.now()), /controlled termination failure/);
+    assert.equal(await channel.runningCount('cleanup'), 1);
+    fail = false; await lifecycle.reclaim('cleanup', channel, Date.now());
+    assert.equal(await channel.runningCount('cleanup'), 0);
+    assert.ok((await store.session('cleanup', session.id))!.moss_session_id);
+  } finally { await driver.close(); }
+});

@@ -6,6 +6,8 @@ import type { AuthContext } from '../auth/token.js'
 import type { AuthService } from '../auth/service.js'
 import type { DocumentStore } from '../documentStore.js'
 import { parkCompliance, parkLeadSummary, parkMonthlyReport, parkOverview } from './aggregates.js'
+import { shanghaiMonth } from './statistics.js'
+import { requestedStatisticsRange } from './statisticsPeriod.js'
 import type { LeadStatus, ParkRole, ParkStore } from './store.js'
 import type { BoxOperations } from './boxOperations.js'
 import { getModelProviderApiKey } from '../modelListCache.js'
@@ -125,24 +127,24 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
 
   if (suffix === 'metrics' && req.method === 'GET') {
     requireRole(role, 'park_leader')
-    writeJson(res, 200, await parkOverview(deps.store, parkId))
+    writeJson(res, 200, await parkOverview(deps.store, parkId, Date.now(), requestedStatisticsRange(req.url!)))
     return true
   }
   if (suffix === 'leads/summary' && req.method === 'GET') {
     requireRole(role, 'park_leader')
-    writeJson(res, 200, await parkLeadSummary(deps.store, parkId))
+    writeJson(res, 200, await parkLeadSummary(deps.store, parkId, Date.now(), requestedStatisticsRange(req.url!)))
     return true
   }
   if (suffix === 'reports' && req.method === 'GET') {
     requireRole(role, 'park_leader')
-    const month = new URL(req.url!, 'http://localhost').searchParams.get('month') ?? new Date().toISOString().slice(0, 7)
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpError(400, 'Invalid month')
+    const month = new URL(req.url!, 'http://localhost').searchParams.get('month') ?? shanghaiMonth()
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || month > shanghaiMonth()) throw new HttpError(400, 'Invalid month')
     writeJson(res, 200, await parkMonthlyReport(deps.store, parkId, month))
     return true
   }
   if (suffix === 'compliance/summary' && req.method === 'GET') {
     requireRole(role, 'park_leader')
-    writeJson(res, 200, await parkCompliance(deps.store, parkId))
+    writeJson(res, 200, await parkCompliance(deps.store, parkId, Date.now(), requestedStatisticsRange(req.url!)))
     return true
   }
 
@@ -171,7 +173,7 @@ export async function handleInternalParkRoute(req: http.IncomingMessage, res: ht
     if (req.method === 'GET' && !leadRoute[2]) {
       const [contact, followUps, inquiries] = await Promise.all([
         deps.store.contact(parkId, leadId), deps.store.followUps(parkId, leadId),
-        deps.store.db.all('SELECT id, redacted_question, redacted_answer, intent, industry, scale, urgency, concerns_json, created_at FROM park_inquiries WHERE org_id = ? AND session_id = ? ORDER BY created_at', [parkId, lead.source_session_id]),
+        deps.store.db.all('SELECT id, redacted_question, redacted_answer, intent, industry, scale, urgency, concerns_json, completion_status, extraction_status, extraction_version, created_at FROM park_inquiries WHERE org_id = ? AND session_id = ? ORDER BY created_at', [parkId, lead.source_session_id]),
       ])
       writeJson(res, 200, { ...lead, tags: JSON.parse(lead.tags_json), tags_json: undefined,
         contact: contact ?? null, follow_ups: followUps, inquiries })

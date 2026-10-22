@@ -17,6 +17,7 @@ export interface ConsultationSource {
   source_id?: string
   ranges?: SourceRange[]
   preview_status?: 'available' | 'unavailable'
+  citation_status?: 'verified' | 'unverified'
 }
 
 /** Merge positions without changing the retrieved clauses or their scoring. */

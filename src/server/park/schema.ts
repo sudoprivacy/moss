@@ -1,6 +1,29 @@
 import type { DbDriver } from '../db/driver.js'
 
 const TABLES = [
+  `CREATE TABLE IF NOT EXISTS park_question_groups (
+    inquiry_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, group_key TEXT NOT NULL,
+    display_question TEXT NOT NULL, rule_version TEXT NOT NULL, is_displayable INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS park_question_groups_org_key_idx ON park_question_groups (org_id, group_key)`,
+  `CREATE TABLE IF NOT EXISTS park_consultation_turns (
+    id TEXT PRIMARY KEY, org_id TEXT NOT NULL, session_id TEXT NOT NULL,
+    request_id TEXT NOT NULL, question_hash TEXT NOT NULL,
+    status TEXT NOT NULL, suggestion_json TEXT NOT NULL DEFAULT '{}',
+    started_at BIGINT NOT NULL, completed_at BIGINT,
+    failure_code TEXT, UNIQUE (session_id, request_id)
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS park_turn_running_idx ON park_consultation_turns (session_id) WHERE status = 'running'`,
+  `CREATE TABLE IF NOT EXISTS park_turn_sources (
+    turn_id TEXT NOT NULL, document_id TEXT NOT NULL, wiki_id TEXT NOT NULL,
+    version TEXT NOT NULL, source_json TEXT NOT NULL,
+    PRIMARY KEY (turn_id, document_id, wiki_id, version)
+  )`,
+  `CREATE TABLE IF NOT EXISTS park_lead_events (
+    org_id TEXT NOT NULL, lead_id TEXT NOT NULL, kind TEXT NOT NULL,
+    occurred_at BIGINT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (lead_id, kind)
+  )`,
   `CREATE TABLE IF NOT EXISTS park_source_bodies (
     org_id TEXT NOT NULL, sha256 TEXT NOT NULL, markdown TEXT NOT NULL,
     PRIMARY KEY (org_id, sha256)
@@ -154,4 +177,8 @@ async function migrateLegacyColumns(driver: DbDriver): Promise<void> {
   await addColumnIfMissing(driver, 'park_config', 'consent_text', "TEXT NOT NULL DEFAULT ''")
   await addColumnIfMissing(driver, 'park_sessions', 'moss_session_id', 'TEXT')
   await relaxLeadInquiryNullable(driver)
+  await addColumnIfMissing(driver, 'park_inquiries', 'completion_status', "TEXT NOT NULL DEFAULT 'legacy'")
+  await addColumnIfMissing(driver, 'park_inquiries', 'extraction_status', "TEXT NOT NULL DEFAULT 'legacy'")
+  await addColumnIfMissing(driver, 'park_inquiries', 'extraction_json', "TEXT NOT NULL DEFAULT '{}'")
+  await addColumnIfMissing(driver, 'park_inquiries', 'extraction_version', 'TEXT')
 }

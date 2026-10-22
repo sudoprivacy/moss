@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { DbDriver, SqlRow } from '../db/driver.js'
 import { initializeParkSchema } from './schema.js'
+import { prepareQuestionGroups, saveQuestionGroup } from './popularQuestions.js'
 import type { WikiSourceSnapshot } from '../wikiSourceSnapshot.js'
 import { isPolicyPublic, type LeadSignal, type PublicPolicy } from './rules.js'
+import { processInquiryJobs } from './inquiryJobs.js'
+import type { InquiryExtractor } from './inquiryExtraction.js'
 
 export type ParkRole = 'park_leader' | 'park_recruiter' | 'park_system_operator'
 export type LeadStatus = 'proposed' | 'claimed' | 'following_up' | 'converted' | 'invalid' | 'closed'
@@ -72,7 +75,7 @@ export interface ParkPolicyRow extends SqlRow, PublicPolicy {
 export class ParkStore {
   constructor(readonly db: DbDriver) {}
 
-  async init(): Promise<void> { await initializeParkSchema(this.db) }
+  async init(): Promise<void> { await initializeParkSchema(this.db); await prepareQuestionGroups(this) }
 
   async config(orgId: string): Promise<ParkConfigRow | undefined> {
     return this.db.get<ParkConfigRow>('SELECT * FROM park_config WHERE org_id = ?', [orgId])
@@ -129,6 +132,10 @@ export class ParkStore {
     [orgId, value.display_name, value.logo_url, value.welcome_text, value.contact_enabled,
       value.park_profile, value.service_catalog, value.service_catalog_version, value.assistant_status,
       value.assistant_config, value.rate_config, value.redaction_config, value.consent_text, Date.now()])
+    if (patch.redaction_config !== undefined && patch.redaction_config !== current?.redaction_config) {
+      const rows = await this.db.all("SELECT id, redacted_question FROM park_inquiries WHERE org_id = ? AND completion_status = 'completed'", [orgId])
+      for (const row of rows) await saveQuestionGroup(this, String(row.id), orgId, String(row.redacted_question))
+    }
     return (await this.config(orgId))!
   }
 
@@ -204,8 +211,8 @@ export class ParkStore {
     return this.db.get('SELECT * FROM park_inquiries WHERE session_id = ? AND client_request_id = ?', [sessionId, requestId])
   }
 
-  async recordInquiry(input: { orgId: string; sessionId: string; requestId: string; question: string; answer: string; signal: LeadSignal; sourceRefs: unknown[] }): Promise<string> {
-    const id = randomUUID()
+  async recordInquiry(input: { orgId: string; sessionId: string; requestId: string; inquiryId?: string; question: string; answer: string; signal: LeadSignal; sourceRefs: unknown[] }): Promise<string> {
+    const id = input.inquiryId ?? randomUUID()
     return this.db.transaction(async () => {
       const inserted = await this.db.run(`INSERT INTO park_inquiries (id, org_id, session_id, client_request_id, redacted_question, redacted_answer, category, intent, industry, scale, urgency, concerns_json, confidence, source_refs_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (session_id, client_request_id) DO NOTHING`,
@@ -214,43 +221,51 @@ export class ParkStore {
         input.signal.urgency, JSON.stringify(input.signal.concerns), 1, JSON.stringify(input.sourceRefs), Date.now()])
       const row = await this.inquiryByRequest(input.sessionId, input.requestId)
       const inquiryId = String(row!.id)
-      if (inserted === 1 && input.signal.score >= 40) {
+      if (inserted === 1) {
+        await this.db.run('UPDATE park_inquiries SET completion_status = ?, extraction_status = ?, confidence = 0 WHERE id = ?',
+          [input.inquiryId ? 'completed' : 'legacy', input.inquiryId ? 'queued' : 'legacy', inquiryId])
         await this.db.run(`INSERT INTO park_lead_jobs (inquiry_id, org_id, session_id, signal_json, status, attempts, next_at)
           VALUES (?, ?, ?, ?, 'queued', 0, ?) ON CONFLICT (inquiry_id) DO NOTHING`,
         [inquiryId, input.orgId, input.sessionId, JSON.stringify(input.signal), Date.now()])
       }
+      if (inserted === 1 && input.inquiryId) await saveQuestionGroup(this, inquiryId, input.orgId, input.question)
       return inquiryId
     })
   }
 
-  async processLeadJobs(): Promise<void> {
-    await this.db.tryRunExclusive('park:lead-jobs', async () => {
-      const due = await this.db.all<{ inquiry_id: string; org_id: string; session_id: string; signal_json: string; attempts: number }>(
-        "SELECT * FROM park_lead_jobs WHERE status = 'queued' AND next_at <= ? ORDER BY next_at LIMIT 20", [Date.now()])
-      for (const job of due) {
-        try {
-          await this.saveLead(job.org_id, job.session_id, job.inquiry_id, JSON.parse(job.signal_json) as LeadSignal)
-          await this.db.run('UPDATE park_lead_jobs SET status = ?, last_error = NULL WHERE inquiry_id = ?', ['done', job.inquiry_id])
-        } catch (error) {
-          const attempts = Number(job.attempts) + 1
-          await this.db.run('UPDATE park_lead_jobs SET attempts = ?, next_at = ?, last_error = ? WHERE inquiry_id = ?',
-            [attempts, Date.now() + Math.min(60_000, attempts * 5000), String(error).slice(0, 500), job.inquiry_id])
-        }
-      }
-    })
+  async processLeadJobs(extract?: InquiryExtractor): Promise<void> {
+    await processInquiryJobs(this, extract)
+  }
+
+  async recordLeadEvent(orgId: string, leadId: string, kind: string, now = Date.now(), evidence: Record<string, unknown> = {}): Promise<void> {
+    await this.db.run(`INSERT INTO park_lead_events (org_id, lead_id, kind, occurred_at, evidence_json)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT (lead_id, kind) DO NOTHING`, [orgId, leadId, kind, now, JSON.stringify(evidence)])
   }
 
   async saveLead(orgId: string, sessionId: string, inquiryId: string | null, signal: LeadSignal): Promise<ParkLeadRow> {
-    const id = randomUUID()
-    const now = Date.now()
-    await this.db.run(`INSERT INTO park_leads (id, org_id, source_session_id, source_inquiry_id, score, score_explanation, tags_json, suggested_action, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (source_session_id) DO UPDATE SET source_inquiry_id = excluded.source_inquiry_id,
-      score = excluded.score, score_explanation = excluded.score_explanation, tags_json = excluded.tags_json,
-      suggested_action = excluded.suggested_action, updated_at = excluded.updated_at`,
-    [id, orgId, sessionId, inquiryId, signal.score, signal.scoreExplanation,
-      JSON.stringify(signal.concerns), signal.suggestedAction, now, now])
-    return (await this.leadBySession(orgId, sessionId))!
+    return this.db.transaction(async () => {
+      if (!await this.session(orgId, sessionId)) throw new Error('Lead source session not found')
+      if (inquiryId && !await this.db.get('SELECT id FROM park_inquiries WHERE org_id = ? AND session_id = ? AND id = ?', [orgId, sessionId, inquiryId])) throw new Error('Lead source inquiry not found')
+      const previous = await this.leadBySession(orgId, sessionId)
+      if (previous?.source_inquiry_id && inquiryId) {
+        const newer = await this.db.get('SELECT created_at FROM park_inquiries WHERE id = ? AND org_id = ?', [previous.source_inquiry_id, orgId])
+        const candidate = await this.db.get('SELECT created_at FROM park_inquiries WHERE id = ? AND org_id = ?', [inquiryId, orgId])
+        if (newer && candidate && Number(newer.created_at) > Number(candidate.created_at)) return previous
+      }
+      const id = randomUUID()
+      const now = Date.now()
+      await this.db.run(`INSERT INTO park_leads (id, org_id, source_session_id, source_inquiry_id, score, score_explanation, tags_json, suggested_action, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (source_session_id) DO UPDATE SET source_inquiry_id = excluded.source_inquiry_id,
+        score = excluded.score, score_explanation = excluded.score_explanation, tags_json = excluded.tags_json,
+        suggested_action = excluded.suggested_action, updated_at = excluded.updated_at`,
+      [id, orgId, sessionId, inquiryId, signal.score, signal.scoreExplanation,
+        JSON.stringify(signal.concerns), signal.suggestedAction, now, now])
+      const lead = (await this.leadBySession(orgId, sessionId))!
+      if (!previous) await this.recordLeadEvent(orgId, lead.id, 'created', now, { source: inquiryId ? 'inquiry' : 'direct_contact', inquiry_id: inquiryId })
+      return lead
+
+    })
   }
 
   async leadBySession(orgId: string, sessionId: string): Promise<ParkLeadRow | undefined> {
@@ -274,6 +289,8 @@ export class ParkStore {
   async saveContact(orgId: string, leadId: string, input: { name: string | null; companyName: string | null; phone: string | null; email: string | null; consentText: string; retentionUntil: number; phoneVerifiedAt?: number | null }): Promise<void> {
     const now = Date.now()
     await this.db.transaction(async () => {
+      const previous = await this.contact(orgId, leadId)
+      if (!previous) await this.recordLeadEvent(orgId, leadId, 'contacted', now, { source: 'consented_contact' })
       await this.db.run(`INSERT INTO park_contacts (lead_id, org_id, name, company_name, phone, email, consent_text, consent_at, retention_until, phone_verified_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (lead_id) DO UPDATE SET name = excluded.name, company_name = excluded.company_name,
@@ -288,11 +305,21 @@ export class ParkStore {
   }
 
   async claimLead(orgId: string, id: string, ownerId: string): Promise<boolean> {
-    return (await this.db.run("UPDATE park_leads SET status = 'claimed', owner_id = ?, updated_at = ? WHERE org_id = ? AND id = ? AND status = 'proposed' AND owner_id IS NULL", [ownerId, Date.now(), orgId, id])) === 1
+    return this.db.transaction(async () => {
+      const now = Date.now()
+      const changed = (await this.db.run("UPDATE park_leads SET status = 'claimed', owner_id = ?, updated_at = ? WHERE org_id = ? AND id = ? AND status = 'proposed' AND owner_id IS NULL", [ownerId, now, orgId, id])) === 1
+      if (changed) await this.recordLeadEvent(orgId, id, 'claimed', now, { actor_id: ownerId })
+      return changed
+    })
   }
 
   async closeLead(orgId: string, id: string, ownerId: string, status: 'converted' | 'invalid' | 'closed'): Promise<boolean> {
-    return (await this.db.run("UPDATE park_leads SET status = ?, updated_at = ? WHERE org_id = ? AND id = ? AND owner_id = ? AND status IN ('claimed', 'following_up')", [status, Date.now(), orgId, id, ownerId])) === 1
+    return this.db.transaction(async () => {
+      const now = Date.now()
+      const changed = (await this.db.run("UPDATE park_leads SET status = ?, updated_at = ? WHERE org_id = ? AND id = ? AND owner_id = ? AND status IN ('claimed', 'following_up')", [status, now, orgId, id, ownerId])) === 1
+      if (changed) await this.recordLeadEvent(orgId, id, status, now, { actor_id: ownerId })
+      return changed
+    })
   }
 
   async addFollowUp(orgId: string, leadId: string, actorId: string, note: string, outcome: string | null): Promise<string | null> {
