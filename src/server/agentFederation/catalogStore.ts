@@ -14,6 +14,11 @@ import { ExternalProviderError } from '../externalProviders/policy.js'
 import { validateCatalogDocument } from './catalogContract.js'
 
 export interface CatalogFilters {
+  approval_status?: string; provider?: string
+  zone?: string
+  execution_mode?: string
+  source_state?: string
+  drift?: string
   search?: string
   protocol?: string
   status?: string

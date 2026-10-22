@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ExternalCatalogOverview } from "./external-catalog-overview";
+import { ExternalRunEvents } from "./external-run-events";
 import { ExternalAgentVersions } from "./external-agent-versions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +21,7 @@ import {
   type ImportCandidate,
   type CatalogAuditEvent,
   type CatalogRun,
+  type CatalogVersionDetail,
 } from "@/lib/api/agent-catalog";
 import {
   createExternalAgentsApi,
@@ -108,7 +111,9 @@ export function ExternalAgentCatalog({
     candidates: string | null;
     audit: string | null;
   }>({ sources: null, candidates: null, audit: null });
-  const [tab, setTab] = useState<"sources" | "candidates" | "audit">("sources");
+  const [tab, setTab] = useState<
+    "catalog" | "sources" | "candidates" | "audit"
+  >("catalog");
   const [search, setSearch] = useState("");
   const [protocol, setProtocol] = useState("");
   const [status, setStatus] = useState("");
@@ -141,6 +146,17 @@ export function ExternalAgentCatalog({
     null,
   );
   const [candidate, setCandidate] = useState<ImportCandidate | null>(null);
+  const [candidateRelease, setCandidateRelease] = useState<CatalogVersionDetail | null>(null);
+  useEffect(() => {
+    const current = new AbortController();
+    setCandidateRelease(null);
+    if (candidate?.published_version) {
+      void createAgentCatalogApi(() => current.signal).agent(candidate.catalog_id).then(view => {
+        if (!current.signal.aborted) setCandidateRelease(view.version_details.find(v => v.version === candidate.published_version) ?? null);
+      }).catch(() => { /* Unknown authority keeps promotion disabled. */ });
+    }
+    return () => current.abort();
+  }, [candidate?.id, candidate?.published_version, agents]);
   const [decisionNote, setDecisionNote] = useState("");
   const [days, setDays] = useState(7);
   const [runSource, setRunSource] = useState<CatalogSource | null>(null);
@@ -198,7 +214,10 @@ export function ExternalAgentCatalog({
     try {
       await action();
       if (!abort.current.signal.aborted) {
-        if (reload) await load();
+        if (reload) {
+          await load();
+          await onChanged();
+        }
         if (message) setNotice(message);
       }
     } catch (e) {
@@ -209,6 +228,7 @@ export function ExternalAgentCatalog({
     }
   }
   async function more() {
+    if (tab === "catalog") return;
     const after = cursors[tab];
     if (!after) return;
     if (tab === "sources") {
@@ -265,26 +285,29 @@ export function ExternalAgentCatalog({
         aria-label="外部智能体治理"
         className="flex flex-wrap gap-2 border-b pb-3"
       >
-        {(["sources", "candidates", "audit"] as const).map((name) => (
-          <Button
-            key={name}
-            role="tab"
-            aria-selected={tab === name}
-            variant={tab === name ? "default" : "ghost"}
-            onClick={() => {
-              setTab(name);
-              setStatus("");
-            }}
-          >
-            {
+        {(["catalog", "sources", "candidates", "audit"] as const).map(
+          (name) => (
+            <Button
+              key={name}
+              role="tab"
+              aria-selected={tab === name}
+              variant={tab === name ? "default" : "ghost"}
+              onClick={() => {
+                setTab(name);
+                setStatus("");
+              }}
+            >
               {
-                sources: "来源连接",
-                candidates: "待审核候选",
-                audit: "审计记录",
-              }[name]
-            }
-          </Button>
-        ))}
+                {
+                  catalog: "智能体目录",
+                  sources: "来源连接",
+                  candidates: "待审核候选",
+                  audit: "审计记录",
+                }[name]
+              }
+            </Button>
+          ),
+        )}
       </div>
       {error && (
         <Alert variant="destructive">
@@ -296,108 +319,129 @@ export function ExternalAgentCatalog({
           {notice}
         </p>
       )}
-      <div className="flex flex-wrap gap-2">
-        <Input
-          aria-label="搜索治理记录"
-          className="max-w-xs"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="名称、标识或地址"
+      {tab === "catalog" && (
+        <ExternalCatalogOverview
+          agents={agents}
+          onVersion={setVersionAgent}
+          onSource={setSourceToEdit}
+          onRuns={async (source) => {
+            const page = await api.runs(source.catalog_id);
+            setRuns(page.items);
+            setRunCursor(page.next_cursor);
+            setRunSource(source);
+          }}
         />
-        {tab !== "audit" && (
-          <>
-            <select
-              aria-label="按协议筛选"
-              className={selectClass}
-              value={protocol}
-              onChange={(e) => setProtocol(e.target.value)}
-            >
-              <option value="">所有协议</option>
-              {options.map((p) => (
-                <option key={p}>{p}</option>
-              ))}
-            </select>
-            <select
-              aria-label="按状态筛选"
-              className={selectClass}
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-            >
-              <option value="">所有状态</option>
-              {(tab === "sources"
-                ? ["enabled", "disabled", "unknown", "available", "unavailable"]
-                : [
-                    "draft",
-                    "pending_approval",
-                    "approved",
-                    "published",
-                    "rejected",
-                    "publication_unknown",
-                    "archived",
-                  ]
-              ).map((s) => (
-                <option key={s} value={s}>
-                  {s === "enabled"
-                    ? "已启用"
-                    : s === "disabled"
-                      ? "已停用"
-                      : label(s)}
-                </option>
-              ))}
-            </select>
-            {tab === "sources" && (
-              <Input
-                aria-label="按负责人筛选"
-                className="max-w-48"
-                placeholder="负责人 ID"
-                value={owner}
-                onChange={(e) => setOwner(e.target.value)}
-              />
-            )}
-            <select
-              aria-label="按支持能力筛选"
-              className={selectClass}
-              value={capability}
-              onChange={(e) => setCapability(e.target.value)}
-            >
-              <option value="">所有能力</option>
-              {[
-                "streaming",
-                "cancel",
-                "resume",
-                "idempotency",
-                "version_pin",
-                "human_approval",
-              ].map((c) => (
-                <option key={c} value={c}>
-                  支持{fieldNames[c]}
-                </option>
-              ))}
-            </select>
-            <select
-              aria-label="按可观测性筛选"
-              className={selectClass}
-              value={observability}
-              onChange={(e) => setObservability(e.target.value)}
-            >
-              <option value="">所有可观测性</option>
-              {["full", "partial", "none", "unknown"].map((c) => (
-                <option key={c} value={c}>
-                  {label(c)}
-                </option>
-              ))}
-            </select>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={hasWarning}
-                onChange={(e) => setHasWarning(e.target.checked)}
-              />
-              仅含警告
-            </label>
-          </>
-        )}
-      </div>
+      )}
+      {tab !== "catalog" && (
+        <div className="flex flex-wrap gap-2">
+          <Input
+            aria-label="搜索治理记录"
+            className="max-w-xs"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="名称、标识或地址"
+          />
+          {tab !== "audit" && (
+            <>
+              <select
+                aria-label="按协议筛选"
+                className={selectClass}
+                value={protocol}
+                onChange={(e) => setProtocol(e.target.value)}
+              >
+                <option value="">所有协议</option>
+                {options.map((p) => (
+                  <option key={p}>{p}</option>
+                ))}
+              </select>
+              <select
+                aria-label="按状态筛选"
+                className={selectClass}
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+              >
+                <option value="">所有状态</option>
+                {(tab === "sources"
+                  ? [
+                      "enabled",
+                      "disabled",
+                      "unknown",
+                      "available",
+                      "unavailable",
+                    ]
+                  : [
+                      "draft",
+                      "pending_approval",
+                      "approved",
+                      "published",
+                      "rejected",
+                      "publication_unknown",
+                      "archived",
+                    ]
+                ).map((s) => (
+                  <option key={s} value={s}>
+                    {s === "enabled"
+                      ? "已启用"
+                      : s === "disabled"
+                        ? "已停用"
+                        : label(s)}
+                  </option>
+                ))}
+              </select>
+              {tab === "sources" && (
+                <Input
+                  aria-label="按负责人筛选"
+                  className="max-w-48"
+                  placeholder="负责人 ID"
+                  value={owner}
+                  onChange={(e) => setOwner(e.target.value)}
+                />
+              )}
+              <select
+                aria-label="按支持能力筛选"
+                className={selectClass}
+                value={capability}
+                onChange={(e) => setCapability(e.target.value)}
+              >
+                <option value="">所有能力</option>
+                {[
+                  "streaming",
+                  "cancel",
+                  "resume",
+                  "idempotency",
+                  "version_pin",
+                  "human_approval",
+                ].map((c) => (
+                  <option key={c} value={c}>
+                    支持{fieldNames[c]}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="按可观测性筛选"
+                className={selectClass}
+                value={observability}
+                onChange={(e) => setObservability(e.target.value)}
+              >
+                <option value="">所有可观测性</option>
+                {["full", "partial", "none", "unknown"].map((c) => (
+                  <option key={c} value={c}>
+                    {label(c)}
+                  </option>
+                ))}
+              </select>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={hasWarning}
+                  onChange={(e) => setHasWarning(e.target.checked)}
+                />
+                仅含警告
+              </label>
+            </>
+          )}
+        </div>
+      )}
       {tab === "sources" && (
         <>
           {attachable.length > 0 && (
@@ -710,7 +754,7 @@ export function ExternalAgentCatalog({
           </p>
         </div>
       )}
-      {cursors[tab] && (
+      {tab !== "catalog" && cursors[tab] && (
         <div className="flex items-center gap-3">
           <Button
             size="sm"
@@ -729,6 +773,7 @@ export function ExternalAgentCatalog({
         <ExternalAgentVersions
           agent={versionAgent}
           managed
+          onChanged={onChanged}
           onClose={() => setVersionAgent(null)}
         />
       )}
@@ -752,7 +797,9 @@ export function ExternalAgentCatalog({
             {runs.map((r) => (
               <details key={r.task_id} className="rounded border p-3 text-xs">
                 <summary className="cursor-pointer">
-                  {date(r.created_at)} · {label(r.status)} · {r.task_id}
+                  {date(r.created_at)} ·{" "}
+                  {r.status === "running" ? "执行中" : label(r.status)} ·{" "}
+                  {r.task_id}
                 </summary>
                 <div className="mt-3 grid gap-2 break-all sm:grid-cols-2">
                   <div>Task：{r.task_id}</div>
@@ -794,6 +841,10 @@ export function ExternalAgentCatalog({
                     </p>
                   )}
                 </div>
+                <ExternalRunEvents
+                  agent={runSource.catalog_id}
+                  task={r.task_id}
+                />
               </details>
             ))}
             {runCursor && (
@@ -830,6 +881,7 @@ export function ExternalAgentCatalog({
             await api.update(sourceToEdit, change);
             setSourceToEdit(null);
             await load();
+            await onChanged();
           }}
         />
       )}
@@ -855,6 +907,12 @@ export function ExternalAgentCatalog({
               </Badge>
             </div>
             <dl className="grid gap-2 break-all text-xs sm:grid-cols-2">
+              <div>外部标识：{candidate.snapshot.external_agent_id}</div>
+              <div>
+                拟登记目录身份：{candidate.catalog_id}（由 Sudo
+                分配，非外部标识）
+              </div>
+              <div>来源身份：尚未验证</div>
               <div>
                 来源修订：{candidate.snapshot.source_revision ?? "来源未提供"}
               </div>
@@ -1081,7 +1139,7 @@ export function ExternalAgentCatalog({
                     <Button
                       key={channel}
                       variant="outline"
-                      disabled={isBusy}
+                      disabled={isBusy || !candidateRelease?.can_promote}
                       onClick={() =>
                         void run(async () => {
                           const page = await releases.versions(

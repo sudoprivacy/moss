@@ -205,7 +205,7 @@ async function fixture(
 }
 
 for (const kind of ['http', 'openai', 'mcp', 'a2a'] as const)
-  test(`catalog ${kind}: import, idempotent sync, separate approval/publication/channel, invoke, new revision`, async (t) => {
+  void test(`catalog ${kind}: import, idempotent sync, separate approval/publication/channel, invoke, new revision`, async (t) => {
     const f = await fixture(kind)
     t.after(f.close)
     const candidate = await f.sync(),
@@ -288,7 +288,7 @@ for (const kind of ['http', 'openai', 'mcp', 'a2a'] as const)
     assert.equal(f.server.control.invocations, 1)
   })
 
-test('catalog authorization, connection changes, disable/enable and audit contain no credential values', async (t) => {
+void test('catalog authorization, connection changes, disable/enable and audit contain no credential values', async (t) => {
   const f = await fixture()
   t.after(f.close)
   const c = await f.sync()
@@ -357,7 +357,7 @@ test('catalog authorization, connection changes, disable/enable and audit contai
   )
 })
 
-test('lost publication response reconciles exact version without another publish', async (t) => {
+void test('lost publication response reconciles exact version without another publish', async (t) => {
   const f = await fixture()
   t.after(f.close)
   const c = await f.approve(await f.sync())
@@ -383,7 +383,7 @@ test('lost publication response reconciles exact version without another publish
   )
 })
 
-test('adoption is explicit, GET stays read-only and preserves legacy versions', async (t) => {
+void test('adoption is explicit, GET stays read-only and preserves legacy versions', async (t) => {
   const f = await fixture('http', true)
   t.after(f.close)
   await f.service.review(actor, f.agent.id, true, f.agent.revision)
@@ -408,7 +408,7 @@ test('adoption is explicit, GET stays read-only and preserves legacy versions', 
   await f.g.assertVersion(actor, f.agent.id, versions.items[0].version)
 })
 
-test('partial publication can be quarantined without retry; review renewal creates a separate candidate', async (t) => {
+void test('partial publication can be quarantined without retry; review renewal creates a separate candidate', async (t) => {
   const f = await fixture()
   t.after(f.close)
   const c = await f.approve(await f.sync())
@@ -451,7 +451,7 @@ test('partial publication can be quarantined without retry; review renewal creat
   )
 })
 
-test('credential rotation, connection mutation and private snapshot corruption invalidate approval', async (t) => {
+void test('credential rotation, connection mutation and private snapshot corruption invalidate approval', async (t) => {
   const f = await fixture()
   t.after(f.close)
   const approved = await f.approve(await f.sync())
@@ -487,7 +487,7 @@ test('credential rotation, connection mutation and private snapshot corruption i
   )
 })
 
-test('historical dispatch provenance survives source edits; old evidence profile stays compatible', async (t) => {
+void test('historical dispatch provenance survives source edits; old evidence profile stays compatible', async (t) => {
   const f = await fixture('a2a')
   t.after(f.close)
   const c = await f.publish(await f.sync())
@@ -560,7 +560,7 @@ test('historical dispatch provenance survives source edits; old evidence profile
   assert.equal(f.server.control.invocations, 1)
 })
 
-test('server filtering spans all pages; audit pagination is newest-first and organization-scoped', async (t) => {
+void test('server filtering spans all pages; audit pagination is newest-first and organization-scoped', async (t) => {
   const f = await fixture()
   t.after(f.close)
   for (let i = 0; i < 65; i++) {
@@ -628,7 +628,7 @@ test('server filtering spans all pages; audit pagination is newest-first and org
   )
 })
 
-test('reusing a provider revision for different content is a conflict and cannot alter the active version', async (t) => {
+void test('reusing a provider revision for different content is a conflict and cannot alter the active version', async (t) => {
   const f = await fixture()
   t.after(f.close)
   const published = await f.publish(await f.sync())
@@ -650,7 +650,7 @@ test('reusing a provider revision for different content is a conflict and cannot
   )
 })
 
-test('concurrent decisions, publication and channel changes serialize with revision checks', async (t) => {
+void test('concurrent decisions, publication and channel changes serialize with revision checks', async (t) => {
   const f = await fixture()
   t.after(f.close)
   const draft = await f.sync()
@@ -698,7 +698,7 @@ test('concurrent decisions, publication and channel changes serialize with revis
   )
 })
 
-test('policy revision invalidates previously validated and approved candidates', async (t) => {
+void test('policy revision invalidates previously validated and approved candidates', async (t) => {
   const f = await fixture()
   t.after(f.close)
   const c = await f.approve(await f.sync()),
@@ -717,7 +717,7 @@ test('policy revision invalidates previously validated and approved candidates',
   )
 })
 
-test('provenance retention drains successive batches and preserves non-retired execution facts', async (t) => {
+void test('provenance retention drains successive batches and preserves non-retired execution facts', async (t) => {
   const f = await fixture()
   t.after(f.close)
   const { maintainRetention, PILOT_RETENTION } = await import('../externalProviders/retention.js')
@@ -736,7 +736,7 @@ test('provenance retention drains successive batches and preserves non-retired e
 })
 
 
-test('Dify catalog governance preserves uploaded definition limitations through actual HTTP execution', async t => {
+void test('Dify catalog governance preserves uploaded definition limitations through actual HTTP execution', async t => {
   const f = await fixture(), dify = await difyReference(); t.after(f.close); t.after(dify.close)
   const policy = await f.service.administration.policy(actor)
   await f.service.administration.setPolicy(actor, { revision: policy.revision, enabled: true, endpoints: [f.server.endpoint, dify.endpoint] })
@@ -758,4 +758,102 @@ test('Dify catalog governance preserves uploaded definition limitations through 
   assert.equal((await f.service.store.task(member, task.id)).answer, '42')
   assert.equal((await f.service.evidence(member, task.id)).provenance?.protocol, 'dify/chat-messages')
   assert.equal(dify.control.invocations, 1)
+})
+
+void test('catalog read model distinguishes approval/publication/stable and is read-only across revocation', async t => {
+  const { CatalogReadModel } = await import('./catalogReadModel.js')
+  const f = await fixture('a2a'); t.after(f.close)
+  const read = new CatalogReadModel(f.g), current = () => read.entry(actor, f.agent.id)
+  assert.equal((await current()).entry.status, 'draft')
+  let c = await f.sync()
+  c = await f.g.decide(actor, c.id, { revision:c.revision, action:'submit', note:'Review' })
+  assert.equal((await current()).entry.status,'pending_approval')
+  c = await f.g.decide(actor, c.id, { revision:c.revision, action:'approve', note:'Review', review_days:1 })
+  assert.equal((await current()).entry.status,'approved')
+  assert.equal((await f.service.releases.list(actor,f.agent.id)).items.length,0)
+  c = await f.g.publish(actor,c.id,{revision:c.revision})
+  const version = c.published_version!
+  assert.equal((await current()).entry.status,'published')
+  await f.service.releases.moveChannel(actor,f.agent.id,'canary',version,0)
+  assert.equal((await current()).entry.is_selectable,false,'canary is not the default member selection')
+  await f.service.releases.moveChannel(actor,f.agent.id,'stable',version,0)
+  const active = await current()
+  assert.equal(active.entry.status,'active'); assert.equal(active.entry.is_selectable,true)
+  assert.equal(active.entry.provider,'a2a')
+  assert.equal(active.versions[0].source_revision,c.snapshot.source_revision)
+  assert.equal(active.versions[0].adapter_version,c.snapshot.adapter_version)
+  assert.equal(active.versions[0].source_identity,'unverified')
+  // Administrator need not be personally in the conversation grant list.
+  assert.equal((await read.entry({...actor,userId:'another-admin'},f.agent.id)).entry.is_selectable,true)
+  await assert.rejects(read.entry({...actor,orgId:'foreign'},f.agent.id),{code:'AGENT_NOT_FOUND'})
+  await f.service.releases.revoke(actor,f.agent.id,version,'Synthetic revocation')
+  const revoked = await current()
+  assert.equal(revoked.entry.status,'revoked');assert.equal(revoked.entry.is_selectable,false)
+  assert.equal(revoked.versions[0].revoke_reason,'Synthetic revocation');assert.equal(revoked.versions[0].can_promote,false)
+  assert.equal((await f.service.releases.list(actor,f.agent.id)).items.length,1)
+  assert.equal((await f.service.releases.list(actor,f.agent.id)).channels.every(c=>!c.enabled),true)
+})
+
+void test('catalog availability and filters follow source/authority gates, preserving immutable provenance', async t => {
+  const { CatalogReadModel } = await import('./catalogReadModel.js')
+  const f=await fixture('openai');t.after(f.close)
+  const c=await f.publish(await f.sync()),version=c.published_version!,read=new CatalogReadModel(f.g)
+  await f.service.releases.moveChannel(actor,f.agent.id,'stable',version,0)
+  const task=await f.service.create({...actor,userId:'member'},syntheticTaskSubmission({agent_id:f.agent.id,query:'6 * 7',idempotency_key:randomUUID()}))
+  await f.service.waitForTask(task.id)
+  assert.ok((await read.entry(actor,f.agent.id)).entry.last_run_at)
+  assert.equal((await read.page(actor,'',{provider:'openai_compatible',status:'active',approval_status:'approved',zone:'unassigned',execution_mode:'external_hosted'})).items.length,1)
+  assert.equal((await read.page(actor,'',{provider:'a2a'})).items.length,0)
+  assert.equal((await read.page(actor,'',{approval_status:'revoked'})).items.length,0)
+  const s=(await f.g.data.source(actor,f.source!.id)).view
+  await f.g.updateSource(actor,s.id,{revision:s.revision,enabled:false})
+  const disabled=await read.entry(actor,f.agent.id)
+  assert.equal(disabled.entry.status,'unavailable');assert.equal(disabled.entry.is_selectable,false)
+  assert.equal(disabled.versions[0].adapter_version,c.snapshot.adapter_version)
+  assert.equal((await read.page(actor,'',{source_state:'disabled',status:'unavailable'})).items.length,1)
+  const original=f.service.releases.list.bind(f.service.releases)
+  f.service.releases.list=async()=>{throw new Error('authority offline')}
+  const failed=await read.entry(actor,f.agent.id)
+  assert.equal(failed.entry.is_selectable,false);assert.equal(failed.entry.admission_error,'CATALOG_READ_UNAVAILABLE')
+  f.service.releases.list=original
+})
+
+void test('admin normalized events are paginated, organization/agent scoped and omit business payloads', async t => {
+  const { dispatchCatalogGovernance }=await import('./catalogRoutes.js')
+  const f=await fixture('a2a');t.after(f.close)
+  const c=await f.publish(await f.sync())
+  await f.service.releases.moveChannel(actor,f.agent.id,'stable',c.published_version!,0)
+  const task=await f.service.create({...actor,userId:'member'},syntheticTaskSubmission({agent_id:f.agent.id,query:'private input marker',idempotency_key:randomUUID()}))
+  await f.service.waitForTask(task.id)
+  const url=new URL(`http://test/api/v1/external-agents/admin/catalog/agents/${f.agent.id}/runs/${task.id}/events`)
+  const page=await dispatchCatalogGovernance(f.g,actor,'GET',url,null) as {events:{sequence:number;at:number;status:string}[];next_cursor:number;has_more:boolean}
+  assert.ok(page.events.length>0)
+  assert.ok(page.events.every(e=>Number.isSafeInteger(e.at)&&e.at>0))
+  assert.equal(page.events.at(-1)?.status,'succeeded')
+  assert.ok(!JSON.stringify(page).includes('private input marker'))
+  assert.ok(page.events.every(e => !Object.hasOwn(e, 'answer') && !Object.hasOwn(e, 'delta') && !Object.hasOwn(e, 'state')))
+  assert.ok(!JSON.stringify(page).includes(key))
+  assert.deepEqual(Object.keys(page.events[0]).sort(),['at','error_code','sequence','status','type'])
+  url.searchParams.set('cursor',String(page.next_cursor))
+  assert.equal((await dispatchCatalogGovernance(f.g,actor,'GET',url,null) as typeof page).events.length,0)
+  url.searchParams.set('cursor','-1')
+  await assert.rejects(dispatchCatalogGovernance(f.g,actor,'GET',url,null),{code:'INVALID_CURSOR'})
+  await assert.rejects(dispatchCatalogGovernance(f.g,{...actor,orgId:'foreign'},'GET',url,null),{code:'AGENT_NOT_FOUND'})
+  url.pathname=url.pathname.replace(task.id,randomUUID());url.searchParams.delete('cursor')
+  await assert.rejects(dispatchCatalogGovernance(f.g,actor,'GET',url,null),{code:'TASK_NOT_FOUND'})
+})
+
+void test('catalog scan cursor survives an empty filtered page',async t=>{
+  const { CatalogReadModel }=await import('./catalogReadModel.js')
+  const f=await fixture();t.after(f.close)
+  const read=new CatalogReadModel(f.g),source=f.source!
+  const entry=(await read.entry(actor,f.agent.id)).entry
+  // Test cursor semantics independently of release I/O for a page beyond 50 sources.
+  f.g.data.page=async(_actor,_kind,after)=>({api_version:'agent-catalog.sudo.dev/v1alpha1',items:[source] as never[],next_cursor:after?null:'next-source-page'})
+  let calls=0
+  read.entry=async()=>({entry:{...entry,provider:++calls===1?'dify':'a2a'},versions:[]})
+  const first=await read.page(actor,'',{provider:'a2a'})
+  assert.equal(first.items.length,0);assert.equal(first.next_cursor,'next-source-page')
+  const next=await read.page(actor,first.next_cursor!,{provider:'a2a'})
+  assert.equal(next.items.length,1);assert.equal(next.next_cursor,null)
 })

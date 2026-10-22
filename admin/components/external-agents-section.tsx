@@ -1,6 +1,7 @@
 import { ExternalEndpointRequests } from './external-endpoint-requests'
 import { ExternalAgentCatalog } from './external-agent-catalog'
-import type { CatalogSource } from '@/lib/api/agent-catalog'
+import { catalogStatusLabel } from './external-catalog-overview'
+import { createAgentCatalogApi, type CatalogEntry, type CatalogSource } from '@/lib/api/agent-catalog'
 import { isEndpointAllowed, normalizeEndpoint } from '@/lib/external-endpoint'
 import { ExternalTaskProfile } from './external-task-profile'
 import { ExternalAgentUsageDetails } from './external-agent-usage-details'
@@ -69,6 +70,13 @@ function ScopedExternalAgents({ query }: { query: string }) {
   const api = useMemo(() => createExternalAgentsApi(undefined, () => controller.current.signal), [controller])
   const [access, setAccess] = useState<ExternalProviderAccess | null>(null)
   const [agents, setAgents] = useState<ExternalAgentAdmin[]>([])
+  const [summaries, setSummaries] = useState<CatalogEntry[]>([])
+  useEffect(() => {
+    const abort = new AbortController()
+    setSummaries([])
+    void createAgentCatalogApi(() => abort.signal).summaries(agents.map(a => a.id)).then(rows => { if (!abort.signal.aborted) setSummaries(rows) }).catch(() => { /* no optimistic availability fallback */ })
+    return () => abort.abort()
+  }, [agents])
   const [managedSources, setManagedSources] = useState<CatalogSource[]>([])
   const [agentCursor, setAgentCursor] = useState<string | null>(null)
   const [members, setMembers] = useState<ExternalProviderMember[]>([])
@@ -486,6 +494,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
       })}>加载更多智能体</Button>}
       <div className="grid gap-4 md:grid-cols-2">
         {visibleAgents.map((agent) => {
+          const summary = summaries.find(s => s.catalog_id === agent.id)
           const isPublished = agent.approved && agent.review_expires_at > Date.now()
           const isManaged = managedSources.some(source => source.catalog_id === agent.id)
           return (
@@ -494,8 +503,8 @@ function ScopedExternalAgents({ query }: { query: string }) {
                 <h4 className="font-semibold">{agent.name}</h4>
                 <div className="flex shrink-0 gap-2">
                   <Badge variant="outline">{agent.provider === 'custom_http' ? agent.protocol ?? '自研 HTTP' : 'Dify'}</Badge>
-                  <Badge variant={isPublished ? 'default' : 'secondary'}>
-                    {isPublished ? '已发布' : agent.approved ? '审核已到期' : '未发布'}
+                  <Badge variant={summary?.is_selectable ? 'default' : 'secondary'}>
+                    {summary ? catalogStatusLabel(summary.status) : '状态待核对'}
                   </Badge>
                 </div>
               </div>
@@ -596,7 +605,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
           {query.trim() ? '没有匹配的外部智能体' : '尚未接入外部智能体，接入并审核后可供授权成员使用。'}
         </p>
       ) : null}
-      {versionAgent && <ExternalAgentVersions key={versionAgent.id} agent={versionAgent} managed={managedSources.some(source => source.catalog_id === versionAgent.id)} onClose={() => setVersionAgent(null)} />}
+      {versionAgent && <ExternalAgentVersions key={versionAgent.id} agent={versionAgent} managed={managedSources.some(source => source.catalog_id === versionAgent.id)} onChanged={onReload} onClose={() => setVersionAgent(null)} />}
       <Dialog
         open={Boolean(dialog)}
         onOpenChange={(open) => {

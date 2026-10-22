@@ -8,6 +8,9 @@ import type {
   CatalogPage,
   CatalogVersionState,
   CatalogRun,
+  CatalogEntry,
+  CatalogVersionDetail,
+  CatalogRunEvent,
 } from "../../../contracts/agent-catalog/v1alpha1/contract";
 export type {
   CatalogSource,
@@ -16,9 +19,18 @@ export type {
   CatalogAuditEvent,
   CatalogVersionState,
   CatalogRun,
+  CatalogEntry,
+  CatalogVersionDetail,
+  CatalogRunEvent,
 } from "../../../contracts/agent-catalog/v1alpha1/contract";
 
 export interface CatalogFilters {
+  approval_status?: string;
+  provider?: string;
+  zone?: string;
+  execution_mode?: string;
+  source_state?: string;
+  drift?: string;
   search?: string;
   protocol?: string;
   status?: string;
@@ -75,6 +87,29 @@ export function createAgentCatalogApi(signal?: () => AbortSignal) {
       );
       return pages.flat();
     },
+    entries: (after = "", query: CatalogFilters = {}) =>
+      page<CatalogEntry>("entries", after, "", query),
+    summaries: async (ids: string[]) => {
+      const result: CatalogEntry[] = [];
+      for (let i = 0; i < ids.length; i += 100)
+        result.push(
+          ...(await request<CatalogEntry[]>(
+            "GET",
+            `/summaries?ids=${encodeURIComponent(ids.slice(i, i + 100).join(","))}`,
+          )),
+        );
+      return result;
+    },
+    runEvents: (agent: string, task: string, cursor = 0) =>
+      request<{
+        events: CatalogRunEvent[];
+        next_cursor: number;
+        has_more: boolean;
+        compacted: boolean;
+      }>(
+        "GET",
+        `/agents/${encodeURIComponent(agent)}/runs/${encodeURIComponent(task)}/events?cursor=${cursor}`,
+      ),
     sources: (after = "", query: CatalogFilters = {}) =>
       page<CatalogSource>("sources", after, "", query),
     candidates: (after = "", source = "", query: CatalogFilters = {}) =>
@@ -95,6 +130,8 @@ export function createAgentCatalogApi(signal?: () => AbortSignal) {
     agent: (id: string) =>
       request<{
         agent: ExternalAgentAdmin;
+        entry: CatalogEntry;
+        version_details: CatalogVersionDetail[];
         source: CatalogSource | null;
         versions: CatalogVersionState[];
       }>("GET", `/agents/${encodeURIComponent(id)}`),

@@ -5,6 +5,8 @@ const messages: Record<string, string> = {
   CANDIDATE_WORKFLOW_REQUIRED: '此智能体已纳入候选管理，请在“来源与候选”中修改、审核并发布。',
   CANDIDATE_VALIDATION_STALE: '候选对应的来源、连接、权限或校验规则已变化。请重新同步并审核新候选。',
   CANDIDATE_STATE_CONFLICT: '候选状态已变化，请刷新后选择适用操作。',
+  CATALOG_READ_UNAVAILABLE: '暂时无法核对版本登记信息，请稍后刷新。',
+  CATALOG_HISTORY_LIMIT: '版本历史超过本页核对上限，当前按不可用展示，请联系管理员核查。',
   CATALOG_SOURCE_DISABLED: '来源已停用，不能发布或发起新任务。',
   CATALOG_SOURCE_NOT_FOUND: '当前组织中未找到此来源，请刷新列表。',
   IMPORT_CANDIDATE_NOT_FOUND: '当前组织中未找到此候选，请刷新列表。',

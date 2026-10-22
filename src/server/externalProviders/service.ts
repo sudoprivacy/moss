@@ -454,7 +454,12 @@ export class ExternalProviderService {
     }
   }
 
-  private async executable(actor: ExternalActor, binding: Binding, context?: { policy: PilotPolicy; agents: Map<string, CatalogAgent>; connections: Map<string, IntegrationConnection> }): Promise<void> {
+  /** Admin read-model check shares runtime gates, excluding the caller's personal grant. */
+  async assertCatalogConfigured(actor: ExternalActor, binding: Binding): Promise<void> {
+    return this.executable(actor, binding, undefined, false)
+  }
+
+  private async executable(actor: ExternalActor, binding: Binding, context?: { policy: PilotPolicy; agents: Map<string, CatalogAgent>; connections: Map<string, IntegrationConnection> }, requireUserGrant = true): Promise<void> {
     await this.controlsReady
     await this.governance.assertEnabled(actor, binding.id)
     await assertAssetOpen(this.store.db, actor.orgId, undefined, binding.id)
@@ -462,7 +467,7 @@ export class ExternalProviderService {
     this.adapters.get(binding.provider_kind ?? 'dify')
     if (binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
     assertPilot(context?.policy ?? await this.administration.effectivePolicy(actor), actor.orgId, binding.endpoint)
-    if (binding.archived || binding.credentialUpdating || binding.credentialRecoveryRequired || !binding.approved || !binding.parametersDigest || binding.review_expires_at <= Date.now() || !binding.allowed_user_ids.includes(actor.userId)) throw new ExternalProviderError(403, 'AGENT_NOT_APPROVED_FOR_USER')
+    if (binding.archived || binding.credentialUpdating || binding.credentialRecoveryRequired || !binding.approved || !binding.parametersDigest || binding.review_expires_at <= Date.now() || (requireUserGrant && !binding.allowed_user_ids.includes(actor.userId))) throw new ExternalProviderError(403, 'AGENT_NOT_APPROVED_FOR_USER')
     const catalog = context ? context.agents.get(binding.id) : await this.options.catalog.getAgent(binding.id, actor.orgId)
     if (!catalog?.enabled || catalog.status !== 'approved' || catalog.providerType !== (binding.provider_kind ?? 'dify') || catalog.providerBinding?.executionMode !== 'external_hosted' || catalog.providerBinding?.bindingId !== binding.id || catalog.providerBinding?.sourceDigest !== binding.source_digest || catalog.providerBinding?.appId !== binding.app_id || catalog.providerBinding?.connectionId !== binding.connectionId || Object.keys(catalog.visibleTo ?? {}).length !== 1 || JSON.stringify([...(catalog.visibleTo?.user_ids ?? [])].sort()) !== JSON.stringify([...binding.allowed_user_ids].sort())) throw new ExternalProviderError(403, 'AGENT_DISABLED_OR_CHANGED')
     if (!context) return this.administration.assertCredentialUsable(actor, binding)

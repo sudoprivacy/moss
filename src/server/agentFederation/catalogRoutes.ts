@@ -2,6 +2,8 @@ import type { AgentCatalogGovernance } from "./catalogGovernance.js";
 import type { ExternalActor } from "../externalProviders/store.js";
 import { ExternalProviderError } from "../externalProviders/policy.js";
 import { ConfiguredAgentProviderAdapter } from "./catalogAdapter.js";
+import { validateCatalogDocument } from "./catalogContract.js";
+import { CatalogReadModel } from "./catalogReadModel.js";
 
 /** Mounted only behind the external-agent administrator role check. */
 export async function dispatchCatalogGovernance(
@@ -15,6 +17,78 @@ export async function dispatchCatalogGovernance(
     "/api/v1/external-agents/admin/catalog/".length,
   );
   const { data } = governance;
+  const read = new CatalogReadModel(governance);
+  if (method === "GET" && path === "entries") {
+    const filters = Object.fromEntries(
+      [
+        "search",
+        "protocol",
+        "status",
+        "owner",
+        "warning",
+        "capability",
+        "observability",
+        "approval_status",
+        "provider",
+        "zone",
+        "execution_mode",
+        "source_state",
+        "drift",
+      ].map((k) => [k, url.searchParams.get(k) ?? ""]),
+    );
+    return read.page(actor, url.searchParams.get("after") ?? "", filters);
+  }
+  if (method === "GET" && path === "summaries") {
+    const ids = (url.searchParams.get("ids") ?? "").split(",").filter(Boolean);
+    if (ids.length > 100 || ids.some((id) => !/^[\w-]{1,200}$/.test(id)))
+      throw new ExternalProviderError(400, "INVALID_CATALOG_FILTER");
+    const result = [];
+    for (let i = 0; i < ids.length; i += 4)
+      result.push(
+        ...(await Promise.all(
+          ids
+            .slice(i, i + 4)
+            .map(async (id) => (await read.entry(actor, id)).entry),
+        )),
+      );
+    return result;
+  }
+  const eventMatch = /^agents\/([\w-]+)\/runs\/([\w-]+)\/events$/.exec(path);
+  if (method === "GET" && eventMatch) {
+    await governance.service.store.binding(actor, eventMatch[1]);
+    const row = await data.db.get(
+      "SELECT t.user_id FROM external_tasks t JOIN external_session_bindings s ON s.id = t.session_id WHERE t.org_id = ? AND t.id = ? AND s.agent_id = ?",
+      [actor.orgId, eventMatch[2], eventMatch[1]],
+    );
+    if (!row) throw new ExternalProviderError(404, "TASK_NOT_FOUND");
+    const cursor = Number(url.searchParams.get("cursor") ?? 0);
+    if (!Number.isSafeInteger(cursor) || cursor < 0)
+      throw new ExternalProviderError(400, "INVALID_CURSOR");
+    const task = await governance.service.store.task(
+      { orgId: actor.orgId, userId: String(row.user_id) },
+      eventMatch[2],
+    );
+    const rows = await data.db.all(
+      "SELECT sequence, document FROM task_events WHERE task_id = ? AND sequence > ? ORDER BY sequence LIMIT 101",
+      [task.id, cursor],
+    );
+    const events = rows.slice(0, 100).map((row) => {
+      const e = JSON.parse(String(row.document));
+      return validateCatalogDocument("CatalogRunEvent", {
+        sequence: Number(row.sequence),
+        at: e.created_at,
+        type: e.type,
+        status: e.state?.status ?? e.status ?? null,
+        error_code: e.state?.error_code ?? null,
+      });
+    });
+    return {
+      events,
+      next_cursor: events.at(-1)?.sequence ?? cursor,
+      has_more: rows.length > 100,
+      compacted: events.length ? events[0].sequence > cursor + 1 : cursor === 0,
+    };
+  }
   if (method === "GET" && path === "managed") {
     const ids = (url.searchParams.get("ids") ?? "").split(",").filter(Boolean);
     if (ids.length > 100 || ids.some((id) => !/^[\w-]{1,200}$/.test(id)))
@@ -63,8 +137,11 @@ export async function dispatchCatalogGovernance(
     if (kind === "sources") return (await data.source(actor, id)).view;
     if (kind === "candidates") return (await data.candidate(actor, id)).view;
     const binding = await governance.service.store.binding(actor, id);
+    const overview = await read.entry(actor, id);
     return {
       agent: governance.admin.describe(binding),
+      entry: overview.entry,
+      version_details: overview.versions,
       source: (await data.managed(actor, id))?.view ?? null,
       versions: (
         await data.db.all(
