@@ -171,14 +171,14 @@ void describe('P2 系统配置迁移', () => {
     }
   })
 
-  void test('预检复用在线命令校验并在缺少 QMS 凭据时阻断且零写入', async () => {
+  void test('预检复用在线命令校验并在 QMS 运行时凭据不可用时阻断且零写入', async () => {
     const fixture = await setup({
       product_improvement: JSON.stringify({ enabled: 1 }),
     }, false, {})
     try {
       const plan = await fixture.migration.plan()
       assert.equal(plan.status, 'blocked')
-      assert.match(plan.conflicts.join('\n'), /QMS_DEFAULT_API_KEY/)
+      assert.match(plan.conflicts.join('\n'), /质量上报凭据暂不可用/)
       assert.deepEqual(await fixture.policies.getPlatform(), {})
       assert.equal(fixture.secrets.size, 0)
     } finally {
