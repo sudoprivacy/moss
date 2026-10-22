@@ -6,8 +6,8 @@ import { PLATFORM_DEFINITIONS, PLATFORM_PROVIDERS, type PlatformProvider, type P
 
 export const PLATFORM_SECRET_NAMESPACE = 'moss:platform-config'
 const LEGACY_ROUTER_MODEL_FIELDS = new Set(['modelServiceUrl', 'modelsApiUrl'])
-const RETIRED_QMS_CONFIG_FIELDS = new Set(['encryptionRequired'])
-const RETIRED_QMS_SECRET_FIELDS = new Set(['postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem'])
+const RETIRED_QMS_CONFIG_FIELDS = new Set(['encryptionRequired', 'apiKeyHeader'])
+const RETIRED_QMS_SECRET_FIELDS = new Set(['postgresUrl', 'redisUrl', 'privateKeyPem', 'publicKeyPem', 'apiKey', 'larkWebhookUrl', 'smtpUrl'])
 export interface PlatformVault {
   getSecret(namespace: string, key: string): Promise<{ value: string | null } | null>
   putSecret(namespace: string, key: string, value: string): Promise<unknown>
@@ -137,7 +137,7 @@ export class PlatformConfigService {
     for (const [key, value] of Object.entries(input.config)) {
       // Accept stale admin-page payloads without restoring global model overrides.
       if (id === 'sudorouter' && LEGACY_ROUTER_MODEL_FIELDS.has(key) && typeof value === 'string') continue
-      if (id === 'qms' && RETIRED_QMS_CONFIG_FIELDS.has(key) && typeof value === 'boolean') continue
+      if (id === 'qms' && RETIRED_QMS_CONFIG_FIELDS.has(key) && (typeof value === 'boolean' || typeof value === 'string')) continue
       const field = fields.find(f => f.key === key && f.type !== 'secret')
       if (!field || !validValue(field.type, value)) throw new PlatformConfigError(400, `无效配置字段: ${key}`)
       snapshot.config[key] = typeof value === 'string' ? value.trim() : value as PlatformValues[string]
@@ -240,9 +240,6 @@ export function validatePlatformConfig(id: PlatformProvider, snapshot: PlatformS
         parseFuiouRsaKey(value, privatePart ? 'private' : 'public')
       } catch { issues.push(`${key} 不是有效的 RSA 密钥`) }
     }
-  }
-  if (id === 'qms' && snapshot.config.apiKeyHeader && !/^[A-Za-z0-9-]+$/.test(String(snapshot.config.apiKeyHeader))) {
-    issues.push('QMS API Key 请求头格式无效')
   }
   return issues
 }

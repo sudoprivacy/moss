@@ -38,7 +38,7 @@ import {
   type BillingRuntimeConfig,
 } from './billing/billingRuntimeConfig.js'
 import { startQmsRuntime, type StartedQmsRuntime } from './qms/qmsRuntime.js'
-import { ensureQmsApiKey, initializeQmsWithDeadline, createDeferredQmsRoutes } from './qms/qmsBootstrap.js'
+import { ensureQmsApiKey, initializeQmsWithDeadline, createDeferredQmsRoutes, type QmsAvailability } from './qms/qmsBootstrap.js'
 import { QmsNexusSecretAdapter } from './qms/qmsSecretAdapter.js'
 import { getAvailableModels } from './modelListCache.js'
 import { getSystemSettings } from './systemSettings.js'
@@ -316,6 +316,7 @@ async function finishStandaloneServerStartup(
   let closeSudoworkRedis: (() => Promise<void>) | undefined
   let qmsRuntime: StartedQmsRuntime | undefined
   let qmsStartup: Promise<void> | undefined
+  let qmsAvailability: QmsAvailability = config.qms.enabled ? { status: 'initializing' } : { status: 'disabled' }
   const qmsStartupController = new AbortController()
 
   const disabledTokenStore: LegacyKeyValueStore = {
@@ -514,7 +515,7 @@ async function finishStandaloneServerStartup(
     loginMethod: config.sudoworkCompatibility.loginMethod,
     sms,
     systemConfig: { skillhubBaseUrl: publicBaseUrl },
-    qms: createDeferredQmsRoutes(() => qmsRuntime, config.qms.apiKeyHeader),
+    qms: createDeferredQmsRoutes(() => qmsRuntime, config.qms.apiKeyHeader, () => qmsAvailability),
   }
   const mossOperationsApp = createSudoworkCompatibilityApp({
     ...compatibilityAppOptions,
@@ -581,11 +582,17 @@ async function finishStandaloneServerStartup(
       })
     },
     onError: error => {
+      qmsAvailability = { status: 'failed' }
       logger.error(`[QMS] Initialization failed (${error instanceof Error ? error.name : 'unknown error'}). Quality APIs are unavailable; check QMS credentials and storage, then restart.`)
     },
   }).then(ready => {
     qmsRuntime = ready
-    if (ready) logger.info('[QMS] Background initialization completed')
+    if (ready) {
+      qmsAvailability = { status: 'ready' }
+      logger.info('[QMS] Background initialization completed')
+    } else if (qmsAvailability.status === 'initializing') {
+      qmsAvailability = { status: 'failed' }
+    }
   })
   const connectHost =
     config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host

@@ -43,13 +43,11 @@ export const PLATFORM_DEFINITIONS: Record<PlatformProvider, { label: string; des
   },
   qms: {
     label: 'QMS', description: '复用 Moss PostgreSQL，使用进程内存队列；企业数据访问权限保持隔离。',
-    fields: [enabled, field('apiKeyHeader', 'API Key 请求头', 'text', true),
+    fields: [enabled,
       number('queueFlushIntervalMs', '队列刷新间隔（毫秒）', 250), number('queueBatchSize', '批量大小', 1, 10000),
       number('queueMaxItems', '内存队列最大事件数'), number('queueMaxBytes', '内存队列最大字节数', 1, 1073741824),
       number('queueRetryIntervalMs', '队列重试间隔（毫秒）'), number('queueDrainTimeoutMs', '停机排空超时（毫秒）'),
-      number('perfRetentionDays', '性能数据保留天数', 1, 3650), number('conversationRetentionDays', '对话数据保留天数', 1, 3650),
-      field('apiKey', 'API Key', 'secret', true),
-      field('larkWebhookUrl', '飞书 Webhook', 'secret'), field('smtpUrl', 'SMTP 连接地址', 'secret')],
+      number('perfRetentionDays', '性能数据保留天数', 1, 3650), number('conversationRetentionDays', '对话数据保留天数', 1, 3650)],
   },
 }
 export function isPlatformProvider(value: string): value is PlatformProvider {

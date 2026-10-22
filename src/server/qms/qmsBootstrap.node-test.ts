@@ -3,10 +3,10 @@ import { it } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { DbDriver } from '../db/driver.js'
 import type { ConfigKey } from '../configStore/configStore.js'
-import { ensureQmsApiKey, initializeQmsWithDeadline } from './qmsBootstrap.js'
-import { resolveQmsConfig } from './config.js'
+import { createDeferredQmsRoutes, ensureQmsApiKey, initializeQmsWithDeadline, type QmsAvailability } from './qmsBootstrap.js'
+import { DEFAULT_QMS_API_KEY, resolveQmsConfig } from './config.js'
 
-void it('generates one persistent QMS key in the existing vault and reuses it on subsequent starts', async () => {
+void it('uses the built-in QMS key without writing deployment credentials', async () => {
   const values = new Map<ConfigKey, string>()
   let writes = 0
   const secrets = { get: (key: ConfigKey) => values.get(key), refreshKey: async () => {}, put: async (key: ConfigKey, value: string) => { values.set(key, value); writes++ } }
@@ -14,11 +14,11 @@ void it('generates one persistent QMS key in the existing vault and reuses it on
   const config = () => resolveQmsConfig({}, {}, { dbBackend: 'postgres', validateSecrets: false })
   const first = config()
   await ensureQmsApiKey({ config: first, driver, secrets })
-  assert.match(first.secrets.apiKey!, /^[A-Za-z0-9_-]{43}$/)
+  assert.equal(first.secrets.apiKey, DEFAULT_QMS_API_KEY)
   const second = config()
   await ensureQmsApiKey({ config: second, driver, secrets })
   assert.equal(second.secrets.apiKey, first.secrets.apiKey)
-  assert.equal(writes, 1)
+  assert.equal(writes, 0)
 })
 
 void it('preserves previously dispatched credentials and respects disabled QMS', async () => {
@@ -27,8 +27,8 @@ void it('preserves previously dispatched credentials and respects disabled QMS',
   const driver = { kind: 'postgres', tryRunExclusiveSession: async (_key: string, fn: () => Promise<unknown>) => fn() } as DbDriver
   const config = resolveQmsConfig({}, {}, { dbBackend: 'postgres', validateSecrets: false })
   await ensureQmsApiKey({ config, driver, secrets })
-  assert.equal(config.secrets.apiKey, 'existing-client-key')
-  assert.equal(values.get('server.qms-api-key'), 'existing-client-key')
+  assert.equal(config.secrets.apiKey, DEFAULT_QMS_API_KEY)
+  assert.equal(values.get('client.product-improvement-api-key'), 'existing-client-key')
   values.clear()
   await ensureQmsApiKey({ config: { ...config, enabled: false }, driver, secrets })
   assert.equal(values.size, 0)
@@ -38,10 +38,10 @@ void it('auto-enables only on the existing PostgreSQL backend without overriding
   assert.equal(resolveQmsConfig({}, {}, { dbBackend: 'postgres', validateSecrets: false }).enabled, true)
   assert.equal(resolveQmsConfig({}, {}, { dbBackend: 'sqlite', validateSecrets: false }).enabled, false)
   assert.equal(resolveQmsConfig({ enabled: false }, {}, { dbBackend: 'postgres' }).enabled, false)
-  assert.equal(resolveQmsConfig({}, { QMS_ENABLED: 'false' }, { dbBackend: 'postgres' }).enabled, false)
+  assert.equal(resolveQmsConfig({}, { QMS_ENABLED: 'false' }, { dbBackend: 'postgres' }).enabled, true)
 })
 
-void it('serializes simultaneous first starts so instances do not publish different API keys', async () => {
+void it('gives simultaneous starts the same built-in key without coordination writes', async () => {
   const values = new Map<ConfigKey, string>()
   let locked = false
   let writes = 0
@@ -55,7 +55,7 @@ void it('serializes simultaneous first starts so instances do not publish differ
   const second = resolveQmsConfig({}, {}, { dbBackend: 'postgres', validateSecrets: false })
   await Promise.all([ensureQmsApiKey({ config: first, driver, secrets }), ensureQmsApiKey({ config: second, driver, secrets })])
   assert.equal(first.secrets.apiKey, second.secrets.apiKey)
-  assert.equal(writes, 1)
+  assert.equal(writes, 0)
 })
 
 void it('does not start disabled QMS and isolates initialization failures from the main server', async () => {
@@ -67,6 +67,17 @@ void it('does not start disabled QMS and isolates initialization failures from t
   assert.equal(await initializeQmsWithDeadline({ enabled: true, initialize, onError: error => errors.push(error) }), undefined)
   assert.equal(calls, 1)
   assert.equal(errors.length, 1)
+})
+
+void it('distinguishes disabled, initializing, and failed QMS routes', () => {
+  let availability: QmsAvailability = { status: 'disabled' }
+  const routes = createDeferredQmsRoutes(() => undefined, 'X-API-Key', () => availability)
+  const execute = () => routes.operations.execute({} as never)
+  assert.throws(execute, (error: unknown) => (error as { code?: string }).code === 'QMS_DISABLED')
+  availability = { status: 'initializing' }
+  assert.throws(execute, (error: unknown) => (error as { code?: string }).code === 'QMS_INITIALIZING')
+  availability = { status: 'failed' }
+  assert.throws(execute, (error: unknown) => (error as { code?: string }).code === 'QMS_INITIALIZATION_FAILED')
 })
 
 void it('bounds optional startup even when a QMS dependency never settles', async () => {

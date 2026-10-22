@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { CheckCircle2, KeyRound, Loader2, RefreshCw, ServerCog, ShieldCheck } from 'lucide-react'
 import { toast } from 'sonner'
 import { DashboardLayout } from '@/components/dashboard-layout'
@@ -18,9 +18,11 @@ import { getPlatformConfig, savePlatformConfig, checkPlatformConfig, previewPhon
 
 export default function PlatformConfigPage() {
   const { user } = useAuth()
+  const [searchParams] = useSearchParams()
+  const requestedProvider = searchParams.get('provider') || 'sms'
   const [data, setData] = useState<PlatformConfigResponse | null>(null)
   const [error, setError] = useState('')
-  const [selected, setSelected] = useState('sms')
+  const [selected, setSelected] = useState(requestedProvider)
   const [draft, setDraft] = useState<PlatformConfigItem['config']>({})
   const [secrets, setSecrets] = useState<Record<string, string | null>>({})
   const [saving, setSaving] = useState(false)
@@ -41,9 +43,14 @@ export default function PlatformConfigPage() {
   useEffect(() => {
     if (user?.role !== 'super_admin') return
     let cancelled = false
-    void load().then(response => { if (!cancelled && response) setDraft(response.items.find(value => value.id === 'sms')?.config ?? {}) })
+    void load().then(response => {
+      if (cancelled || !response) return
+      const preferred = response.items.some(value => value.id === requestedProvider) ? requestedProvider : 'sms'
+      setSelected(preferred)
+      setDraft(response.items.find(value => value.id === preferred)?.config ?? {})
+    })
     return () => { cancelled = true }
-  }, [load, user?.role])
+  }, [load, requestedProvider, user?.role])
 
   const choose = async (next: string) => {
     if (next === selected || !await confirmDiscard()) return
@@ -56,7 +63,8 @@ export default function PlatformConfigPage() {
       const input = { expectedVersion: item.version, config: draft, secrets }
       if (checkOnly) {
         const result = await checkPlatformConfig(item.id, input)
-        if (result.ready) toast.success('配置检查通过；未发送短信或创建支付订单')
+        if (result.ready && draft.enabled !== false) toast.success('配置检查通过；未发送短信或创建支付订单')
+        else if (result.ready) toast.info('配置格式有效，但服务尚未启用')
         else toast.error(result.issues.join('；'))
       } else {
         await savePlatformConfig(item.id, input)

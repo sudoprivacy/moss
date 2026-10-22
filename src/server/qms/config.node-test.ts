@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { QmsConfigurationError, resolveQmsConfig } from './config.js'
+import { DEFAULT_QMS_API_KEY, resolveQmsConfig } from './config.js'
 
 void describe('QMS runtime configuration', () => {
   void it('keeps QMS disabled without configuring additional services', () => {
@@ -13,16 +13,9 @@ void describe('QMS runtime configuration', () => {
     assert.equal(config.retention.conversationDays, 180)
   })
 
-  void it('requires the ingestion API key without separate database or queue credentials', () => {
-    assert.throws(
-      () => resolveQmsConfig({ enabled: true }, {}),
-      (error: unknown) => error instanceof QmsConfigurationError
-        && error.missing.sort().join(',') === 'QMS_API_KEY',
-    )
-  })
-
-  void it('enables QMS with only shared Moss storage and ingestion credentials', () => {
-    const config = resolveQmsConfig({ enabled: true }, { QMS_API_KEY: 'key' })
+  void it('enables QMS with the built-in Sudowork ingestion key and no extra credentials', () => {
+    const config = resolveQmsConfig({ enabled: true }, {})
+    assert.equal(config.secrets.apiKey, DEFAULT_QMS_API_KEY)
     assert.equal(config.queue.maxItems, 10000)
     assert.equal(config.queue.maxBytes, 16 * 1024 * 1024)
     assert.equal('postgresUrl' in config.secrets, false)
@@ -39,7 +32,7 @@ void describe('QMS runtime configuration', () => {
     }
     const config = resolveQmsConfig(legacyInput, legacyEnvironment)
     assert.equal(config.enabled, true)
-    assert.equal(config.secrets.apiKey, 'a-production-key')
+    assert.equal(config.secrets.apiKey, DEFAULT_QMS_API_KEY)
     assert.equal('encryptionRequired' in config, false)
     assert.equal('privateKeyPem' in config.secrets, false)
     assert.equal('publicKeyPem' in config.secrets, false)
@@ -54,7 +47,7 @@ void describe('QMS runtime configuration', () => {
       perfRetentionDays: 30,
       conversationRetentionDays: 60,
     }, {
-      QMS_API_KEY: 'a-production-key',
+      QMS_API_KEY: 'ignored-production-key',
     })
 
     assert.equal(config.apiKeyHeader, 'X-Custom-Key')
@@ -62,14 +55,14 @@ void describe('QMS runtime configuration', () => {
     assert.equal(config.queue.batchSize, 25)
     assert.equal(config.retention.perfDays, 30)
     assert.equal(config.retention.conversationDays, 60)
-    assert.equal(config.secrets.apiKey, 'a-production-key')
+    assert.equal(config.secrets.apiKey, DEFAULT_QMS_API_KEY)
   })
 })
 
-void it('honors legacy QMS environment switches and the legacy API key alias', () => {
+void it('ignores retired QMS environment overrides', () => {
   const config = resolveQmsConfig({ enabled: false }, {
     QMS_ENABLED: 'true', QMS_DEFAULT_API_KEY: 'legacy-key',
   })
-  assert.equal(config.enabled, true)
-  assert.equal(config.secrets.apiKey, 'legacy-key')
+  assert.equal(config.enabled, false)
+  assert.equal(config.secrets.apiKey, DEFAULT_QMS_API_KEY)
 })

@@ -28,7 +28,7 @@ void describe('QMS client cutover with real storage', () => {
     const { createServer } = await import('node:http')
     const { setTimeout: delay } = await import('node:timers/promises')
     const { startQmsRuntime } = await import('./qmsRuntime.js')
-    const { resolveQmsConfig } = await import('./config.js')
+    const { DEFAULT_QMS_API_KEY, resolveQmsConfig } = await import('./config.js')
     const { createSudoworkQmsRoutes } = await import('../api/compat/sudowork/qmsRoutes.js')
     const { createHostDispatch } = await import('../api/compat/sudowork/hostDispatch.js')
     const tenant = `qms-e2e-${randomUUID()}`
@@ -36,9 +36,7 @@ void describe('QMS client cutover with real storage', () => {
     const store = new MossQmsStore(moss.driver)
     await store.start()
     const runtime = await startQmsRuntime({
-      config: resolveQmsConfig({ enabled: true, queueFlushIntervalMs: 100 }, {
-        QMS_API_KEY: 'cutover-test-key',
-      }),
+      config: resolveQmsConfig({ enabled: true, queueFlushIntervalMs: 100 }),
       ownerId: tenant,
       driver: moss.driver,
       organizations: { getCode: async () => tenant, hasCode: async code => code === tenant || code === `${tenant}-other` },
@@ -54,7 +52,7 @@ void describe('QMS client cutover with real storage', () => {
     assert(address && typeof address === 'object')
     const base = `http://127.0.0.1:${address.port}`
     async function call(path: string, body?: unknown, token = 'admin', method = body === undefined ? 'GET' : 'POST') {
-      const response = await fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'X-API-Key': 'cutover-test-key', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+      const response = await fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'X-API-Key': DEFAULT_QMS_API_KEY, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
       const result = await response.json() as any
       assert.equal(response.status, 200, `${method} ${path}: ${JSON.stringify(result)}`)
       assert.notEqual(result.success, false, `${method} ${path}: ${JSON.stringify(result)}`)

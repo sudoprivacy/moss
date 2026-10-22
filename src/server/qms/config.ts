@@ -43,6 +43,9 @@ export interface QmsRuntimeConfig {
   }
 }
 
+/** Shared with the legacy Sudowork quality reporter; QMS requires no deployment secret. */
+export const DEFAULT_QMS_API_KEY = 'sk-8f3a2b1c9d5e7f6a4b3c2d1e8f9a0b7c'
+
 export class QmsConfigurationError extends Error {
   constructor(message: string, readonly missing: string[] = []) {
     super(message)
@@ -63,16 +66,10 @@ export function resolveQmsConfig(
   secrets: QmsSecretEnvironment = process.env as QmsSecretEnvironment,
   options: { validateSecrets?: boolean; dbBackend?: 'sqlite' | 'postgres' } = {},
 ): QmsRuntimeConfig {
-  const enabled = secrets.QMS_ENABLED === undefined ? input.enabled ?? (options.dbBackend === 'postgres') : secrets.QMS_ENABLED === 'true'
-  const apiKey = secrets.QMS_API_KEY?.trim() || secrets.QMS_DEFAULT_API_KEY?.trim()
-  const missing: string[] = []
-
-  if (enabled && options.validateSecrets !== false) {
-    if (!apiKey) missing.push('QMS_API_KEY')
-  }
-  if (missing.length > 0) {
-    throw new QmsConfigurationError(`Missing required QMS secrets: ${missing.join(', ')}`, missing)
-  }
+  // QMS_ENABLED was a deployment-era switch. The server.json/platform value is
+  // authoritative now; an omitted value enables QMS automatically on PostgreSQL.
+  const enabled = input.enabled ?? (options.dbBackend === 'postgres')
+  const apiKey = DEFAULT_QMS_API_KEY
 
   const apiKeyHeader = input.apiKeyHeader?.trim() || 'X-API-Key'
   if (!/^[A-Za-z0-9-]+$/.test(apiKeyHeader)) {
@@ -106,9 +103,5 @@ export function resolveQmsConfig(
 
 export function assertQmsRuntimeConfig(config: QmsRuntimeConfig): void {
   if (!config.enabled) return
-  const missing: string[] = []
-  if (!config.secrets.apiKey?.trim()) missing.push('QMS_API_KEY')
-  if (missing.length > 0) {
-    throw new QmsConfigurationError(`Missing required QMS secrets: ${missing.join(', ')}`, missing)
-  }
+  if (!config.secrets.apiKey?.trim()) throw new QmsConfigurationError('QMS API key is unavailable')
 }
