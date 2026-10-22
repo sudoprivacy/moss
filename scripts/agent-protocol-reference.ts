@@ -16,6 +16,8 @@ const key = randomBytes(32).toString('hex')
 const execution: ReferenceExecution | undefined = process.env.AGENT_REFERENCE_EXECUTION_FILE ? JSON.parse(await readFile(process.env.AGENT_REFERENCE_EXECUTION_FILE, 'utf8')) : undefined
 if (execution && (Object.keys(execution).some(key => !['profile', 'gatewayOrigin', 'orgId'].includes(key)) || new URL(execution.gatewayOrigin).origin !== execution.gatewayOrigin)) throw new Error('Invalid reference gateway configuration')
 const service = await startProtocolReference(protocol, key, port, execution)
+// Explicit test-only fault trigger for browser acceptance after metadata preflight.
+if (process.env.AGENT_REFERENCE_DISCONNECT_ON_SIGNAL === '1') process.on('SIGUSR2', () => { service.control.fault = 'disconnect' })
 const stop = async () => { await service.close(); process.exit(0) }
 process.once('SIGTERM', () => { void stop() }); process.once('SIGINT', () => { void stop() })
 try {

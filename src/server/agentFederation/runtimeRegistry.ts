@@ -15,7 +15,8 @@ export function describeCapabilities(binding: Binding) {
   if (!['dify', 'custom_http'].includes(kind)) throw new ExternalProviderError(409, 'PROVIDER_NOT_IMPLEMENTED')
   const capabilities = kind === 'dify' ? DIFY_CAPABILITIES : binding.sourceManifest?.protocol === DURABLE_AGENT_HTTP_API ? DURABLE_HTTP_CAPABILITIES : HTTP_CAPABILITIES
   const status = (enabled: boolean) => enabled ? 'supported' as const : 'unsupported' as const
-  return { streaming: status(capabilities.supports_streaming), cancel: status(capabilities.supports_cancel), resume: status(capabilities.supports_resume), version_pin: status(capabilities.supports_version_pin) }
+  return { streaming: status(capabilities.supports_streaming), cancel: status(capabilities.supports_cancel), resume: status(capabilities.supports_resume), version_pin: status(capabilities.supports_version_pin),
+    idempotency: status(capabilities.supports_idempotency), human_approval: status(capabilities.supports_human_approval), trace_export: 'partial' as const }
 }
 
 interface Registration extends Pick<ProviderAdapter, 'kind' | 'capabilities'> {

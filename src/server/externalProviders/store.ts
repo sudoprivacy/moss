@@ -1,4 +1,5 @@
 import { initializeExternalTaskPersistence, attemptState } from '../agentFederation/taskPersistence.js'
+import { initializeCatalogGovernance } from '../agentFederation/catalogStore.js'
 import type { ExecutionFence } from '../agentFederation/executionOwnership.js'
 import { AgentReleaseStore } from '../agentFederation/releases.js'
 import { randomUUID, createHash } from 'node:crypto'
@@ -34,7 +35,7 @@ export class ExternalTaskStore {
   readonly releases: AgentReleaseStore
   constructor(readonly db: DbDriver) {
     this.releases = new AgentReleaseStore(db)
-    this.ready = initializeExternalTaskPersistence(db).then(() => db.exec(`
+    this.ready = initializeCatalogGovernance(db).then(() => initializeExternalTaskPersistence(db)).then(() => db.exec(`
       CREATE TABLE IF NOT EXISTS external_pilot_maintenance (name TEXT PRIMARY KEY, next_run_at BIGINT NOT NULL);
       CREATE TABLE IF NOT EXISTS external_pilot_capacity (org_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS external_pilot_retention (task_id TEXT PRIMARY KEY, compacted_at BIGINT NOT NULL, retired_at BIGINT, audit_document TEXT);

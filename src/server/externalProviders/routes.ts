@@ -1,4 +1,5 @@
 import type { ExternalProviderService } from './service.js'
+import { dispatchCatalogGovernance } from '../agentFederation/catalogRoutes.js'
 import { ExternalProviderError } from './policy.js'
 import type { ExternalActor } from './store.js'
 
@@ -21,6 +22,11 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
     const after = url.searchParams.get('after') ?? ''
     if (after.length > 200 || (after && !/^[\w.-]+$/.test(after))) throw new ExternalProviderError(400, 'INVALID_CURSOR')
     let data: unknown, status = 200
+    if (path.startsWith(`${base}/external-agents/admin/catalog/`)) {
+      requireAdmin()
+      data = await dispatchCatalogGovernance(service.governance, actor, method, url, body)
+      return { status: 200, body: { success: true, data } }
+    }
     if (path.startsWith(`${base}/external-agents/admin/`)) {
       requireAdmin()
       const action = path.slice(`${base}/external-agents/admin/`.length)
@@ -60,11 +66,14 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
           else if (release[2] === 'channels' && method === 'POST') {
             const input = body as { name?: unknown; version?: unknown; revision?: unknown }
             if (!input || !['stable', 'canary'].includes(String(input.name)) || typeof input.version !== 'string' || !Number.isSafeInteger(input.revision) || Object.keys(input).some(key => !['name', 'version', 'revision'].includes(key))) throw new ExternalProviderError(400, 'INVALID_CHANNEL_INPUT')
+            await service.governance.assertVersion(actor, release[1], input.version)
             data = await service.releases.moveChannel(actor, release[1], input.name as 'stable' | 'canary', input.version, Number(input.revision))
+            await service.governance.data.audit(actor, 'channel.updated', release[1], { version: input.version })
           } else if (release[2] === 'revoke-version' && method === 'POST') {
             const input = body as { version?: unknown; note?: unknown }
             if (!input || typeof input.version !== 'string' || typeof input.note !== 'string' || Object.keys(input).some(key => !['version', 'note'].includes(key))) throw new ExternalProviderError(400, 'INVALID_RELEASE_INPUT')
             await service.releases.revoke(actor, release[1], input.version, input.note); data = { revoked: true }
+            await service.governance.data.audit(actor, 'version.revoked', release[1], { version: input.version })
           } else throw new ExternalProviderError(404, 'NOT_FOUND')
           return { status, body: { success: true, data } }
         }
@@ -94,7 +103,7 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
       else if (session && method === 'GET') data = await service.store.history(actor, session[1])
       else if (task && method === 'GET' && !task[2]) data = await service.store.task(actor, task[1])
       else if (task && method === 'GET' && task[2] === 'specification') data = await service.store.taskRecord(actor, task[1])
-      else if (task && method === 'GET' && task[2] === 'evidence') data = await service.evidence(actor, task[1])
+      else if (task && method === 'GET' && task[2] === 'evidence') data = await service.evidence(actor, task[1], url.searchParams.get('profile') === 'catalog-v1')
       else if (task && method === 'GET' && task[2] === 'external-run') data = await service.store.runBinding(actor, task[1])
       else if (task && method === 'GET' && task[2] === 'events') {
         const cursor = Number(url.searchParams.get('cursor') ?? 0)

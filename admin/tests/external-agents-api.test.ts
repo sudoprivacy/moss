@@ -89,6 +89,7 @@ test('API errors retain server codes without displaying arbitrary provider error
     return true
   })
   assert.doesNotMatch(externalAgentError(new Error('sensitive provider response')), /sensitive/)
+  assert.match(externalAgentError(new Error('EXECUTION_UNCONFIRMED')), /不要重新发送任务/)
 })
 
 test('endpoint workflow submits only address and reason; grant and review send policy revision', async () => {

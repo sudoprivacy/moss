@@ -9,10 +9,13 @@ import { Textarea } from '@/components/ui/textarea'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { createExternalAgentsApi, type ExternalAgentAdmin, type AgentVersionsPage } from '@/lib/api/external-agents'
 import { externalAgentError } from '@/lib/external-agent-errors'
+import { createAgentCatalogApi, type CatalogVersionState } from '@/lib/api/agent-catalog'
 
-export function ExternalAgentVersions({ agent, onClose }: { agent: ExternalAgentAdmin; onClose: () => void }) {
+export function ExternalAgentVersions({ agent, onClose, managed = false }: { agent: ExternalAgentAdmin; onClose: () => void; managed?: boolean }) {
   const controller = useRef(new AbortController())
   const api = useMemo(() => createExternalAgentsApi(undefined, () => controller.current.signal), [])
+  const governance = useMemo(() => createAgentCatalogApi(() => controller.current.signal), [])
+  const [states, setStates] = useState<CatalogVersionState[]>([])
   const busy = useRef(false)
   const [page, setPage] = useState<AgentVersionsPage | null>(null)
   const [isBusy, setIsBusy] = useState(false)
@@ -23,8 +26,12 @@ export function ExternalAgentVersions({ agent, onClose }: { agent: ExternalAgent
   const [revoke, setRevoke] = useState<string | null>(null)
   const reload = useCallback(async (after = '') => {
     const data = await api.versions(agent.id, after)
+    if (managed) {
+      const state = await governance.agent(agent.id)
+      if (!controller.current.signal.aborted) setStates(state.versions)
+    }
     if (!controller.current.signal.aborted) setPage(current => after && current ? { ...data, items: [...current.items, ...data.items] } : data)
-  }, [api, agent.id])
+  }, [api, agent.id, governance, managed])
   useEffect(() => {
     if (controller.current.signal.aborted) controller.current = new AbortController()
     const current = controller.current
@@ -58,7 +65,7 @@ export function ExternalAgentVersions({ agent, onClose }: { agent: ExternalAgent
             return <p key={name} className="break-all text-sm"><strong>{name}</strong>：{channel ? `${channel.version}${channel.enabled ? '' : '（已停用）'}` : '未发布'}</p>
           })}
         </div>
-        <form className="space-y-3 rounded-md border p-3" onSubmit={event => {
+        {!managed && <form className="space-y-3 rounded-md border p-3" onSubmit={event => {
           event.preventDefault()
           void run(() => api.publishVersion(agent.id, { revision: agent.revision, version: label.trim(), note: note.trim() }), '版本已发布，可在下方选择发布频道。')
         }}>
@@ -68,15 +75,20 @@ export function ExternalAgentVersions({ agent, onClose }: { agent: ExternalAgent
           <Textarea id="external-version-note" value={note} onChange={e => setNote(e.target.value)} maxLength={2000} required placeholder="说明版本变化、审核依据或撤销原因" disabled={isBusy} />
           <Button type="submit" disabled={isBusy || !agent.approved || !label.trim() || !note.trim()}>发布不可变版本</Button>
           {!agent.approved && <p className="text-xs text-muted-foreground">当前配置尚未审核，请先完成审核发布。</p>}
-        </form>
+        </form>}
+        {managed && <div className="space-y-2 rounded-md border p-3"><p className="text-sm">新版本请在“待审核候选”中批准并发布。</p><Label htmlFor="managed-version-note">撤销 / 弃用 / 归档说明</Label><Textarea id="managed-version-note" value={note} onChange={e => setNote(e.target.value)} maxLength={2000} /></div>}
         <div className="space-y-3">
           {!page.items.length && <p className="text-sm text-muted-foreground">尚未发布版本。完成当前配置审核后即可发布。</p>}
           {page.items.map(version => {
+            const state = states.find(s => s.version === version.version)
+            const isActive = !managed || state?.lifecycle === 'published'
             const revoked = version.decisions.some(d => d.decision === 'revoked')
             const approved = !revoked && version.decisions.some(d => d.decision === 'approved' && d.expires_at > Date.now())
             return <article key={version.version} className="space-y-2 rounded-md border p-3">
               <div className="flex flex-wrap items-center gap-2"><strong className="break-all text-sm">{version.version}</strong><Badge variant="outline">{revoked ? '已撤销' : version.decisions[0]?.decision === 'withdrawn' ? '已撤回批准' : approved ? '已批准' : '未批准或已过期'}</Badge><Badge variant="secondary">{version.snapshot.sourceManifest?.execution_revision ? '执行版本锁定' : '来源快照'}</Badge></div>
               <p className="break-all text-xs text-muted-foreground">来源：{version.snapshot.source_digest}</p>
+              {state && <p className="break-all text-xs text-muted-foreground">治理状态：{state.lifecycle === 'published' ? '已发布' : state.lifecycle === 'deprecated' ? '已弃用，停止新任务' : '已归档'} · {state.provenance === 'legacy_adopted' ? '历史版本显式纳管，原审批记录保留' : `候选：${state.candidate_id}`}</p>}
+              {version.decisions.map(d => <p key={d.id} className="text-xs text-muted-foreground">{new Date(d.created_at).toLocaleString()} · {d.actor_id} · {d.decision}：{d.note}</p>)}
               {version.registry && <div className="space-y-1 text-xs text-muted-foreground">
                 <Badge variant="outline">Nexus 登记签名已验证</Badge>
                 <p className="break-all">登记摘要：{version.registry.registration_digest}</p>
@@ -86,8 +98,9 @@ export function ExternalAgentVersions({ agent, onClose }: { agent: ExternalAgent
               <ExternalTaskProfile profile={version.snapshot.sourceManifest?.execution_context} />
               {!version.snapshot.sourceManifest?.execution_revision && <p className="text-xs text-muted-foreground">此来源未提供远端不可变执行保证；运行前仍需核对来源。</p>}
               <div className="flex flex-wrap gap-2">
-                {(['stable', 'canary'] as const).map(name => <Button key={name} size="sm" variant="outline" disabled={isBusy || !approved || agent.archived} onClick={() => void run(() => api.moveChannel(agent.id, { name, version: version.version, revision: page.channels.find(c => c.name === name)?.revision ?? 0 }), `${name} 已切换到 ${version.version}。`)}>设为 {name}</Button>)}
+                {(['stable', 'canary'] as const).map(name => <Button key={name} size="sm" variant="outline" disabled={isBusy || !approved || !isActive || agent.archived} onClick={() => void run(() => api.moveChannel(agent.id, { name, version: version.version, revision: page.channels.find(c => c.name === name)?.revision ?? 0 }), `${name} 已切换到 ${version.version}。`)}>设为 {name}</Button>)}
                 <Button size="sm" variant="ghost" disabled={isBusy || revoked} onClick={() => setRevoke(version.version)}>撤销版本</Button>
+                {managed && state && state.lifecycle !== 'archived' && <>{state.lifecycle !== 'deprecated' && <Button size="sm" variant="ghost" disabled={isBusy || !note.trim()} onClick={() => void run(() => governance.lifecycle(agent.id, version.version, 'deprecated', note.trim()), '版本已弃用，停止新任务。')}>弃用版本</Button>}<Button size="sm" variant="ghost" disabled={isBusy || !note.trim()} onClick={() => void run(() => governance.lifecycle(agent.id, version.version, 'archived', note.trim()), '版本已归档，历史记录保留。')}>归档版本</Button></>}
               </div>
             </article>
           })}

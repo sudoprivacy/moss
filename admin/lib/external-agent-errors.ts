@@ -1,6 +1,19 @@
 import { ApiRequestError } from './api/client'
 
 const messages: Record<string, string> = {
+  EXECUTION_UNCONFIRMED: '远端执行结果无法确认。请核对提供方运行记录，不要重新发送任务。',
+  CANDIDATE_WORKFLOW_REQUIRED: '此智能体已纳入候选管理，请在“来源与候选”中修改、审核并发布。',
+  CANDIDATE_VALIDATION_STALE: '候选对应的来源、连接、权限或校验规则已变化。请重新同步并审核新候选。',
+  CANDIDATE_STATE_CONFLICT: '候选状态已变化，请刷新后选择适用操作。',
+  CATALOG_SOURCE_DISABLED: '来源已停用，不能发布或发起新任务。',
+  CATALOG_SOURCE_NOT_FOUND: '当前组织中未找到此来源，请刷新列表。',
+  IMPORT_CANDIDATE_NOT_FOUND: '当前组织中未找到此候选，请刷新列表。',
+  CATALOG_VERSION_NOT_ACTIVE: '此版本尚未完成候选发布、已弃用或已归档，不能发起新任务。',
+  SOURCE_REVISION_CONFLICT: '来源使用同一修订号返回了不同内容，请先修正来源修订，已有批准不会沿用。',
+  PUBLICATION_RECONCILIATION_REQUIRED: '已有发布操作结果待核对，请先核对原操作。',
+  REVIEW_NOTE_REQUIRED: '请填写本次审核或治理操作的说明。',
+  CATALOG_CONTRACT_INVALID: '治理数据未通过契约校验，请联系管理员核查服务版本。',
+  TASK_PROVENANCE_CONFLICT: '本次派发与已保存的执行上下文不同，已停止重复派发。',
   ENDPOINT_REQUEST_NOT_FOUND: '未找到当前组织的地址申请，请刷新申请列表。',
   ENDPOINT_REQUEST_CHANGED: '地址申请已被审核或已更新，请关闭弹窗并刷新申请列表。',
   ENDPOINT_REQUEST_LIMIT: '当前组织的地址申请记录已达上限，请联系平台管理员。',

@@ -41,6 +41,14 @@ export async function maintainRetention(store: ExternalTaskStore, now = Date.now
     await db.run(`UPDATE external_pilot_retention SET audit_document = NULL WHERE task_id IN (
       SELECT task_id FROM external_pilot_retention WHERE retired_at < ? AND audit_document IS NOT NULL
       ORDER BY retired_at, task_id LIMIT ?)`, [now - PILOT_RETENTION.auditDays * DAY, PILOT_RETENTION.batchSize])
+    await db.run(`DELETE FROM agent_task_provenance WHERE task_id IN (
+      SELECT r.task_id FROM external_pilot_retention r JOIN agent_task_provenance p ON p.task_id = r.task_id
+      WHERE r.retired_at < ? ORDER BY r.retired_at, r.task_id LIMIT ?)`,
+    [now - PILOT_RETENTION.auditDays * DAY, PILOT_RETENTION.batchSize])
+    const catalogAuditAt = db.kind === 'postgres' ? "CAST(CAST(document AS jsonb)->>'at' AS BIGINT)" : "CAST(json_extract(document, '$.at') AS BIGINT)"
+    await db.run(`DELETE FROM agent_catalog_audit WHERE id IN (
+      SELECT id FROM agent_catalog_audit WHERE ${catalogAuditAt} < ? ORDER BY ${catalogAuditAt}, id LIMIT ?)`,
+    [now - PILOT_RETENTION.auditDays * DAY, PILOT_RETENTION.batchSize])
     // Admin audit has no task text or credentials and follows the longer audit window.
     await db.run(`DELETE FROM external_pilot_admin_audit WHERE id IN (
       SELECT id FROM external_pilot_admin_audit WHERE created_at < ? ORDER BY created_at, id LIMIT ?)`,

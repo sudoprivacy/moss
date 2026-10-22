@@ -1,4 +1,6 @@
 import { ExternalEndpointRequests } from './external-endpoint-requests'
+import { ExternalAgentCatalog } from './external-agent-catalog'
+import type { CatalogSource } from '@/lib/api/agent-catalog'
 import { isEndpointAllowed, normalizeEndpoint } from '@/lib/external-endpoint'
 import { ExternalTaskProfile } from './external-task-profile'
 import { ExternalAgentUsageDetails } from './external-agent-usage-details'
@@ -35,6 +37,7 @@ import { ExternalAgentVersions } from './external-agent-versions'
 
 const selectClass = 'h-9 w-full rounded-md border bg-background px-3 text-sm'
 const initialDraft = (): OnboardExternalAgent => ({
+  catalog_governance: true,
   request_id: crypto.randomUUID(),
   provider_kind: 'dify',
   endpoint: '',
@@ -66,6 +69,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
   const api = useMemo(() => createExternalAgentsApi(undefined, () => controller.current.signal), [controller])
   const [access, setAccess] = useState<ExternalProviderAccess | null>(null)
   const [agents, setAgents] = useState<ExternalAgentAdmin[]>([])
+  const [managedSources, setManagedSources] = useState<CatalogSource[]>([])
   const [agentCursor, setAgentCursor] = useState<string | null>(null)
   const [members, setMembers] = useState<ExternalProviderMember[]>([])
   const [memberSearch, setMemberSearch] = useState('')
@@ -456,6 +460,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
           ) : null}
         </div>
       ) : null}
+      {access?.can_manage && <ExternalAgentCatalog agents={agents} endpoints={policy.endpoints} onChanged={onReload} onManaged={setManagedSources} />}
       {access?.can_manage && !access.credential_storage_available ? (
         <Feedback error>凭据服务不可用，请检查 Moss 的 Nexus Secret 服务。</Feedback>
       ) : null}
@@ -482,6 +487,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
       <div className="grid gap-4 md:grid-cols-2">
         {visibleAgents.map((agent) => {
           const isPublished = agent.approved && agent.review_expires_at > Date.now()
+          const isManaged = managedSources.some(source => source.catalog_id === agent.id)
           return (
             <article key={agent.id} aria-label={agent.name} className="space-y-3 rounded-xl border bg-card p-4">
               <div className="flex items-start justify-between gap-3">
@@ -540,10 +546,10 @@ function ScopedExternalAgents({ query }: { query: string }) {
                 >
                   测试连接
                 </Button>
-                <Button size="sm" variant="outline" disabled={isBusy} onClick={() => onOpen({ kind: 'edit', agent })}>
+                <Button size="sm" variant="outline" disabled={isBusy || isManaged} onClick={() => onOpen({ kind: 'edit', agent })}>
                   编辑配置
                 </Button>
-                {!isPublished ? (
+                {!isPublished && !isManaged ? (
                   <Button
                     size="sm"
                     disabled={
@@ -557,7 +563,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                     审核发布
                   </Button>
                 ) : null}
-                {agent.approved ? (
+                {agent.approved && !isManaged ? (
                   <Button
                     size="sm"
                     variant="outline"
@@ -576,6 +582,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                   更换密钥
                 </Button>
                 <Button size="sm" variant="outline" disabled={isBusy} onClick={() => setVersionAgent(agent)}>版本与频道</Button>
+                {isManaged && <span className="self-center text-xs text-muted-foreground">通过上方来源与候选管理配置和发布</span>}
                 <Button size="sm" variant="ghost" disabled={isBusy} onClick={() => onOpen({ kind: 'archive', agent })}>
                   归档
                 </Button>
@@ -589,7 +596,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
           {query.trim() ? '没有匹配的外部智能体' : '尚未接入外部智能体，接入并审核后可供授权成员使用。'}
         </p>
       ) : null}
-      {versionAgent && <ExternalAgentVersions key={versionAgent.id} agent={versionAgent} onClose={() => setVersionAgent(null)} />}
+      {versionAgent && <ExternalAgentVersions key={versionAgent.id} agent={versionAgent} managed={managedSources.some(source => source.catalog_id === versionAgent.id)} onClose={() => setVersionAgent(null)} />}
       <Dialog
         open={Boolean(dialog)}
         onOpenChange={(open) => {
