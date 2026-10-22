@@ -23,6 +23,7 @@ export interface CatalogSnapshot {
   source_digest: string; parameters_digest: string; adapter_version: string
   endpoint: string; input_profile: string; output_profile: string
   capabilities: CatalogCapabilities; user_ids: string[]; data_scope: 'synthetic_only'
+  requested_permissions: { profile: 'sudo-task-grant/v1'; model_resource: string; tool_resources: string[]; max_model_calls: number } | null
 }
 export interface CatalogValidationReport {
   id: string; rule_version: string; source_revision: number; binding_revision: number

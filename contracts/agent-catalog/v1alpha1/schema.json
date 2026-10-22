@@ -265,7 +265,8 @@
         "output_profile",
         "capabilities",
         "user_ids",
-        "data_scope"
+        "data_scope",
+        "requested_permissions"
       ],
       "properties": {
         "name": {
@@ -335,6 +336,41 @@
         "data_scope": {
           "enum": [
             "synthetic_only"
+          ]
+        },
+        "requested_permissions": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "profile",
+                "model_resource",
+                "tool_resources",
+                "max_model_calls"
+              ],
+              "properties": {
+                "profile": {
+                  "const": "sudo-task-grant/v1"
+                },
+                "model_resource": {
+                  "type": "string"
+                },
+                "tool_resources": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "max_model_calls": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
           ]
         }
       }
