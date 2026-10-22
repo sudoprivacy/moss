@@ -2,7 +2,7 @@
 
 日期：2026-10-22。依据：领导提供的《统一 Agent 接入标准：协议接入批次实施、验证与 UI 说明》v0.1，以及本仓 P0–P4 实施计划。
 
-**本轮限定范围已完成代码、前后端操作和本地验证。** 交付的是实验性外部 Agent 接入与治理闭环，不代表 Enterprise 1.1 全部发版，也不代表商业 Provider、生产部署或全部协议能力已验收。代码保留在三仓原分支 `codex/agent-platform-foundation-20261016`；本轮新提交尚未 push、创建 PR 或合并。
+**更正：本文记录前次交付，当时 §9.4/§9.6 的部分 UI 及本轮 Electron 操作验收尚未补齐。新增完成项请以 [UI 补齐与操作验收](protocol-governance-ui-acceptance-20261022.md) 为准。** 交付的是实验性外部 Agent 接入与治理闭环，不代表 Enterprise 1.1 全部发版，也不代表商业 Provider、生产部署或全部协议能力已验收。代码保留在三仓原分支 `codex/agent-platform-foundation-20261016`；本轮新提交尚未 push、创建 PR 或合并。
 
 ## 1. 做成了什么
 
