@@ -1,4 +1,6 @@
 import { dcClient } from './client'
+import type { EndpointRequest, EndpointRequestsPage } from '../../../src/server/externalProviders/endpointRequests.types'
+export type { EndpointRequest } from '../../../src/server/externalProviders/endpointRequests.types'
 import type { AgentVersionsPage, AgentVersionManifest, AgentChannel } from '../../../contracts/agent-federation/v1alpha1/contract'
 export type { AgentVersionsPage, AgentVersionManifest, AgentChannel } from '../../../contracts/agent-federation/v1alpha1/contract'
 import type {
@@ -75,6 +77,10 @@ export function createExternalAgentsApi(
     members: () => get<ExternalProviderMember[]>(`${base}/admin/members`),
     membersPage: (search = '', after = '') => get<{ items: ExternalProviderMember[]; next_cursor: string | null }>(`${base}/admin/members-page?q=${encodeURIComponent(search)}&after=${encodeURIComponent(after)}`),
     policy: () => get<ExternalPilotPolicy>(`${base}/admin/policy`),
+    endpointRequests: (after = '') => get<EndpointRequestsPage>(`${base}/admin/endpoint-requests?after=${encodeURIComponent(after)}`),
+    requestEndpoint: (body: { endpoint: string; reason: string }) => post<{ request: EndpointRequest | null; policy: ExternalPilotPolicy }>(`${base}/admin/endpoint-requests`, body),
+    approveEndpoint: (body: { endpoint: string; note: string; policy_revision: number }) => post<{ request: EndpointRequest | null; policy: ExternalPilotPolicy }>(`${base}/admin/endpoints/approve`, body),
+    reviewEndpoint: (body: { id: string; revision: number; policy_revision: number; approved: boolean; note: string }) => post<{ request: EndpointRequest; policy: ExternalPilotPolicy }>(`${base}/admin/endpoint-requests/review`, body),
     savePolicy: (body: ExternalPilotPolicy) => post<ExternalPilotPolicy>(`${base}/admin/policy`, body),
     inspect: (body: InspectExternalConnection) => post<ExternalConnectionInspection>(`${base}/admin/inspect`, body),
     onboard: (body: OnboardExternalAgent) => post<ExternalAgentAdmin>(`${base}/admin/onboard`, body),

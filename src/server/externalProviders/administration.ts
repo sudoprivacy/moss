@@ -1,4 +1,5 @@
 import { isStandardProtocol, StandardHttpAdapter } from '../agentFederation/standardHttpAdapter.js'
+import { EndpointRequests } from './endpointRequests.js'
 import type { ProductRegistryClient } from '../agentFederation/registryClient.js'
 import { describeExternalAgent } from './description.js'
 import { randomUUID } from 'node:crypto'
@@ -43,6 +44,7 @@ function string(value: unknown, max = 200): string {
 }
 
 export class ExternalProviderAdministration {
+  readonly endpointRequests = new EndpointRequests(this)
   readonly operations: CredentialOperations
   constructor(readonly store: ExternalTaskStore, readonly options: AdministrationOptions) { this.operations = new CredentialOperations(store, options) }
   get credentialStorageAvailable(): boolean { return Boolean(this.options.secrets.putSecret && this.options.secrets.deleteSecret) }

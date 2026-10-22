@@ -27,6 +27,10 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
       const admin = service.administration
       if (action === 'policy' && method === 'GET') data = await admin.policy(actor)
       else if (action === 'policy' && method === 'POST') { requirePlatformAdmin(); data = await admin.setPolicy(actor, body) }
+      else if (action === 'endpoint-requests' && method === 'GET') data = await admin.endpointRequests.list(actor, after)
+      else if (action === 'endpoint-requests' && method === 'POST') data = await admin.endpointRequests.submit(actor, body)
+      else if (action === 'endpoint-requests/review' && method === 'POST') { requirePlatformAdmin(); data = await admin.endpointRequests.review(actor, body) }
+      else if (action === 'endpoints/approve' && method === 'POST') { requirePlatformAdmin(); data = await admin.endpointRequests.approve(actor, body) }
       else if (action === 'members-page' && method === 'GET') data = await admin.memberPage(actor, url.searchParams.get('after') ?? '', url.searchParams.get('q') ?? '')
       else if (action === 'members' && method === 'GET') data = await admin.members(actor)
       else if (action === 'agents' && method === 'GET') data = url.searchParams.get('paged') === '1' ? await admin.listPage(actor, after) : await admin.list(actor)

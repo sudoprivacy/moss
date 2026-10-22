@@ -40,6 +40,9 @@ export class ExternalTaskStore {
       CREATE TABLE IF NOT EXISTS external_pilot_retention (task_id TEXT PRIMARY KEY, compacted_at BIGINT NOT NULL, retired_at BIGINT, audit_document TEXT);
       CREATE INDEX IF NOT EXISTS external_pilot_retention_retired ON external_pilot_retention(retired_at);
       CREATE TABLE IF NOT EXISTS external_pilot_policy (org_id TEXT PRIMARY KEY, document TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS external_endpoint_requests (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, endpoint TEXT NOT NULL, status TEXT NOT NULL, document TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS external_endpoint_requests_org ON external_endpoint_requests(org_id, id);
+      CREATE UNIQUE INDEX IF NOT EXISTS external_endpoint_requests_pending ON external_endpoint_requests(org_id, endpoint) WHERE status = 'pending';
       CREATE TABLE IF NOT EXISTS external_pilot_admin_operations (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, request_hash TEXT NOT NULL, status TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS external_pilot_operations (
         id TEXT PRIMARY KEY, org_id TEXT NOT NULL, kind TEXT NOT NULL, request_id TEXT NOT NULL,

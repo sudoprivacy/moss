@@ -1,6 +1,10 @@
 import { ApiRequestError } from './api/client'
 
 const messages: Record<string, string> = {
+  ENDPOINT_REQUEST_NOT_FOUND: '未找到当前组织的地址申请，请刷新申请列表。',
+  ENDPOINT_REQUEST_CHANGED: '地址申请已被审核或已更新，请关闭弹窗并刷新申请列表。',
+  ENDPOINT_REQUEST_LIMIT: '当前组织的地址申请记录已达上限，请联系平台管理员。',
+  ENDPOINT_LIMIT: '当前组织最多允许 20 个服务地址，请先在接入范围中移除不再使用的地址。',
   REGISTRY_ENROLLMENT_REQUIRED: '此新智能体的注册尚未完成。请恢复注册中心配置，再重试原接入操作；不能改用旧目录发布。',
   REGISTRY_PUBLICATION_INCOMPLETE: '审核配置已保存，但版本发布或频道切换未完成。请打开版本与频道，检查后重试发布或切换。',
   REGISTRY_UNAVAILABLE: '无法连接统一注册中心，请恢复服务后重试。',

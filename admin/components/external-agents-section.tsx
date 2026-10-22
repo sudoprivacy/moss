@@ -1,3 +1,5 @@
+import { ExternalEndpointRequests } from './external-endpoint-requests'
+import { isEndpointAllowed, normalizeEndpoint } from '@/lib/external-endpoint'
 import { ExternalTaskProfile } from './external-task-profile'
 import { ExternalAgentUsageDetails } from './external-agent-usage-details'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -21,6 +23,7 @@ import { useAuth } from '@/lib/hooks/use-auth'
 import {
   createExternalAgentsApi,
   type ExternalAgentAdmin,
+  type EndpointRequest,
   type ExternalTask,
   type ExternalPilotPolicy,
   type ExternalProviderAccess,
@@ -49,6 +52,7 @@ type DialogState =
   | { kind: 'create' }
   | { kind: 'edit' | 'rotate' | 'approve' | 'disable' | 'archive'; agent: ExternalAgentAdmin }
   | { kind: 'policy' }
+  | { kind: 'endpointReview'; request: EndpointRequest; approved: boolean }
   | null
 
 export default function ExternalAgentsSection({ query }: { query: string }) {
@@ -77,6 +81,11 @@ function ScopedExternalAgents({ query }: { query: string }) {
   const [versionAgent, setVersionAgent] = useState<ExternalAgentAdmin | null>(null)
   const [draft, setDraft] = useState<OnboardExternalAgent>(initialDraft)
   const [step, setStep] = useState(0)
+  const [endpointMode, setEndpointMode] = useState<'existing' | 'new'>('existing')
+  const [endpointNote, setEndpointNote] = useState('')
+  const [endpointRequests, setEndpointRequests] = useState<EndpointRequest[]>([])
+  const [endpointCursor, setEndpointCursor] = useState<string | null>(null)
+  const [dialogNotice, setDialogNotice] = useState('')
   const [fileName, setFileName] = useState('')
   const [newKey, setNewKey] = useState('')
   const [reviewDays, setReviewDays] = useState(7)
@@ -92,11 +101,13 @@ function ScopedExternalAgents({ query }: { query: string }) {
     if (current.signal.aborted) return
     setAccess(permissions)
     if (!permissions.can_manage) return
-    const [rows, settings] = await Promise.all([api.listPage(), api.policy()])
+    const [rows, settings, requests] = await Promise.all([api.listPage(), api.policy(), api.endpointRequests()])
     if (current.signal.aborted) return
     setAgents(rows.items)
     setAgentCursor(rows.next_cursor)
     setPolicy(settings)
+    setEndpointRequests(requests.items)
+    setEndpointCursor(requests.next_cursor)
   }, [api, controller])
 
   useEffect(() => {
@@ -154,6 +165,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
   function clearDialog() {
     fileGeneration.current++
     setDialog(null)
+    setDialogNotice('')
     setDraft(initialDraft())
     setNewKey('')
     setFileName('')
@@ -164,6 +176,9 @@ function ScopedExternalAgents({ query }: { query: string }) {
     setError('')
     setNotice('')
     setStep(0)
+    setDialogNotice('')
+    setEndpointNote('')
+    setEndpointMode(policy.endpoints.length ? 'existing' : 'new')
     setFileName('')
     setNewKey('')
     setReviewDays(7)
@@ -200,12 +215,16 @@ function ScopedExternalAgents({ query }: { query: string }) {
   const isMetadataReady = Boolean(draft.name.trim() && draft.allowed_user_ids.length && draft.review_note.trim())
   const isDefinitionReady =
     isMetadataReady && Boolean(draft.app_id.trim() && draft.workspace_id.trim() && draft.source_definition)
+  const endpointAllowed = isEndpointAllowed(draft.endpoint, policy.endpoints)
+  const needsEndpointRequest = !endpointAllowed && !access?.can_manage_policy
   const isConfirmDisabled =
     isBusy ||
     (dialog?.kind === 'create'
       ? step === 0
-        ? !draft.endpoint || !draft.api_key.trim() || (draft.provider_kind === 'custom_http' && !draft.source_definition)
+        ? !draft.endpoint.trim() || (!endpointAllowed && !endpointNote.trim()) || (!needsEndpointRequest && (!policy.enabled || !access?.credential_storage_available || !draft.api_key.trim() || (draft.provider_kind === 'custom_http' && !draft.source_definition)))
         : !isDefinitionReady
+      : dialog?.kind === 'endpointReview'
+        ? !endpointNote.trim()
       : dialog?.kind === 'edit'
         ? !isMetadataReady || (dialog.agent.definition_evidence === 'digest_only' && !draft.source_definition)
         : dialog?.kind === 'rotate'
@@ -216,6 +235,25 @@ function ScopedExternalAgents({ query }: { query: string }) {
     if (!dialog || isConfirmDisabled) return
     await onRun(async () => {
       if (dialog.kind === 'create' && step === 0) {
+        setDialogNotice('')
+        if (!endpointAllowed) {
+          if (!access?.can_manage_policy) {
+            const result = await api.requestEndpoint({ endpoint: draft.endpoint, reason: endpointNote })
+            if (!isLive()) return
+            setPolicy(result.policy)
+            setDraft(current => ({ ...current, endpoint: normalizeEndpoint(current.endpoint), api_key: '' }))
+            setDialogNotice(result.request ? '地址申请已提交，等待超级管理员审核。申请中不保存 API Key；批准后请刷新并测试连接。' : '该地址已在允许范围内，请填写 API Key 后测试连接。')
+            await onReload()
+            return
+          }
+          const result = await api.approveEndpoint({ endpoint: draft.endpoint, note: endpointNote, policy_revision: policy.revision })
+          if (!isLive()) return
+          setPolicy(result.policy)
+          setDraft(current => ({ ...current, endpoint: normalizeEndpoint(current.endpoint) }))
+          setDialogNotice('地址已加入当前组织的允许范围。若连接测试失败，可修正 API Key 后重试；地址批准会保留。')
+          await onReload()
+          if (!isLive()) return
+        }
         const inspection = await api.inspect({ endpoint: draft.endpoint, api_key: draft.api_key, provider_kind: draft.provider_kind, ...(draft.provider_kind === 'custom_http' ? { source_definition: draft.source_definition } : {}) })
         if (!isLive()) return
         setDraft((current) => ({ ...current, name: current.name || inspection.name }))
@@ -226,6 +264,9 @@ function ScopedExternalAgents({ query }: { query: string }) {
       if (dialog.kind === 'create') {
         await api.onboard(draft)
         message = '配置已保存，审核发布后授权用户即可使用。'
+      } else if (dialog.kind === 'endpointReview') {
+        await api.reviewEndpoint({ id: dialog.request.id, revision: dialog.request.revision, policy_revision: policy.revision, approved: dialog.approved, note: endpointNote })
+        message = dialog.approved ? '服务地址已批准。组织管理员可刷新后测试连接；组织启用状态未改变。' : '地址申请已拒绝，申请人可查看审核说明。'
       } else if (dialog.kind === 'edit') {
         await api.update(dialog.agent.id, {
           revision: dialog.agent.revision,
@@ -275,7 +316,9 @@ function ScopedExternalAgents({ query }: { query: string }) {
   )
   const selected = dialog && 'agent' in dialog ? dialog.agent : null
   const title =
-    dialog?.kind === 'create'
+    dialog?.kind === 'endpointReview'
+      ? dialog.approved ? '批准服务地址' : '拒绝地址申请'
+    : dialog?.kind === 'create'
       ? '接入外部智能体'
       : dialog?.kind === 'edit'
         ? '编辑外部智能体'
@@ -291,8 +334,10 @@ function ScopedExternalAgents({ query }: { query: string }) {
   const confirmLabel =
     dialog?.kind === 'create'
       ? step === 0
-        ? '测试连接并继续'
+        ? endpointAllowed ? '测试连接并继续' : access?.can_manage_policy ? '批准地址并测试连接' : '提交地址申请'
         : '保存待审核配置'
+      : dialog?.kind === 'endpointReview'
+        ? dialog.approved ? '确认批准地址' : '确认拒绝申请'
       : dialog?.kind === 'approve'
         ? '确认发布'
         : dialog?.kind === 'disable'
@@ -385,7 +430,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
             <RefreshCw className="size-4" />
           </Button>
           <Button
-            disabled={isLoading || isBusy || !policy.enabled || !access?.credential_storage_available}
+            disabled={isLoading || isBusy || !access?.can_manage}
             onClick={() => onOpen({ kind: 'create' })}
           >
             <Plus className="mr-2 size-4" />
@@ -417,6 +462,15 @@ function ScopedExternalAgents({ query }: { query: string }) {
       {access?.can_manage && !policy.enabled && !access.can_manage_policy ? (
         <Feedback>请平台管理员为当前组织启用试点并配置允许的外部服务地址。</Feedback>
       ) : null}
+      {access?.can_manage ? <ExternalEndpointRequests items={endpointRequests} endpoints={policy.endpoints} canReview={Boolean(access.can_manage_policy)} busy={isBusy} cursor={endpointCursor}
+        onReview={(request, approved) => onOpen({ kind: 'endpointReview', request, approved })}
+        onFirst={() => void onRun(onReload)}
+        onNext={() => void onRun(async () => {
+          const page = await api.endpointRequests(endpointCursor ?? '')
+          if (!isLive()) return
+          setEndpointRequests(page.items)
+          setEndpointCursor(page.next_cursor)
+        })} /> : null}
       {access?.can_manage ? <UnknownExternalTasks api={api} /> : null}
       {error && !dialog ? <Feedback error>{error}</Feedback> : null}
       {notice ? <Feedback>{notice}</Feedback> : null}
@@ -547,12 +601,13 @@ function ScopedExternalAgents({ query }: { query: string }) {
             <DialogTitle>{title}</DialogTitle>
             <DialogDescription>
               {selected?.name ||
-                (dialog?.kind === 'policy'
+                (dialog?.kind === 'endpointReview' ? '仅批准当前组织的网络访问范围，不会自动启用组织或发布智能体。' : dialog?.kind === 'policy'
                   ? '网络接入范围由平台管理员维护，组织管理员负责本组织的接入和发布。'
                   : '将已发布的外部智能体接入当前组织。仅用于已审核的合成数据试点。')}
             </DialogDescription>
           </DialogHeader>
           {error ? <Feedback error>{error}</Feedback> : null}
+          {dialogNotice ? <Feedback>{dialogNotice}</Feedback> : null}
           <fieldset disabled={isBusy} className="min-w-0 space-y-4">
             {dialog?.kind === 'create' ? (
               <>
@@ -578,20 +633,29 @@ function ScopedExternalAgents({ query }: { query: string }) {
                         {draft.provider_kind === 'custom_http' && <ExternalTaskProfile source={draft.source_definition} />}
                       </Field>
                     ) : null}
-                    <Field id="external-endpoint" label="服务 API 地址">
-                      <select
-                        id="external-endpoint"
-                        className={selectClass}
-                        value={draft.endpoint}
-                        onChange={(event) => setDraft({ ...draft, endpoint: event.target.value })}
-                      >
-                        {policy.endpoints.map((endpoint) => (
-                          <option key={endpoint} value={endpoint}>
-                            {endpoint}
-                          </option>
-                        ))}
+                    <Field id="external-endpoint-mode" label="服务 API 地址来源">
+                      <select id="external-endpoint-mode" className={selectClass} value={endpointMode} onChange={event => {
+                        const mode = event.target.value as 'existing' | 'new'
+                        setEndpointMode(mode)
+                        setDialogNotice('')
+                        setDraft({ ...draft, endpoint: mode === 'existing' ? policy.endpoints[0] ?? '' : '', api_key: '' })
+                      }}>
+                        <option value="existing" disabled={!policy.endpoints.length}>选择已批准地址</option>
+                        <option value="new">填写新地址</option>
                       </select>
                     </Field>
+                    <Field id="external-endpoint" label="服务 API 地址" hint="填写服务的固定 IP 地址，以 /v1 结尾，例如 http://10.0.1.158:8089/v1。Dify 可在应用的“访问 API”页面查看。">
+                      {endpointMode === 'existing' ? <select id="external-endpoint" className={selectClass} value={draft.endpoint} onChange={event => { setDialogNotice(''); setDraft({ ...draft, endpoint: event.target.value, api_key: '' }) }}>
+                        {draft.endpoint && !endpointAllowed && <option value={draft.endpoint}>{draft.endpoint}（已移出允许范围）</option>}
+                        {policy.endpoints.map(endpoint => <option key={endpoint} value={endpoint}>{endpoint}</option>)}
+                      </select> : <Input id="external-endpoint" value={draft.endpoint} maxLength={1024} placeholder="http://10.0.1.158:8089/v1" onChange={event => { setDialogNotice(''); setDraft({ ...draft, endpoint: event.target.value, api_key: '' }) }} />}
+                      <p className="text-xs text-muted-foreground">{endpointAllowed ? '地址已批准，可直接测试连接。' : access?.can_manage_policy ? '你是超级管理员，确认后将批准此地址并测试连接。' : '新地址需超级管理员批准。提交申请不会连接远端服务，也不会提交 API Key。'}</p>
+                    </Field>
+                    {!endpointAllowed && <Field id="external-endpoint-note" label={access?.can_manage_policy ? '地址批准说明' : '地址申请说明'} hint="填写服务用途与归属，请勿填写密钥。">
+                      <Textarea id="external-endpoint-note" value={endpointNote} maxLength={1000} onChange={event => setEndpointNote(event.target.value)} />
+                    </Field>}
+                    {!policy.enabled && <Feedback>当前组织尚未启用外部接入。组织管理员可以先申请地址；超级管理员需在“配置接入范围”中显式启用后才能测试。</Feedback>}
+                    <Button type="button" variant="outline" size="sm" onClick={() => void onRun(onReload)}>刷新地址审批状态</Button>
                     <Field
                       id="external-api-key"
                       label="服务 API Key"
@@ -600,6 +664,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
                       <Input
                         id="external-api-key"
                         type="password"
+                        disabled={needsEndpointRequest}
                         autoComplete="new-password"
                         value={draft.api_key}
                         onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}
@@ -670,6 +735,13 @@ function ScopedExternalAgents({ query }: { query: string }) {
                 </Field>
               </>
             ) : null}
+            {dialog?.kind === 'endpointReview' ? <>
+              <p className="break-all text-sm font-medium">{dialog.request.endpoint}</p>
+              <p className="break-words text-sm">申请说明：{dialog.request.reason}</p>
+              <Field id="external-endpoint-review-note" label="审核说明">
+                <Textarea id="external-endpoint-review-note" value={endpointNote} maxLength={1000} onChange={event => setEndpointNote(event.target.value)} />
+              </Field>
+            </> : null}
             {dialog?.kind === 'policy' ? (
               <>
                 <label className="flex items-center gap-2 text-sm">

@@ -90,3 +90,21 @@ test('API errors retain server codes without displaying arbitrary provider error
   })
   assert.doesNotMatch(externalAgentError(new Error('sensitive provider response')), /sensitive/)
 })
+
+test('endpoint workflow submits only address and reason; grant and review send policy revision', async () => {
+  const calls: Array<{ path: string; body: unknown }> = []
+  const api = createExternalAgentsApi({
+    async get<T>(path: string) { calls.push({ path, body: null }); return { success: true, data: {} } as T },
+    async post<T>(path: string, body?: unknown) { calls.push({ path, body }); return { success: true, data: {} } as T },
+  })
+  await api.requestEndpoint({ endpoint: 'http://127.0.0.2/v1', reason: 'Team API' })
+  await api.approveEndpoint({ endpoint: 'http://127.0.0.2/v1', note: 'Reviewed', policy_revision: 4 })
+  await api.reviewEndpoint({ id: 'request-a', revision: 1, policy_revision: 5, approved: false, note: 'Owner not verified' })
+  await api.endpointRequests('cursor-a')
+  assert.deepEqual(calls, [
+    { path: '/api/v1/external-agents/admin/endpoint-requests', body: { endpoint: 'http://127.0.0.2/v1', reason: 'Team API' } },
+    { path: '/api/v1/external-agents/admin/endpoints/approve', body: { endpoint: 'http://127.0.0.2/v1', note: 'Reviewed', policy_revision: 4 } },
+    { path: '/api/v1/external-agents/admin/endpoint-requests/review', body: { id: 'request-a', revision: 1, policy_revision: 5, approved: false, note: 'Owner not verified' } },
+    { path: '/api/v1/external-agents/admin/endpoint-requests?after=cursor-a', body: null },
+  ])
+})
