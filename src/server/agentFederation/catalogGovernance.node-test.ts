@@ -25,6 +25,7 @@ import { ExternalTaskStore } from '../externalProviders/store.js'
 import { ExternalProviderService } from '../externalProviders/service.js'
 import { dispatchExternalProvider } from '../externalProviders/routes.js'
 import { discoverStandardManifest } from './standardHttpAdapter.js'
+import { CatalogReadModel } from './catalogReadModel.js'
 import type { ImportCandidate } from '../../../contracts/agent-catalog/v1alpha1/contract.js'
 import type { StandardHttpProtocol } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 
@@ -312,6 +313,9 @@ void test('catalog authorization, connection changes, disable/enable and audit c
   const managed = await dispatchCatalogGovernance(f.g, actor, 'GET', managedUrl, undefined)
   assert.equal((managed as Array<{ id: string }>)[0].id, f.source!.id)
   assert.deepEqual(await dispatchCatalogGovernance(f.g, { ...actor, orgId: 'other' }, 'GET', managedUrl, undefined), [])
+  const administrator = { ...actor, userId: 'another-admin' }
+  assert.equal((await f.service.administration.listPage(administrator)).items.some(item => item.id === f.agent.id), true)
+  assert.equal((await f.service.listPage(administrator)).items.some(item => item.id === f.agent.id), false)
   await assert.rejects(dispatchCatalogGovernance(f.g, actor, 'GET', new URL(managedUrl.href + ',invalid%27'), undefined), { code: 'INVALID_CATALOG_FILTER' })
   const detail = await dispatchCatalogGovernance(f.g, actor, 'GET', new URL(`http://localhost/api/v1/external-agents/admin/catalog/agents/${f.agent.id}`), undefined) as { agent: { id: string }; source: { id: string } }
   assert.equal(detail.agent.id, f.agent.id)
@@ -406,6 +410,66 @@ void test('adoption is explicit, GET stays read-only and preserves legacy versio
     'unknown',
   )
   await f.g.assertVersion(actor, f.agent.id, versions.items[0].version)
+})
+
+void test('legacy adoption maps revoked, expired and disabled-channel authority state', async (t) => {
+  const revoked = await fixture('http', true)
+  t.after(revoked.close)
+  await revoked.service.review(actor, revoked.agent.id, true, revoked.agent.revision)
+  const revokedVersion = (await revoked.service.releases.list(actor, revoked.agent.id)).items[0]
+  await revoked.service.releases.revoke(actor, revoked.agent.id, revokedVersion.version, 'Legacy revoked before catalog adoption')
+  const revokedBinding = await revoked.service.store.binding(actor, revoked.agent.id)
+  await revoked.g.attach(actor, { catalog_id: revoked.agent.id, revision: revokedBinding.revision })
+  assert.equal((await revoked.g.data.version(actor, revoked.agent.id, revokedVersion.version))?.lifecycle, 'deprecated')
+  assert.equal((await new CatalogReadModel(revoked.g).entry(actor, revoked.agent.id)).versions[0].status, 'revoked')
+
+  const expired = await fixture('http', true)
+  t.after(expired.close)
+  await expired.service.review(actor, expired.agent.id, true, expired.agent.revision)
+  const expiredVersion = (await expired.service.releases.list(actor, expired.agent.id)).items[0]
+  await expired.db.run("UPDATE agent_version_decisions SET expires_at = 1 WHERE catalog_id = ? AND version = ? AND decision = 'approved'", [expired.agent.id, expiredVersion.version])
+  const expiredBinding = await expired.service.store.binding(actor, expired.agent.id)
+  await expired.g.attach(actor, { catalog_id: expired.agent.id, revision: expiredBinding.revision })
+  assert.equal((await expired.g.data.version(actor, expired.agent.id, expiredVersion.version))?.lifecycle, 'deprecated')
+
+  const disabled = await fixture('http', true)
+  t.after(disabled.close)
+  await disabled.service.review(actor, disabled.agent.id, true, disabled.agent.revision)
+  const disabledVersion = (await disabled.service.releases.list(actor, disabled.agent.id)).items[0]
+  const stable = (await disabled.service.releases.list(actor, disabled.agent.id)).channels.find(channel => channel.name === 'stable')
+  await disabled.service.releases.moveChannel(actor, disabled.agent.id, 'stable', disabledVersion.version, stable?.revision ?? 0)
+  await disabled.db.run('UPDATE agent_channels SET enabled = 0 WHERE catalog_id = ? AND name = ?', [disabled.agent.id, 'stable'])
+  const disabledBinding = await disabled.service.store.binding(actor, disabled.agent.id)
+  await disabled.g.attach(actor, { catalog_id: disabled.agent.id, revision: disabledBinding.revision })
+  const disabledView = await new CatalogReadModel(disabled.g).entry(actor, disabled.agent.id)
+  assert.equal((await disabled.g.data.version(actor, disabled.agent.id, disabledVersion.version))?.lifecycle, 'published')
+  assert.equal(disabledView.entry.status, 'published')
+  assert.equal(disabledView.entry.is_selectable, false)
+  assert.equal(disabledView.versions[0].channels[0].enabled, false)
+})
+
+void test('source execution changes freeze published versions until a fresh candidate is approved', async (t) => {
+  const f = await fixture('a2a')
+  t.after(f.close)
+  const published = await f.publish(await f.sync())
+  await f.service.releases.moveChannel(actor, f.agent.id, 'stable', published.published_version!, 0)
+  const before = await f.g.data.version(actor, f.agent.id, published.published_version!)
+  assert.equal(before?.lifecycle, 'published')
+  const changed = await f.g.updateSource(actor, f.source!.id, {
+    revision: f.source!.revision,
+    allowed_user_ids: ['member'],
+  })
+  assert.equal(changed.last_error, 'SOURCE_REVALIDATION_REQUIRED')
+  assert.equal(changed.revision, f.source!.revision + 1)
+  assert.equal((await f.g.data.version(actor, f.agent.id, published.published_version!))?.lifecycle, 'deprecated')
+  await assert.rejects(f.g.assertVersion(actor, f.agent.id, published.published_version!), { code: 'CATALOG_VERSION_NOT_ACTIVE' })
+  const read = new CatalogReadModel(f.g)
+  const entry = await read.entry(actor, f.agent.id)
+  assert.equal(entry.entry.status, 'deprecated')
+  assert.equal(entry.entry.has_drift, true)
+  const fresh = await f.g.sync(actor, changed.id, { revision: changed.revision })
+  assert.equal(fresh.status, 'succeeded')
+  assert.equal((await f.g.data.candidate(actor, fresh.candidate_id!)).view.status, 'draft')
 })
 
 void test('partial publication can be quarantined without retry; review renewal creates a separate candidate', async (t) => {

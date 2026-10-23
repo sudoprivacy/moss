@@ -414,6 +414,31 @@ export class CatalogGovernanceStore {
     if (JSON.stringify(saved) !== JSON.stringify(item))
       throw new ExternalProviderError(409, 'IMMUTABLE_VERSION_CONFLICT')
   }
+  /** Freeze executable Catalog projections when their source identity changes.
+   *  The release authority remains immutable; the local Catalog state records
+   *  that every previously published projection needs a fresh candidate and
+   *  approval before dispatch can use it again.
+   */
+  async deprecatePublishedVersions(actor: ExternalActor, catalogId: string): Promise<string[]> {
+    await this.ready
+    const rows = await this.db.all(
+      'SELECT version, document FROM agent_catalog_versions WHERE org_id = ? AND catalog_id = ?',
+      [actor.orgId, catalogId],
+    )
+    const changed: string[] = []
+    for (const row of rows) {
+      const item = JSON.parse(String(row.document)) as CatalogVersionState
+      if (item.lifecycle !== 'published') continue
+      item.lifecycle = 'deprecated'
+      validateCatalogDocument('CatalogVersionState', item)
+      await this.db.run(
+        'UPDATE agent_catalog_versions SET document = ? WHERE org_id = ? AND catalog_id = ? AND version = ?',
+        [JSON.stringify(item), actor.orgId, catalogId, item.version],
+      )
+      changed.push(item.version)
+    }
+    return changed
+  }
   async saveSync(item: SourceSyncResult) {
     validateCatalogDocument('SourceSyncResult', item)
     await this.db.run(

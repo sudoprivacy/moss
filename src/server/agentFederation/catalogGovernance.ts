@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { AgentVersionManifest } from '../../../contracts/agent-federation/v1alpha1/contract.js'
+import type { AgentVersionDecision, AgentVersionManifest } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import type {
   ExternalTask,
   ExternalTaskProvenance,
@@ -189,7 +189,7 @@ export class AgentCatalogGovernance {
     if (definition !== null)
       providerDefinition(binding.provider_kind, definition, binding.app_id)
     // Explicit adoption preserves existing release IDs, even when their old provenance is incomplete.
-    const versions: AgentVersionManifest[] = []
+    const versions: Array<AgentVersionManifest & { decisions: AgentVersionDecision[] }> = []
     let after = ''
     for (let i = 0; i < 200; i++) {
       const page = await this.service.releases.list(actor, binding.id, after)
@@ -252,7 +252,12 @@ export class AgentCatalogGovernance {
         'INSERT INTO agent_catalog_sources(id, org_id, catalog_id, document) VALUES (?, ?, ?, ?)',
         [id, actor.orgId, binding.id, JSON.stringify(record)],
       )
-      for (const version of versions)
+      const now = Date.now()
+      for (const version of versions) {
+        const revoked = version.decisions.some((decision) => decision.decision === 'revoked')
+        const approved = !revoked && version.decisions.some(
+          (decision) => decision.decision === 'approved' && decision.expires_at > now,
+        )
         await this.data.saveVersion(actor, {
           catalog_id: binding.id,
           source_id: id,
@@ -260,9 +265,13 @@ export class AgentCatalogGovernance {
           candidate_id: null,
           spec_digest: version.spec_digest,
           source_digest: version.snapshot.source_digest,
-          lifecycle: 'published',
+          // A legacy release is runnable only when its authority still has a
+          // non-revoked, non-expired approval. Keep the release ID and digest,
+          // but never manufacture a published Catalog state during adoption.
+          lifecycle: approved ? 'published' : 'deprecated',
           provenance: 'legacy_adopted',
         })
+      }
       await this.data.audit(actor, 'source.created', binding.id, {
         source_id: id,
       })
@@ -347,6 +356,10 @@ export class AgentCatalogGovernance {
       const current = await this.data.source(actor, id)
       if (current.view.revision !== revision(body.revision))
         fail('CONFIGURATION_CHANGED')
+      const executionChanged =
+        current.view.endpoint !== proposed.endpoint ||
+        JSON.stringify(current.view.allowed_user_ids) !== JSON.stringify(proposed.allowed_user_ids) ||
+        current.definition !== definition
       if (body.enabled !== false)
         assertPilot(
           await this.admin.effectivePolicy(actor),
@@ -363,6 +376,11 @@ export class AgentCatalogGovernance {
       current.view.revision++
       if (typeof body.enabled === 'boolean') current.view.enabled = body.enabled
       current.view.availability = 'unknown'
+      if (executionChanged) {
+        const frozen = await this.data.deprecatePublishedVersions(actor, binding.id)
+        current.view.last_error = 'SOURCE_REVALIDATION_REQUIRED'
+        current.view.warning_count += frozen.length > 0 ? 1 : 0
+      }
       await this.data.saveSource(current)
       await this.data.audit(
         actor,
@@ -374,6 +392,11 @@ export class AgentCatalogGovernance {
         binding.id,
         { source_id: id },
       )
+      if (executionChanged)
+        await this.data.audit(actor, 'source.versions_frozen', binding.id, {
+          source_id: id,
+          reason: 'SOURCE_REVALIDATION_REQUIRED',
+        })
       return current.view
     })
   }

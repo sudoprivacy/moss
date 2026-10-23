@@ -222,7 +222,7 @@ export class CatalogReadModel {
       last_run_at: last?.last_run_at == null ? null : Number(last.last_run_at),
       warning_count: source?.warning_count ?? 0,
       has_drift:
-        ["PROVIDER_SOURCE_CHANGED", "SOURCE_REVISION_CONFLICT"].includes(
+        ["PROVIDER_SOURCE_CHANGED", "SOURCE_REVISION_CONFLICT", "SOURCE_REVALIDATION_REQUIRED"].includes(
           source?.last_error ?? "",
         ) ||
         Boolean(

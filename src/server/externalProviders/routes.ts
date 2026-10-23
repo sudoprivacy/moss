@@ -39,6 +39,8 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
       else if (action === 'endpoints/approve' && method === 'POST') { requirePlatformAdmin(); data = await admin.endpointRequests.approve(actor, body) }
       else if (action === 'members-page' && method === 'GET') data = await admin.memberPage(actor, url.searchParams.get('after') ?? '', url.searchParams.get('q') ?? '')
       else if (action === 'members' && method === 'GET') data = await admin.members(actor)
+      // Keep the management directory separate from service.listPage(): the
+      // latter is the user-executable directory and filters allowed_user_ids.
       else if (action === 'agents' && method === 'GET') data = url.searchParams.get('paged') === '1' ? await admin.listPage(actor, after) : await admin.list(actor)
       else if (action === 'unknown-tasks' && method === 'GET') data = await service.store.unresolved(actor.orgId)
       else if (action === 'reconcile-task' && method === 'POST') {

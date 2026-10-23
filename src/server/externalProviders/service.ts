@@ -234,6 +234,9 @@ export class ExternalProviderService {
   }
 
   async listPage(actor: ExternalActor, after = '') {
+    // This is the end-user executable directory. Management routes must use
+    // administration.listPage(), which intentionally does not apply the
+    // conversation grant (allowed_user_ids) to organization administrators.
     await this.authorize(actor)
     const effectivePolicy = await this.administration.effectivePolicy(actor)
     if (!effectivePolicy.orgIds.includes(actor.orgId)) return { items: [], next_cursor: null }
