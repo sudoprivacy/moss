@@ -78,10 +78,14 @@ try {
   const initialB = (await invoke(b, { kind: 'state' })).session
   assert.notEqual(initialA.profileId, initialB.profileId)
   for (const binding of [a, b]) {
-    assert.notEqual((await tool(binding, 'browser_launch', { isHeadless: true, transport: 'extension' })).isError, true)
+    const launch = await tool(binding, 'browser_launch', { isHeadless: true, transport: 'extension' })
+    if (launch.isError) console.log(JSON.stringify({ phase: 'launch-failed', result: launch }))
+    assert.notEqual(launch.isError, true)
     const { session } = await invoke(binding, { kind: 'state' })
     const owner = binding === a ? 'owner-a' : 'owner-b'
-    assert.notEqual((await tool(binding, 'browser_action', { kind: 'navigate', controlEpoch: session.controlEpoch, targetEpoch: session.targetEpoch, url: `http://${fixtureHost}:${port}/${owner}` })).isError, true)
+    const navigate = await tool(binding, 'browser_action', { kind: 'navigate', controlEpoch: session.controlEpoch, targetEpoch: session.targetEpoch, url: `http://${fixtureHost}:${port}/${owner}` })
+    if (navigate.isError) console.log(JSON.stringify({ phase: 'navigate-failed', owner, url: `http://${fixtureHost}:${port}/${owner}`, result: navigate }))
+    assert.notEqual(navigate.isError, true)
     const cookie = await waitCookie(binding, `profile_login=${owner}`)
     assert.ok(!cookie.includes(`profile_login=${owner === 'owner-a' ? 'owner-b' : 'owner-a'}`))
     console.log(JSON.stringify({ phase: 'owner-isolation', owner, profileId: session.profileId }))
