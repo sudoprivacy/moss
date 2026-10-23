@@ -24,12 +24,17 @@ jobs:
   real-managed-profiles:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CHROME_VERSION: '156.0.8078.47-1'
+      CHROME_SHA256: '6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8'
+      LEGACY_CHROME_VERSION: '155.0.8059.84-1'
+      LEGACY_CHROME_SHA256: '8fbd2ae69cdf7ee98b7513c3396a7b5e06f974f8625fdd590df3091dd0c3e9de'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: sudoprivacy/ai-dev-browser
-          ref: 9337b07c6af7961d50883088ed79cce34b81c1f0 # Published ai-dev-browser v0.58.2.
+          ref: 5543c313c35b20aa8ef82acb84e40f27a4105527 # Published ai-dev-browser v0.58.3.
           path: adb-core
       - uses: actions/checkout@v4
         with:
@@ -52,7 +57,12 @@ jobs:
             --secret "id=extension_key,src=$key_file" \
             --build-arg SOURCE_REVISION="$(git -C adb-core rev-parse HEAD)" \
             -t managed-browser-base:ci adb-core
-          docker build --build-arg ADB_BROWSER_IMAGE=managed-browser-base:ci \
+          docker build -f deploy/browser/chrome-version.Dockerfile \
+            --build-arg BROWSER_BASE_IMAGE=managed-browser-base:ci \
+            --build-arg CHROME_VERSION="$CHROME_VERSION" \
+            --build-arg CHROME_SHA256="$CHROME_SHA256" \
+            -t managed-browser-chrome:ci deploy/browser
+          docker build --build-arg ADB_BROWSER_IMAGE=managed-browser-chrome:ci \
             -t managed-browser-worker:ci deploy/browser
       - name: Verify isolated persistent profiles with actual Chrome
         shell: bash
@@ -90,9 +100,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          docker build -f deploy/browser/chrome-version.Dockerfile \
+            --build-arg BROWSER_BASE_IMAGE=managed-browser-worker:ci \
+            --build-arg CHROME_VERSION="$LEGACY_CHROME_VERSION" \
+            --build-arg CHROME_SHA256="$LEGACY_CHROME_SHA256" \
+            -t managed-browser-chrome:legacy-ci deploy/browser
           docker build -f deploy/browser/fixtures/legacy-extension.Dockerfile \
             --secret "id=extension_key,src=$RUNNER_TEMP/browser-extension-signing.pem" \
-            --build-arg BROWSER_WORKER_IMAGE=managed-browser-worker:ci \
+            --build-arg BROWSER_WORKER_IMAGE=managed-browser-chrome:legacy-ci \
             -t managed-browser-worker:legacy-extension-ci adb-previous-extension
           python3 deploy/browser/live_docker.py \
             --image managed-browser-worker:ci \
