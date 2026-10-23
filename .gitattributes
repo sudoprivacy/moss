@@ -1,3 +1,6 @@
 deploy/models/*.zip filter=lfs diff=lfs merge=lfs -text
 deploy/wework-finance-sdk/*.so filter=lfs diff=lfs merge=lfs -text
 deploy/install.sh text eol=lf
+# Pinned contract artifacts retain the exact bytes of their upstream Git blobs.
+contracts/agent-registry/v1alpha1/* -text
+contracts/nexus-prewrite/v1/* -text
