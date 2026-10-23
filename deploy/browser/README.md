@@ -6,11 +6,18 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.58.2 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.58.3 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
 the consumer test verifies it against the installed public package.
+
+The managed-browser workflow builds the SDK v0.58.3 base, applies
+`chrome-version.Dockerfile`, then builds this worker. The Chrome layer downloads
+the versioned official package, verifies its SHA-256 before installation and
+checks the installed package version. The current runtime uses Chrome
+156.0.8078.47. The upstream base still downloads `stable_current`; the version
+pin applies to the final runtime, not every intermediate build dependency.
 
 This patch adds bounded selection drag, selection text and multiline paste over
 the existing authenticated input channel. Copy reads the active page selection;
@@ -162,10 +169,11 @@ restart recovery. `.github/workflows/managed-browser.yml` runs it in CI.
 
 `live_docker.py --prior-image OLD --image CURRENT --output evidence.json`
 also verifies a real signed extension upgrade in the same persistent profile,
-then graceful and crash recovery. The fixture image uses the public v0.54.0
-extension and its earlier bootstrap contract. Installed versions, signing
-identity, original cookie and human lease are checked against Chrome's actual
-state; containers and volumes carry unique ownership labels and are removed.
+then graceful and crash recovery. The fixture image uses the unchanged public
+v0.54.0 extension on Chrome 155.0.8059.84 and its earlier bootstrap contract,
+then upgrades to the current worker on Chrome 156.0.8078.47. Installed versions,
+signing identity, original cookie and human lease are checked against Chrome's
+actual state; containers and volumes carry unique ownership labels and are removed.
 
 `test_worker_live.py` validates the actual Chrome/HTTP control boundary.
 `test_agent_live.py` and SudoWork's `live_browser_handoff.py` cover configured
