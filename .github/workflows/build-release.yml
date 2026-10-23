@@ -124,6 +124,8 @@ jobs:
         with:
           node-version: '22.22.1'
       - run: bun install --frozen-lockfile
+      - name: Verify pinned contract bytes on every runtime platform
+        run: node --test scripts/contracts/nexus-prewrite-source.test.mjs scripts/contracts/registry-source.test.mjs
       - name: Install checksum-verified runtime
         run: bun scripts/fetch-nexus-runtime.js
       - name: Bundle as production Node code

@@ -270,8 +270,7 @@ describe('embedded Nexus ZoneId deployment surfaces', () => {
           ...process.env,
           EXISTING_INSTALL: existingInstall,
           EXPLICIT_DECLARATION: explicitDeclaration,
-          ENV_PATH: envPath,
-          LOCK_PATH: lockPath,
+          ...shellPathEnvironment({ ENV_PATH: envPath, LOCK_PATH: lockPath }),
         },
       })
     try {
