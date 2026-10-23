@@ -1,3 +1,4 @@
+import { verifyTaskRuntimeIsolation } from '../testing/taskRuntimeIsolationFixture.js'
 import { seedExternalTaskMigration } from '../testing/externalTaskMigrationFixture.js'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
@@ -93,4 +94,9 @@ void test('explicit migration preserves legacy reconciliation before deleting ol
   await migrateExternalTaskPersistence(db, { oldWritersStopped: true, backupSha256: '0'.repeat(64) })
   assert.deepEqual(JSON.parse(String((await db.get('SELECT document FROM external_pilot_reconciliations'))?.document)), reconciliation)
   await initializeExternalTaskPersistence(db)
+})
+
+void test('external and native maintenance cannot read, dispatch, mutate or retire hosted tasks', async t => {
+  const db = new SqliteDriver(new DatabaseSync(':memory:')); t.after(() => db.close())
+  await verifyTaskRuntimeIsolation(db)
 })

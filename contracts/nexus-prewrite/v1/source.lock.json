@@ -1,0 +1,21 @@
+{
+  "repository": "https://github.com/sudoprivacy/sudostack",
+  "revision": "495d5e7b83d14abe2448dcbb5560656c5d1d26a6",
+  "files": {
+    "schema.json": {
+      "path": "contracts/experimental/nexus-prewrite/schema.json",
+      "output": "schema.json",
+      "digest": "sha256:40c1b8e578141710f5cabe4f8f08afcc9f5f7061fce0f4e18480d724baf18bd0"
+    },
+    "fixture.json": {
+      "path": "contracts/experimental/nexus-prewrite/fixture.json",
+      "output": "fixture.json",
+      "digest": "sha256:d6b7ed6b5481e43414c6aa9feffd768e9e6a6430f7975215fcb926cf911d96e0"
+    },
+    "source.lock.json": {
+      "path": "contracts/experimental/nexus-prewrite/source.lock.json",
+      "output": "owner.source.lock.json",
+      "digest": "sha256:29762823a3d03734bf24c50a8b301b12ecdf6035f3694a69f19f735045c32206"
+    }
+  }
+}

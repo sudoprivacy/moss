@@ -78,10 +78,12 @@ try {
   const initialB = (await invoke(b, { kind: 'state' })).session
   assert.notEqual(initialA.profileId, initialB.profileId)
   for (const binding of [a, b]) {
-    assert.notEqual((await tool(binding, 'browser_launch', { isHeadless: true, transport: 'extension' })).isError, true)
+    const launched = await tool(binding, 'browser_launch', { isHeadless: true, transport: 'extension' })
+    if (launched.isError === true) throw new Error(`browser_launch failed for ${binding.userId}: ${JSON.stringify(launched)}`)
     const { session } = await invoke(binding, { kind: 'state' })
     const owner = binding === a ? 'owner-a' : 'owner-b'
-    assert.notEqual((await tool(binding, 'browser_action', { kind: 'navigate', controlEpoch: session.controlEpoch, targetEpoch: session.targetEpoch, url: `http://${fixtureHost}:${port}/${owner}` })).isError, true)
+    const navigation = await tool(binding, 'browser_action', { kind: 'navigate', controlEpoch: session.controlEpoch, targetEpoch: session.targetEpoch, url: `http://${fixtureHost}:${port}/${owner}` })
+    if (navigation.isError === true) throw new Error(`browser navigation failed for ${owner}: ${JSON.stringify(navigation)}`)
     const cookie = await waitCookie(binding, `profile_login=${owner}`)
     assert.ok(!cookie.includes(`profile_login=${owner === 'owner-a' ? 'owner-b' : 'owner-a'}`))
     console.log(JSON.stringify({ phase: 'owner-isolation', owner, profileId: session.profileId }))

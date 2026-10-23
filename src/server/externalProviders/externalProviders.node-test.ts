@@ -1,3 +1,5 @@
+import { describeExternalAgent } from './description.js'
+import { DURABLE_AGENT_HTTP_API } from '../../../contracts/agent-http/v1alpha2/contract.js'
 import { syntheticTaskSubmission } from '../testing/externalProviderDefinitionFixture.js'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 import { queryOnlyDefinition } from '../testing/externalProviderDefinitionFixture.js'
@@ -902,4 +904,164 @@ void test('referencing a Moss-owned namespace never transfers its credential cle
   await f.admin.operations.reconcile()
   assert.equal(f.values.size, 1, 'Archiving the reference must not delete the owner key')
   assert.equal((await f.driver.get("SELECT COUNT(*) AS count FROM external_pilot_operations WHERE kind = 'cleanup'"))?.count, 0)
+})
+
+void test('directory usage is read-only, explicit review time is recorded and historic time is never fabricated', async () => {
+  const f = await setup()
+  const binding = await f.store.binding(actor, f.registered.id)
+  assert.equal(typeof binding.reviewedAt, 'number')
+  const before = JSON.stringify(binding)
+  const [agent] = await f.service.list(actor)
+  assert.equal(agent.usage?.reviewed_at, binding.reviewedAt)
+  assert.equal(agent.usage?.review_state, 'current')
+  assert.equal(agent.usage?.capability_basis, 'adapter_contract')
+  assert.equal(agent.usage?.content_classification, 'caller_declared_only')
+  assert.equal(JSON.stringify(await f.store.binding(actor, binding.id)), before)
+  assert.equal(f.calls.length, 0)
+  const historic = { ...binding, reviewedAt: undefined }
+  assert.equal(describeExternalAgent(historic).usage?.reviewed_at, null)
+  assert.equal(describeExternalAgent(binding, binding.review_expires_at).usage?.review_state, 'expired')
+  assert.equal(describeExternalAgent({ ...binding, approved: false }).usage?.reviewed_at, null)
+  assert.equal(describeExternalAgent({ ...binding, approved: false }).usage?.review_state, 'not_approved')
+  const disabled = await f.service.review(actor, binding.id, false, binding.revision!)
+  assert.equal(disabled.usage?.reviewed_at, null)
+  assert.equal(disabled.usage?.review_state, 'not_approved')
+})
+
+void test('usage describes adapter guarantees without promoting them to identity or execution evidence', async () => {
+  const f = await setup()
+  const binding = await f.store.binding(actor, f.registered.id)
+  const dify = describeExternalAgent(binding, 100)
+  assert.deepEqual(dify.capabilities, { streaming: 'supported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported', idempotency: 'unsupported', human_approval: 'unsupported', trace_export: 'partial' })
+  const http = describeExternalAgent({ ...binding, provider_kind: 'custom_http' }, 100)
+  assert.deepEqual(http.capabilities, { streaming: 'unsupported', cancel: 'unsupported', resume: 'unsupported', version_pin: 'unsupported', idempotency: 'unsupported', human_approval: 'unsupported', trace_export: 'partial' })
+  const durable = describeExternalAgent({ ...binding, provider_kind: 'custom_http', sourceManifest: { protocol: DURABLE_AGENT_HTTP_API } as NonNullable<typeof binding.sourceManifest> }, 100)
+  assert.deepEqual(durable.capabilities, { streaming: 'unsupported', cancel: 'unsupported', resume: 'supported', version_pin: 'supported', idempotency: 'supported', human_approval: 'unsupported', trace_export: 'partial' })
+  assert.equal(durable.source_identity_evidence, 'unverified')
+  assert.deepEqual(durable.usage, dify.usage)
+  assert.deepEqual(http.usage, dify.usage)
+  assert.equal(durable.usage?.data_scope, 'synthetic_only')
+  assert.equal(durable.usage?.input, 'text_query_only')
+  for (const field of ['attachments', 'resource_refs', 'tools'] as const) assert.equal(durable.usage?.[field], 'unsupported')
+  assert.equal('execution' in durable, false)
+})
+
+void test('asset suspension scopes task observations through canonical session bindings and never invents remote cancellation', async () => {
+  const f = await setup(), binding = await f.store.binding(actor, f.registered.id)
+  const queued = await f.store.create(actor, f.request(), binding, 2000)
+  const remote = await f.store.create(actor, f.request(), binding, 2000)
+  const unknown = await f.store.create(actor, f.request(), binding, 2000)
+  await f.store.mutate(remote.id, task => { task.status = 'running'; return 'status' })
+  await f.store.mutate(unknown.id, task => { task.status = 'unknown'; return 'status' })
+  await f.driver.run('INSERT INTO agent_asset_gates(org_id, asset_id, catalog_id, operation_id) VALUES (?, ?, ?, ?)', [actor.orgId, 'asset-a', binding.id, 'suspension-a'])
+  const before = f.calls.length
+  assert.deepEqual(await f.service.suspendCatalog({ ...actor, userId: 'admin' }, binding.id), { accepted: 0, in_flight: 1, unknown: 1 })
+  assert.equal((await f.store.task(actor, queued.id)).status, 'rejected')
+  assert.equal((await f.store.task(actor, remote.id)).status, 'running')
+  assert.equal((await f.store.task(actor, unknown.id)).status, 'unknown')
+  assert.equal((await f.store.task(actor, remote.id)).cancellation.status, 'unsupported')
+  assert.deepEqual(await f.service.suspendCatalog({ orgId: 'org-b', userId: 'admin' }, binding.id), { accepted: 0, in_flight: 0, unknown: 0 })
+  const blocked = await f.service.create(actor, syntheticTaskSubmission(f.request()))
+  assert.equal(blocked.status, 'rejected'); assert.equal(blocked.error_code, 'AGENT_SUSPENSION_ACTIVE')
+  assert.equal(f.calls.length, before)
+})
+
+void test('endpoint requests enforce route roles and cannot carry credentials or caller-selected organizations', async () => {
+  const f = await administrationSetup()
+  const route = (path: string, method: string, body: unknown, admin = true, platform = false) => dispatchExternalProvider(f.service, actor, method, new URL(`http://moss.test/api/v1/external-agents/admin/${path}`), body, () => { if (!admin) throw new ExternalProviderError(403, 'ADMIN_REQUIRED') }, () => { if (!platform) throw new ExternalProviderError(403, 'PLATFORM_ADMIN_REQUIRED') })
+  const request = { endpoint: policy.endpoints[0], reason: 'Read-only team service' }
+  for (const [path, method] of [['endpoint-requests', 'GET'], ['endpoint-requests', 'POST'], ['endpoint-requests/review', 'POST'], ['endpoints/approve', 'POST']]) assert.equal((await route(path, method, request, false)).status, 403)
+  assert.equal((await route('endpoints/approve', 'POST', { endpoint: request.endpoint, note: 'Reviewed', policy_revision: 0 })).status, 403)
+  assert.equal((await route('endpoint-requests/review', 'POST', {})).status, 403)
+  for (const extra of [{ api_key: 'private-key' }, { org_id: 'org-b' }, { approved: true }]) assert.equal((await route('endpoint-requests', 'POST', { ...request, ...extra })).status, 400)
+  for (const endpoint of ['http://example.com/v1', 'http://user:password@127.0.0.1/v1', 'http://127.0.0.1/v1?key=secret', 'file:///v1', 'http://127.0.0.1/console']) assert.equal((await route('endpoint-requests', 'POST', { ...request, endpoint })).status, 400)
+  assert.equal((await route('endpoint-requests', 'POST', request)).status, 200)
+  assert.equal((await route('endpoints/approve', 'POST', { endpoint: request.endpoint, note: 'Reviewed', policy_revision: 0 }, true, true)).status, 200)
+  const rows = await f.driver.all('SELECT document FROM external_endpoint_requests')
+  assert.doesNotMatch(JSON.stringify(rows), /private-key|api_key|credential/)
+})
+
+void test('pending endpoint submissions deduplicate canonically, never grant access, and survive store reopening', async () => {
+  const f = await administrationSetup()
+  await f.enable()
+  const endpoint = 'http://127.0.0.2:8089/v1'
+  const requests = f.admin.endpointRequests
+  const before = await f.admin.policy(actor)
+  const results = await Promise.all([requests.submit(actor, { endpoint: `${endpoint}/`, reason: 'Team API' }), requests.submit(actor, { endpoint, reason: 'Repeated click' })])
+  assert.equal(results[0].request!.id, results[1].request!.id)
+  assert.equal(results[0].request!.endpoint, endpoint)
+  assert.deepEqual(await f.admin.policy(actor), before)
+  let network = 0
+  f.admin.options.transport = new DifyPilotTransport((async () => { network++; throw new Error('unexpected network') }) as unknown as typeof fetch)
+  await assert.rejects(f.admin.inspect(actor, { endpoint, api_key: 'synthetic' }), { code: 'ENDPOINT_NOT_APPROVED' })
+  assert.equal(network, 0)
+  assert.equal(f.writes.length, 0)
+  assert.equal((await requests.list({ ...actor, orgId: 'other' })).items.length, 0)
+  await assert.rejects(requests.review({ ...actor, orgId: 'other' }, { id: results[0].request!.id, revision: 1, policy_revision: 0, approved: true, note: 'Other org' }), { code: 'ENDPOINT_REQUEST_NOT_FOUND' })
+  const reopened = new ExternalTaskStore(f.driver)
+  await reopened.ready
+  assert.equal((await f.driver.get('SELECT status FROM external_endpoint_requests WHERE id = ?', [results[0].request!.id]))!.status, 'pending')
+  assert.equal((await requests.submit(actor, { endpoint: before.endpoints[0], reason: 'Already allowed' })).request, null)
+  assert.equal((await requests.list(actor)).items.length, 1)
+})
+
+void test('endpoint reviews preserve organization enablement, existing policy and audit; rejection can be reapplied', async () => {
+  const f = await administrationSetup(), requests = f.admin.endpointRequests
+  const submitted = await requests.submit(actor, { endpoint: policy.endpoints[0], reason: 'Team service' })
+  const review = { id: submitted.request!.id, revision: 1, policy_revision: 0, approved: true, note: 'Network scope reviewed' }
+  const accepted = await requests.review(actor, review)
+  assert.equal(accepted.policy.enabled, false, 'address approval must not enable the organization')
+  assert.deepEqual(accepted.policy.endpoints, policy.endpoints)
+  await assert.rejects(f.admin.inspect(actor, { endpoint: policy.endpoints[0], api_key: 'synthetic' }), { code: 'PILOT_NOT_ENABLED' })
+  assert.equal(accepted.request.reviewed_by, actor.userId)
+  await assert.rejects(requests.review(actor, review), { code: 'ENDPOINT_REQUEST_CHANGED' })
+  const second = await requests.submit(actor, { endpoint: 'http://127.0.0.2/v1', reason: 'Another service' })
+  await requests.review(actor, { id: second.request!.id, revision: 1, policy_revision: 1, approved: false, note: 'Owner not verified' })
+  const again = await requests.submit(actor, { endpoint: 'http://127.0.0.2/v1', reason: 'Owner now verified' })
+  assert.notEqual(again.request!.id, second.request!.id)
+  assert.equal((await requests.list(actor)).items.length, 3)
+  const approved = await requests.approve(actor, { endpoint: again.request!.endpoint, note: 'Verified', policy_revision: 1 })
+  assert.equal(approved.request!.id, again.request!.id)
+  assert.deepEqual(approved.policy.endpoints, [...policy.endpoints, again.request!.endpoint])
+  assert.equal(approved.policy.enabled, false)
+  const audit = await f.driver.all('SELECT action FROM external_pilot_admin_audit')
+  assert.ok(audit.some(row => row.action === 'endpoint.requested'))
+  assert.ok(audit.some(row => row.action === 'endpoint.approved'))
+  assert.ok(audit.some(row => row.action === 'endpoint.rejected'))
+})
+
+void test('endpoint approvals serialize with policy edits and never resurrect revoked grants from history', async () => {
+  const f = await administrationSetup(), requests = f.admin.endpointRequests
+  await f.enable()
+  const inputs = ['http://127.0.0.2/v1', 'http://127.0.0.3/v1'].map(endpoint => ({ endpoint, note: 'Reviewed', policy_revision: 1 }))
+  const results = await Promise.allSettled(inputs.map(input => requests.approve(actor, input)))
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1)
+  const failure = results.findIndex(result => result.status === 'rejected')
+  assert.equal((results[failure] as PromiseRejectedResult).reason.code, 'CONFIGURATION_CHANGED')
+  await requests.approve(actor, { ...inputs[failure], policy_revision: 2 })
+  const current = await f.admin.policy(actor)
+  assert.equal(current.endpoints.length, 3)
+  await f.admin.setPolicy(actor, { enabled: true, endpoints: policy.endpoints, revision: current.revision })
+  const before = await f.admin.policy(actor)
+  assert.equal((await requests.list(actor)).items.every(request => request.status === 'approved'), true)
+  assert.deepEqual(await f.admin.policy(actor), before, 'GET must not restore a historical grant')
+  await assert.rejects(f.admin.inspect(actor, { endpoint: inputs[0].endpoint, api_key: 'synthetic' }), { code: 'ENDPOINT_NOT_APPROVED' })
+  const renewed = await requests.submit(actor, { endpoint: inputs[0].endpoint, reason: 'Request approval again' })
+  assert.equal(renewed.request!.status, 'pending')
+  assert.deepEqual(await f.admin.policy(actor), before)
+})
+
+void test('endpoint request pagination is scoped, read-only, and limit failures roll back inline grants', async () => {
+  const f = await administrationSetup(), requests = f.admin.endpointRequests
+  for (let index = 1; index <= 52; index++) await requests.submit(actor, { endpoint: `http://127.0.0.${index}/v1`, reason: 'Paging test' })
+  const first = await requests.list(actor), second = await requests.list(actor, first.next_cursor!)
+  assert.equal(first.items.length, 50)
+  assert.equal(second.items.length, 2)
+  assert.equal(new Set([...first.items, ...second.items].map(row => row.id)).size, 52)
+  assert.equal(second.next_cursor, null)
+  const endpoints = Array.from({ length: 20 }, (_, index) => `http://10.1.0.${index + 1}/v1`)
+  await f.admin.setPolicy(actor, { enabled: true, endpoints, revision: 0 })
+  await assert.rejects(requests.approve(actor, { endpoint: 'http://127.0.0.99/v1', note: 'Over limit', policy_revision: 1 }), { code: 'ENDPOINT_LIMIT' })
+  assert.equal((await f.driver.get('SELECT COUNT(*) AS count FROM external_endpoint_requests'))!.count, 52)
+  assert.deepEqual((await f.admin.policy(actor)).endpoints, endpoints)
 })

@@ -29,3 +29,34 @@ The API response uses the alpha5 ExternalTask projection, containing task_contra
 Run `node --import tsx --test src/server/agentFederation/taskIngress.node-test.ts src/server/catalog/catalogSchema.node-test.ts`. PostgreSQL cases run in `src/server/externalProviders/externalProviders.pg-test.ts` with `MOSS_PG_TEST_URL`. Full server, real independent Provider and browser evidence belongs in the delivery report; controlled fault-test executors are distinguished from actual SudoRouter model calls.
 
 New tasks carry a durable session_sequence assigned while the session row is locked. History orders by this creation sequence, not deadline or clock time. Legacy tasks remain before sequenced tasks and sort by their existing created_at and ID; their original order cannot be reconstructed for tied timestamps. Data classification is a request assertion, not DLP or an automatic sensitive-content detector.
+
+## Internal hosted profile
+
+`internal_hosted` / `hosted_artifact` is a separate accepted-resolution branch.
+It pins catalog/asset/artifact identity, inventory metadata digest, exact artifact
+specification digest, Docker image content ID, dependency lock and runner profile.
+The Registry signature evidence is mandatory, and the published specification
+must be the same digest as the evaluated artifact. No Provider endpoint, API key,
+binding ID, provider kind or remote-version claim belongs in this branch.
+`immutable_hosted_artifact` names the imported artifact, not an immutable version
+of the original Dify service or proof of source-account identity.
+
+This branch remains experimental. Its schema is a record-validation boundary;
+it never grants L2 or permission to execute. Runtime admission must independently
+validate current inventory acceptance, signed approval, exact artifact, user
+access, IAM run grant and fresh authorization before side effects. Hosted Task
+submission/dispatch and Work integration are tracked separately from this schema
+preparation. Roll out controller runtime filters before enabling hosted writes.
+
+Internal hosted executions also pin `runtime_authority_id`, the SHA-256 identity
+of the Docker daemon verified by the trusted supervisor. Recovery on a different
+runtime cannot confirm removal of the old worker. `HostedAgent`, `HostedSession`
+and `HostedEventsPage` describe the product directory/history projections for
+this runtime. Cancellation is a request until worker, IAM and Router cleanup are
+confirmed; recovery cannot turn unknown output into success.
+
+## Hosted task evidence (read only)
+
+`GET /api/v1/tasks/{id}/evidence?cursor=0` returns `HostedTaskEvidence` to the active task owner, even if the directory entry is subsequently disabled. It does not publish, reauthorize a run, rotate credentials, reconcile, or contact Router. The fixed release comes from the persisted admission decision. Trace is paged in at most 100 entries, bounded by the response's task sequence, and labelled `worker_reported`; it is not an independent attestation. Re-fetch from cursor 0 for a fresh projection. Concurrent execution may add ledger facts after the captured task sequence; this is a read model, not a cross-authority atomic snapshot.
+
+Usage explicitly states `sudorouter` authority and `router_quota` units, not monetary cost. Only verified ledger entries contribute to verified subtotals; they are deduplicated by Router account plus ledger ID and checked against the call's token, model, organization, task, artifact and mode. Conflicting duplicates fail closed. Pending/unknown calls or an unfinished task never imply final zero usage. No model answer, request body, raw Router credential/token, grant credential, private resource or full event task snapshot appears in this projection. Platform/department reporting remains a separate aggregation capability.

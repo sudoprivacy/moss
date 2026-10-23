@@ -1,0 +1,5368 @@
+{
+  "$defs": {
+    "AcceptanceReport": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "AgentAcceptanceReport",
+          "default": "AgentAcceptanceReport",
+          "title": "Kind",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "L1",
+            "L2",
+            "L3"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "expires_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "execution_revision": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Execution Revision"
+        },
+        "evidence_refs": {
+          "items": {
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "checks": {
+          "items": {
+            "enum": [
+              "entry",
+              "identity",
+              "router",
+              "revoke",
+              "tool",
+              "isolation",
+              "evaluation",
+              "trace",
+              "native"
+            ],
+            "type": "string"
+          },
+          "maxItems": 9,
+          "minItems": 1,
+          "title": "Checks",
+          "type": "array"
+        },
+        "evaluation_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evaluation Id"
+        },
+        "dataset_digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset Digest"
+        },
+        "rubric_digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rubric Digest"
+        },
+        "before_score": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before Score"
+        },
+        "after_score": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After Score"
+        },
+        "allowed_drop": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Drop"
+        },
+        "native_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeAcceptanceBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "asset_id",
+        "metadata_digest",
+        "spec_digest",
+        "level",
+        "expires_at",
+        "evidence_refs",
+        "checks"
+      ],
+      "title": "AcceptanceReport",
+      "type": "object"
+    },
+    "AssetEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "operation": {
+          "title": "Operation",
+          "type": "string"
+        },
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "initiated_by": {
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "revision",
+        "operation",
+        "actor",
+        "initiated_by",
+        "created_at",
+        "reason"
+      ],
+      "title": "AssetEvent",
+      "type": "object"
+    },
+    "AssetHistory": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "AgentAssetHistory",
+          "default": "AgentAssetHistory",
+          "title": "Kind",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/AssetEvent"
+          },
+          "title": "Events",
+          "type": "array"
+        },
+        "next_revision": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Revision"
+        }
+      },
+      "required": [
+        "asset_id",
+        "events",
+        "next_revision"
+      ],
+      "title": "AssetHistory",
+      "type": "object"
+    },
+    "AssetMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "source_platform": {
+          "enum": [
+            "dify",
+            "langgraph",
+            "openai",
+            "mcp",
+            "a2a",
+            "http",
+            "native",
+            "saas",
+            "other"
+          ],
+          "title": "Source Platform",
+          "type": "string"
+        },
+        "source_instance": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Source Instance",
+          "type": "string"
+        },
+        "source_agent_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Source Agent Id",
+          "type": "string"
+        },
+        "owner_user_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Owner User Id"
+        },
+        "department_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Department Id"
+        },
+        "purpose": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Purpose",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "office",
+            "core"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "hosting": {
+          "enum": [
+            "external_hosted",
+            "internal_hosted",
+            "public_saas"
+          ],
+          "title": "Hosting",
+          "type": "string"
+        },
+        "requested_level": {
+          "enum": [
+            "L0",
+            "L1",
+            "L2",
+            "L3"
+          ],
+          "title": "Requested Level",
+          "type": "string"
+        },
+        "data_connections": {
+          "items": {
+            "$ref": "#/$defs/DataConnection"
+          },
+          "maxItems": 64,
+          "title": "Data Connections",
+          "type": "array"
+        },
+        "tool_refs": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Tool Refs",
+          "type": "array"
+        },
+        "model_paths": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Model Paths",
+          "type": "array"
+        },
+        "risk_note": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Risk Note",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "source_platform",
+        "source_instance",
+        "source_agent_id",
+        "owner_user_id",
+        "purpose",
+        "domain",
+        "hosting",
+        "requested_level"
+      ],
+      "title": "AssetMetadata",
+      "type": "object"
+    },
+    "AssetPage": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "AgentAssetPage",
+          "default": "AgentAssetPage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/AssetRecord"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "title": "AssetPage",
+      "type": "object"
+    },
+    "AssetRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "AgentAsset",
+          "default": "AgentAsset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "owner_zone": {
+          "title": "Owner Zone",
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/AssetMetadata"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "discovered",
+            "draft",
+            "submitted",
+            "returned",
+            "approved",
+            "suspended",
+            "merged"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "actual_level": {
+          "enum": [
+            "L0",
+            "L1",
+            "L2",
+            "L3"
+          ],
+          "title": "Actual Level",
+          "type": "string"
+        },
+        "recommended_level": {
+          "enum": [
+            "L0",
+            "L1",
+            "L2",
+            "L3"
+          ],
+          "title": "Recommended Level",
+          "type": "string"
+        },
+        "recommendation_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recommendation Reasons",
+          "type": "array"
+        },
+        "risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "external"
+          ],
+          "title": "Risk",
+          "type": "string"
+        },
+        "external_domain": {
+          "title": "External Domain",
+          "type": "boolean"
+        },
+        "effective_domain": {
+          "default": "office",
+          "enum": [
+            "office",
+            "core"
+          ],
+          "title": "Effective Domain",
+          "type": "string"
+        },
+        "principal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrincipalRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "merged_into": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Merged Into"
+        },
+        "observations": {
+          "items": {
+            "$ref": "#/$defs/DiscoveryEvidence"
+          },
+          "title": "Observations",
+          "type": "array"
+        },
+        "review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Reason"
+        },
+        "acceptance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AcceptanceReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "acceptance_issuer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Acceptance Issuer"
+        },
+        "evidence_status": {
+          "default": "none",
+          "enum": [
+            "none",
+            "current",
+            "expired",
+            "untrusted",
+            "blocked"
+          ],
+          "title": "Evidence Status",
+          "type": "string"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        },
+        "updated_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Updated At",
+          "type": "integer"
+        },
+        "cost_status": {
+          "default": "unavailable",
+          "enum": [
+            "unavailable",
+            "router_verified"
+          ],
+          "title": "Cost Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "owner_zone",
+        "metadata",
+        "metadata_digest",
+        "revision",
+        "status",
+        "actual_level",
+        "recommended_level",
+        "recommendation_reasons",
+        "risk",
+        "external_domain",
+        "observations",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "AssetRecord",
+      "type": "object"
+    },
+    "Channel": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "stable",
+            "canary"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Version",
+          "type": "string"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "updated_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Updated At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "spec_digest",
+        "revision",
+        "enabled",
+        "updated_at"
+      ],
+      "title": "Channel",
+      "type": "object"
+    },
+    "CheckExecutionGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "CheckExecutionGrant",
+          "default": "CheckExecutionGrant",
+          "title": "Kind",
+          "type": "string"
+        },
+        "grant_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "permission": {
+          "$ref": "#/$defs/ExecutionPermission"
+        },
+        "token": {
+          "format": "password",
+          "title": "Token",
+          "type": "string",
+          "writeOnly": true
+        }
+      },
+      "required": [
+        "grant_id",
+        "task_id",
+        "spec_digest",
+        "permission",
+        "token"
+      ],
+      "title": "CheckExecutionGrant",
+      "type": "object"
+    },
+    "ClaimAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "kind": {
+          "const": "ClaimAsset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "owner_user_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Owner User Id",
+          "type": "string"
+        },
+        "department_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Department Id"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "asset_id",
+        "expected_revision",
+        "initiated_by",
+        "kind",
+        "owner_user_id"
+      ],
+      "title": "ClaimAsset",
+      "type": "object"
+    },
+    "CommandResult": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "RegistryCommandResult",
+          "default": "RegistryCommandResult",
+          "title": "Kind",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/Principal"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignedVersion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "decision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Decision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "channel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Channel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "principal"
+      ],
+      "title": "CommandResult",
+      "type": "object"
+    },
+    "CompleteHostedEvaluationCase": {
+      "additionalProperties": false,
+      "properties": {
+        "case_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "lease_token": {
+          "maxLength": 128,
+          "minLength": 32,
+          "title": "Lease Token",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "unknown"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "answer": {
+          "anyOf": [
+            {
+              "maxLength": 128000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answer"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z][A-Z0-9_]{0,99}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "model_call_ids": {
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Model Call Ids",
+          "type": "array"
+        },
+        "trace": {
+          "items": {
+            "$ref": "#/$defs/EvaluationTrace"
+          },
+          "maxItems": 256,
+          "title": "Trace",
+          "type": "array"
+        },
+        "cleanup_confirmed": {
+          "default": false,
+          "title": "Cleanup Confirmed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "case_id",
+        "lease_token",
+        "status"
+      ],
+      "title": "CompleteHostedEvaluationCase",
+      "type": "object"
+    },
+    "CreateMigrationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "baseline_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Baseline Run Id",
+          "type": "string"
+        },
+        "minimum_pass_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Minimum Pass Bps",
+          "type": "integer"
+        },
+        "maximum_drop_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Maximum Drop Bps",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "baseline_run_id",
+        "minimum_pass_bps",
+        "maximum_drop_bps",
+        "initiated_by"
+      ],
+      "title": "CreateMigrationPolicy",
+      "type": "object"
+    },
+    "DataConnection": {
+      "additionalProperties": false,
+      "properties": {
+        "reference": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Reference",
+          "type": "string"
+        },
+        "classification": {
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "core"
+          ],
+          "title": "Classification",
+          "type": "string"
+        },
+        "actions": {
+          "items": {
+            "enum": [
+              "read",
+              "write",
+              "delete",
+              "export"
+            ],
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Actions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "reference",
+        "classification",
+        "actions"
+      ],
+      "title": "DataConnection",
+      "type": "object"
+    },
+    "DecideVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "kind": {
+          "const": "DecideVersion",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Version",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "approved",
+            "withdrawn",
+            "revoked"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "principal",
+        "kind",
+        "version",
+        "decision",
+        "reason"
+      ],
+      "title": "DecideVersion",
+      "type": "object"
+    },
+    "Decision": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Version",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "approved",
+            "withdrawn",
+            "revoked"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expires At"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        },
+        "registry_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Registry Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "decision",
+        "actor",
+        "reason",
+        "expires_at",
+        "created_at",
+        "registry_revision"
+      ],
+      "title": "Decision",
+      "type": "object"
+    },
+    "DifyTextPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "DifyTextPlan",
+          "default": "DifyTextPlan",
+          "title": "Kind",
+          "type": "string"
+        },
+        "profile": {
+          "const": "dify-0.6.0-linear-text-v1",
+          "default": "dify-0.6.0-linear-text-v1",
+          "title": "Profile",
+          "type": "string"
+        },
+        "source_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Source Digest",
+          "type": "string"
+        },
+        "source_model": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Source Model",
+          "type": "string"
+        },
+        "source_provider": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Source Provider",
+          "type": "string"
+        },
+        "source_plugin": {
+          "maxLength": 250,
+          "minLength": 1,
+          "title": "Source Plugin",
+          "type": "string"
+        },
+        "llm_node": {
+          "pattern": "^[A-Za-z0-9_-]{1,100}$",
+          "title": "Llm Node",
+          "type": "string"
+        },
+        "prompts": {
+          "items": {
+            "$ref": "#/$defs/HostedPrompt"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Prompts",
+          "type": "array"
+        },
+        "temperature": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Temperature"
+        },
+        "max_tokens": {
+          "anyOf": [
+            {
+              "maximum": 4096,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tokens"
+        },
+        "conversation_mode": {
+          "const": "independent_turns",
+          "default": "independent_turns",
+          "title": "Conversation Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_digest",
+        "source_model",
+        "source_provider",
+        "source_plugin",
+        "llm_node",
+        "prompts"
+      ],
+      "title": "DifyTextPlan",
+      "type": "object"
+    },
+    "DiscoveryEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "enum": [
+            "router",
+            "im",
+            "platform",
+            "catalog"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "source_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "record_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "snapshot_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Snapshot Digest",
+          "type": "string"
+        },
+        "observed_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Observed At",
+          "type": "integer"
+        },
+        "external_domain": {
+          "default": false,
+          "title": "External Domain",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source",
+        "source_id",
+        "record_id",
+        "snapshot_digest",
+        "observed_at"
+      ],
+      "title": "DiscoveryEvidence",
+      "type": "object"
+    },
+    "EvaluationCase": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 16000,
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "expected": {
+          "maxLength": 32000,
+          "minLength": 1,
+          "title": "Expected",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "query",
+        "expected"
+      ],
+      "title": "EvaluationCase",
+      "type": "object"
+    },
+    "EvaluationCaseLease": {
+      "additionalProperties": false,
+      "properties": {
+        "case_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "lease_token": {
+          "maxLength": 128,
+          "minLength": 32,
+          "title": "Lease Token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "lease_token"
+      ],
+      "title": "EvaluationCaseLease",
+      "type": "object"
+    },
+    "EvaluationDataset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "EvaluationDataset",
+          "default": "EvaluationDataset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "zone": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Zone",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "dataset_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Dataset Digest",
+          "type": "string"
+        },
+        "rubric_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Rubric Digest",
+          "type": "string"
+        },
+        "dataset": {
+          "$ref": "#/$defs/EvaluationDatasetInput"
+        },
+        "created_by": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Created By",
+          "type": "string"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "zone",
+        "asset_id",
+        "metadata_digest",
+        "dataset_digest",
+        "rubric_digest",
+        "dataset",
+        "created_by",
+        "initiated_by",
+        "created_at"
+      ],
+      "title": "EvaluationDataset",
+      "type": "object"
+    },
+    "EvaluationDatasetInput": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Version",
+          "type": "string"
+        },
+        "input_scope": {
+          "const": "synthetic_text",
+          "default": "synthetic_text",
+          "title": "Input Scope",
+          "type": "string"
+        },
+        "rubric": {
+          "const": "exact-strip-v1",
+          "default": "exact-strip-v1",
+          "title": "Rubric",
+          "type": "string"
+        },
+        "cases": {
+          "items": {
+            "$ref": "#/$defs/EvaluationCase"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Cases",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "cases"
+      ],
+      "title": "EvaluationDatasetInput",
+      "type": "object"
+    },
+    "EvaluationDatasetPage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "EvaluationDatasetPage",
+          "default": "EvaluationDatasetPage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/EvaluationDataset"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "title": "EvaluationDatasetPage",
+      "type": "object"
+    },
+    "EvaluationTrace": {
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Node",
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "started",
+            "completed"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "origin": {
+          "const": "worker_reported",
+          "default": "worker_reported",
+          "title": "Origin",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "phase"
+      ],
+      "title": "EvaluationTrace",
+      "type": "object"
+    },
+    "ExecutionAuthorization": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "ExecutionAuthorization",
+          "default": "ExecutionAuthorization",
+          "title": "Kind",
+          "type": "string"
+        },
+        "grant": {
+          "$ref": "#/$defs/ExecutionGrant"
+        },
+        "authorized_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Authorized At",
+          "type": "integer"
+        },
+        "cacheable": {
+          "const": false,
+          "default": false,
+          "title": "Cacheable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "grant",
+        "authorized_at"
+      ],
+      "title": "ExecutionAuthorization",
+      "type": "object"
+    },
+    "ExecutionGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "AgentExecutionGrant",
+          "default": "AgentExecutionGrant",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "zone": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Zone",
+          "type": "string"
+        },
+        "issuer": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Issuer",
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/IssueExecutionGrant"
+        },
+        "worker_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Worker Id",
+          "type": "string"
+        },
+        "delegation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Delegation Id"
+        },
+        "key_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Id"
+        },
+        "owner_user_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Owner User Id",
+          "type": "string"
+        },
+        "department_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Department Id"
+        },
+        "status": {
+          "enum": [
+            "issuing",
+            "active",
+            "revoked",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "cleanup_pending": {
+          "title": "Cleanup Pending",
+          "type": "boolean"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        },
+        "expires_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "stopped_by": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stopped By"
+        },
+        "stopped_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stopped At"
+        }
+      },
+      "required": [
+        "id",
+        "zone",
+        "issuer",
+        "request",
+        "worker_id",
+        "owner_user_id",
+        "department_id",
+        "status",
+        "cleanup_pending",
+        "created_at",
+        "expires_at"
+      ],
+      "title": "ExecutionGrant",
+      "type": "object"
+    },
+    "ExecutionGrantPage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "ExecutionGrantPage",
+          "default": "ExecutionGrantPage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ExecutionGrant"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "title": "ExecutionGrantPage",
+      "type": "object"
+    },
+    "ExecutionGrantResult": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "ExecutionGrantResult",
+          "default": "ExecutionGrantResult",
+          "title": "Kind",
+          "type": "string"
+        },
+        "grant": {
+          "$ref": "#/$defs/ExecutionGrant"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Key"
+        }
+      },
+      "required": [
+        "grant"
+      ],
+      "title": "ExecutionGrantResult",
+      "type": "object"
+    },
+    "ExecutionPermission": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,499}$",
+          "title": "Resource",
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "model.invoke",
+            "tool.invoke",
+            "data.read",
+            "data.write",
+            "data.delete",
+            "data.export"
+          ],
+          "title": "Operation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "resource",
+        "operation"
+      ],
+      "title": "ExecutionPermission",
+      "type": "object"
+    },
+    "ExecutionRequestRevocation": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "ExecutionRequestRevocation",
+          "default": "ExecutionRequestRevocation",
+          "title": "Kind",
+          "type": "string"
+        },
+        "zone": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Zone",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "fenced_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Fenced At",
+          "type": "integer"
+        },
+        "stopped_by": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Stopped By",
+          "type": "string"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/$defs/ExecutionGrant"
+          },
+          "title": "Grants",
+          "type": "array"
+        },
+        "cleanup_pending": {
+          "title": "Cleanup Pending",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "zone",
+        "request_id",
+        "task_id",
+        "fenced_at",
+        "stopped_by",
+        "grants",
+        "cleanup_pending"
+      ],
+      "title": "ExecutionRequestRevocation",
+      "type": "object"
+    },
+    "HostedArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "HostedArtifact",
+          "default": "HostedArtifact",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "zone": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Zone",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "spec_payload_base64": {
+          "maxLength": 750000,
+          "minLength": 1,
+          "title": "Spec Payload Base64",
+          "type": "string"
+        },
+        "image": {
+          "$ref": "#/$defs/HostedImage"
+        },
+        "dify_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DifyTextPlan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_by": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Created By",
+          "type": "string"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        },
+        "evidence": {
+          "const": "registered_only",
+          "default": "registered_only",
+          "title": "Evidence",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "zone",
+        "asset_id",
+        "metadata_digest",
+        "spec_digest",
+        "spec_payload_base64",
+        "image",
+        "dify_plan",
+        "created_by",
+        "initiated_by",
+        "created_at"
+      ],
+      "title": "HostedArtifact",
+      "type": "object"
+    },
+    "HostedArtifactPage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "HostedArtifactPage",
+          "default": "HostedArtifactPage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/HostedArtifact"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "title": "HostedArtifactPage",
+      "type": "object"
+    },
+    "HostedEvaluationCase": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "HostedEvaluationCase",
+          "default": "HostedEvaluationCase",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "sample_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Sample Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "unknown"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "deadline_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Deadline At"
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        },
+        "answer": {
+          "anyOf": [
+            {
+              "maxLength": 128000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answer"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z][A-Z0-9_]{0,99}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "passed": {
+          "default": false,
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "model_call_ids": {
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Model Call Ids",
+          "type": "array"
+        },
+        "grant_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grant Id"
+        },
+        "trace": {
+          "items": {
+            "$ref": "#/$defs/EvaluationTrace"
+          },
+          "maxItems": 256,
+          "title": "Trace",
+          "type": "array"
+        },
+        "trace_digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trace Digest"
+        },
+        "cleanup_confirmed": {
+          "default": false,
+          "title": "Cleanup Confirmed",
+          "type": "boolean"
+        },
+        "iam_cleanup_confirmed": {
+          "default": false,
+          "title": "Iam Cleanup Confirmed",
+          "type": "boolean"
+        },
+        "source_execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceEvaluationExecution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model_evidence": {
+          "const": "evaluator_reported",
+          "default": "evaluator_reported",
+          "title": "Model Evidence",
+          "type": "string"
+        },
+        "native_verification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeOutputVerification"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "run_id",
+        "sample_id",
+        "status"
+      ],
+      "title": "HostedEvaluationCase",
+      "type": "object"
+    },
+    "HostedEvaluationCasePage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "HostedEvaluationCasePage",
+          "default": "HostedEvaluationCasePage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/HostedEvaluationCase"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "title": "HostedEvaluationCasePage",
+      "type": "object"
+    },
+    "HostedEvaluationClaim": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "HostedEvaluationClaim",
+          "default": "HostedEvaluationClaim",
+          "title": "Kind",
+          "type": "string"
+        },
+        "case": {
+          "$ref": "#/$defs/HostedEvaluationCase"
+        },
+        "lease_token": {
+          "maxLength": 128,
+          "minLength": 32,
+          "title": "Lease Token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case",
+        "lease_token"
+      ],
+      "title": "HostedEvaluationClaim",
+      "type": "object"
+    },
+    "HostedEvaluationPage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "HostedEvaluationPage",
+          "default": "HostedEvaluationPage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/HostedEvaluationRun"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "title": "HostedEvaluationPage",
+      "type": "object"
+    },
+    "HostedEvaluationRun": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_kind": {
+          "default": "hosted",
+          "enum": [
+            "hosted",
+            "native"
+          ],
+          "title": "Execution Kind",
+          "type": "string"
+        },
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "HostedEvaluationRun",
+          "default": "HostedEvaluationRun",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "zone": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Zone",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "artifact_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "dataset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "dataset_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Dataset Digest",
+          "type": "string"
+        },
+        "rubric_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Rubric Digest",
+          "type": "string"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "created_by": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Created By",
+          "type": "string"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "maximum": 240,
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "max_model_calls": {
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Max Model Calls",
+          "type": "integer"
+        },
+        "total_cases": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Total Cases",
+          "type": "integer"
+        },
+        "queued_cases": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Queued Cases",
+          "type": "integer"
+        },
+        "running_cases": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Running Cases",
+          "type": "integer"
+        },
+        "finished_cases": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Finished Cases",
+          "type": "integer"
+        },
+        "passed_cases": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Passed Cases",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "finished"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "evidence": {
+          "const": "evaluation_only",
+          "default": "evaluation_only",
+          "title": "Evidence",
+          "type": "string"
+        },
+        "role": {
+          "default": "hosted",
+          "enum": [
+            "hosted",
+            "source_baseline"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "source_runtime": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceEvaluationRuntime"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "comparison_policy_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Comparison Policy Id"
+        }
+      },
+      "required": [
+        "id",
+        "zone",
+        "asset_id",
+        "metadata_digest",
+        "artifact_id",
+        "spec_digest",
+        "dataset_id",
+        "dataset_digest",
+        "rubric_digest",
+        "initiated_by",
+        "created_by",
+        "created_at",
+        "timeout_seconds",
+        "max_model_calls",
+        "total_cases",
+        "queued_cases",
+        "running_cases",
+        "finished_cases",
+        "passed_cases",
+        "status"
+      ],
+      "title": "HostedEvaluationRun",
+      "type": "object"
+    },
+    "HostedImage": {
+      "additionalProperties": false,
+      "description": "A preloaded reviewed image, never a mutable tag or build instructions.",
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "HostedImage",
+          "default": "HostedImage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "profile": {
+          "enum": [
+            "dify-0.6.0-linear-text-v1",
+            "langgraph-stdio-v1"
+          ],
+          "title": "Profile",
+          "type": "string"
+        },
+        "image_id": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Image Id",
+          "type": "string"
+        },
+        "source_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Source Digest",
+          "type": "string"
+        },
+        "dependency_lock_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Dependency Lock Digest",
+          "type": "string"
+        },
+        "protocol": {
+          "const": "agent-hosted-stdio/v1",
+          "default": "agent-hosted-stdio/v1",
+          "title": "Protocol",
+          "type": "string"
+        },
+        "model_resource": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,499}$",
+          "title": "Model Resource",
+          "type": "string"
+        },
+        "model_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Name",
+          "type": "string"
+        },
+        "max_output_tokens": {
+          "default": 128,
+          "maximum": 4096,
+          "minimum": 1,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "profile",
+        "image_id",
+        "source_digest",
+        "dependency_lock_digest",
+        "model_resource",
+        "model_name"
+      ],
+      "title": "HostedImage",
+      "type": "object"
+    },
+    "HostedPrompt": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "enum": [
+            "system",
+            "user",
+            "assistant"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "content": {
+          "maxLength": 32000,
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "title": "HostedPrompt",
+      "type": "object"
+    },
+    "IssueExecutionGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "IssueExecutionGrant",
+          "default": "IssueExecutionGrant",
+          "title": "Kind",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "run",
+            "evaluation"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "dataset_digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset Digest"
+        },
+        "permissions": {
+          "items": {
+            "$ref": "#/$defs/ExecutionPermission"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Permissions",
+          "type": "array"
+        },
+        "ttl_seconds": {
+          "default": 120,
+          "maximum": 300,
+          "minimum": 1,
+          "title": "Ttl Seconds",
+          "type": "integer"
+        },
+        "max_model_calls": {
+          "default": 8,
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Max Model Calls",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "request_id",
+        "asset_id",
+        "metadata_digest",
+        "spec_digest",
+        "task_id",
+        "initiated_by",
+        "mode",
+        "permissions"
+      ],
+      "title": "IssueExecutionGrant",
+      "type": "object"
+    },
+    "LinkAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "kind": {
+          "const": "LinkAsset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "asset_id",
+        "expected_revision",
+        "initiated_by",
+        "kind",
+        "principal"
+      ],
+      "title": "LinkAsset",
+      "type": "object"
+    },
+    "MergeAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "kind": {
+          "const": "MergeAsset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "target_asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Target Asset Id",
+          "type": "string"
+        },
+        "target_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Target Revision",
+          "type": "integer"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "asset_id",
+        "expected_revision",
+        "initiated_by",
+        "kind",
+        "target_asset_id",
+        "target_revision",
+        "reason"
+      ],
+      "title": "MergeAsset",
+      "type": "object"
+    },
+    "MigrationComparison": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_kind": {
+          "default": "hosted",
+          "enum": [
+            "hosted",
+            "native"
+          ],
+          "title": "Execution Kind",
+          "type": "string"
+        },
+        "kind": {
+          "const": "MigrationComparison",
+          "default": "MigrationComparison",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "zone": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Zone",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "policy_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Policy Id",
+          "type": "string"
+        },
+        "baseline_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Baseline Run Id",
+          "type": "string"
+        },
+        "candidate_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Candidate Run Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "dataset_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Dataset Digest",
+          "type": "string"
+        },
+        "rubric_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Rubric Digest",
+          "type": "string"
+        },
+        "total_cases": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Total Cases",
+          "type": "integer"
+        },
+        "baseline_passed": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Baseline Passed",
+          "type": "integer"
+        },
+        "candidate_passed": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Candidate Passed",
+          "type": "integer"
+        },
+        "minimum_pass_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Minimum Pass Bps",
+          "type": "integer"
+        },
+        "maximum_drop_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Maximum Drop Bps",
+          "type": "integer"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "created_by": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Created By",
+          "type": "string"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "zone",
+        "asset_id",
+        "policy_id",
+        "baseline_run_id",
+        "candidate_run_id",
+        "metadata_digest",
+        "spec_digest",
+        "dataset_digest",
+        "rubric_digest",
+        "total_cases",
+        "baseline_passed",
+        "candidate_passed",
+        "minimum_pass_bps",
+        "maximum_drop_bps",
+        "passed",
+        "created_by",
+        "created_at"
+      ],
+      "title": "MigrationComparison",
+      "type": "object"
+    },
+    "MigrationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_kind": {
+          "default": "hosted",
+          "enum": [
+            "hosted",
+            "native"
+          ],
+          "title": "Execution Kind",
+          "type": "string"
+        },
+        "kind": {
+          "const": "MigrationPolicy",
+          "default": "MigrationPolicy",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "zone": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Zone",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "artifact_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "dataset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "dataset_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Dataset Digest",
+          "type": "string"
+        },
+        "rubric_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Rubric Digest",
+          "type": "string"
+        },
+        "baseline_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Baseline Run Id",
+          "type": "string"
+        },
+        "baseline_passed": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Baseline Passed",
+          "type": "integer"
+        },
+        "total_cases": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Total Cases",
+          "type": "integer"
+        },
+        "minimum_pass_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Minimum Pass Bps",
+          "type": "integer"
+        },
+        "maximum_drop_bps": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Maximum Drop Bps",
+          "type": "integer"
+        },
+        "source_runtime": {
+          "$ref": "#/$defs/SourceEvaluationRuntime"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "created_by": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Created By",
+          "type": "string"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "zone",
+        "asset_id",
+        "metadata_digest",
+        "artifact_id",
+        "spec_digest",
+        "dataset_id",
+        "dataset_digest",
+        "rubric_digest",
+        "baseline_run_id",
+        "baseline_passed",
+        "total_cases",
+        "minimum_pass_bps",
+        "maximum_drop_bps",
+        "source_runtime",
+        "initiated_by",
+        "created_by",
+        "created_at"
+      ],
+      "title": "MigrationPolicy",
+      "type": "object"
+    },
+    "MigrationPolicyPage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "MigrationPolicyPage",
+          "default": "MigrationPolicyPage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/MigrationPolicy"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "title": "MigrationPolicyPage",
+      "type": "object"
+    },
+    "MoveChannel": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "kind": {
+          "const": "MoveChannel",
+          "title": "Kind",
+          "type": "string"
+        },
+        "channel": {
+          "enum": [
+            "stable",
+            "canary"
+          ],
+          "title": "Channel",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Version",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "principal",
+        "kind",
+        "channel",
+        "version",
+        "expected_revision",
+        "reason"
+      ],
+      "title": "MoveChannel",
+      "type": "object"
+    },
+    "NativeAcceptanceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "conversion_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Conversion Id",
+          "type": "string"
+        },
+        "profile_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Profile Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversion_id",
+        "profile_digest"
+      ],
+      "title": "NativeAcceptanceBinding",
+      "type": "object"
+    },
+    "NativeConversion": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "NativeConversion",
+          "default": "NativeConversion",
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "zone": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Zone",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "source_asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Source Asset Id",
+          "type": "string"
+        },
+        "source_artifact_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Source Artifact Id",
+          "type": "string"
+        },
+        "source_metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Source Metadata Digest",
+          "type": "string"
+        },
+        "source_spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Source Spec Digest",
+          "type": "string"
+        },
+        "source_acceptance": {
+          "$ref": "#/$defs/AcceptanceReport"
+        },
+        "source_acceptance_issuer": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Source Acceptance Issuer",
+          "type": "string"
+        },
+        "source_acceptance_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Source Acceptance Digest",
+          "type": "string"
+        },
+        "source_acceptance_payload_base64": {
+          "anyOf": [
+            {
+              "maxLength": 64000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Acceptance Payload Base64"
+        },
+        "image": {
+          "$ref": "#/$defs/NativeImage"
+        },
+        "definition": {
+          "$ref": "#/$defs/NativeDefinition"
+        },
+        "definition_payload_base64": {
+          "anyOf": [
+            {
+              "maxLength": 500000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Definition Payload Base64"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "spec_payload_base64": {
+          "maxLength": 750000,
+          "minLength": 1,
+          "title": "Spec Payload Base64",
+          "type": "string"
+        },
+        "created_by": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Created By",
+          "type": "string"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        },
+        "evidence": {
+          "const": "registered_only",
+          "default": "registered_only",
+          "title": "Evidence",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "zone",
+        "asset_id",
+        "metadata_digest",
+        "source_asset_id",
+        "source_artifact_id",
+        "source_metadata_digest",
+        "source_spec_digest",
+        "source_acceptance",
+        "source_acceptance_issuer",
+        "source_acceptance_digest",
+        "image",
+        "definition",
+        "spec_digest",
+        "spec_payload_base64",
+        "created_by",
+        "initiated_by",
+        "created_at"
+      ],
+      "title": "NativeConversion",
+      "type": "object"
+    },
+    "NativeConversionPage": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "NativeConversionPage",
+          "default": "NativeConversionPage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/NativeConversion"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "title": "NativeConversionPage",
+      "type": "object"
+    },
+    "NativeDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "sudocode-dify-independent-text-v1alpha1",
+          "default": "sudocode-dify-independent-text-v1alpha1",
+          "title": "Profile",
+          "type": "string"
+        },
+        "plan": {
+          "$ref": "#/$defs/DifyTextPlan"
+        },
+        "tools": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0,
+          "title": "Tools",
+          "type": "array"
+        },
+        "memory": {
+          "const": "disabled",
+          "default": "disabled",
+          "title": "Memory",
+          "type": "string"
+        },
+        "input": {
+          "const": "literal_text",
+          "default": "literal_text",
+          "title": "Input",
+          "type": "string"
+        },
+        "max_model_calls": {
+          "const": 1,
+          "default": 1,
+          "title": "Max Model Calls",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "plan"
+      ],
+      "title": "NativeDefinition",
+      "type": "object"
+    },
+    "NativeExecutionProfile": {
+      "additionalProperties": false,
+      "description": "Bindings to the current experimental owners, not activation of stable v1 families.",
+      "properties": {
+        "kind": {
+          "const": "NativeExecutionProfile",
+          "default": "NativeExecutionProfile",
+          "title": "Kind",
+          "type": "string"
+        },
+        "profile": {
+          "const": "native-independent-text-v1alpha1",
+          "default": "native-independent-text-v1alpha1",
+          "title": "Profile",
+          "type": "string"
+        },
+        "conversion_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Conversion Id",
+          "type": "string"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "definition_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Definition Digest",
+          "type": "string"
+        },
+        "image_id": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Image Id",
+          "type": "string"
+        },
+        "runtime": {
+          "$ref": "#/$defs/NativeRuntime"
+        },
+        "task_contract_version": {
+          "const": "task.sudo.dev/v1alpha1",
+          "default": "task.sudo.dev/v1alpha1",
+          "title": "Task Contract Version",
+          "type": "string"
+        },
+        "task_policy": {
+          "const": "independent_turns",
+          "default": "independent_turns",
+          "title": "Task Policy",
+          "type": "string"
+        },
+        "tool_policy": {
+          "const": "deny_all",
+          "default": "deny_all",
+          "title": "Tool Policy",
+          "type": "string"
+        },
+        "context_policy": {
+          "const": "literal_synthetic_text",
+          "default": "literal_synthetic_text",
+          "title": "Context Policy",
+          "type": "string"
+        },
+        "memory_policy": {
+          "const": "disabled",
+          "default": "disabled",
+          "title": "Memory Policy",
+          "type": "string"
+        },
+        "verify_policy": {
+          "const": "native-text-completion-v1",
+          "default": "native-text-completion-v1",
+          "title": "Verify Policy",
+          "type": "string"
+        },
+        "event_contract_version": {
+          "const": "task.sudo.dev/v1alpha1",
+          "default": "task.sudo.dev/v1alpha1",
+          "title": "Event Contract Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversion_id",
+        "spec_digest",
+        "definition_digest",
+        "image_id",
+        "runtime"
+      ],
+      "title": "NativeExecutionProfile",
+      "type": "object"
+    },
+    "NativeImage": {
+      "additionalProperties": false,
+      "description": "A fixed native runtime candidate, not a renamed hosted artifact.",
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "NativeImage",
+          "default": "NativeImage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "profile": {
+          "const": "sudocode-dify-independent-text-v1alpha1",
+          "default": "sudocode-dify-independent-text-v1alpha1",
+          "title": "Profile",
+          "type": "string"
+        },
+        "image_id": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Image Id",
+          "type": "string"
+        },
+        "source_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Source Digest",
+          "type": "string"
+        },
+        "dependency_lock_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Dependency Lock Digest",
+          "type": "string"
+        },
+        "protocol": {
+          "const": "agent-hosted-stdio/v1",
+          "default": "agent-hosted-stdio/v1",
+          "title": "Protocol",
+          "type": "string"
+        },
+        "model_resource": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,499}$",
+          "title": "Model Resource",
+          "type": "string"
+        },
+        "model_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Name",
+          "type": "string"
+        },
+        "max_output_tokens": {
+          "default": 128,
+          "maximum": 4096,
+          "minimum": 1,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "definition_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Definition Digest",
+          "type": "string"
+        },
+        "runtime": {
+          "$ref": "#/$defs/NativeRuntime"
+        }
+      },
+      "required": [
+        "image_id",
+        "source_digest",
+        "dependency_lock_digest",
+        "model_resource",
+        "model_name",
+        "definition_digest",
+        "runtime"
+      ],
+      "title": "NativeImage",
+      "type": "object"
+    },
+    "NativeOutputVerification": {
+      "additionalProperties": false,
+      "description": "Deterministic execution-shape checks, not independent business correctness.",
+      "properties": {
+        "kind": {
+          "const": "NativeOutputVerification",
+          "default": "NativeOutputVerification",
+          "title": "Kind",
+          "type": "string"
+        },
+        "policy": {
+          "const": "native-text-completion-v1",
+          "default": "native-text-completion-v1",
+          "title": "Policy",
+          "type": "string"
+        },
+        "profile_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Profile Digest",
+          "type": "string"
+        },
+        "output_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Output Digest",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "passed",
+            "rejected"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "failures": {
+          "items": {
+            "enum": [
+              "output_text",
+              "model_call_count",
+              "native_trace",
+              "execution_cleanup"
+            ],
+            "type": "string"
+          },
+          "title": "Failures",
+          "type": "array"
+        }
+      },
+      "required": [
+        "profile_digest",
+        "output_digest",
+        "verdict",
+        "failures"
+      ],
+      "title": "NativeOutputVerification",
+      "type": "object"
+    },
+    "NativeRuntime": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "sudocode",
+          "default": "sudocode",
+          "title": "Kind",
+          "type": "string"
+        },
+        "commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Commit",
+          "type": "string"
+        },
+        "executable_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Executable Digest",
+          "type": "string"
+        },
+        "runner_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Runner Digest",
+          "type": "string"
+        },
+        "platform": {
+          "enum": [
+            "linux/amd64",
+            "linux/arm64"
+          ],
+          "title": "Platform",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "executable_digest",
+        "runner_digest",
+        "platform"
+      ],
+      "title": "NativeRuntime",
+      "type": "object"
+    },
+    "ObserveAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "kind": {
+          "const": "ObserveAsset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/AssetMetadata"
+        },
+        "observation": {
+          "$ref": "#/$defs/DiscoveryEvidence"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "asset_id",
+        "expected_revision",
+        "initiated_by",
+        "kind",
+        "metadata",
+        "observation"
+      ],
+      "title": "ObserveAsset",
+      "type": "object"
+    },
+    "ObserveSourceEvaluation": {
+      "additionalProperties": false,
+      "properties": {
+        "case_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "lease_token": {
+          "maxLength": 128,
+          "minLength": 32,
+          "title": "Lease Token",
+          "type": "string"
+        },
+        "source_execution": {
+          "$ref": "#/$defs/SourceEvaluationExecution"
+        }
+      },
+      "required": [
+        "case_id",
+        "lease_token",
+        "source_execution"
+      ],
+      "title": "ObserveSourceEvaluation",
+      "type": "object"
+    },
+    "PlatformDiscoveryItem": {
+      "additionalProperties": false,
+      "description": "Metadata-only discovery profile, not a runtime or identity assertion.",
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "platform": {
+          "enum": [
+            "langgraph",
+            "http",
+            "openai",
+            "mcp",
+            "a2a",
+            "saas",
+            "other"
+          ],
+          "title": "Platform",
+          "type": "string"
+        },
+        "external_domain": {
+          "title": "External Domain",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "platform",
+        "external_domain"
+      ],
+      "title": "PlatformDiscoveryItem",
+      "type": "object"
+    },
+    "PlatformDiscoveryPage": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-inventory.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "scope": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Scope",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/PlatformDiscoveryItem"
+          },
+          "maxItems": 100,
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "api_version",
+        "scope",
+        "items",
+        "next_cursor"
+      ],
+      "title": "PlatformDiscoveryPage",
+      "type": "object"
+    },
+    "Principal": {
+      "additionalProperties": false,
+      "properties": {
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "owner_zone": {
+          "title": "Owner Zone",
+          "type": "string"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "suspended",
+            "revoked"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "principal",
+        "owner_zone",
+        "display_name",
+        "status",
+        "revision",
+        "created_at"
+      ],
+      "title": "Principal",
+      "type": "object"
+    },
+    "PrincipalRef": {
+      "additionalProperties": false,
+      "properties": {
+        "trust_domain": {
+          "maxLength": 253,
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$",
+          "title": "Trust Domain",
+          "type": "string"
+        },
+        "agent_name": {
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+          "title": "Agent Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trust_domain",
+        "agent_name"
+      ],
+      "title": "PrincipalRef",
+      "type": "object"
+    },
+    "PublishVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "kind": {
+          "const": "PublishVersion",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Version",
+          "type": "string"
+        },
+        "spec_ref": {
+          "$ref": "urn:sudo:contracts:common:v1:resource-ref"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "source_evidence_refs": {
+          "items": {
+            "$ref": "urn:sudo:contracts:common:v1:resource-ref"
+          },
+          "maxItems": 16,
+          "title": "Source Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "principal",
+        "kind",
+        "version",
+        "spec_ref",
+        "spec_digest"
+      ],
+      "title": "PublishVersion",
+      "type": "object"
+    },
+    "RecordAcceptance": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "kind": {
+          "const": "RecordAcceptance",
+          "title": "Kind",
+          "type": "string"
+        },
+        "report": {
+          "$ref": "#/$defs/AcceptanceReport"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "asset_id",
+        "expected_revision",
+        "initiated_by",
+        "kind",
+        "report"
+      ],
+      "title": "RecordAcceptance",
+      "type": "object"
+    },
+    "RegisterEvaluationDataset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "RegisterEvaluationDataset",
+          "default": "RegisterEvaluationDataset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "dataset": {
+          "$ref": "#/$defs/EvaluationDatasetInput"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "asset_id",
+        "metadata_digest",
+        "dataset",
+        "initiated_by"
+      ],
+      "title": "RegisterEvaluationDataset",
+      "type": "object"
+    },
+    "RegisterHostedArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "RegisterHostedArtifact",
+          "default": "RegisterHostedArtifact",
+          "title": "Kind",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "image": {
+          "$ref": "#/$defs/HostedImage"
+        },
+        "dify_source": {
+          "anyOf": [
+            {
+              "maxLength": 256000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dify Source"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "asset_id",
+        "metadata_digest",
+        "image",
+        "initiated_by"
+      ],
+      "title": "RegisterHostedArtifact",
+      "type": "object"
+    },
+    "RegisterNativeConversion": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "RegisterNativeConversion",
+          "default": "RegisterNativeConversion",
+          "title": "Kind",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "source_artifact_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Source Artifact Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "image": {
+          "$ref": "#/$defs/NativeImage"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "source_artifact_id",
+        "asset_id",
+        "metadata_digest",
+        "image",
+        "initiated_by"
+      ],
+      "title": "RegisterNativeConversion",
+      "type": "object"
+    },
+    "RegisterPrincipal": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "kind": {
+          "const": "RegisterPrincipal",
+          "title": "Kind",
+          "type": "string"
+        },
+        "display_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Display Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "principal",
+        "kind",
+        "display_name"
+      ],
+      "title": "RegisterPrincipal",
+      "type": "object"
+    },
+    "Resolution": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "RegistryResolution",
+          "default": "RegistryResolution",
+          "title": "Kind",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/Principal"
+        },
+        "version": {
+          "$ref": "#/$defs/SignedVersion"
+        },
+        "approval": {
+          "$ref": "#/$defs/Decision"
+        },
+        "channel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Channel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evaluated_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Evaluated At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "principal",
+        "version",
+        "approval",
+        "channel",
+        "evaluated_at"
+      ],
+      "title": "Resolution",
+      "type": "object"
+    },
+    "ReviewAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "kind": {
+          "const": "ReviewAsset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "approve",
+            "return"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "asset_id",
+        "expected_revision",
+        "initiated_by",
+        "kind",
+        "decision",
+        "reason"
+      ],
+      "title": "ReviewAsset",
+      "type": "object"
+    },
+    "RevokeExecutionRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "RevokeExecutionRequest",
+          "default": "RevokeExecutionRequest",
+          "title": "Kind",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "task_id"
+      ],
+      "title": "RevokeExecutionRequest",
+      "type": "object"
+    },
+    "SaveAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "kind": {
+          "const": "SaveAsset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/AssetMetadata"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "asset_id",
+        "expected_revision",
+        "initiated_by",
+        "kind",
+        "metadata"
+      ],
+      "title": "SaveAsset",
+      "type": "object"
+    },
+    "SetPrincipalStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "kind": {
+          "const": "SetPrincipalStatus",
+          "title": "Kind",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "suspended",
+            "revoked"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "principal",
+        "kind",
+        "status",
+        "expected_revision",
+        "reason"
+      ],
+      "title": "SetPrincipalStatus",
+      "type": "object"
+    },
+    "SignedVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/VersionManifest"
+        },
+        "payload_base64": {
+          "title": "Payload Base64",
+          "type": "string"
+        },
+        "digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "algorithm": {
+          "const": "Ed25519",
+          "default": "Ed25519",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "key_id": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Key Id",
+          "type": "string"
+        },
+        "signature_base64": {
+          "title": "Signature Base64",
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest",
+        "payload_base64",
+        "digest",
+        "key_id",
+        "signature_base64"
+      ],
+      "title": "SignedVersion",
+      "type": "object"
+    },
+    "SourceEvaluationExecution": {
+      "additionalProperties": false,
+      "description": "Source-reported correlation only; never a trusted model bill or version pin.",
+      "properties": {
+        "profile": {
+          "enum": [
+            "dify-service-api-v1",
+            "langgraph-source-v1"
+          ],
+          "title": "Profile",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Id"
+        },
+        "workflow_run_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workflow Run Id"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "origin": {
+          "const": "source_reported",
+          "default": "source_reported",
+          "title": "Origin",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "request_id"
+      ],
+      "title": "SourceEvaluationExecution",
+      "type": "object"
+    },
+    "SourceEvaluationRuntime": {
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "enum": [
+            "dify-service-api-v1",
+            "langgraph-source-v1",
+            "registry-hosted-artifact-v1"
+          ],
+          "title": "Profile",
+          "type": "string"
+        },
+        "source_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Source Digest",
+          "type": "string"
+        },
+        "runtime_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Runtime Digest",
+          "type": "string"
+        },
+        "model_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Name",
+          "type": "string"
+        },
+        "revision_strength": {
+          "enum": [
+            "observed_source_snapshot",
+            "local_source_digest"
+          ],
+          "title": "Revision Strength",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "source_digest",
+        "runtime_digest",
+        "model_name",
+        "revision_strength"
+      ],
+      "title": "SourceEvaluationRuntime",
+      "type": "object"
+    },
+    "StartHostedEvaluation": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_kind": {
+          "default": "hosted",
+          "enum": [
+            "hosted",
+            "native"
+          ],
+          "title": "Execution Kind",
+          "type": "string"
+        },
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "StartHostedEvaluation",
+          "default": "StartHostedEvaluation",
+          "title": "Kind",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "metadata_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Metadata Digest",
+          "type": "string"
+        },
+        "artifact_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "dataset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 120,
+          "maximum": 240,
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "max_model_calls": {
+          "default": 1,
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Max Model Calls",
+          "type": "integer"
+        },
+        "role": {
+          "default": "hosted",
+          "enum": [
+            "hosted",
+            "source_baseline"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "source_runtime": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceEvaluationRuntime"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "comparison_policy_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Comparison Policy Id"
+        }
+      },
+      "required": [
+        "request_id",
+        "asset_id",
+        "metadata_digest",
+        "artifact_id",
+        "dataset_id",
+        "initiated_by"
+      ],
+      "title": "StartHostedEvaluation",
+      "type": "object"
+    },
+    "SubmitAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "kind": {
+          "const": "SubmitAsset",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "asset_id",
+        "expected_revision",
+        "initiated_by",
+        "kind"
+      ],
+      "title": "SubmitAsset",
+      "type": "object"
+    },
+    "SuspendAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "expected_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "initiated_by": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,149}$",
+          "title": "Initiated By",
+          "type": "string"
+        },
+        "kind": {
+          "const": "SuspendAsset",
+          "title": "Kind",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "asset_id",
+        "expected_revision",
+        "initiated_by",
+        "kind",
+        "reason"
+      ],
+      "title": "SuspendAsset",
+      "type": "object"
+    },
+    "VersionItem": {
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/SignedVersion"
+        },
+        "decision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Decision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "decision"
+      ],
+      "title": "VersionItem",
+      "type": "object"
+    },
+    "VersionManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "VersionManifest",
+          "default": "VersionManifest",
+          "title": "Kind",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "title": "Version",
+          "type": "string"
+        },
+        "spec_ref": {
+          "$ref": "urn:sudo:contracts:common:v1:resource-ref"
+        },
+        "spec_digest": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Spec Digest",
+          "type": "string"
+        },
+        "source_evidence_refs": {
+          "items": {
+            "$ref": "urn:sudo:contracts:common:v1:resource-ref"
+          },
+          "title": "Source Evidence Refs",
+          "type": "array"
+        },
+        "created_by": {
+          "title": "Created By",
+          "type": "string"
+        },
+        "created_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Created At",
+          "type": "integer"
+        },
+        "evidence": {
+          "const": "signed_registration_only",
+          "default": "signed_registration_only",
+          "title": "Evidence",
+          "type": "string"
+        }
+      },
+      "required": [
+        "principal",
+        "version",
+        "spec_ref",
+        "spec_digest",
+        "source_evidence_refs",
+        "created_by",
+        "created_at"
+      ],
+      "title": "VersionManifest",
+      "type": "object"
+    },
+    "VersionsPage": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "agent-registry.sudo.dev/v1alpha1",
+          "default": "agent-registry.sudo.dev/v1alpha1",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "kind": {
+          "const": "RegistryVersionsPage",
+          "default": "RegistryVersionsPage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "principal": {
+          "$ref": "#/$defs/Principal"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/VersionItem"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "channels": {
+          "items": {
+            "$ref": "#/$defs/Channel"
+          },
+          "title": "Channels",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "principal",
+        "items",
+        "channels",
+        "next_cursor"
+      ],
+      "title": "VersionsPage",
+      "type": "object"
+    }
+  },
+  "anyOf": [
+    {
+      "discriminator": {
+        "mapping": {
+          "DecideVersion": "#/$defs/DecideVersion",
+          "MoveChannel": "#/$defs/MoveChannel",
+          "PublishVersion": "#/$defs/PublishVersion",
+          "RegisterPrincipal": "#/$defs/RegisterPrincipal",
+          "SetPrincipalStatus": "#/$defs/SetPrincipalStatus"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RegisterPrincipal"
+        },
+        {
+          "$ref": "#/$defs/PublishVersion"
+        },
+        {
+          "$ref": "#/$defs/DecideVersion"
+        },
+        {
+          "$ref": "#/$defs/MoveChannel"
+        },
+        {
+          "$ref": "#/$defs/SetPrincipalStatus"
+        }
+      ]
+    },
+    {
+      "$ref": "#/$defs/CommandResult"
+    },
+    {
+      "$ref": "#/$defs/Resolution"
+    },
+    {
+      "$ref": "#/$defs/VersionsPage"
+    },
+    {
+      "$ref": "#/$defs/VersionItem"
+    },
+    {
+      "discriminator": {
+        "mapping": {
+          "ClaimAsset": "#/$defs/ClaimAsset",
+          "LinkAsset": "#/$defs/LinkAsset",
+          "MergeAsset": "#/$defs/MergeAsset",
+          "ObserveAsset": "#/$defs/ObserveAsset",
+          "RecordAcceptance": "#/$defs/RecordAcceptance",
+          "ReviewAsset": "#/$defs/ReviewAsset",
+          "SaveAsset": "#/$defs/SaveAsset",
+          "SubmitAsset": "#/$defs/SubmitAsset",
+          "SuspendAsset": "#/$defs/SuspendAsset"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SaveAsset"
+        },
+        {
+          "$ref": "#/$defs/ObserveAsset"
+        },
+        {
+          "$ref": "#/$defs/ClaimAsset"
+        },
+        {
+          "$ref": "#/$defs/SubmitAsset"
+        },
+        {
+          "$ref": "#/$defs/ReviewAsset"
+        },
+        {
+          "$ref": "#/$defs/SuspendAsset"
+        },
+        {
+          "$ref": "#/$defs/LinkAsset"
+        },
+        {
+          "$ref": "#/$defs/MergeAsset"
+        },
+        {
+          "$ref": "#/$defs/RecordAcceptance"
+        }
+      ]
+    },
+    {
+      "$ref": "#/$defs/AssetRecord"
+    },
+    {
+      "$ref": "#/$defs/AssetPage"
+    },
+    {
+      "$ref": "#/$defs/AssetHistory"
+    },
+    {
+      "$ref": "#/$defs/PlatformDiscoveryPage"
+    },
+    {
+      "$ref": "#/$defs/IssueExecutionGrant"
+    },
+    {
+      "$ref": "#/$defs/RevokeExecutionRequest"
+    },
+    {
+      "$ref": "#/$defs/ExecutionRequestRevocation"
+    },
+    {
+      "$ref": "#/$defs/ExecutionGrant"
+    },
+    {
+      "$ref": "#/$defs/ExecutionGrantResult"
+    },
+    {
+      "$ref": "#/$defs/ExecutionGrantPage"
+    },
+    {
+      "$ref": "#/$defs/CheckExecutionGrant"
+    },
+    {
+      "$ref": "#/$defs/ExecutionAuthorization"
+    },
+    {
+      "$ref": "#/$defs/DifyTextPlan"
+    },
+    {
+      "$ref": "#/$defs/HostedImage"
+    },
+    {
+      "$ref": "#/$defs/RegisterHostedArtifact"
+    },
+    {
+      "$ref": "#/$defs/HostedArtifact"
+    },
+    {
+      "$ref": "#/$defs/HostedArtifactPage"
+    },
+    {
+      "$ref": "#/$defs/NativeImage"
+    },
+    {
+      "$ref": "#/$defs/RegisterNativeConversion"
+    },
+    {
+      "$ref": "#/$defs/NativeConversion"
+    },
+    {
+      "$ref": "#/$defs/NativeConversionPage"
+    },
+    {
+      "$ref": "#/$defs/NativeExecutionProfile"
+    },
+    {
+      "$ref": "#/$defs/NativeOutputVerification"
+    },
+    {
+      "$ref": "#/$defs/EvaluationDataset"
+    },
+    {
+      "$ref": "#/$defs/EvaluationDatasetPage"
+    },
+    {
+      "$ref": "#/$defs/RegisterEvaluationDataset"
+    },
+    {
+      "$ref": "#/$defs/EvaluationCaseLease"
+    },
+    {
+      "$ref": "#/$defs/ObserveSourceEvaluation"
+    },
+    {
+      "$ref": "#/$defs/CompleteHostedEvaluationCase"
+    },
+    {
+      "$ref": "#/$defs/HostedEvaluationRun"
+    },
+    {
+      "$ref": "#/$defs/HostedEvaluationCase"
+    },
+    {
+      "$ref": "#/$defs/HostedEvaluationPage"
+    },
+    {
+      "$ref": "#/$defs/HostedEvaluationCasePage"
+    },
+    {
+      "$ref": "#/$defs/HostedEvaluationClaim"
+    },
+    {
+      "$ref": "#/$defs/StartHostedEvaluation"
+    },
+    {
+      "$ref": "#/$defs/CreateMigrationPolicy"
+    },
+    {
+      "$ref": "#/$defs/MigrationPolicy"
+    },
+    {
+      "$ref": "#/$defs/MigrationPolicyPage"
+    },
+    {
+      "$ref": "#/$defs/MigrationComparison"
+    }
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.sudo.dev/experimental/agent-registry/v1alpha1"
+}

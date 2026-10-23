@@ -1,3 +1,10 @@
+import { initializeAssetControls, assertAssetOpen } from '../agentFederation/assetControlStore.js'
+import { AgentCatalogGovernance } from '../agentFederation/catalogGovernance.js'
+import { assertNoTaskCredential } from '../agentFederation/taskExecutionContext.js'
+import { ExternalTaskExecution } from '../agentFederation/externalTaskExecution.js'
+import type { ExecutionModelGateway } from '../agentFederation/executionModelGateway.js'
+import type { AgentVersionManifest } from '../../../contracts/agent-federation/v1alpha1/contract.js'
+import { describeExternalAgent } from './description.js'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 import { ExternalProviderAdministration, object, type AdministrationOptions } from './administration.js'
 import { randomUUID } from 'node:crypto'
@@ -9,28 +16,36 @@ import { ExternalTaskStore, digest, type Binding, type ExternalActor } from './s
 import { ExternalProviderError, assertPilot, parseRegistration, type PilotPolicy } from './policy.js'
 import { decodeOutput } from './decoder.js'
 import { providerDefinition } from './providerDefinition.js'
-import { createRuntimeRegistry, describeCapabilities } from '../agentFederation/runtimeRegistry.js'
+import { createRuntimeRegistry } from '../agentFederation/runtimeRegistry.js'
 import { maintainRetention } from './retention.js'
 import { admitExternalTask } from '../agentFederation/taskIngress.js'
-import { AgentReleaseStore } from '../agentFederation/releases.js'
+import { RegistryReleases } from '../agentFederation/registryReleases.js'
+import { RegistryMigration } from '../agentFederation/registryMigration.js'
 import { ExternalExecutionOwnership } from '../agentFederation/executionOwnership.js'
 import { DURABLE_AGENT_HTTP_API } from '../../../contracts/agent-http/v1alpha2/contract.js'
 
 export class ExternalProviderService {
+  private readonly controlsReady: Promise<void>
   private readonly timer: ReturnType<typeof setInterval>
   private readonly executions = new Map<string, Promise<void>>()
   private readonly controllers = new Set<AbortController>()
   private maintenance: Promise<void> | null = null
   private nextCredentialMaintenance = 0
   readonly administration: ExternalProviderAdministration
-  readonly releases: AgentReleaseStore
+  readonly governance: AgentCatalogGovernance
+  readonly releases: RegistryReleases
+  readonly registryMigration: RegistryMigration
   readonly ownership: ExternalExecutionOwnership
   private closing = false
+  private taskExecution?: ExternalTaskExecution
   private readonly adapters: ReturnType<typeof createRuntimeRegistry>
   constructor(readonly store: ExternalTaskStore, private readonly options: AdministrationOptions, serverInstanceId?: string) {
-    this.releases = store.releases
+    this.controlsReady = store.ready.then(() => initializeAssetControls(store.db))
+    this.releases = new RegistryReleases(store, options.registry)
+    this.registryMigration = new RegistryMigration(this.releases, { maintenance: options.registryMaintenance ?? false, backupDirectory: options.registryBackupDirectory })
     this.ownership = new ExternalExecutionOwnership(store, serverInstanceId)
     this.administration = new ExternalProviderAdministration(store, options)
+    this.governance = new AgentCatalogGovernance(this)
     this.adapters = createRuntimeRegistry(options)
     this.timer = setInterval(() => { void this.maintain().catch(() => {}) }, 1000)
     this.timer.unref()
@@ -46,18 +61,27 @@ export class ExternalProviderService {
     await this.ownership.stop()
   }
 
+  async configureTaskExecution(gateway?: ExecutionModelGateway, origin?: string) {
+    if (!origin) return
+    if (!gateway || !this.options.registry) throw new ExternalProviderError(503, 'TASK_EXECUTION_CONTEXT_UNAVAILABLE')
+    await this.store.ready
+    this.taskExecution = new ExternalTaskExecution(this.store.db, this.options.registry, gateway, origin)
+    await this.taskExecution.ready
+  }
+
   maintain(): Promise<void> {
     if (this.maintenance) return this.maintenance
     this.maintenance = (async () => {
       await this.store.ready
       await this.ownership.heartbeat()
       await this.store.scheduled('expiry', 1000, () => this.store.expire())
+      await this.taskExecution?.maintain()
       if (Date.now() >= this.nextCredentialMaintenance) {
         this.nextCredentialMaintenance = Date.now() + 60_000
         await this.administration.operations.reconcile()
         await maintainRetention(this.store)
       }
-      if (!this.closing) for (const id of await this.ownership.candidates()) {
+      if (!this.closing && !this.options.registryMaintenance) for (const id of await this.ownership.candidates()) {
         if (this.closing || this.executions.size >= 32) break
         this.startTask(id)
       }
@@ -67,6 +91,18 @@ export class ExternalProviderService {
 
   async authorize(actor: ExternalActor): Promise<void> {
     if (!await this.options.isActorActive(actor)) throw new ExternalProviderError(401, 'USER_NOT_ACTIVE')
+  }
+
+  get isRegistryMaintenance(): boolean { return this.options.registryMaintenance ?? false }
+
+  async onboard(actor: ExternalActor, input: unknown) {
+    const record = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {}
+    const { catalog_governance, ...registration } = record
+    if (catalog_governance !== undefined && typeof catalog_governance !== 'boolean') throw new ExternalProviderError(400, 'INVALID_ADMIN_INPUT')
+    const agent = await this.administration.onboard(actor, registration)
+    await this.registryMigration.enrollNew(actor, agent.id)
+    if (catalog_governance) await this.governance.attach(actor, { catalog_id: agent.id, revision: agent.revision, source_definition: record.source_definition })
+    return agent
   }
 
   async register(actor: ExternalActor, input: unknown): Promise<ExternalAgent> {
@@ -83,10 +119,10 @@ export class ExternalProviderService {
         throw new ExternalProviderError(400, 'INVALID_MEMBER')
       }
     }
-    const binding: Binding = { ...definition, ...source, id: randomUUID(), orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'reference_compat' }
+    const binding: Binding = { ...definition, ...source, ...(this.options.registry ? { registryRequired: true } : {}), id: randomUUID(), orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'reference_compat' }
     await this.store.ready
     const requestHash = digest(JSON.stringify(definition, Object.keys(definition).sort()))
-    return this.store.db.transaction(async () => {
+    const agent = await this.store.db.transaction(async () => {
       const reserved = await this.store.db.run(`INSERT INTO external_pilot_operations (id, org_id, kind, request_id, request_hash, status, lease_until, document) VALUES (?, ?, 'reference_register', ?, ?, 'complete', 0, ?) ON CONFLICT(org_id, kind, request_id) DO NOTHING`, [randomUUID(), actor.orgId, request_id, requestHash, JSON.stringify({ bindingId: binding.id })])
       if (!reserved) {
         const existing = await this.store.db.get("SELECT request_hash, document FROM external_pilot_operations WHERE org_id = ? AND kind = 'reference_register' AND request_id = ?", [actor.orgId, request_id])
@@ -99,11 +135,14 @@ export class ExternalProviderService {
       await this.administration.audit(actor, 'agent.reference_registered', binding.id)
       return this.describe(binding)
     })
+    await this.registryMigration.enrollNew(actor, agent.id)
+    return agent
   }
 
   async review(actor: ExternalActor, id: string, approved: boolean, revision: number, reviewDays?: number): Promise<ExternalAgent> {
     if (!Number.isSafeInteger(revision) || revision < 1) throw new ExternalProviderError(400, 'INVALID_REVIEW')
     await this.authorize(actor)
+    await this.governance.assertUnmanaged(actor, id)
     const binding = await this.store.binding(actor, id)
     if ((binding.revision ?? 1) !== revision) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
     if (binding.credentialUpdating) throw new ExternalProviderError(409, 'CREDENTIAL_UPDATE_IN_PROGRESS')
@@ -124,26 +163,55 @@ export class ExternalProviderService {
       const key = secret.value
       parametersDigest = await this.administration.parameters(binding, key, AbortSignal.timeout(10_000))
     }
-    return this.administration.change(actor, id, revision, approved ? 'agent.approved' : 'agent.disabled', async current => {
+    const isRegistry = await this.releases.isRegistry(actor, id)
+    const result = await this.administration.change(actor, id, revision, approved ? 'agent.approved' : 'agent.disabled', async current => {
+      await this.governance.assertUnmanaged(actor, id)
       if (current.credentialUpdating) throw new ExternalProviderError(409, 'CREDENTIAL_UPDATE_IN_PROGRESS')
       current.credentialVersion = credentialVersion
-      current.approved = approved; current.parametersDigest = parametersDigest; current.reviewedBy = actor.userId
+      current.approved = approved; current.parametersDigest = parametersDigest; current.reviewedBy = actor.userId; current.reviewedAt = approved ? Date.now() : null
       current.review_expires_at = binding.review_expires_at
       await this.options.catalog.updateAgentConfiguration(id, actor.orgId, { status: approved ? 'approved' : 'pending', enabled: approved })
-      if (approved) {
+      if (approved && !isRegistry) {
         const version = await this.releases.publish(actor, current, this.releases.defaultVersion(current), current.review_note)
         const page = await this.releases.list(actor, id)
         await this.releases.moveChannel(actor, id, 'stable', version.version, page.channels.find(c => c.name === 'stable')?.revision ?? 0)
       }
     })
+    if (approved && isRegistry) {
+      try {
+        const current = await this.store.binding(actor, id)
+        const version = await this.releases.publish(actor, current, this.releases.defaultVersion(current), current.review_note)
+        const page = await this.releases.list(actor, id)
+        await this.releases.moveChannel(actor, id, 'stable', version.version, page.channels.find(channel => channel.name === 'stable')?.revision ?? 0)
+      } catch {
+        // The local governance change committed before the remote operation. Do not report it as rolled back.
+        throw new ExternalProviderError(503, 'REGISTRY_PUBLICATION_INCOMPLETE')
+      }
+    }
+    return result
   }
 
   async publishVersion(actor: ExternalActor, id: string, input: unknown) {
     const body = object(input, ['revision', 'version', 'note'])
     if (typeof body.version !== 'string' || typeof body.note !== 'string' || !Number.isSafeInteger(body.revision)) throw new ExternalProviderError(400, 'INVALID_RELEASE_INPUT')
     await this.authorize(actor)
+    await this.governance.assertUnmanaged(actor, id)
+    if (await this.releases.isRegistry(actor, id)) {
+      const binding = await this.store.db.transaction(async () => {
+        await this.store.db.run('UPDATE external_pilot_bindings SET document = document WHERE id = ? AND org_id = ?', [id, actor.orgId])
+        await this.governance.assertUnmanaged(actor, id)
+        const current = await this.store.binding(actor, id)
+        if ((current.revision ?? 1) !== body.revision) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
+        await this.administration.assertCredentialUsable(actor, current)
+        return current
+      })
+      const result = await this.releases.publish(actor, binding, body.version as string, body.note as string)
+      await this.administration.audit(actor, 'agent.version_published', id)
+      return result
+    }
     return this.store.db.transaction(async () => {
       await this.store.db.run('UPDATE external_pilot_bindings SET document = document WHERE id = ? AND org_id = ?', [id, actor.orgId])
+      await this.governance.assertUnmanaged(actor, id)
       const binding = await this.store.binding(actor, id)
       if ((binding.revision ?? 1) !== body.revision) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
       await this.administration.assertCredentialUsable(actor, binding)
@@ -166,6 +234,9 @@ export class ExternalProviderService {
   }
 
   async listPage(actor: ExternalActor, after = '') {
+    // This is the end-user executable directory. Management routes must use
+    // administration.listPage(), which intentionally does not apply the
+    // conversation grant (allowed_user_ids) to organization administrators.
     await this.authorize(actor)
     const effectivePolicy = await this.administration.effectivePolicy(actor)
     if (!effectivePolicy.orgIds.includes(actor.orgId)) return { items: [], next_cursor: null }
@@ -184,6 +255,7 @@ export class ExternalProviderService {
 
   async create(actor: ExternalActor, input: unknown) {
     if (this.closing) throw new ExternalProviderError(503, 'EXTERNAL_PROVIDER_STOPPING')
+    if (this.isRegistryMaintenance) throw new ExternalProviderError(503, 'REGISTRY_MAINTENANCE_REQUIRED')
     await this.authorize(actor)
     if (!input || typeof input !== 'object' || !('api_version' in input)) throw new ExternalProviderError(409, 'TASK_CLIENT_UPGRADE_REQUIRED')
     const task = await admitExternalTask(this.store, actor, input, {
@@ -192,8 +264,13 @@ export class ExternalProviderService {
       executable: binding => this.executable(actor, binding),
       timeoutMs: this.options.policy.timeoutMs,
       capabilities: binding => this.adapters.get(binding.provider_kind ?? 'dify').create(binding).capabilities,
-      resolveRelease: (binding, version, channel) => this.releases.resolve(actor, binding.id, version, channel),
+      resolveRelease: async (binding, version, channel) => {
+        const selected = await this.releases.resolve(actor, binding.id, version, channel)
+        await this.governance.assertVersion(actor, binding.id, selected.manifest.version)
+        return selected
+      },
     })
+    await this.governance.data.audit(actor, 'task.resolved', task.agent_id, { task_id: task.id, result: task.status === 'rejected' ? 'failed' : 'succeeded', reason: task.error_code }, `resolved-${task.id}`)
     if (task.status === 'accepted') this.startTask(task.id)
     return task
   }
@@ -202,22 +279,44 @@ export class ExternalProviderService {
     await this.authorize(actor)
     const binding = await this.store.binding(actor, id)
     await this.executable(actor, binding)
-    return this.releases.options(actor, id, after)
+    const page = await this.releases.options(actor, id, after)
+    if (!await this.governance.data.managed(actor, id)) return page
+    const states = await Promise.all(page.items.map(item => this.governance.data.version(actor, id, item.version)))
+    return { ...page, items: page.items.filter((_, i) => states[i]?.lifecycle === 'published'),
+      channels: page.channels.filter(channel => page.items.some((item, i) => item.version === channel.version && states[i]?.lifecycle === 'published')) }
   }
 
-  async evidence(actor: ExternalActor, id: string): Promise<ExternalTaskEvidence> {
+  async evidence(actor: ExternalActor, id: string, extended = true): Promise<ExternalTaskEvidence> {
     await this.authorize(actor)
     const task = await this.store.task(actor, id)
     const record = await this.store.taskRecord(actor, id), run = await this.store.runBinding(actor, id)
-    const selected = record?.resolution.status === 'accepted' ? record.resolution.agent : undefined
+    const selected = record?.resolution.status === 'accepted' && record.resolution.execution_mode === 'external_hosted' ? record.resolution.agent : undefined
+    const provenance = await this.governance.provenance(actor, id)
     return { api_version: EXTERNAL_PROVIDER_API, kind: 'ExternalTaskEvidence', task_id: task.id, session_id: task.session_id, attempt_id: task.attempt_id, status: task.status,
+      ...(extended && provenance ? { provenance } : {}),
       ...(selected ? { selection: { version: selected.version, source_digest: selected.source_digest, release_digest: selected.release_digest,
         resolved_from_channel: selected.resolved_from_channel, channel_revision: selected.channel_revision,
-        execution_revision: selected.execution_revision, version_evidence: selected.version_evidence } } : {}),
-      ...(run ? { execution: { provider_run_id: run.provider_run_id, execution_revision: run.execution_revision, version_evidence: run.version_evidence, resume: run.resume } } : {}),
+        execution_revision: selected.execution_revision, version_evidence: selected.version_evidence,
+        ...(selected.registry ? { registry: selected.registry } : {}) } } : {}),
+      ...(run ? { execution: { ...(extended ? { adapter_version: run.adapter_version, observability: run.observability } : {}), provider_run_id: run.provider_run_id, provider_response_id: run.provider_response_id, protocol: run.provider_protocol, trace_id: run.trace_id, usage: run.usage, execution_revision: run.execution_revision, version_evidence: run.version_evidence, resume: run.resume } } : {}),
     }
   }
 
+  /** Stop unstarted work; remote cancellation is deliberately not asserted. */
+  async suspendCatalog(operator: ExternalActor, catalogId: string) {
+    await this.controlsReady
+    const rows = await this.store.db.all(`SELECT t.id, t.status FROM external_tasks t JOIN external_session_bindings x ON x.id = t.session_id WHERE t.org_id = ? AND x.agent_id = ? AND t.status IN ('accepted', 'dispatching', 'running', 'unknown') ORDER BY t.id LIMIT 10001`, [operator.orgId, catalogId])
+    if (rows.length > 10000) throw new ExternalProviderError(503, 'EXTERNAL_TASK_SCAN_INCOMPLETE')
+    for (const row of rows) if (row.status === 'accepted') await this.store.mutate(String(row.id), task => {
+      if (task.status !== 'accepted') return false
+      task.status = task.task_contract_version ? 'failed' : 'rejected'
+      task.error_code = 'AGENT_SUSPENSION_ACTIVE'
+      return 'status'
+    })
+    const current = await this.store.db.all(`SELECT t.status, COUNT(*) AS count FROM external_tasks t JOIN external_session_bindings x ON x.id = t.session_id WHERE t.org_id = ? AND x.agent_id = ? GROUP BY t.status`, [operator.orgId, catalogId])
+    const count = (status: string) => Number(current.find(row => row.status === status)?.count ?? 0)
+    return { accepted: count('accepted'), in_flight: count('dispatching') + count('running'), unknown: count('unknown') }
+  }
   async waitForTask(id: string): Promise<void> { await this.executions.get(id) }
 
   private startTask(id: string) {
@@ -239,7 +338,8 @@ export class ExternalProviderService {
       renewing = this.ownership.renew(fence).then(ok => { if (!ok) controller.abort() }, () => controller.abort()).finally(() => { renewing = undefined })
     }, 5000)
     heartbeat.unref()
-    let submitted = Boolean(task.dispatch_authorized_at) || recovery, durable = false
+    let submitted = Boolean(task.dispatch_authorized_at) || recovery, durable = false, managed = false
+    let executionToken: string | undefined
     try {
       const governedBinding = await this.store.binding(actor, task.agent_id)
       await this.authorize(actor)
@@ -248,11 +348,15 @@ export class ExternalProviderService {
       let binding = governedBinding
       const record = await this.store.taskRecord(actor, task.id)
       const resolution = record?.resolution
+      let version: AgentVersionManifest | undefined
       if (resolution?.status === 'accepted' && resolution.agent.release_digest) {
-        const version = await this.releases.version(actor, task.agent_id, resolution.agent.version)
+        await this.governance.assertVersion(actor, task.agent_id, resolution.agent.version)
+        version = await this.releases.version(actor, task.agent_id, resolution.agent.version)
         if (version.spec_digest !== resolution.agent.release_digest || version.snapshot.source_digest !== task.source_digest) throw new ExternalProviderError(409, 'AGENT_VERSION_DIGEST_MISMATCH')
         binding = { ...governedBinding, ...version.snapshot }
       }
+      managed = Boolean(binding.sourceManifest?.execution_context)
+      if (managed && (!this.taskExecution || !version || recovery)) throw new ExternalProviderError(409, recovery ? 'RECOVERY_UNSUPPORTED' : 'TASK_EXECUTION_CONTEXT_UNAVAILABLE')
       durable = binding.sourceManifest?.protocol === DURABLE_AGENT_HTTP_API
       if (recovery && !durable) {
         await this.store.mutate(id, current => { current.status = 'unknown'; current.error_code = 'RECOVERY_UNSUPPORTED'; return 'status' }, fence)
@@ -273,13 +377,25 @@ export class ExternalProviderService {
         endpoint: binding.endpoint, org_id: actor.orgId, policy: await this.administration.effectivePolicy(actor),
         key, query: task.query, provider_session_id: invocation.provider_session_id, deadline_at: task.deadline_at,
         end_user: invocation.end_user, signal: controller.signal, recovery, known_provider_run_id: task.provider_refs.run_id,
+        ...(managed ? { execution_context: async () => {
+          const context = await this.taskExecution!.prepare(actor, task, version!, binding.sourceManifest!.execution_context!, controller.signal, async () => {
+          controller.signal.throwIfAborted()
+          await this.authorize(actor)
+          await this.executable(actor, await this.store.binding(actor, task.agent_id))
+          })
+          executionToken = context.access_token
+          return context
+        } } : {}),
         authorize_dispatch: async () => {
           // Adapter preflight precedes the same durable governance linearization point.
           await this.store.db.transaction(async () => {
             await this.store.db.run('UPDATE external_pilot_bindings SET document = document WHERE id = ? AND org_id = ?', [binding.id, actor.orgId])
             const current = await this.store.binding(actor, binding.id)
             if (JSON.stringify(current) !== JSON.stringify(governedBinding)) throw new ExternalProviderError(409, 'CONFIGURATION_CHANGED')
-            if (resolution?.status === 'accepted' && resolution.agent.release_digest) await this.releases.resolve(actor, task.agent_id, resolution.agent.version)
+            if (resolution?.status === 'accepted' && resolution.agent.release_digest) {
+              await this.governance.assertVersion(actor, task.agent_id, resolution.agent.version)
+              await this.releases.resolve(actor, task.agent_id, resolution.agent.version)
+            }
             await this.administration.lockPolicy(actor)
             await this.authorize(actor)
             await this.executable(actor, current)
@@ -289,11 +405,13 @@ export class ExternalProviderService {
               return 'status'
             }, fence)
             if (!claimed) throw new ExternalProviderError(409, 'DISPATCH_DEADLINE')
+            await this.governance.recordProvenance(actor, task, binding, adapter, version?.version)
           })
           controller.signal.throwIfAborted()
           submitted = true
         },
       }, async observation => {
+        assertNoTaskCredential(observation, executionToken)
         await this.store.mutate(id, current => {
           current.status = 'running'; current.raw_answer = observation.text
           current.provider_refs = {
@@ -307,14 +425,21 @@ export class ExternalProviderService {
           return 'answer'
         }, fence)
       })
+      assertNoTaskCredential(result, executionToken)
       const decoded = decodeOutput(result.text, binding.decoder, true)
+      const cleaned = !managed || await this.taskExecution!.finish(actor.orgId, task.id)
       await this.store.db.transaction(async () => {
         const completed = await this.store.mutate(id, current => {
-          current.status = result.status; current.raw_answer = result.text; current.answer = decoded.answer
+          current.status = cleaned ? result.status : 'unknown'; current.raw_answer = result.text; current.answer = decoded.answer
+          current.error_code = !cleaned ? 'EXTERNAL_EXECUTION_CLEANUP_PENDING' : result.status === 'failed' ? result.error_code ?? 'PROVIDER_EXECUTION_FAILED' : null
           current.output_status = decoded.valid ? 'valid' : 'invalid'
           return 'answer'
         }, fence)
-        if (completed) await this.store.saveRunBinding(actor, result.binding)
+        if (completed) {
+          await this.store.saveRunBinding(actor, result.binding)
+          await this.governance.data.audit(actor, 'run.completed', binding.id, { task_id: task.id, version: version?.version ?? null, provider_run_id: result.binding.provider_run_id ?? null, provider_response_id: result.binding.provider_response_id ?? null,
+            result: !cleaned ? 'unknown' : result.status === 'succeeded' ? 'succeeded' : 'failed' }, `completed-${task.id}`)
+        }
       })
     } catch (error) {
       if (this.closing && durable) return // Another controller resumes observation using the saved request.
@@ -324,14 +449,28 @@ export class ExternalProviderService {
         current.error_code = code
         return 'status'
       }, fence)
-    } finally { clearTimeout(timeout); clearInterval(heartbeat); await renewing; this.controllers.delete(controller) }
+      const outcome = await this.store.task(actor, task.id)
+      await this.governance.data.audit(actor, 'run.failed_or_unknown', task.agent_id, { task_id: task.id, result: outcome.status === 'unknown' ? 'unknown' : 'failed', reason: code }, `failed-${task.id}`)
+    } finally {
+      if (managed) await this.taskExecution?.finish(actor.orgId, task.id).catch(() => {})
+      clearTimeout(timeout); clearInterval(heartbeat); await renewing; this.controllers.delete(controller)
+    }
   }
 
-  private async executable(actor: ExternalActor, binding: Binding, context?: { policy: PilotPolicy; agents: Map<string, CatalogAgent>; connections: Map<string, IntegrationConnection> }): Promise<void> {
+  /** Admin read-model check shares runtime gates, excluding the caller's personal grant. */
+  async assertCatalogConfigured(actor: ExternalActor, binding: Binding): Promise<void> {
+    return this.executable(actor, binding, undefined, false)
+  }
+
+  private async executable(actor: ExternalActor, binding: Binding, context?: { policy: PilotPolicy; agents: Map<string, CatalogAgent>; connections: Map<string, IntegrationConnection> }, requireUserGrant = true): Promise<void> {
+    await this.controlsReady
+    await this.governance.assertEnabled(actor, binding.id)
+    await assertAssetOpen(this.store.db, actor.orgId, undefined, binding.id)
+    if (binding.sourceManifest?.execution_context && !this.taskExecution) throw new ExternalProviderError(503, 'TASK_EXECUTION_CONTEXT_UNAVAILABLE')
     this.adapters.get(binding.provider_kind ?? 'dify')
     if (binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
     assertPilot(context?.policy ?? await this.administration.effectivePolicy(actor), actor.orgId, binding.endpoint)
-    if (binding.archived || binding.credentialUpdating || binding.credentialRecoveryRequired || !binding.approved || !binding.parametersDigest || binding.review_expires_at <= Date.now() || !binding.allowed_user_ids.includes(actor.userId)) throw new ExternalProviderError(403, 'AGENT_NOT_APPROVED_FOR_USER')
+    if (binding.archived || binding.credentialUpdating || binding.credentialRecoveryRequired || !binding.approved || !binding.parametersDigest || binding.review_expires_at <= Date.now() || (requireUserGrant && !binding.allowed_user_ids.includes(actor.userId))) throw new ExternalProviderError(403, 'AGENT_NOT_APPROVED_FOR_USER')
     const catalog = context ? context.agents.get(binding.id) : await this.options.catalog.getAgent(binding.id, actor.orgId)
     if (!catalog?.enabled || catalog.status !== 'approved' || catalog.providerType !== (binding.provider_kind ?? 'dify') || catalog.providerBinding?.executionMode !== 'external_hosted' || catalog.providerBinding?.bindingId !== binding.id || catalog.providerBinding?.sourceDigest !== binding.source_digest || catalog.providerBinding?.appId !== binding.app_id || catalog.providerBinding?.connectionId !== binding.connectionId || Object.keys(catalog.visibleTo ?? {}).length !== 1 || JSON.stringify([...(catalog.visibleTo?.user_ids ?? [])].sort()) !== JSON.stringify([...binding.allowed_user_ids].sort())) throw new ExternalProviderError(403, 'AGENT_DISABLED_OR_CHANGED')
     if (!context) return this.administration.assertCredentialUsable(actor, binding)
@@ -351,7 +490,7 @@ export class ExternalProviderService {
   }
 
   private describe(binding: Binding): ExternalAgent {
-    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_identity_evidence: 'unverified', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: describeCapabilities(binding) }
+    return describeExternalAgent(binding)
   }
 
 

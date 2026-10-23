@@ -1,4 +1,8 @@
-import { describeCapabilities } from '../agentFederation/runtimeRegistry.js'
+import { isStandardProtocol, StandardHttpAdapter } from '../agentFederation/standardHttpAdapter.js'
+import { CatalogGovernanceStore } from '../agentFederation/catalogStore.js'
+import { EndpointRequests } from './endpointRequests.js'
+import type { ProductRegistryClient } from '../agentFederation/registryClient.js'
+import { describeExternalAgent } from './description.js'
 import { randomUUID } from 'node:crypto'
 import { definitionDigest, DEFINITION_PROFILE_VERSION } from './definition.js'
 export { definitionDigest } from './definition.js'
@@ -26,6 +30,9 @@ export interface AdministrationOptions {
   membersPage?: (orgId: string, after: string, search: string, limit: number) => Promise<ExternalProviderMember[]>
   transport?: DifyPilotTransport
   httpRequest?: ProviderRequest
+  registry?: ProductRegistryClient
+  registryMaintenance?: boolean
+  registryBackupDirectory?: string
 }
 const fail = (code: string, status = 400): never => { throw new ExternalProviderError(status, code) }
 export function object(value: unknown, keys: string[]): Record<string, unknown> {
@@ -38,8 +45,13 @@ function string(value: unknown, max = 200): string {
 }
 
 export class ExternalProviderAdministration {
+  readonly catalogState: CatalogGovernanceStore
+  readonly endpointRequests = new EndpointRequests(this)
   readonly operations: CredentialOperations
-  constructor(readonly store: ExternalTaskStore, readonly options: AdministrationOptions) { this.operations = new CredentialOperations(store, options) }
+  constructor(readonly store: ExternalTaskStore, readonly options: AdministrationOptions) {
+    this.operations = new CredentialOperations(store, options)
+    this.catalogState = new CatalogGovernanceStore(store.db, store.ready)
+  }
   get credentialStorageAvailable(): boolean { return Boolean(this.options.secrets.putSecret && this.options.secrets.deleteSecret) }
   get transport() { return this.options.transport ?? new DifyPilotTransport() }
 
@@ -96,7 +108,8 @@ export class ExternalProviderAdministration {
     try {
       if (body.provider_kind === 'custom_http') {
         const source = providerDefinition(body.provider_kind, body.source_definition)
-        return { ...await new CustomHttpAdapter({ manifest: source.sourceManifest!, digest: source.source_digest }, this.options.httpRequest).inspect(endpoint, key, AbortSignal.timeout(10000)), source_identity_evidence: 'unverified' as const }
+        const Adapter = isStandardProtocol(source.sourceManifest) ? StandardHttpAdapter : CustomHttpAdapter
+        return { ...await new Adapter({ manifest: source.sourceManifest!, digest: source.source_digest }, this.options.httpRequest).inspect(endpoint, key, AbortSignal.timeout(10000)), source_identity_evidence: 'unverified' as const }
       }
       if (body.provider_kind !== undefined && body.provider_kind !== 'dify') return fail('PROVIDER_NOT_IMPLEMENTED')
       return await this.transport.inspect(endpoint, key, AbortSignal.timeout(10000))
@@ -117,7 +130,7 @@ export class ExternalProviderAdministration {
     const { review_expires_at: _expiry, credential_ref: _ref, ...stableDefinition } = definition
     const credentialFingerprint = digest(JSON.stringify([actor.orgId, requestId, apiKey]))
     const hash = digest(JSON.stringify({ ...stableDefinition, review_days: body.review_days, credentialFingerprint }))
-    const binding: Binding = { ...definition, ...source, id, orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'onboarding' }
+    const binding: Binding = { ...definition, ...source, ...(this.options.registry ? { registryRequired: true } : {}), id, orgId: actor.orgId, connectionId: randomUUID(), approved: false, parametersDigest: null, reviewedBy: null, revision: 1, definitionProfileVersion: DEFINITION_PROFILE_VERSION, registrationMode: 'onboarding' }
     const operation: CredentialOperation = { id: operationId, actor, kind: 'onboard', binding, targetRef: credential_ref }
     if (!await this.operations.reserve(operation, requestId, hash)) {
       const existing = await this.store.db.get('SELECT * FROM external_pilot_operations WHERE org_id = ? AND kind = ? AND request_id = ?', [actor.orgId, 'onboard', requestId])
@@ -152,6 +165,7 @@ export class ExternalProviderAdministration {
     if (body.source_definition === undefined && binding.definitionProfileVersion !== DEFINITION_PROFILE_VERSION) return fail('DEFINITION_REVIEW_REQUIRED', 409)
     const definition = await this.definition(actor, { ...binding, ...body, source_digest })
     return this.change(actor, id, Number(body.revision), 'agent.updated', async current => {
+      if (await this.catalogState.managed(actor, id)) return fail('CANDIDATE_WORKFLOW_REQUIRED', 409)
       Object.assign(current, definition, source, { approved: false, parametersDigest: null, reviewedBy: null, definitionProfileVersion: DEFINITION_PROFILE_VERSION })
       const catalog = await this.options.catalog.getAgent(id, actor.orgId)
       await this.options.catalog.updateAgentConfiguration(id, actor.orgId, { name: current.name, visibleTo: { user_ids: current.allowed_user_ids }, status: 'pending', enabled: false, providerBinding: { ...catalog?.providerBinding, sourceDigest: current.source_digest } })
@@ -161,7 +175,8 @@ export class ExternalProviderAdministration {
   async parameters(binding: Binding, key: string, signal: AbortSignal): Promise<string> {
     if (binding.provider_kind !== 'custom_http') return this.transport.parameters(binding.endpoint, key, signal)
     if (!binding.sourceManifest) return fail('DEFINITION_REVIEW_REQUIRED', 409)
-    const inspected = await new CustomHttpAdapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, this.options.httpRequest).inspect(binding.endpoint, key, signal)
+    const Adapter = isStandardProtocol(binding.sourceManifest) ? StandardHttpAdapter : CustomHttpAdapter
+    const inspected = await new Adapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, this.options.httpRequest).inspect(binding.endpoint, key, signal)
     return inspected.parameters_digest
   }
 
@@ -205,9 +220,9 @@ export class ExternalProviderAdministration {
     return this.inspect(actor, { endpoint: binding.endpoint, api_key: secret.value, provider_kind: binding.provider_kind, source_definition: binding.sourceManifest ? JSON.stringify(binding.sourceManifest) : undefined })
   }
 
-  async assertCredentialUsable(actor: ExternalActor, binding: Binding): Promise<void> {
+  async assertCredentialUsable(actor: ExternalActor, binding: Binding, allowExpiredReview = false): Promise<void> {
     if (binding.archived) return fail('AGENT_ARCHIVED', 409)
-    if (binding.review_expires_at <= Date.now()) return fail('AGENT_REVIEW_EXPIRED', 409)
+    if (!allowExpiredReview && binding.review_expires_at <= Date.now()) return fail('AGENT_REVIEW_EXPIRED', 409)
     if (binding.credentialUpdating) return fail('CREDENTIAL_UPDATE_IN_PROGRESS', 409)
     if (binding.credentialRecoveryRequired) return fail('CREDENTIAL_ROTATION_REQUIRED', 409)
     const connection = await this.options.identities.getIntegrationConnection(binding.connectionId)
@@ -242,9 +257,11 @@ export class ExternalProviderAdministration {
 
   async audit(actor: ExternalActor, action: string, id: string) {
     await this.store.db.run('INSERT INTO external_pilot_admin_audit(id, org_id, user_id, action, resource_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), actor.orgId, actor.userId, action, id, Date.now()])
+    const source = await this.catalogState.managed(actor, id)
+    await this.catalogState.audit(actor, action, id, { source_id: source?.view.id ?? null })
   }
   describe(binding: Binding): ExternalAgentAdmin {
-    return { id: binding.id, name: binding.name, provider: binding.provider_kind ?? 'dify', execution_mode: 'external_hosted', profile: 'synthetic_pilot', source_identity_evidence: 'unverified', source_digest: binding.source_digest, decoder: binding.decoder, approved: binding.approved, review_expires_at: binding.review_expires_at, capabilities: describeCapabilities(binding), endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, allowed_user_ids: binding.allowed_user_ids, review_note: binding.review_note, revision: binding.revision ?? 1, archived: binding.archived ?? false, credential_configured: Boolean(binding.credential_ref), credential_state: binding.credentialUpdating ? 'updating' : binding.credentialRecoveryRequired ? 'rotation_required' : 'ready', registration_mode: binding.registrationMode ?? 'reference_compat', definition_evidence: binding.definitionProfileVersion === DEFINITION_PROFILE_VERSION ? binding.provider_kind === 'custom_http' ? 'validated_manifest' : 'validated_dsl' : 'digest_only' }
+    return { ...describeExternalAgent(binding), endpoint: binding.endpoint, app_id: binding.app_id, workspace_id: binding.workspace_id, allowed_user_ids: binding.allowed_user_ids, review_note: binding.review_note, revision: binding.revision ?? 1, archived: binding.archived ?? false, credential_configured: Boolean(binding.credential_ref), credential_state: binding.credentialUpdating ? 'updating' : binding.credentialRecoveryRequired ? 'rotation_required' : 'ready', registration_mode: binding.registrationMode ?? 'reference_compat', definition_evidence: binding.definitionProfileVersion === DEFINITION_PROFILE_VERSION ? binding.provider_kind === 'custom_http' ? 'validated_manifest' : 'validated_dsl' : 'digest_only' }
   }
   private async definition(actor: ExternalActor, body: Record<string, unknown>) {
     if (![1, 3, 7].includes(Number(body.review_days))) return fail('INVALID_REVIEW_DAYS')

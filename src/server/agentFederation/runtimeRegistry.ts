@@ -1,6 +1,7 @@
 import type { ProviderAdapter } from './adapter.js'
 import { ProviderAdapterRegistry } from './adapter.js'
 import { DifyGatewayAdapter } from './difyAdapter.js'
+import { isStandardProtocol, StandardHttpAdapter } from './standardHttpAdapter.js'
 import { CustomHttpAdapter } from './customHttpAdapter.js'
 import { DurableHttpAdapter } from './durableHttpAdapter.js'
 import { DURABLE_AGENT_HTTP_API, DURABLE_HTTP_CAPABILITIES } from '../../../contracts/agent-http/v1alpha2/contract.js'
@@ -14,7 +15,8 @@ export function describeCapabilities(binding: Binding) {
   if (!['dify', 'custom_http'].includes(kind)) throw new ExternalProviderError(409, 'PROVIDER_NOT_IMPLEMENTED')
   const capabilities = kind === 'dify' ? DIFY_CAPABILITIES : binding.sourceManifest?.protocol === DURABLE_AGENT_HTTP_API ? DURABLE_HTTP_CAPABILITIES : HTTP_CAPABILITIES
   const status = (enabled: boolean) => enabled ? 'supported' as const : 'unsupported' as const
-  return { streaming: status(capabilities.supports_streaming), cancel: status(capabilities.supports_cancel), resume: status(capabilities.supports_resume), version_pin: status(capabilities.supports_version_pin) }
+  return { streaming: status(capabilities.supports_streaming), cancel: status(capabilities.supports_cancel), resume: status(capabilities.supports_resume), version_pin: status(capabilities.supports_version_pin),
+    idempotency: status(capabilities.supports_idempotency), human_approval: status(capabilities.supports_human_approval), trace_export: 'partial' as const }
 }
 
 interface Registration extends Pick<ProviderAdapter, 'kind' | 'capabilities'> {
@@ -30,6 +32,7 @@ export function createRuntimeRegistry(options: AdministrationOptions) {
     } },
     { kind: 'custom_http', capabilities: HTTP_CAPABILITIES, create(binding) {
       if (!binding.sourceManifest) throw new ExternalProviderError(409, 'DEFINITION_REVIEW_REQUIRED')
+      if (isStandardProtocol(binding.sourceManifest)) return new StandardHttpAdapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, options.httpRequest)
       if (binding.sourceManifest.protocol === DURABLE_AGENT_HTTP_API) return new DurableHttpAdapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, options.httpRequest)
       return new CustomHttpAdapter({ manifest: binding.sourceManifest, digest: binding.source_digest }, options.httpRequest)
     } },

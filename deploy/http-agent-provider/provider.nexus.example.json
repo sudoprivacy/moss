@@ -1,0 +1,13 @@
+{
+  "host": "127.0.0.1",
+  "port": 8093,
+  "database_file": "/data/provider.sqlite",
+  "nexus_model": {
+    "endpoint": "https://127.0.0.1:2126",
+    "model_mounts": ["/cloud-model"],
+    "tls": { "ca": "/run/secrets/nexus-ca.pem", "cert": "/run/secrets/provider.pem", "key": "/run/secrets/provider-key.pem", "serverName": "nexus-node" }
+  },
+  "clients": [{ "id": "moss-review", "token_file": "/run/secrets/client.token", "agent_ids": ["review-assistant"] }],
+  "definitions": [{ "external_agent_id": "review-assistant", "name": "Review assistant", "system_prompt": "Answer synthetic test questions accurately. Return concise plain text. Do not request sensitive data.", "nexus_endpoint": "https://127.0.0.1:2126", "model_mount": "/cloud-model", "model": "gemini-3.1-flash-lite", "max_output_tokens": 512 }],
+  "concurrency": 4
+}

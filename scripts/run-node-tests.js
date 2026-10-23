@@ -5,7 +5,10 @@ import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
+  'scripts/contracts/registry-source.test.mjs',
+  'scripts/contracts/nexus-prewrite-source.test.mjs',
   'scripts/e2e/workspace-proof.test.mjs',
+  'scripts/e2e/http-agent-artifact.test.mjs',
   'scripts/e2e/fetch-nexus-runtime.test.mjs',
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',
   'src/server/runtime/cohostOwnerRuntime.node-test.ts',
@@ -19,9 +22,39 @@ const nodeTestFiles = [
   'src/server/backends/scodeProxyConfig.node-test.ts',
   'src/server/externalProviders/externalProviders.node-test.ts',
   'src/server/agentFederation/agentFederation.node-test.ts',
+  'src/server/agentFederation/standardHttpAdapter.node-test.ts',
+  'src/server/agentFederation/catalogGovernance.node-test.ts',
   'src/server/agentFederation/provider/provider.node-test.ts',
+  'src/server/agentFederation/provider/routerTransport.node-test.ts',
+  'src/server/agentFederation/provider/nexusModelExecutor.node-test.ts',
   'src/server/agentFederation/releases.node-test.ts',
+  'src/server/agentFederation/registryClient.node-test.ts',
+  'src/server/agentFederation/executionClient.node-test.ts',
+  'src/server/agentFederation/executionModelGateway.node-test.ts',
+  'src/server/agentFederation/externalTaskExecution.node-test.ts',
+  'src/server/agentFederation/taskExecutionContext.node-test.ts',
+  'src/server/agentFederation/taskProtocolIntegration.node-test.ts',
+  'src/server/agentFederation/toolGateway.node-test.ts',
+  'src/server/agentFederation/usageReport.node-test.ts',
+  'src/server/agentFederation/executionGatewayRoutes.node-test.ts',
+  'src/server/agentFederation/assetSuspension.node-test.ts',
+  'src/server/agentFederation/nexusModelRelay.node-test.ts',
+  'src/server/agentFederation/hostedRunner.node-test.ts',
+  'src/server/agentFederation/nativeExecution.node-test.ts',
+  'src/server/agentFederation/evaluationDatasets.node-test.ts',
+  'src/server/agentFederation/hostedEvaluationCoordinator.node-test.ts',
+  'src/server/agentFederation/hostedConfiguration.node-test.ts',
+  'src/server/agentFederation/difySourceBaseline.node-test.ts',
+  'src/server/agentFederation/langgraphSourceBaseline.node-test.ts',
+  'src/server/agentFederation/evaluationRuns.node-test.ts',
+  'src/server/agentFederation/hostedArtifacts.node-test.ts',
+  'src/server/agentFederation/inventoryService.node-test.ts',
+  'src/server/agentFederation/inventoryDiscovery.node-test.ts',
+  'src/server/agentFederation/registryReleases.node-test.ts',
   'src/server/agentFederation/taskPersistence.node-test.ts',
+  'src/server/agentFederation/hostedTaskStore.node-test.ts',
+  'src/server/agentFederation/hostedReleases.node-test.ts',
+  'src/server/agentFederation/hostedTaskService.node-test.ts',
   'src/server/agentFederation/taskMigrationCli.node-test.ts',
   'src/server/agentFederation/taskIngress.node-test.ts',
   'src/server/backends/cohostWorkspace.node-test.ts',
@@ -213,6 +246,7 @@ function collectNodeTests(directory) {
 const discovered = [
   ...collectNodeTests(join(repoRoot, 'src', 'server')),
   ...collectNodeTests(join(repoRoot, 'scripts', 'e2e')),
+  ...collectNodeTests(join(repoRoot, 'scripts', 'contracts')),
 ].sort()
 const listed = [...nodeTestFiles].sort()
 const unlisted = discovered.filter(file => !listed.includes(file))
@@ -227,7 +261,7 @@ const selectors = process.argv.slice(2).map(value => value.replaceAll('\\', '/')
 const selected = selectors.length === 0
   ? nodeTestFiles
   : nodeTestFiles.filter(file => selectors.some((selector) => {
-      const prefix = selector.startsWith('src/server/') || selector.startsWith('scripts/e2e/') ? selector : `src/server/${selector}`
+      const prefix = selector.startsWith('src/server/') || selector.startsWith('scripts/') ? selector : `src/server/${selector}`
       return file === prefix || file.startsWith(`${prefix}/`) || file.split('/').includes(selector)
     }))
 

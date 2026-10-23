@@ -1,3 +1,4 @@
+import { isManagedHosted } from '../../../catalog/executionMode.js'
 import type { CatalogAgent, CatalogRepository, CatalogSkill } from '../../../catalog/catalogRepository.js'
 import type { CatalogService } from '../../../catalog/catalogService.js'
 import type { CatalogUploadService } from '../../../catalog/catalogUploadService.js'
@@ -64,8 +65,8 @@ export class SudoworkCatalogService {
       success: true as const,
       message: 'success',
       data: {
-        // Hosted agents are invoked through the external task contract, never installed as native templates.
-        assistants: page.items.filter((agent) => agent.providerBinding?.executionMode !== 'external_hosted').map((agent) => legacyAgent(agent, target.code)),
+        // Hosted agents are invoked through the Task contract, never installed as native templates.
+        assistants: page.items.filter((agent) => !isManagedHosted(agent.providerBinding)).map((agent) => legacyAgent(agent, target.code)),
         next_cursor: page.nextCursor,
         has_more: page.hasMore,
       },
@@ -127,7 +128,7 @@ export class SudoworkCatalogService {
     return {
       success: true as const,
       data: page.items.flatMap((agent) => {
-        if (agent.providerType !== 'dify' || !agent.providerBinding || agent.providerBinding.executionMode === 'external_hosted') return []
+        if (agent.providerType !== 'dify' || !agent.providerBinding || isManagedHosted(agent.providerBinding)) return []
         return [{
           assistant_id: agent.id,
           runtime: 'dify' as const,
@@ -304,7 +305,7 @@ export class SudoworkCatalogService {
 
   private async requireAgent(id: string): Promise<CatalogAgent> {
     const resource = await this.options.repository.findAgent(id)
-    if (!resource || resource.providerBinding?.executionMode === 'external_hosted') throw new SudoworkCatalogError(404, '智能体不存在')
+    if (!resource || isManagedHosted(resource.providerBinding)) throw new SudoworkCatalogError(404, '智能体不存在')
     return resource
   }
 

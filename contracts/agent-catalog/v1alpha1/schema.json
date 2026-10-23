@@ -1,0 +1,1431 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://contracts.sudo.dev/experimental/agent-catalog/v1alpha1",
+  "definitions": {
+    "CatalogCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "streaming",
+        "cancel",
+        "resume",
+        "idempotency",
+        "version_pin",
+        "human_approval",
+        "trace_export"
+      ],
+      "properties": {
+        "streaming": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "partial",
+            "provider_dependent",
+            "unknown"
+          ]
+        },
+        "cancel": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "partial",
+            "provider_dependent",
+            "unknown"
+          ]
+        },
+        "resume": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "partial",
+            "provider_dependent",
+            "unknown"
+          ]
+        },
+        "idempotency": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "partial",
+            "provider_dependent",
+            "unknown"
+          ]
+        },
+        "version_pin": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "partial",
+            "provider_dependent",
+            "unknown"
+          ]
+        },
+        "human_approval": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "partial",
+            "provider_dependent",
+            "unknown"
+          ]
+        },
+        "trace_export": {
+          "enum": [
+            "full",
+            "partial",
+            "none",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "CatalogSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "id",
+        "catalog_id",
+        "org_id",
+        "zone_id",
+        "owner_id",
+        "name",
+        "provider",
+        "protocol",
+        "external_agent_id",
+        "endpoint",
+        "connection_id",
+        "credential_reference",
+        "revision",
+        "enabled",
+        "availability",
+        "adapter_version",
+        "definition_available",
+        "last_sync_at",
+        "last_sync_status",
+        "last_error",
+        "warning_count",
+        "created_at",
+        "updated_at",
+        "allowed_user_ids",
+        "review_note"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "agent-catalog.sudo.dev/v1alpha1"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "catalog_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "org_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "zone_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "provider": {
+          "enum": [
+            "dify",
+            "custom_http"
+          ]
+        },
+        "protocol": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "external_agent_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "endpoint": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "connection_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "credential_reference": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "availability": {
+          "enum": [
+            "unknown",
+            "available",
+            "unavailable"
+          ]
+        },
+        "adapter_version": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "definition_available": {
+          "type": "boolean"
+        },
+        "last_sync_at": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_sync_status": {
+          "enum": [
+            "never",
+            "running",
+            "succeeded",
+            "failed"
+          ]
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warning_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allowed_user_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "maxItems": 100
+        },
+        "review_note": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    },
+    "CatalogSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "protocol",
+        "external_agent_id",
+        "source_revision",
+        "revision_basis",
+        "source_digest",
+        "parameters_digest",
+        "adapter_version",
+        "endpoint",
+        "input_profile",
+        "output_profile",
+        "capabilities",
+        "user_ids",
+        "data_scope",
+        "requested_permissions"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "protocol": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "external_agent_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "source_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision_basis": {
+          "enum": [
+            "provider_declared",
+            "content_digest"
+          ]
+        },
+        "source_digest": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "parameters_digest": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "adapter_version": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "endpoint": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "input_profile": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "output_profile": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "capabilities": {
+          "$ref": "#/definitions/CatalogCapabilities"
+        },
+        "user_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+          },
+          "maxItems": 100
+        },
+        "data_scope": {
+          "enum": [
+            "synthetic_only"
+          ]
+        },
+        "requested_permissions": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "profile",
+                "model_resource",
+                "tool_resources",
+                "max_model_calls"
+              ],
+              "properties": {
+                "profile": {
+                  "const": "sudo-task-grant/v1"
+                },
+                "model_resource": {
+                  "type": "string"
+                },
+                "tool_resources": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "max_model_calls": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "CatalogValidationReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "rule_version",
+        "source_revision",
+        "binding_revision",
+        "policy_digest",
+        "snapshot_digest",
+        "validated_at",
+        "status",
+        "checks",
+        "warnings",
+        "unsupported"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "rule_version": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "source_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "binding_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "policy_digest": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "snapshot_digest": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "validated_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "enum": [
+            "valid"
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 100
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 100
+        },
+        "unsupported": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "maxItems": 100
+        }
+      }
+    },
+    "CatalogChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "before",
+        "after"
+      ],
+      "properties": {
+        "field": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "before": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CatalogDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "actor_id",
+        "note",
+        "at"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "submitted",
+            "approved",
+            "rejected",
+            "archived"
+          ]
+        },
+        "actor_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ImportCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "id",
+        "source_id",
+        "catalog_id",
+        "org_id",
+        "revision",
+        "status",
+        "snapshot",
+        "validation",
+        "changes",
+        "decisions",
+        "created_at",
+        "published_version",
+        "publication_error",
+        "publication_started_at"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "agent-catalog.sudo.dev/v1alpha1"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "catalog_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "org_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "pending_approval",
+            "approved",
+            "rejected",
+            "publishing",
+            "publication_unknown",
+            "published",
+            "archived"
+          ]
+        },
+        "snapshot": {
+          "$ref": "#/definitions/CatalogSnapshot"
+        },
+        "validation": {
+          "$ref": "#/definitions/CatalogValidationReport"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CatalogChange"
+          },
+          "maxItems": 100
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CatalogDecision"
+          },
+          "maxItems": 1000
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "published_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publication_error": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publication_started_at": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SourceSyncResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "id",
+        "source_id",
+        "org_id",
+        "started_at",
+        "completed_at",
+        "status",
+        "candidate_id",
+        "reused",
+        "error"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "agent-catalog.sudo.dev/v1alpha1"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "org_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "started_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "running",
+            "succeeded",
+            "failed"
+          ]
+        },
+        "candidate_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reused": {
+          "type": "boolean"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CatalogAuditEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version",
+        "id",
+        "org_id",
+        "zone_id",
+        "actor_id",
+        "at",
+        "action",
+        "catalog_id",
+        "source_id",
+        "candidate_id",
+        "version",
+        "task_id",
+        "result",
+        "reason",
+        "context",
+        "provider_run_id",
+        "provider_response_id"
+      ],
+      "properties": {
+        "api_version": {
+          "const": "agent-catalog.sudo.dev/v1alpha1"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "org_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "zone_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actor_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "action": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "catalog_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "unknown"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "protocol",
+                "adapter_version",
+                "source_revision",
+                "source_digest",
+                "capabilities"
+              ],
+              "properties": {
+                "protocol": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "adapter_version": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "source_revision": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source_digest": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "capabilities": {
+                  "$ref": "#/definitions/CatalogCapabilities"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "provider_response_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        }
+      }
+    },
+    "CatalogVersionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalog_id",
+        "version",
+        "source_id",
+        "candidate_id",
+        "spec_digest",
+        "source_digest",
+        "lifecycle",
+        "provenance"
+      ],
+      "properties": {
+        "catalog_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+        },
+        "candidate_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spec_digest": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "source_digest": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "lifecycle": {
+          "enum": [
+            "published",
+            "deprecated",
+            "archived"
+          ]
+        },
+        "provenance": {
+          "enum": [
+            "candidate",
+            "legacy_adopted"
+          ]
+        }
+      }
+    },
+    "CatalogRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "session_id",
+        "user_id",
+        "status",
+        "output_status",
+        "source_digest",
+        "attempt_id",
+        "error_code",
+        "version",
+        "source_revision",
+        "adapter_version",
+        "protocol",
+        "provider_run_id",
+        "provider_response_id",
+        "observability",
+        "version_evidence",
+        "created_at",
+        "updated_at",
+        "capabilities"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "user_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "output_status": {
+          "type": "string"
+        },
+        "source_digest": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adapter_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_response_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observability": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version_evidence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CatalogCapabilities"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CatalogVersionDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "source_revision",
+        "source_digest",
+        "adapter_version",
+        "status",
+        "approval_status",
+        "channels",
+        "revoke_reason",
+        "can_promote",
+        "promotion_block",
+        "evidence_level",
+        "source_identity"
+      ],
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_digest": {
+          "type": "string"
+        },
+        "adapter_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "pending_approval",
+            "approved",
+            "published",
+            "active",
+            "deprecated",
+            "revoked",
+            "archived",
+            "unavailable"
+          ]
+        },
+        "approval_status": {
+          "enum": [
+            "approved",
+            "expired",
+            "withdrawn",
+            "revoked",
+            "unapproved"
+          ]
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "enabled",
+              "revision"
+            ],
+            "properties": {
+              "name": {
+                "enum": [
+                  "stable",
+                  "canary"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "revoke_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "can_promote": {
+          "type": "boolean"
+        },
+        "promotion_block": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence_level": {
+          "enum": [
+            "source_snapshot_only",
+            "provider_revision_fenced"
+          ]
+        },
+        "source_identity": {
+          "const": "unverified"
+        }
+      }
+    },
+    "CatalogEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalog_id",
+        "name",
+        "provider",
+        "protocol",
+        "source",
+        "external_agent_id",
+        "owner_id",
+        "org_id",
+        "zone_id",
+        "execution_mode",
+        "status",
+        "admission_error",
+        "is_selectable",
+        "published_version",
+        "source_revision",
+        "source_digest",
+        "adapter_version",
+        "capabilities",
+        "observability",
+        "last_run_at",
+        "warning_count",
+        "has_drift",
+        "channels",
+        "approval_status"
+      ],
+      "properties": {
+        "catalog_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "dify",
+            "http",
+            "openai_compatible",
+            "mcp",
+            "a2a"
+          ]
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CatalogSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "external_agent_id": {
+          "type": "string"
+        },
+        "owner_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "org_id": {
+          "type": "string"
+        },
+        "zone_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "execution_mode": {
+          "const": "external_hosted"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "pending_approval",
+            "approved",
+            "published",
+            "active",
+            "deprecated",
+            "revoked",
+            "archived",
+            "unavailable"
+          ]
+        },
+        "admission_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_selectable": {
+          "type": "boolean"
+        },
+        "published_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_digest": {
+          "type": "string"
+        },
+        "adapter_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/definitions/CatalogCapabilities"
+        },
+        "observability": {
+          "enum": [
+            "full",
+            "partial",
+            "none",
+            "unknown"
+          ]
+        },
+        "last_run_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "warning_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "has_drift": {
+          "type": "boolean"
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "enabled",
+              "revision",
+              "version"
+            ],
+            "properties": {
+              "name": {
+                "enum": [
+                  "stable",
+                  "canary"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "version": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "approval_status": {
+          "enum": [
+            "approved",
+            "expired",
+            "withdrawn",
+            "revoked",
+            "unapproved",
+            "pending_approval"
+          ]
+        }
+      }
+    },
+    "CatalogRunEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "at",
+        "type",
+        "status",
+        "error_code"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,4 +1,6 @@
 import { dcClient } from './client'
+import type { EndpointRequest, EndpointRequestsPage } from '../../../src/server/externalProviders/endpointRequests.types'
+export type { EndpointRequest } from '../../../src/server/externalProviders/endpointRequests.types'
 import type { AgentVersionsPage, AgentVersionManifest, AgentChannel } from '../../../contracts/agent-federation/v1alpha1/contract'
 export type { AgentVersionsPage, AgentVersionManifest, AgentChannel } from '../../../contracts/agent-federation/v1alpha1/contract'
 import type {
@@ -21,6 +23,20 @@ export type {
   ExternalProviderMember,
   OnboardExternalAgent,
 } from '../../../contracts/external-provider/v1/contract'
+
+export interface RegistryStatus {
+  authority: 'nexus_registry' | 'moss_legacy'
+  state: 'legacy' | 'preparing' | 'active'
+  configured: boolean
+  maintenance: boolean
+  principal: { trust_domain: string; agent_name: string } | null
+}
+export interface RegistryMigrationPlan {
+  plan_digest: string
+  version_count: number
+  active_tasks: number
+  principal: { trust_domain: string; agent_name: string }
+}
 
 interface ExternalHttpClient {
   get<T>(path: string, options?: Partial<RequestInit>): Promise<T>
@@ -49,6 +65,9 @@ export function createExternalAgentsApi(
   const base = '/api/v1/external-agents'
   const agentPath = (id: string, action: string) => `${base}/admin/${encodeURIComponent(id)}/${action}`
   return {
+    registryStatus: (id: string) => get<RegistryStatus>(agentPath(id, 'registry-status')),
+    registryPlan: (id: string) => get<RegistryMigrationPlan>(agentPath(id, 'registry-plan')),
+    migrateRegistry: (id: string, planDigest: string) => post<{ state: string; plan_digest: string }>(agentPath(id, 'registry-migrate'), { plan_digest: planDigest, old_writers_stopped: true }),
     access: () => get<ExternalProviderAccess>(`${base}/access`),
     list: () => get<ExternalAgentAdmin[]>(`${base}/admin/agents`),
     listPage: (after = '') => get<{ items: ExternalAgentAdmin[]; next_cursor: string | null }>(`${base}/admin/agents?paged=1&after=${encodeURIComponent(after)}`),
@@ -58,6 +77,10 @@ export function createExternalAgentsApi(
     members: () => get<ExternalProviderMember[]>(`${base}/admin/members`),
     membersPage: (search = '', after = '') => get<{ items: ExternalProviderMember[]; next_cursor: string | null }>(`${base}/admin/members-page?q=${encodeURIComponent(search)}&after=${encodeURIComponent(after)}`),
     policy: () => get<ExternalPilotPolicy>(`${base}/admin/policy`),
+    endpointRequests: (after = '') => get<EndpointRequestsPage>(`${base}/admin/endpoint-requests?after=${encodeURIComponent(after)}`),
+    requestEndpoint: (body: { endpoint: string; reason: string }) => post<{ request: EndpointRequest | null; policy: ExternalPilotPolicy }>(`${base}/admin/endpoint-requests`, body),
+    approveEndpoint: (body: { endpoint: string; note: string; policy_revision: number }) => post<{ request: EndpointRequest | null; policy: ExternalPilotPolicy }>(`${base}/admin/endpoints/approve`, body),
+    reviewEndpoint: (body: { id: string; revision: number; policy_revision: number; approved: boolean; note: string }) => post<{ request: EndpointRequest; policy: ExternalPilotPolicy }>(`${base}/admin/endpoint-requests/review`, body),
     savePolicy: (body: ExternalPilotPolicy) => post<ExternalPilotPolicy>(`${base}/admin/policy`, body),
     inspect: (body: InspectExternalConnection) => post<ExternalConnectionInspection>(`${base}/admin/inspect`, body),
     onboard: (body: OnboardExternalAgent) => post<ExternalAgentAdmin>(`${base}/admin/onboard`, body),

@@ -25,6 +25,16 @@ async function lockSchema(db: DbDriver): Promise<void> {
   if (db.kind === 'postgres') await db.get("SELECT pg_advisory_xact_lock(hashtextextended('moss-external-task-schema-v1', 0))")
 }
 
+/** Read projection only: task/session identity stays in the canonical tables. */
+async function createExternalTaskView(db: DbDriver): Promise<void> {
+  const existing = await db.get(db.kind === 'postgres'
+    ? "SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'external_tasks'"
+    : "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'external_tasks'")
+  if (!existing) await db.exec(`CREATE VIEW external_tasks AS
+    SELECT t.*, s.runtime_type AS task_runtime FROM tasks t JOIN sessions s ON s.session_id = t.session_id
+    WHERE s.runtime_type = 'external' AND s.org_id = t.org_id AND s.user_id = t.user_id`)
+}
+
 async function createCanonicalSchema(db: DbDriver): Promise<void> {
   await db.exec(SESSION_SCHEMA)
   if (db.kind === 'postgres') {
@@ -72,11 +82,12 @@ async function createCanonicalSchema(db: DbDriver): Promise<void> {
 export async function initializeExternalTaskPersistence(db: DbDriver): Promise<void> {
   await db.transaction(async () => {
     await lockSchema(db)
-    if (await completed(db)) return
+    if (await completed(db)) { await createExternalTaskView(db); return }
     for (const table of legacyTables) {
       if (await tableExists(db, table)) throw new Error('EXTERNAL_TASK_MIGRATION_REQUIRED: stop all old writers, then run scripts/migrate-external-tasks.ts in a maintenance window; see docs/external-task-migration.md')
     }
     await createCanonicalSchema(db)
+    await createExternalTaskView(db)
     await db.exec(migrationSchema)
     await db.run("INSERT INTO federation_task_migrations(id, completed) VALUES ('canonical-v1', 1)")
   })
@@ -105,6 +116,7 @@ export async function migrateExternalTaskPersistence(db: DbDriver, authorization
     await db.exec(migrationSchema)
     await db.run("INSERT INTO federation_task_migrations(id, completed) VALUES ('canonical-v1', 0) ON CONFLICT(id) DO NOTHING")
     await createCanonicalSchema(db)
+    await createExternalTaskView(db)
     await db.exec('CREATE TABLE IF NOT EXISTS external_pilot_reconciliations (task_id TEXT PRIMARY KEY, attempt_id TEXT, document TEXT NOT NULL)')
     let cursor = ''
     while (true) {

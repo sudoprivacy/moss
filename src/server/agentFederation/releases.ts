@@ -1,3 +1,4 @@
+import { REGISTRY_STATE_SCHEMA, assertLegacyAuthority } from './registryState.js'
 import { randomUUID } from 'node:crypto'
 import type { DbDriver } from '../db/driver.js'
 import type { Binding, ExternalActor } from '../externalProviders/store.js'
@@ -16,7 +17,8 @@ function fail(code: string): never { throw new ExternalProviderError(409, code) 
 export class AgentReleaseStore {
   readonly ready: Promise<void>
   constructor(readonly db: DbDriver) {
-    this.ready = db.exec(`
+    this.ready = db.exec(`${REGISTRY_STATE_SCHEMA}
+
       CREATE TABLE IF NOT EXISTS agent_principals (
         catalog_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, trust_domain TEXT NOT NULL, agent_name TEXT NOT NULL,
         created_at BIGINT NOT NULL, UNIQUE(trust_domain, agent_name)
@@ -72,6 +74,8 @@ export class AgentReleaseStore {
   }
   async publish(actor: ExternalActor, binding: Binding, version: string, note: string): Promise<AgentVersion> {
     await this.ready
+    await assertLegacyAuthority(this.db, binding.id)
+    if (binding.registryRequired) fail('REGISTRY_AUTHORITY_REQUIRED')
     if (binding.orgId !== actor.orgId || !binding.approved || !binding.parametersDigest || binding.review_expires_at <= Date.now()) fail('CANDIDATE_APPROVAL_REQUIRED')
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(version) || !note.trim() || note.length > 2000) fail('INVALID_RELEASE_INPUT')
     return this.db.transaction(async () => {
@@ -97,7 +101,8 @@ export class AgentReleaseStore {
     return Boolean(await this.db.get("SELECT id FROM agent_version_decisions WHERE catalog_id = ? AND version = ? AND decision = 'revoked' LIMIT 1", [catalogId, version]))
   }
   async version(actor: ExternalActor, catalogId: string, version: string, requireApproved = true): Promise<AgentVersion> {
-    await this.ready; const principal = await this.principal(actor, catalogId)
+    await this.ready; if (requireApproved) await assertLegacyAuthority(this.db, catalogId)
+    const principal = await this.principal(actor, catalogId)
     const row = await this.db.get('SELECT manifest, spec_digest FROM agent_versions WHERE catalog_id = ? AND version = ?', [catalogId, version])
     if (!row) throw new ExternalProviderError(404, 'AGENT_VERSION_NOT_FOUND')
     const manifest = parseAgentVersion(JSON.parse(String(row.manifest)))
@@ -111,6 +116,7 @@ export class AgentReleaseStore {
   }
   async moveChannel(actor: ExternalActor, catalogId: string, name: 'stable' | 'canary', version: string, expectedRevision: number): Promise<AgentChannel> {
     await this.ready
+    await assertLegacyAuthority(this.db, catalogId)
     if (!['stable', 'canary'].includes(name) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) fail('INVALID_CHANNEL_INPUT')
     return this.db.transaction(async () => {
       await this.lock(actor, catalogId); await this.version(actor, catalogId, version)
@@ -125,6 +131,7 @@ export class AgentReleaseStore {
   }
   async resolve(actor: ExternalActor, catalogId: string, requestedVersion?: string, requestedChannel?: string): Promise<AgentReleaseSelection> {
     await this.ready
+    await assertLegacyAuthority(this.db, catalogId)
     if (requestedVersion && requestedChannel) fail('AMBIGUOUS_AGENT_SELECTOR')
     return this.db.transaction(async () => {
       await this.lock(actor, catalogId)
@@ -139,6 +146,7 @@ export class AgentReleaseStore {
   }
   async revoke(actor: ExternalActor, catalogId: string, version: string, note: string): Promise<void> {
     await this.ready
+    await assertLegacyAuthority(this.db, catalogId)
     if (!note.trim() || note.length > 2000) fail('INVALID_RELEASE_INPUT')
     await this.db.transaction(async () => {
       await this.lock(actor, catalogId); await this.version(actor, catalogId, version, false)
@@ -161,6 +169,7 @@ export class AgentReleaseStore {
 
   async options(actor: ExternalActor, catalogId: string, after = '') {
     await this.ready
+    await assertLegacyAuthority(this.db, catalogId)
     const principal = await this.principal(actor, catalogId), now = Date.now()
     const rows = await this.db.all(`SELECT v.version, MAX(d.expires_at) AS approval_expires_at FROM agent_versions v
       JOIN agent_version_decisions d ON d.catalog_id = v.catalog_id AND d.version = v.version

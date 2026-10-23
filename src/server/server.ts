@@ -1,4 +1,8 @@
+import { dispatchToolManagement, toolInvocationRoute, toolManagementRoute } from './agentFederation/toolGatewayRoutes.js'
+import { dispatchModelInvocation, modelInvocationRoute, readExecutionJson, MODEL_BODY_LIMIT, TOOL_BODY_LIMIT } from './agentFederation/executionGatewayRoutes.js'
+import { dispatchHostedTask, isHostedTaskRoute } from './agentFederation/hostedTaskRoutes.js'
 import { dispatchExternalProvider, isExternalProviderRoute } from './externalProviders/routes.js'
+import { dispatchAgentInventory, isAgentInventoryRoute } from './agentFederation/inventoryRoutes.js'
 import { ExternalProviderError } from './externalProviders/policy.js'
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
@@ -2064,8 +2068,18 @@ export function startServer(
   }) : null
 
   const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient, runtime.serverInstanceId) : null
-  const externalStoreReady = externalProviders?.ownership.ready ?? Promise.resolve()
   let isStopped = false
+  let hostedEvaluations: Awaited<ReturnType<typeof authService.createHostedEvaluationRuntime>>
+  let agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, undefined, externalProviders?.releases)
+  const hostedReady = authService.createHostedEvaluationRuntime(runtime.serverInstanceId, externalProviders?.releases).then(async value => {
+    if (isStopped) { await value?.close(); return }
+    hostedEvaluations = value
+    await externalProviders?.configureTaskExecution(value?.gateway, process.env.MOSS_AGENT_EXTERNAL_TASK_CONTEXT_ORIGIN)
+    await agentInventory.close()
+    agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, value?.coordinator, externalProviders?.releases, value?.tasks, value?.gateway, externalProviders ?? undefined)
+    agentInventory.start()
+  })
+  const externalStoreReady = Promise.all([externalProviders?.ownership.ready ?? Promise.resolve(), hostedReady])
 
   // Zone 管理面（§8.8）：/v2 未配置时 client 为 null——binding 列表等只读
   // 本地的操作仍可用，涉及 Nexus 的操作返回 503（显式未配置，不静默）。
@@ -2168,6 +2182,16 @@ export function startServer(
       try { return (await authService.listDepartments(orgId)).departments } catch { return [] }
     },
   }) : null
+  const agentTools = authService.createAgentToolManagement(mcpStore, nexusClient ? org => ({
+    getConfigItemByPinyin: async pinyin => {
+      const row = await runtime.store.getConfigItemByPinyin(pinyin, org)
+      if (!row || row.scope !== 'system' || !['bearer', 'basic', 'header'].includes(String(row.scheme))) return null
+      return { pinyin: String(row.pinyin), scheme: row.scheme as 'bearer' | 'basic' | 'header', bearer_prefix: row.bearer_prefix == null ? null : String(row.bearer_prefix),
+        entries: (await runtime.store.getConfigEntries(Number(row.id))).map(entry => ({ config_key: String(entry.config_key) })) }
+    },
+    listSecrets: (namespace, subject) => nexusClient.listSecrets(namespace, subject),
+  }) : undefined)
+  void agentTools?.gateway.store.ready.catch(error => process.stderr.write(`[agent-tools] initialization failed: ${error instanceof Error ? error.name : 'error'}\n`))
   const mcpAdminApi = createMcpAdminApi({
     mcpStore,
     authService,
@@ -3866,6 +3890,49 @@ export function startServer(
         return
       }
 
+      const modelInvocation = modelInvocationRoute.exec(pathname)
+      if (modelInvocation) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method !== 'POST') throw new HttpError(405, 'METHOD_NOT_ALLOWED')
+        const cancellation = new AbortController()
+        const disconnected = () => { if (!res.writableEnded) cancellation.abort() }
+        res.once('close', disconnected)
+        try {
+          await hostedReady
+          if (url.search) throw new ExternalProviderError(400, 'INVALID_EXECUTION_QUERY')
+          const bearer = getBearerToken(req) ?? ''
+          if (!bearer) throw new ExternalProviderError(401, 'EXECUTION_TOKEN_INVALID')
+          const result = await dispatchModelInvocation(hostedEvaluations?.gateway, modelInvocation[1],
+            await readExecutionJson(req, MODEL_BODY_LIMIT), bearer, cancellation.signal)
+          writeJson(res, 200, { success: true, data: result })
+        } catch (error) {
+          const status = error instanceof ExternalProviderError ? error.status : 503
+          const code = error instanceof ExternalProviderError ? error.code : 'MODEL_GATEWAY_UNAVAILABLE'
+          writeJson(res, status, { success: false, error: { code, message: code } })
+        } finally { res.off('close', disconnected) }
+        return
+      }
+
+      const toolInvocation = toolInvocationRoute.exec(pathname)
+      if (toolInvocation) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method !== 'POST') throw new HttpError(405, 'METHOD_NOT_ALLOWED')
+        if (!agentTools) throw new HttpError(503, 'TOOL_GATEWAY_NOT_CONFIGURED')
+        // Only Nexus task-bound IAM credentials are accepted here. No browser identity override.
+        try {
+          if (url.search) throw new ExternalProviderError(400, 'INVALID_EXECUTION_QUERY')
+          const bearer = getBearerToken(req) ?? ''
+          if (!bearer) throw new ExternalProviderError(401, 'EXECUTION_TOKEN_INVALID')
+          const result = await agentTools.gateway.invoke(toolInvocation[1], await readExecutionJson(req, TOOL_BODY_LIMIT), bearer)
+          writeJson(res, 200, { success: true, data: result })
+        } catch (error) {
+          const status = error instanceof ExternalProviderError ? error.status : 503
+          const code = error instanceof ExternalProviderError ? error.code : 'TOOL_GATEWAY_UNAVAILABLE'
+          writeJson(res, status, { success: false, error: { code, message: code } })
+        }
+        return
+      }
+
       // Document Center v2: SSE build-events route accepts ?token=xxx as
       // a fallback because browser EventSource can't send custom headers.
       // Scope: only this single route; getBearerToken stays header-only
@@ -3889,10 +3956,32 @@ export function startServer(
         throw new HttpError(401, 'Unauthorized')
       }
 
-      if (isExternalProviderRoute(pathname)) {
+      if (toolManagementRoute.test(pathname)) {
         res.setHeader('Cache-Control', 'no-store')
-        const result = await dispatchExternalProvider(externalProviders, auth, req.method ?? 'GET', url,
-          req.method === 'POST' ? await readJsonBody(req) : {}, () => {
+        try {
+          const data = await dispatchToolManagement(agentTools, auth, req.method ?? 'GET', pathname, req.method === 'POST' ? await readJsonBody(req) : {})
+          writeJson(res, 200, { success: true, data })
+        } catch (error) {
+          const status = error instanceof ExternalProviderError ? error.status : 503
+          const code = error instanceof ExternalProviderError ? error.code : 'TOOL_GATEWAY_UNAVAILABLE'
+          writeJson(res, status, { success: false, error: { code, message: code } })
+        }
+        return
+      }
+
+      if (isAgentInventoryRoute(pathname)) {
+        res.setHeader('Cache-Control', 'no-store')
+        const result = await dispatchAgentInventory(agentInventory, auth, req.method ?? 'GET', url,
+          req.method === 'POST' ? await readJsonBody(req) : {})
+        writeJson(res, result.status, result.body)
+        return
+      }
+
+      if (isExternalProviderRoute(pathname) || isHostedTaskRoute(pathname)) {
+        res.setHeader('Cache-Control', 'no-store')
+        const body = req.method === 'POST' ? await readJsonBody(req) : {}
+        const result = await dispatchHostedTask(hostedEvaluations?.tasks, runtime.store.driver, auth, req.method ?? 'GET', url, body)
+          ?? await dispatchExternalProvider(externalProviders, auth, req.method ?? 'GET', url, body, () => {
             if (!['admin', 'super_admin'].includes(auth!.role)) throw new ExternalProviderError(403, 'ADMIN_REQUIRED')
             try { authService.requireScope(auth!, 'admin:users') } catch { throw new ExternalProviderError(403, 'ADMIN_REQUIRED') }
           }, () => {
@@ -11512,6 +11601,8 @@ export function startServer(
       if (isStopped) throw new Error('Server stopped before initialization completed')
       server.listen(config.port, config.host)
     }).catch(error => {
+      void agentInventory.close().catch(() => {})
+      void hostedEvaluations?.close().catch(() => {})
       void externalProviders?.close().catch(() => {})
       onError(error instanceof Error ? error : new Error('External provider task store initialization failed'))
     })
@@ -11633,6 +11724,9 @@ export function startServer(
     ready,
     stop: async () => {
       isStopped = true
+      await hostedReady.catch(() => {})
+      await agentInventory.close()
+      await hostedEvaluations?.close()
       await externalProviders?.close()
       wikiJobExecutor.stop()
       sourceSyncWorker.stop()

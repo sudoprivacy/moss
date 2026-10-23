@@ -1,4 +1,4 @@
-import type { CustomAgentManifest, ExternalRunBinding, ProviderCapabilities, ProviderObservation, TaskCorrelation } from '../../../contracts/agent-federation/v1alpha1/contract.js'
+import type { CustomAgentManifest, ExternalRunBinding, ProviderCapabilities, ProviderObservation, TaskCorrelation, TaskExecutionContext } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { AGENT_FEDERATION_API } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import { assertPilot, canonicalEndpoint, ExternalProviderError, type PilotPolicy } from '../externalProviders/policy.js'
 import { parseExternalRunBinding, parseProviderObservation } from './manifest.js'
@@ -21,10 +21,14 @@ export interface ProviderInvocation extends TaskCorrelation {
   signal: AbortSignal
   /** Persist the dispatch intent and recheck governance under the caller's lock. */
   authorize_dispatch: () => Promise<void>
+  /** Issued by the trusted task coordinator after source preflight, never by the browser. */
+  execution_context?: () => Promise<TaskExecutionContext>
 }
 export interface ProviderResult {
   text: string
   status: 'succeeded' | 'failed'
+  /** Allowlisted provider-reported runtime reason; not a Moss policy verdict. */
+  error_code?: string
   binding: ExternalRunBinding
 }
 export interface ProviderAdapter {
@@ -78,7 +82,7 @@ export function createObserver(adapter: ProviderAdapter, input: ProviderInvocati
   }))
 }
 
-export function runBinding(adapter: ProviderAdapter, input: ProviderInvocation, runId: string, sessionId: string | undefined, startedAt: string): ExternalRunBinding {
+export function runBinding(adapter: ProviderAdapter, input: ProviderInvocation, runId: string, sessionId: string | undefined, startedAt: string): ExternalRunBinding & { provider_run_id: string } {
   if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(runId)) throw new ExternalProviderError(502, 'PROVIDER_RUN_ID_MISSING')
   return parseExternalRunBinding({
     api_version: AGENT_FEDERATION_API, kind: 'ExternalRunBinding',
@@ -88,7 +92,7 @@ export function runBinding(adapter: ProviderAdapter, input: ProviderInvocation, 
     ...(sessionId ? { provider_session_id: sessionId } : {}), adapter_version: adapter.version,
     observability: 'partial', replay: 'unsupported', resume: 'unsupported', version_evidence: 'source_snapshot_only',
     started_at: startedAt, completed_at: new Date().toISOString(),
-  })
+  }) as ExternalRunBinding & { provider_run_id: string }
 }
 
 export interface ReviewedHttpManifest { manifest: CustomAgentManifest; digest: string }

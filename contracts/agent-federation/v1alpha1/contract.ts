@@ -1,6 +1,27 @@
 /** Moss-owned federation boundary. Experimental; ADR-003/004 remain Proposed. */
 export const AGENT_FEDERATION_API = 'agent-federation.sudo.dev/v1alpha1' as const
+export const STANDARD_HTTP_PROTOCOLS = ['openai-chat-completions/v1', 'mcp/2025-06-18', 'a2a/0.3.0'] as const
+export type StandardHttpProtocol = typeof STANDARD_HTTP_PROTOCOLS[number]
+export interface ProtocolUsage { source: 'provider_reported'; input_tokens: number; output_tokens: number }
+
 export const AGENT_HTTP_API = 'agent-http.sudo.dev/v1alpha1' as const
+export const TASK_GRANT_PROFILE = 'sudo-task-grant/v1' as const
+export interface TaskGrantProfile {
+  profile: typeof TASK_GRANT_PROFILE
+  model_resource: string
+  tool_resources: string[]
+  max_model_calls: number
+}
+/** Ephemeral capability: never persist in TaskSpec, Registry, logs, prompts or user-visible history. */
+export interface TaskExecutionContext extends TaskCorrelation, TaskGrantProfile {
+  org_id: string
+  grant_id: string
+  spec_digest: string
+  expires_at: number
+  model_gateway: string
+  tool_gateway: string
+  access_token: string
+}
 
 export interface ProviderCapabilities {
   supports_streaming: boolean
@@ -23,12 +44,18 @@ export interface CustomAgentManifest {
   description?: string
   source_revision: string
   execution_mode: 'external_hosted'
-  protocol: typeof AGENT_HTTP_API | 'agent-http.sudo.dev/v1alpha2'
+  protocol: typeof AGENT_HTTP_API | 'agent-http.sudo.dev/v1alpha2' | StandardHttpProtocol
+  /** Required only for standard HTTP profiles; metadata digest is not runtime attestation. */
+  target?: string
+  discovery_digest?: string
+  conversation_mode?: 'single_turn'
   /** Required for durable HTTP; legacy profiles cannot assert an execution revision. */
   execution_revision?: string
   input_profile: 'query_only_v1'
   output_profile: 'text_v1'
   capabilities: ProviderCapabilities
+  /** Explicitly reviewed task identity profile; absent means no execution credential is sent. */
+  execution_context?: TaskGrantProfile
 }
 
 /** Created by authenticated ingress; provider identifiers never populate these fields. */
@@ -47,7 +74,11 @@ export interface ExternalRunBinding extends TaskCorrelation {
   external_agent_id: string
   source_identity_evidence?: 'unverified'
   source_digest: string
-  provider_run_id: string
+  provider_run_id?: string
+  provider_response_id?: string
+  provider_protocol?: StandardHttpProtocol
+  trace_id?: string
+  usage?: ProtocolUsage
   provider_session_id?: string
   adapter_version: string
   observability: 'partial'
@@ -104,6 +135,13 @@ export interface AgentExecutionSnapshot {
   decoder: 'text' | 'reply_actions_v1'
   definitionProfileVersion?: number
 }
+export interface AgentRegistryEvidence {
+  authority: 'nexus_registry'
+  principal: { trust_domain: string; agent_name: string }
+  registration_digest: string
+  signing_key_id: string
+  evidence: 'signed_registration_only'
+}
 export interface AgentVersionManifest {
   api_version: typeof AGENT_FEDERATION_API
   kind: 'AgentVersionManifest'
@@ -111,6 +149,7 @@ export interface AgentVersionManifest {
   version: string
   spec_digest: string
   snapshot: AgentExecutionSnapshot
+  registry?: AgentRegistryEvidence
   created_by: string
   created_at: number
 }
@@ -123,7 +162,7 @@ export interface AgentChannel {
 }
 export interface AgentVersionDecision {
   id: string
-  decision: 'approved' | 'revoked'
+  decision: 'approved' | 'withdrawn' | 'revoked'
   actor_id: string
   note: string
   expires_at: number
@@ -150,6 +189,7 @@ export interface AgentReleaseOptions {
     spec_digest: string
     execution_revision?: string
     approval_expires_at: number
+    registry?: AgentRegistryEvidence
   }[]
   channels: AgentChannel[]
   next_cursor: string | null

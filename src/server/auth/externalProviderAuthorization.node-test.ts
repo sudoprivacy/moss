@@ -2,6 +2,11 @@ import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, test } from 'node:test'
 import { randomUUID } from 'node:crypto'
+import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { registryHttpFixture } from '../testing/registryHttpFixture.js'
+import type { RegistryRequest } from '../agentFederation/registryClient.js'
 import { AuthService } from './service.js'
 import { AuthCenterDb, hashPassword } from '../authCenter/db.js'
 import { createCatalogTestRepository, createIdentityTestRepository } from '../testing/compatibilityRepositories.js'
@@ -16,7 +21,29 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })
 
-void test('switched super admin can manage only the selected organization without becoming its member', async () => {
+for (const registryEnabled of [false, true]) void test(`switched super admin stays organization-scoped (${registryEnabled ? 'Registry' : 'legacy'})`, async t => {
+  const remote = registryHttpFixture()
+  const configVariable = 'MOSS_AGENT_REGISTRY_CONFIG_FILE'
+  const previousConfig = process.env[configVariable]
+  const directory = await mkdtemp(join(tmpdir(), 'registry-authorization-'))
+  cleanups.push(async () => {
+    if (previousConfig === undefined) delete process.env[configVariable]
+    else process.env[configVariable] = previousConfig
+    await rm(directory, { recursive: true, force: true })
+  })
+  delete process.env[configVariable]
+  if (registryEnabled) {
+    const tokenFile = join(directory, 'token')
+    await writeFile(tokenFile, 'synthetic-test-token', { mode: 0o600 })
+    const config = join(directory, 'registry.json')
+    await writeFile(config, JSON.stringify({ endpoint: 'http://127.0.0.1:12345', tokenFile, publicKeys: [remote.publicPem],
+      organizations: { 'org-a': { trustDomain: 'a.example', zoneId: 'zone-a' }, 'org-b': { trustDomain: 'b.example', zoneId: 'zone-1' } } }))
+    process.env[configVariable] = config
+    t.mock.method(globalThis, 'fetch', (url: string, init: Parameters<RegistryRequest>[1]) => {
+      assert.equal(init.headers['X-Nexus-Zone-ID'], 'zone-1')
+      return remote.request(url, init)
+    })
+  }
   const db = new DatabaseSync(':memory:')
   const authDb = new AuthCenterDb(db)
   createIdentityTestRepository(db, {}, authDb.driver)
@@ -55,6 +82,10 @@ void test('switched super admin can manage only the selected organization withou
     auth.destroy()
     db.close()
   })
+
+  await providers.ownership.ready
+  assert.equal(providers.ownership.ownerId, 'authorization-test')
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM server_instances').get()?.count, 1)
 
   const login = await auth.issueTokenFromPassword({ username: 'root', password })
   const homeAuth = (await auth.verifyAccessToken(login.access_token))!
@@ -98,9 +129,26 @@ void test('switched super admin can manage only the selected organization withou
     providers.register(switchedAuth, { ...registration, allowed_user_ids: ['root'] }),
     (error) => error instanceof ExternalProviderError && error.status === 400 && error.code === 'INVALID_MEMBER',
   )
-  await providers.register(switchedAuth, { ...registration, request_id: randomUUID(), allowed_user_ids: ['member-b'] })
+  const agent = await providers.register(switchedAuth, { ...registration, request_id: randomUUID(), allowed_user_ids: ['member-b'] })
   assert.equal((await providers.administration.list(switchedAuth)).length, 1)
   assert.equal((await providers.administration.list(homeAuth)).length, 0)
+
+  // Reads after an organization switch must neither publish nor cross the tenant boundary.
+  remote.state.beforeRequest = method => assert.equal(method, 'GET')
+  for (const action of ['versions', 'registry-status']) {
+    const url = new URL(`http://moss.test/api/v1/external-agents/admin/${agent.id}/${action}`)
+    const selected = await dispatchExternalProvider(providers, switchedAuth, 'GET', url, {}, () => {})
+    assert.equal(selected.status, 200)
+    if (action === 'registry-status') assert.equal((selected.body.data as { authority: string }).authority, registryEnabled ? 'nexus_registry' : 'moss_legacy')
+    assert.equal((await dispatchExternalProvider(providers, homeAuth, 'GET', url, {}, () => {})).status, 404)
+    const memberLogin = await auth.issueTokenFromPassword({ username: 'member-b', password })
+    const member = (await auth.verifyAccessToken(memberLogin.access_token))!
+    assert.equal((await dispatchExternalProvider(providers, member, 'GET', url, {}, () => {
+      throw new ExternalProviderError(403, 'ADMIN_REQUIRED')
+    })).status, 403)
+  }
+  assert.equal(remote.versions.size, 0)
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM agent_versions').get()?.count, 0)
 
   await assert.rejects(
     providers.authorize({ userId: 'admin-a', orgId: 'org-b' }),

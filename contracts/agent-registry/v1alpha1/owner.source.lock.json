@@ -1,0 +1,21 @@
+{
+  "repository": "https://github.com/nexi-lab/nexus",
+  "revision": "e696d0df5191066a7cc84365839453d6f2a347c5",
+  "semanticOwner": "nexus",
+  "maturity": "experimental-registration-authority",
+  "apiVersion": "agent-registry.sudo.dev/v1alpha1",
+  "files": {
+    "src/nexus/contracts/schemas/agent-registry/v1alpha1/contract.gen.ts": {
+      "output": "contract.gen.ts",
+      "digest": "sha256:2468cc1eb98515a5973a5284cd0c2bf23edf5242c512be02a4c6887d40bd3d2a"
+    },
+    "src/nexus/contracts/schemas/agent-registry/v1alpha1/schema.json": {
+      "output": "schema.json",
+      "digest": "sha256:fcd0f3a61fbb64b22e707249c33bac3df5e00ae653f65ff9e17071c356870f4d"
+    },
+    "src/nexus/contracts/schemas/agent-registry/v1alpha1/signed-version.fixture.json": {
+      "output": "signed-version.fixture.json",
+      "digest": "sha256:85119973a3ecf7786b9efbcf9bdb16223abc6d8d119ad0db2577f28326a15b3c"
+    }
+  }
+}

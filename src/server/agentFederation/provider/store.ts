@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { DbDriver, SqlRow } from '../../db/driver.js'
 import { DURABLE_AGENT_HTTP_API, type AgentRun, type SubmitAgentRun } from '../../../../contracts/agent-http/v1alpha2/contract.js'
 import { AgentProtocolError, contentDigest, parseAgentRun, parseSubmitAgentRun } from './protocol.js'
+import type { NexusWriteReceipt } from './nexusWriteRejection.js'
 
 type RunRow = SqlRow & { client_id: string; invocation_id: string; request_digest: string; request: string; document: string; owner: string | null; lease_until: number; status: AgentRun['status']; session_id: string }
 export type ModelMessage = { role: 'user' | 'assistant'; content: string }
@@ -32,6 +33,10 @@ export class AgentRunStore {
       CREATE INDEX IF NOT EXISTS http_agent_runs_lease ON http_agent_runs(status, lease_until);
       CREATE INDEX IF NOT EXISTS http_agent_runs_revision_queue ON http_agent_runs(execution_revision, status, deadline_at);
       CREATE INDEX IF NOT EXISTS http_agent_runs_retention ON http_agent_runs(retired, updated_at);
+      CREATE TABLE IF NOT EXISTS http_agent_write_rejections (
+        client_id TEXT NOT NULL, invocation_id TEXT NOT NULL, observed_at BIGINT NOT NULL, receipt TEXT NOT NULL,
+        PRIMARY KEY(client_id, invocation_id)
+      );
     `)
   }
   async now(): Promise<number> {
@@ -117,12 +122,15 @@ export class AgentRunStore {
       return Boolean(await this.db.run('UPDATE http_agent_runs SET lease_until = ? WHERE client_id = ? AND invocation_id = ? AND owner = ?', [now + RUN_LEASE_MS, claim.clientId, claim.request.invocation_id, claim.owner]))
     })
   }
-  async finish(claim: ClaimedRun, text: string, status: 'succeeded' | 'failed' | 'unknown', error: string | null = null): Promise<boolean> {
+  async finish(claim: ClaimedRun, text: string, status: 'succeeded' | 'failed' | 'unknown', error: string | null = null, receipt?: NexusWriteReceipt): Promise<boolean> {
     if (text.length > 128_000 || (status !== 'succeeded' && text)) throw new AgentProtocolError(500, 'INVALID_RUN_OUTPUT')
+    if (receipt && status !== 'failed') throw new AgentProtocolError(500, 'INVALID_WRITE_REJECTION_STATUS')
     return this.db.transaction(async () => {
       const row = await this.lock(claim.clientId, claim.request.invocation_id), now = await this.now()
       if (!row || row.status !== 'running' || row.owner !== claim.owner || Number(row.lease_until) <= now || Number(row.deadline_at) <= now) return false
       await this.settle(row, status, text, error, now)
+      // Commit evidence with the terminal state under the same owner/lease fence.
+      if (receipt) await this.db.run('INSERT INTO http_agent_write_rejections(client_id, invocation_id, observed_at, receipt) VALUES (?, ?, ?, ?)', [claim.clientId, claim.request.invocation_id, now, JSON.stringify(receipt)])
       return true
     })
   }
@@ -168,7 +176,10 @@ export class AgentRunStore {
     const retired = await this.db.all<RunRow>("SELECT * FROM http_agent_runs WHERE retired = 0 AND status IN ('succeeded', 'failed', 'cancelled') AND updated_at < ? ORDER BY updated_at LIMIT 100", [now - 30 * 86400_000])
     for (const row of retired) {
       const run = parseAgentRun(JSON.parse(row.document)); run.output.text = ''; run.error_code = 'RUN_PAYLOAD_RETIRED'
-      await this.db.run('UPDATE http_agent_runs SET request = ?, document = ?, retired = 1 WHERE client_id = ? AND invocation_id = ? AND retired = 0', ['{}', JSON.stringify(run), row.client_id, row.invocation_id])
+      await this.db.transaction(async () => {
+        await this.db.run('UPDATE http_agent_runs SET request = ?, document = ?, retired = 1 WHERE client_id = ? AND invocation_id = ? AND retired = 0', ['{}', JSON.stringify(run), row.client_id, row.invocation_id])
+        await this.db.run('DELETE FROM http_agent_write_rejections WHERE client_id = ? AND invocation_id = ?', [row.client_id, row.invocation_id])
+      })
     }
     await this.db.run(`DELETE FROM http_agent_sessions WHERE id IN (
       SELECT id FROM http_agent_sessions WHERE active_run IS NULL AND updated_at < ? ORDER BY updated_at, id LIMIT 100)`, [now - 30 * 86400_000])

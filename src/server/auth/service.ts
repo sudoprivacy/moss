@@ -1,6 +1,20 @@
+import { assertAgentToolManager } from '../agentFederation/toolGatewayRoutes.js'
+import { AgentToolGateway } from '../agentFederation/toolGateway.js'
+import { AgentUsageReports } from '../agentFederation/usageReport.js'
+import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
+import { AssetSuspensions } from '../agentFederation/assetSuspension.js'
+import type { ExecutionModelGateway } from '../agentFederation/executionModelGateway.js'
+import { HostedTaskService } from '../agentFederation/hostedTaskService.js'
+import { HostedReleases } from '../agentFederation/hostedReleases.js'
+import type { RegistryReleases } from '../agentFederation/registryReleases.js'
+import { hostedFromEnvironment } from '../agentFederation/hostedConfiguration.js'
+import type { HostedEvaluationCoordinator } from '../agentFederation/hostedEvaluationCoordinator.js'
+import { registryFromEnvironment } from '../agentFederation/registryConfiguration.js'
+import { AgentInventoryService } from '../agentFederation/inventoryService.js'
+import { InventorySources } from '../agentFederation/inventorySources.js'
 import { ExternalProviderService } from '../externalProviders/service.js'
 import { ExternalTaskStore } from '../externalProviders/store.js'
-import { pilotPolicyFromEnvironment } from '../externalProviders/policy.js'
+import { ExternalProviderError, pilotPolicyFromEnvironment } from '../externalProviders/policy.js'
 import { migratePhonePasswords } from '../identity/phonePasswordMigration.js'
 import { randomUUID } from 'crypto'
 import { z } from 'zod'
@@ -692,10 +706,66 @@ export class AuthService {
     })
   }
 
+  createAgentToolManagement(mcp: import('../mcp/db.js').McpStore, secrets?: (org: string) => import('../mcp/authResolver.js').McpAuthSecretsApi) {
+    const registry = registryFromEnvironment()
+    if (!registry) return undefined
+    const gateway = new AgentToolGateway(new ToolGatewayStore(this.db.driver), {
+      registry, mcp, secrets,
+      member: async (orgId, userId) => {
+        const user = await this.db.getUserByIdAndOrg(userId, orgId)
+        if (user?.status !== 'active') return null
+        const departments = await getUserAncestorIds(userId, orgId, (id, org) => this.db.getUserByIdAndOrg(id, org), org => this.db.listDepartmentsByOrg(org))
+        return { isAdmin: false, userId, role: user.role, departmentId: user.departmentId ?? null, visibleDepartmentIds: departments }
+      },
+    })
+    return { gateway, authorize: async (actor: AuthContext) => {
+      const user = await this.getUserPinnedOrSuperAdmin(actor.userId, actor.orgId)
+      assertAgentToolManager(actor, user)
+    } }
+  }
+
+  async createHostedEvaluationRuntime(ownerId?: string, releases?: RegistryReleases) {
+    const registry = registryFromEnvironment()
+    const runtime = await hostedFromEnvironment(this.db.driver, registry, ownerId)
+    if (!runtime) return undefined
+    const catalog = new CatalogRepository(this.db.driver)
+    const tasks = runtime.taskCoordinator && registry && releases ? new HostedTaskService(runtime.taskCoordinator, {
+      catalog, registry, releases: new HostedReleases(catalog, releases),
+      activeMember: async actor => (await this.db.getUserByIdAndOrg(actor.userId, actor.orgId))?.status === 'active',
+    }) : undefined
+    tasks?.startMaintenance()
+    return { ...runtime, tasks, close: async () => { await tasks?.close(); await runtime.close() } }
+  }
+
+  createAgentInventoryService(secrets?: import('../externalProviders/administration.js').ExternalSecretPort, hosted?: HostedEvaluationCoordinator, releases?: RegistryReleases, tasks?: HostedTaskService, gateway?: ExecutionModelGateway, external?: ExternalProviderService): AgentInventoryService {
+    const registry = registryFromEnvironment()
+    const suspensions = registry ? new AssetSuspensions(this.db.driver, registry, { gateway, tasks, external }) : undefined
+    return new AgentInventoryService({
+      registry, suspensions, catalog: new CatalogRepository(this.db.driver), hosted, tasks,
+      usage: gateway ? new AgentUsageReports(this.db.driver, gateway.ready) : undefined,
+      releases: releases ? new HostedReleases(new CatalogRepository(this.db.driver), releases) : undefined,
+      sources: new InventorySources({ db: this.db.driver, identities: this.identityRepository, catalog: new CatalogRepository(this.db.driver), secrets }),
+      authorize: async actor => {
+        const user = await this.getUserPinnedOrSuperAdmin(actor.userId, actor.orgId)
+        if (user?.status !== 'active') throw new ExternalProviderError(401, 'USER_NOT_ACTIVE')
+        return { canManage: ['admin', 'super_admin'].includes(user.role) && ['admin', 'super_admin'].includes(actor.role) && hasScope(actor.scopes, 'admin:users') }
+      },
+      member: async (orgId, userId) => {
+        const user = await this.db.getUserByIdAndOrg(userId, orgId)
+        return user?.status === 'active' ? { id: user.id, departmentId: user.departmentId } : null
+      },
+      members: (orgId, after, search) => this.db.agentInventoryMembersPage(orgId, after, search, 51),
+      labels: (orgId, users, departments) => this.db.agentInventoryLabels(orgId, users, departments),
+    })
+  }
+
   createExternalProviderService(secrets: import('../externalProviders/administration.js').ExternalSecretPort, serverInstanceId: string): ExternalProviderService {
     return new ExternalProviderService(new ExternalTaskStore(this.db.driver), {
       catalog: new CatalogRepository(this.db.driver), identities: this.identityRepository, secrets,
       policy: pilotPolicyFromEnvironment(),
+      registry: registryFromEnvironment(),
+      registryMaintenance: process.env.MOSS_AGENT_REGISTRY_MAINTENANCE === '1',
+      registryBackupDirectory: process.env.MOSS_AGENT_REGISTRY_BACKUP_DIR,
       members: async orgId => (await this.db.listUsersByOrg(orgId)).filter(user => user.status === 'active').map(user => ({ id: user.id, name: user.displayName || user.name || user.email })),
       membersPage: (orgId, after, search, limit) => this.db.externalMembersPage(orgId, after, search, limit),
       isActorActive: async actor => {

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { AgentToolManagement } from '@/components/agent-tool-management'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { JsonEditor } from '@/components/ui/json-editor'
 import { Button } from '@/components/ui/button'
@@ -334,6 +335,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const { user } = useAuth()
+  const [toolServer, setToolServer] = useState<McpServer | null>(null)
   const [servers, setServers] = useState<McpServer[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
@@ -860,7 +862,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
   }
 
   return (
-    <DashboardLayout title={pageTitle} description={pageDesc}>
+    <DashboardLayout title={pageTitle} description={pageDesc} headerActions={<Button variant="outline" onClick={() => navigate('/mcp/policy')}>组织 MCP 策略</Button>}>
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
         <div className="rounded-lg border bg-card p-4">
@@ -1043,7 +1045,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
                   <TableCell className="text-sm">
                     <BoundNamesCell ids={server.bound_skills} nameById={skillNameById} />
                   </TableCell>
-                  <TableCell className="text-sm">{getCredentialSource(server.secret_ref)}</TableCell>
+                  <TableCell className="text-sm">{server.secret_ref ? getCredentialSource(server.secret_ref) : server.auth_type === 'none' ? '无需凭据' : '服务配置'}</TableCell>
                   <TableCell><RiskBadge level={server.risk_level} /></TableCell>
                   <TableCell className="text-sm whitespace-nowrap">
                     {formatLastInvocation(server.last_invocation_at)}
@@ -1053,6 +1055,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
+                      {server.mcp_type === 'http' && ['admin', 'super_admin'].includes(user?.role ?? '') && <Button variant="outline" size="sm" onClick={() => setToolServer(server)}>Agent 工具授权</Button>}
                       {server.template_id && (
                         <Button variant="outline" size="sm" onClick={() => handleOpenConfig(server)}>配置</Button>
                       )}
@@ -1077,6 +1080,7 @@ export default function McpServersPage({ fixedScope }: McpServersPageProps) {
         </Table>
       </div>
 
+      {toolServer && toolServer.org_id === user?.orgId && <AgentToolManagement key={`${user?.orgId ?? ''}:${toolServer.id}`} serverId={toolServer.id} name={toolServer.display_name || toolServer.name} onClose={() => setToolServer(null)} />}
       {/* Create/Edit Dialog with 5-step wizard */}
       <Dialog open={isCreateDialogOpen} onOpenChange={(open) => { setIsCreateDialogOpen(open); if (!open) setEditingServer(null) }}>
         <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">

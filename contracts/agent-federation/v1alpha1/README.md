@@ -36,3 +36,7 @@ The durable HTTP provider is an independent service that calls SudoRouter and su
 `node --import tsx --test src/server/agentFederation/agentFederation.node-test.ts src/server/externalProviders/externalProviders.node-test.ts`
 
 Tests validate the same schema used by the adapter and cover profile escalation, endpoint and identity checks, dispatch revocation, changed manifests, result correlation, bounded reads, uncertainty/no retries and common Dify/HTTP event/run schemas. Legacy HTTP tests use a protocol fixture. Durable provider, canonical migration, release and actual-process recovery tests are in this directory and its provider subdirectory. Real service evidence is separate from controlled executor fault tests.
+
+## Standard HTTP profiles (2026-10-21)
+
+The experimental manifest now also selects OpenAI Chat Completions, MCP 2025-06-18 and A2A 0.3.0 through the existing `custom_http` category. See [the supported profiles, evidence distinctions and local reference runbook](../../../docs/agent-protocol-standard.md). Earlier HTTP-only descriptions above refer to the legacy/durable HTTP profiles, not these new adapters.

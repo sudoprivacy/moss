@@ -23,11 +23,15 @@ import { readLiveManagedExecution } from '../backends/liveManagedExecution.js';
 import type { InternalSessionChannel } from '../internalSessionChannel.js';
 import { cohostSessionStatePath } from '../backends/cohostSessionState.js';
 
-it('external sessions cannot launch a native runner', () => {
+for (const type of ['external', 'hosted'] as const) it(`${type} sessions cannot launch a native runner`, () => {
   assert.throws(() => new SessionRunnerDaemon(
-    { session: { runtime: { type: 'external', engine: 'external_provider' } } } as RunnerManifest,
+    { session: { runtime: { type, engine: type === 'external' ? 'external_provider' : 'hosted_artifact' } } } as RunnerManifest,
     {} as DirectConnectStore,
-  ), /External sessions cannot launch/);
+  ), /Task-managed sessions cannot launch/);
+});
+
+for (const type of ['external', 'hosted'] as const) it(`${type} sessions cannot fall through to a host backend`, async () => {
+  await assert.rejects(new RuntimeBackend().spawn({ runtime: { type } } as never), /Task-managed sessions cannot launch/)
 });
 
 describe('Runner cancellation during recovery', () => {

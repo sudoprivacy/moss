@@ -7,6 +7,7 @@ import { CustomHttpAdapter, type ProviderRequest } from './customHttpAdapter.js'
 import { parseExternalRunBinding } from './manifest.js'
 import { contentDigest, parseAgentRun } from './provider/protocol.js'
 import { boundedJson } from './provider/runtime.js'
+import { modelWriteRejectionCodes } from './provider/nexusWriteRejection.js'
 
 /** Durable profile uses one invocation ID and body for submit, recovery and polling. */
 export class DurableHttpAdapter implements ProviderAdapter {
@@ -76,7 +77,8 @@ export class DurableHttpAdapter implements ProviderAdapter {
       if (status !== 'running') {
         const base = runBinding(this, input, runId, sessionId, new Date(result.created_at).toISOString())
         const binding = parseExternalRunBinding({ ...base, resume: 'query_only', version_evidence: 'provider_revision_fenced', execution_revision: result.execution_revision, completed_at: new Date(result.updated_at).toISOString() })
-        return { text: result.output.text, status, binding }
+        const errorCode = status === 'failed' && result.error_code && modelWriteRejectionCodes.has(result.error_code) ? result.error_code : undefined
+        return { text: result.output.text, status, binding, ...(errorCode ? { error_code: errorCode } : {}) }
       }
       await delay(500, undefined, { signal })
     }

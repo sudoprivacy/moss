@@ -1,0 +1,220 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
+import { HostedEvaluationCoordinator } from './hostedEvaluationCoordinator.js'
+import { AgentInventoryService } from './inventoryService.js'
+import { dispatchAgentInventory } from './inventoryRoutes.js'
+import { ExternalProviderError } from '../externalProviders/policy.js'
+
+function fixture() {
+  const events: string[] = [], completions: any[] = []
+  const run: any = { id: 'run-a', asset_id: 'asset-a', artifact_id: 'artifact-a', dataset_id: 'dataset-a', metadata_digest: 'metadata', spec_digest: 'spec', dataset_digest: 'dataset', rubric_digest: 'rubric', initiated_by: 'alice', total_cases: 1, timeout_seconds: 120, max_model_calls: 1, status: 'queued', running_cases: 0 }
+  const artifact: any = { kind: 'HostedArtifact', id: 'artifact-a', asset_id: 'asset-a', metadata_digest: 'metadata', spec_digest: 'spec', image: {model_resource: 'model:lab', model_name: 'model'} }
+  let claimed = false
+  const registry: any = {
+    hostedGet: async () => artifact,
+    evaluationDatasetGet: async () => ({ asset_id: 'asset-a', metadata_digest: 'metadata', dataset_digest: 'dataset', rubric_digest: 'rubric', dataset: {cases: [{id: 'one', query: '6*7', expected: '42'}]} }),
+    evaluationStart: async () => run,
+    evaluationGet: async () => run,
+    evaluationClaim: async () => { events.push('claim'); if (claimed) return null; claimed = true; return { case: {id: 'case-a', sample_id: 'one', deadline_at: Date.now()+120000}, lease_token: 'one-time-lease' } },
+    evaluationGrant: async () => { events.push('grant'); return {api_key: 'one-time-key', grant: {id:'grant-a', request: {asset_id:'asset-a',task_id:'case-a',mode:'evaluation',spec_digest:'spec',metadata_digest:'metadata',dataset_digest:'dataset',initiated_by:'alice',max_model_calls:1,permissions:[{operation:'model.invoke',resource:'model:lab'}]}}} },
+    executionRevoke: async () => { events.push('revoke') },
+    evaluationComplete: async (_org: string, _id: string, result: any) => { events.push('complete'); completions.push(result); return result },
+    evaluationStop: async () => { events.push('stop'); return run },
+  }
+  const gateway: any = {
+    invoke: async () => {events.push('model'); return {id:'call-a',status:'completed',answer:'42'}},
+    taskCalls: async () => [{id:'call-a'}],
+    reconcile: async () => {events.push('model-cleanup'); return {tokenCleanupPending:false}},
+  }
+  const runner: any = {run: async (options: any) => {events.push('runner'); await options.trace({node:'llm',phase:'completed',origin:'worker_reported'}); return {answer:await options.model(1,{messages:[],max_tokens:128}),modelCalls:1}}}
+  const coordinator = new HostedEvaluationCoordinator(registry, gateway, runner, () => true)
+  const admit = async () => {events.push('admit')}
+  async function finished() {for(let i=0; !completions.length && i<100; i++) await delay(10); assert.equal(completions.length,1)}
+  return {registry,run,gateway,runner,events,completions,coordinator,admit,finished}
+}
+
+void test('durable claim precedes IAM/model, completion contains trace and never contains key', async () => {
+  const f = fixture()
+  await f.coordinator.resume('org-a','run-a',f.admit)
+  await f.finished()
+  assert.ok(f.events.indexOf('claim') < f.events.indexOf('grant'))
+  assert.ok(f.events.indexOf('grant') < f.events.indexOf('runner'))
+  assert.ok(f.events.indexOf('model-cleanup') < f.events.indexOf('revoke'))
+  assert.ok(f.events.indexOf('revoke') < f.events.indexOf('complete'))
+  assert.equal(f.completions[0].status,'succeeded')
+  assert.equal(f.completions[0].cleanup_confirmed,true)
+  assert.deepEqual(f.completions[0].model_call_ids,['call-a'])
+  assert.equal(f.completions[0].trace[0].origin,'worker_reported')
+  assert.ok(!JSON.stringify(f.completions).includes('one-time-key'))
+  await f.coordinator.close()
+})
+
+void test('lost one-time IAM key does not execute a second worker', async () => {
+  const f=fixture(), original=f.registry.evaluationGrant
+  f.registry.evaluationGrant=async()=>({...await original(),api_key:null})
+  await f.coordinator.resume('org-a','run-a',f.admit); await f.finished()
+  assert.ok(!f.events.includes('runner'))
+  assert.equal(f.completions[0].status,'failed')
+  assert.equal(f.completions[0].error_code,'EVALUATION_CREDENTIAL_UNAVAILABLE')
+  assert.ok(f.events.includes('revoke'))
+  await f.coordinator.close()
+})
+
+void test('model cleanup outage still revokes IAM and cannot report success', async () => {
+  const f=fixture()
+  f.gateway.reconcile=async()=>{throw new Error('private provider details')}
+  await f.coordinator.resume('org-a','run-a',f.admit);await f.finished()
+  assert.equal(f.completions[0].status,'unknown')
+  assert.equal(f.completions[0].cleanup_confirmed,false)
+  assert.equal(f.completions[0].answer,null)
+  assert.ok(f.events.includes('revoke'))
+  assert.ok(!JSON.stringify(f.completions).includes('private provider'))
+  await f.coordinator.close()
+})
+
+void test('worker termination remains unknown and blocks next local case', async () => {
+  const f=fixture()
+  f.runner.run=async()=>{throw new Error('worker died')}
+  await f.coordinator.resume('org-a','run-a',f.admit);await f.finished()
+  assert.equal(f.completions[0].status,'unknown')
+  assert.equal(f.completions[0].cleanup_confirmed,false)
+  assert.equal(f.events.filter(x=>x==='claim').length,1)
+  await f.coordinator.close()
+})
+
+void test('restart cannot execute a durably running case; malformed artifact cannot dispatch', async () => {
+  const f=fixture();f.run.running_cases=1
+  await assert.rejects(f.coordinator.resume('org-a','run-a',f.admit),{code:'EVALUATION_CASE_IN_PROGRESS'})
+  assert.ok(!f.events.includes('claim'))
+  f.run.running_cases=0; f.run.spec_digest='different'
+  await assert.rejects(f.coordinator.resume('org-a','run-a',f.admit),{code:'EVALUATION_INPUT_MISMATCH'})
+  assert.ok(!f.events.includes('claim')); await f.coordinator.close()
+})
+
+void test('concurrent resume claims only one local execution slot', async () => {
+  const f=fixture()
+  await Promise.all(Array.from({length:8},()=>f.coordinator.resume('org-a','run-a',f.admit)))
+  await f.finished()
+  assert.equal(f.events.filter(x=>x==='runner').length,1)
+  await f.coordinator.close()
+})
+
+void test('manager boundary blocks caller scores, forged actor, lease and owner writes', async () => {
+  const actor:any={orgId:'org-a',userId:'alice',role:'admin',scopes:[]}
+  let manage=true, starts:any[]=[]
+  const service=new AgentInventoryService({
+    registry:{scope:()=>({}),inventoryGet:async()=>({id:'asset-a',metadata_digest:'metadata',metadata:{owner_user_id:'alice'}})} as any,
+    hosted:{start:async (_org:string, command:any)=>{starts.push(command);return {id:'run-a'}}} as any,
+    catalog:{} as any,authorize:async()=>({canManage:manage}), member:async()=>({id:'alice',departmentId:null}), members:async()=>[],labels:async()=>({users:new Map(),departments:new Map()}),
+  })
+  const body={asset_id:'asset-a',metadata_digest:'metadata',artifact_id:'artifact-a',dataset_id:'dataset-a',request_id:'request-1'}
+  const url=new URL('http://local/api/v1/agent-inventory/hosted/evaluations')
+  for(const patch of [{passed_cases:1},{initiated_by:'other'},{lease_token:'secret'},{status:'succeeded'},{source_runtime:{profile:'dify-service-api-v1'}}]) {
+    const result=await dispatchAgentInventory(service,actor,'POST',url,{...body,...patch})
+    assert.equal(result.status,400)
+  }
+  assert.equal(starts.length,0)
+  manage=false
+  assert.equal((await dispatchAgentInventory(service,actor,'POST',url,body)).status,403)
+  manage=true
+  assert.equal((await dispatchAgentInventory(service,actor,'POST',url,body)).status,200)
+  assert.equal(starts[0].initiated_by,'alice')
+  const forbidden=new URL(url+'/run-a/complete')
+  assert.equal((await dispatchAgentInventory(service,actor,'POST',forbidden,{})).status,404)
+})
+
+void test('evaluation detail and case reads require current owner or manager without mutation', async () => {
+  let manage=false, owner='alice', mutations=0
+  const run={id:'run-a',asset_id:'asset-a'}
+  const service=new AgentInventoryService({
+    registry:{scope:()=>({}),inventoryGet:async()=>({id:'asset-a',metadata:{owner_user_id:owner}}),evaluationGet:async()=>run,evaluationCases:async()=>({items:[],next_cursor:null})} as any,
+    hosted:{start:async()=>{mutations++}} as any,catalog:{} as any,
+    authorize:async()=>({canManage:manage}),member:async()=>({id:'alice',departmentId:null}),members:async()=>[],labels:async()=>({users:new Map(),departments:new Map()}),
+  })
+  const actor:any={orgId:'org-a',userId:'alice',role:'member',scopes:[]}
+  for(const suffix of ['', '/cases']){
+    const url=new URL('http://local/api/v1/agent-inventory/hosted/evaluations/run-a'+suffix)
+    owner='alice';assert.equal((await dispatchAgentInventory(service,actor,'GET',url,undefined)).status,200)
+    owner='bob';assert.equal((await dispatchAgentInventory(service,actor,'GET',url,undefined)).status,404)
+    manage=true;assert.equal((await dispatchAgentInventory(service,actor,'GET',url,undefined)).status,200);manage=false
+  }
+  assert.equal(mutations,0)
+})
+
+void test('source baseline cannot accidentally run the imported hosted image', async () => {
+  const f=fixture();f.run.role='source_baseline'
+  await assert.rejects(f.coordinator.resume('org-a','run-a',f.admit),{code:'EVALUATION_SOURCE_NOT_CONFIGURED'})
+  assert.ok(!f.events.includes('claim'));assert.ok(!f.events.includes('runner'))
+  await f.coordinator.close()
+})
+
+void test('source execution uses durable references and fresh admission, never invokes hosted runner', async () => {
+  const f=fixture(), snapshot:any={profile:'dify-service-api-v1',source_digest:'source',runtime_digest:'runtime',model_name:'model',revision_strength:'observed_source_snapshot'}
+  f.run.role='source_baseline';f.run.source_runtime=snapshot
+  f.gateway.taskCalls=async()=>[]
+  f.registry.executionAuthorize=async()=>{f.events.push('authorize')}
+  f.registry.evaluationObserveSource=async(_org:string,_run:string,body:any)=>{assert.equal(body.lease_token,'one-time-lease');assert.equal(body.source_execution.request_id,'case-a');f.events.push('observe')}
+  const source:any={snapshot:async()=>snapshot,run:async(_options:any,_expected:any,id:string,admit:any,observe:any)=>{
+    await observe({profile:'dify-service-api-v1',request_id:id});await admit();f.events.push('source-post')
+    return {answer:'42',modelCalls:0}
+  }}
+  const coordinator=new HostedEvaluationCoordinator(f.registry,f.gateway,f.runner,()=>true,()=>source)
+  await coordinator.resume('org-a','run-a',f.admit);await f.finished()
+  assert.ok(f.events.indexOf('grant')<f.events.indexOf('observe'))
+  assert.ok(f.events.indexOf('observe')<f.events.indexOf('authorize'))
+  assert.ok(f.events.indexOf('authorize')<f.events.indexOf('source-post'))
+  assert.ok(!f.events.includes('runner'));assert.ok(!f.events.includes('model'))
+  assert.equal(f.completions[0].status,'succeeded');assert.deepEqual(f.completions[0].model_call_ids,[])
+  await coordinator.close()
+})
+
+void test('migration management rejects injected results and verifies current organizational authority', async()=>{
+ let manage=true, owner='alice', writes=0
+ const actor:any={orgId:'org-a',userId:'alice',role:'admin',scopes:[]}
+ const service=new AgentInventoryService({
+  registry:{scope:()=>({}),inventoryGet:async()=>({id:'asset-a',metadata:{owner_user_id:owner}}),evaluationGet:async()=>({id:'run-a',asset_id:'asset-a'}),
+   migrationPolicyList:async()=>({items:[],next_cursor:null}),migrationPolicyCreate:async(_org:string,input:any)=>{writes++;assert.equal(input.initiated_by,'alice');return {id:'policy-a'}},
+   migrationCompare:async()=>{writes++;return {id:'comparison-a'}}} as any,
+  catalog:{} as any,authorize:async()=>({canManage:manage}),member:async()=>({id:'alice',departmentId:null}),members:async()=>[],labels:async()=>({users:new Map(),departments:new Map()}),
+ })
+ const base='http://local/api/v1/agent-inventory',create=new URL(base+'/hosted/migration/policies')
+ const input={request_id:'request-1',baseline_run_id:'run-a',minimum_pass_bps:10000,maximum_drop_bps:0}
+ for(const patch of [{initiated_by:'bob'},{passed:true},{candidate_passed:20}])assert.equal((await dispatchAgentInventory(service,actor,'POST',create,{...input,...patch})).status,400)
+ manage=false;assert.equal((await dispatchAgentInventory(service,actor,'POST',create,input)).status,403)
+ owner='other';assert.equal((await dispatchAgentInventory(service,actor,'GET',new URL(base+'/assets/asset-a/migration-policies'),undefined)).status,404)
+ manage=true;assert.equal((await dispatchAgentInventory(service,actor,'POST',create,input)).status,200)
+ assert.equal((await dispatchAgentInventory(service,actor,'POST',new URL(base+'/hosted/evaluations/run-a/compare'),{passed:true})).status,400)
+ assert.equal(writes,1)
+})
+
+function nativeFixture(role: 'hosted' | 'source_baseline') {
+  const f = fixture()
+  const source: any = { kind: 'HostedArtifact', id: 'source-artifact', asset_id: 'source-asset', metadata_digest: 'source-metadata', spec_digest: 'source-spec', image: { model_resource: 'model:lab', model_name: 'model', source_digest: 'source', image_id: 'source-image' } }
+  const conversion: any = { kind: 'NativeConversion', id: 'artifact-a', asset_id: 'asset-a', metadata_digest: 'metadata', spec_digest: 'spec', source_asset_id: source.asset_id, source_artifact_id: source.id, source_metadata_digest: source.metadata_digest, source_spec_digest: source.spec_digest, image: { ...source.image, image_id: 'native-image' } }
+  f.run.execution_kind = 'native'; f.run.role = role
+  f.run.source_runtime = role === 'source_baseline' ? { profile: 'registry-hosted-artifact-v1', source_digest: 'source', runtime_digest: 'source-spec', model_name: 'model', revision_strength: 'local_source_digest' } : null
+  f.registry.nativeGet = async () => conversion
+  f.registry.hostedGet = async (_org: string, id: string) => { assert.equal(id, source.id); return source }
+  return { ...f, source, conversion }
+}
+
+for (const role of ['hosted', 'source_baseline'] as const) void test(`native ${role} executes its exact image with target grant and cleanup`, async () => {
+  const f = nativeFixture(role), original = f.runner.run
+  f.runner.run = async (options: any) => {
+    assert.equal(options.artifact.image.image_id, role === 'source_baseline' ? 'source-image' : 'native-image')
+    return original(options)
+  }
+  await f.coordinator.resume('org-a', 'run-a', f.admit); await f.finished()
+  assert.equal(f.completions[0].status, 'succeeded')
+  assert.deepEqual(f.completions[0].model_call_ids, ['call-a'])
+  await f.coordinator.close()
+})
+
+void test('native baseline rejects substituted source before claiming or issuing a grant', async () => {
+  const f = nativeFixture('source_baseline')
+  f.source.spec_digest = 'substituted'
+  await assert.rejects(f.coordinator.resume('org-a', 'run-a', f.admit), { code: 'EVALUATION_SOURCE_CHANGED' })
+  assert.ok(!f.events.includes('claim')); assert.ok(!f.events.includes('grant'))
+  await f.coordinator.close()
+})

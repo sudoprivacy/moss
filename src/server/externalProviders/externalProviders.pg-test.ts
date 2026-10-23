@@ -96,6 +96,12 @@ void test('PostgreSQL: cross-instance idempotency, dispatch fencing, nonblocking
       await second.review(actor, agent.id, true, rotated.revision)
     } finally { release() }
     await first.waitForTask(stale.id)
+    // A peer's maintenance loop can own this task; waiting for this process's
+    // local promise alone does not establish terminal durable state.
+    const terminalDeadline = Date.now() + 5000
+    while (['accepted', 'dispatching', 'running'].includes((await second.store.task(actor, stale.id)).status) && Date.now() < terminalDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
     assert.equal((await second.store.task(actor, stale.id)).error_code, 'CONFIGURATION_CHANGED')
     assert.equal(calls.length, 1)
 

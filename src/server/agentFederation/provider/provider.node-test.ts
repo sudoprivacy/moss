@@ -124,6 +124,20 @@ void test('model failures distinguish explicit rejection from uncertain executio
   }
 })
 
+void test('pre-dispatch egress refusal is a stable failed run; it does not create an unknown or retry', async t => {
+  for (const code of ['MODEL_EGRESS_DENIED', 'MODEL_EGRESS_UNAVAILABLE']) {
+    let attempts = 0
+    const f = await fixture(t, async () => { attempts++; throw new AgentProtocolError(403, code) })
+    const input = request()
+    const accepted = await f.runtime.submit('client-1', input)
+    await f.runtime.tick(); await f.runtime.idle()
+    const result = await f.runtime.submit('client-1', input)
+    assert.equal(result.status, 'failed'); assert.equal(result.error_code, code)
+    assert.equal(result.provider_run_id, accepted.provider_run_id)
+    await f.runtime.tick(); await f.runtime.idle(); assert.equal(attempts, 1)
+  }
+})
+
 void test('provider replicas coalesce maintenance and a failed batch can retry', async t => {
   const f = await fixture(t), other = new AgentRunStore(f.driver)
   await other.ready

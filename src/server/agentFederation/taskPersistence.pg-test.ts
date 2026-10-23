@@ -1,3 +1,4 @@
+import { verifyTaskRuntimeIsolation } from '../testing/taskRuntimeIsolationFixture.js'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { randomUUID } from 'node:crypto'
@@ -32,4 +33,12 @@ void test('PostgreSQL migration preserves historical order and event bytes, seal
   } finally {
     await Promise.all(drivers.map(d => d.close())); await admin.query(`DROP SCHEMA ${schema} CASCADE`); await admin.end()
   }
+})
+
+void test('PostgreSQL enforces task runtime boundaries while preserving global idempotency', { skip: !process.env.MOSS_PG_TEST_URL }, async () => {
+  const connectionString = process.env.MOSS_PG_TEST_URL!, schema = `runtime_${randomUUID().replaceAll('-', '')}`
+  const admin = new pg.Pool({ connectionString }); await admin.query(`CREATE SCHEMA ${schema}`)
+  const db = new PgDriver(new pg.Pool({ connectionString, options: `-c search_path=${schema}` }) as unknown as PgPoolLike)
+  try { await verifyTaskRuntimeIsolation(db) }
+  finally { await db.close(); await admin.query(`DROP SCHEMA ${schema} CASCADE`); await admin.end() }
 })

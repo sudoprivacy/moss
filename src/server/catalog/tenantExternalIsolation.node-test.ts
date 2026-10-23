@@ -9,6 +9,9 @@ void test('native tenant listing and management exclude hosted agents without de
   try {
     await catalog.createAgent({ id: 'native', orgId: 'org-a', name: 'Native template', authorId: 'admin-a', status: 'approved' })
     await catalog.createAgent({ id: 'hosted', orgId: 'org-a', name: 'Dify agent', authorId: 'admin-a', status: 'approved', providerType: 'dify', providerBinding: { executionMode: 'external_hosted', appId: 'app' } })
+    await catalog.createAgent({ id: 'internal', orgId: 'org-a', name: 'Hosted artifact', authorId: 'admin-a', status: 'approved', providerType: 'moss_runtime', providerBinding: { executionMode: 'internal_hosted', assetId: 'asset-a' } })
+    assert.equal(await store.getTenantAssistant('internal', 'org-a'), null)
+    assert.equal(await store.getTenantAssistantByName('Hosted artifact', 'org-a'), null)
     assert.deepEqual((await store.listTenantAssistants()).map(row => row.id), ['native'])
     assert.deepEqual((await store.listTenantAssistants('approved', 'org-a')).map(row => row.id), ['native'])
     assert.deepEqual(await store.listTenantAssistants(undefined, 'org-b'), [])
