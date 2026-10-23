@@ -321,6 +321,18 @@ export class TokenQuotaExceededError extends Error {
 }
 
 /**
+ * MOSS_REQUIRE_ZONE 严格模式拒绝：Org 无 active default Zone binding 时
+ * 创建会话被 fail-closed 拒绝（409）。与渐进语义（默认宽松、无 Zone 会话
+ * 落本地）相对，由部署方显式选择。
+ */
+export class ZoneRequiredError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ZoneRequiredError'
+  }
+}
+
+/**
  * How long a computed usage total may be reused.
  *
  * Usage is not stored anywhere — `loadBudgetStats` derives it by parsing every
@@ -867,6 +879,45 @@ export class RuntimeService {
       sessionId,
     )
     await mkdir(dirname(transcriptPath), { recursive: true })
+
+    // P1a (§8.10 R5.1/R5.3)：home Zone 由 Org binding policy 解析；payload 的
+    // zone 只是提示，仅当与 policy 一致才被接受。Nexus 权威写入失败时投影
+    // 记 observed=null（后台补写），session 创建不被 Nexus 可用性阻塞。
+    // 解析先于 createSession：解析只依赖 orgId/zoneHint——严格模式
+    // （MOSS_REQUIRE_ZONE）下无 home Zone 在任何会话行写入前拒绝（零残留）。
+    let zoneResolution: { homeZoneId: string | null } | null = null
+    try {
+      const { resolveHomeZoneWithHint } = await import(
+        './zones/runtime/sessionZoneBridge.js'
+      )
+      const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+      const zoneConfig = resolveZoneBindingConfig()
+      zoneResolution = await resolveHomeZoneWithHint(
+        this.store.driver,
+        input.orgId,
+        input.zoneHint,
+        zoneConfig,
+      )
+      if (!zoneResolution.homeZoneId && zoneConfig.requireZone) {
+        throw new ZoneRequiredError(
+          `ZONE_REQUIRED: org ${input.orgId} has no active default zone binding and MOSS_REQUIRE_ZONE is enabled; session creation is rejected in strict mode`,
+        )
+      }
+    } catch (zoneError) {
+      if (zoneError instanceof ZoneRequiredError) throw zoneError
+      // Zone 解析失败不阻塞 session 创建（P1a 渐进语义），记录即可。
+      console.warn('[RuntimeService] session zone bridge failed:', zoneError)
+    }
+    if (zoneResolution === null) {
+      const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+      const zoneConfig = resolveZoneBindingConfig()
+      if (zoneConfig.requireZone) {
+        throw new ZoneRequiredError(
+          `ZONE_REQUIRED: zone binding resolution failed for org ${input.orgId} and MOSS_REQUIRE_ZONE is enabled; session creation is rejected in strict mode`,
+        )
+      }
+    }
+
     const created = await this.store.createSession({
       sessionId,
       transcriptSessionId: sessionId,
@@ -885,6 +936,45 @@ export class RuntimeService {
       managementActorId: input.managementActorId,
       managementAgent: input.managementAgent,
     })
+
+    if (zoneResolution && zoneResolution.homeZoneId) {
+      try {
+        const { establishNexusSession } = await import(
+          './zones/runtime/sessionZoneBridge.js'
+        )
+        const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+        const { NexusZoneClient } = await import('./nexus/nexusZoneClient.js')
+        const zoneConfig = resolveZoneBindingConfig()
+        const observed = zoneConfig.zoneBindingEnabled
+          ? await establishNexusSession(
+              new NexusZoneClient(zoneConfig),
+              { sessionId: created.sessionId, homeZoneId: zoneResolution.homeZoneId },
+            )
+          : null
+        await this.store.driver.run(
+          `UPDATE sessions
+           SET home_zone_id = ?, home_zone_observed_at = ?, home_zone_observed_revision = ?,
+               home_zone_sync_error = ?
+           WHERE session_id = ?`,
+          [
+            zoneResolution.homeZoneId,
+            observed?.observedAt ?? null,
+            observed?.observedRevision ?? null,
+            observed?.syncError ?? null,
+            created.sessionId,
+          ],
+        )
+      } catch (zoneError) {
+        // Nexus 权威写入失败不阻塞 session 创建（P1a 渐进语义），投影由
+        // 后台补写，记录即可。
+        console.warn('[RuntimeService] session zone bridge failed:', zoneError)
+      }
+    } else if (zoneResolution) {
+      // 无 Zone 会话（宽松模式）：显式留痕，降级对管理者可见可审计。
+      console.warn(
+        `[ZoneBinding] session created without zone binding: org=${input.orgId} user=${input.userId} session=${created.sessionId} requireZone=false`,
+      )
+    }
 
     // Ensure config directory exists for scode sessions (which don't use session-runner which normally creates it)
     if (runtime.engine === 'scode') {
@@ -1840,6 +1930,10 @@ export class RuntimeService {
         settings: systemSettings,
         orgId: session.orgId,
         userApiKey: userModelKey,
+        // 4A/4B：部署级开关（默认关）。开启后仅"零自定义 Provider +
+        // legacy-default"的发现失败降级为 requestedModel 原样透传（unverified），
+        // 已配置 Provider 的路由边界语义不变。
+        allowUnverified: process.env.MOSS_ALLOW_UNVERIFIED_MODEL === '1',
       })
       : null
     const defaultModel = providerCatalog?.selection.modelId || requestedModel
@@ -1853,6 +1947,12 @@ export class RuntimeService {
     const runnerEnv: Record<string, string> = {
       ...process.env as Record<string, string>,
       MOSS_DEFAULT_MODEL: defaultModel,
+    }
+    if (providerCatalog?.unverified) {
+      // 4A：发现失败被降级透传的会话显式可辨（stderr + runner 环境），便于
+      // 部署方审计降级流量；真实 LLM 调用失败仍会在调用点原样暴露。
+      runnerEnv.MOSS_MODEL_UNVERIFIED = '1'
+      process.stderr.write(`  - model unverified: discovery failed, passing through '${defaultModel}' (MOSS_ALLOW_UNVERIFIED_MODEL)\n`)
     }
     for (const key of ['MOSS_BROWSER_GATEWAY_URL', 'MOSS_BROWSER_GATEWAY_TOKEN', 'MOSS_BROWSER_GATEWAY_AI_TOKEN', 'MOSS_BROWSER_SECRET', 'MOSS_BROWSER_ALLOWED_OWNERS']) delete runnerEnv[key]
     if (providerCatalog) {
@@ -2059,6 +2159,80 @@ export class RuntimeService {
       attachPath,
     })
     await this.store.setCurrentAttempt(session.sessionId, attempt.attemptId)
+    let p1aRunnerZoneContext: {
+      NEXUS_ZONE_ID: string
+      NEXUS_V2_BASE_URL: string
+      NEXUS_DELEGATION_REF: string
+      NEXUS_RESOURCE_SCOPE: string
+    } | null = null
+
+    // P1a (§8.10 R5.2)：runner generation 记录 execution_zone_id 并与 Nexus
+    // PID/runtime descriptor 对账。execution zone 默认 = session home zone；
+    // Nexus 不可达、delegation 无法换发或 descriptor 对账失败时，下面会
+    // markAttemptLost 并令 spawn 失败；zoned runner 始终 fail closed。
+    try {
+      const sessionRow = await this.store.driver.get(
+        `SELECT home_zone_id FROM sessions WHERE session_id = ? LIMIT 1`,
+        [session.sessionId],
+      )
+      const homeZoneId = sessionRow?.home_zone_id
+      if (typeof homeZoneId === 'string' && homeZoneId) {
+        const { reconcileRunnerGeneration, runnerZoneContext } = await import(
+          './zones/runtime/sessionZoneBridge.js'
+        )
+        const { resolveZoneBindingConfig } = await import('./zones/binding/config.js')
+        const { NexusZoneClient } = await import('./nexus/nexusZoneClient.js')
+        const zoneConfig = resolveZoneBindingConfig()
+        if (!zoneConfig.zoneBindingEnabled) {
+          // M-6：存量 zoned 会话 + 配置回退（MOSS_NEXUS_V2_BASE_URL 被移除）
+          // ——显式 fail-closed，与本段注释"zoned runner 始终 fail closed"的
+          // 承诺一致；不再静默以无 NEXUS_* env 启动本地 runner 且
+          // execution_zone_id 照样落库（审计列失真）。
+          throw new Error('zoned session but zone binding is disabled (MOSS_NEXUS_V2_BASE_URL unset)')
+        }
+        const client = new NexusZoneClient(zoneConfig)
+        p1aRunnerZoneContext = await runnerZoneContext(
+          this.store.driver,
+          client,
+          {
+            sessionId: session.sessionId,
+            runtimePid: `moss-${attempt.attemptId}`,
+            config: zoneConfig,
+          },
+        )
+        if (!p1aRunnerZoneContext) {
+          throw new Error('zoned session has no usable runner delegation')
+        }
+        const reconciled = await reconcileRunnerGeneration(
+          client,
+          {
+            attemptId: attempt.attemptId,
+            sessionId: session.sessionId,
+            homeZoneId,
+            delegationRef: p1aRunnerZoneContext.NEXUS_DELEGATION_REF,
+          },
+        )
+        if (!reconciled.ok) {
+          // 低-15④：reconcile 失败携带 Nexus 错误码（不再吞根因）；start 已
+          // 成功的场景 bridge 已 best-effort 取消该 run（幽灵 run 不产生）。
+          throw new Error(`Nexus runtime descriptor reconciliation failed (${reconciled.errorCode})`)
+        }
+        // M-6：execution_zone_id 仅在 context/reconcile 确立后落库——审计列
+        // 与 runner 实况一致。
+        await this.store.driver.run(
+          `UPDATE session_attempts SET execution_zone_id = ? WHERE attempt_id = ?`,
+          [reconciled.executionZoneId, attempt.attemptId],
+        )
+      }
+    } catch (zoneError) {
+      console.warn('[RuntimeService] runner generation zone reconcile failed:', zoneError)
+      await this.store.markAttemptLost(
+        attempt.attemptId,
+        `runtime zone authorization failed: ${errorMessage(zoneError)}`,
+        this.options.serverInstanceId,
+      )
+      throw zoneError
+    }
 
     // Resume path: if the session was previously idle-killed (status=ended,
     // desired_state=active, ended_at set), clear those terminal markers so
@@ -2449,7 +2623,12 @@ export class RuntimeService {
     const manifestPath = join(attemptDir, 'manifest.json')
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
-    const runnerEnv = await this.buildRunnerModelEnvironment(session)
+    const baseRunnerEnv = await this.buildRunnerModelEnvironment(session)
+    // P1a (§8.10 R5.4/R5.5)：runner 的 Zone context。仅注入 NEXUS_ZONE_ID、
+    // /v2 endpoint 与短期**用户** delegation ref——service/global admin
+    // credential 永不进入 runner env。
+    const { applyRunnerZoneContext } = await import('./zones/runtime/sessionZoneBridge.js')
+    const runnerEnv = applyRunnerZoneContext(baseRunnerEnv, p1aRunnerZoneContext)
 
     // Inject Auth Proxy token for scode process. The URL must be reachable from
     // wherever the session runs: for the local runner that's loopback, but for

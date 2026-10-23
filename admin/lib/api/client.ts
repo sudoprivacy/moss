@@ -25,6 +25,8 @@ export class ApiRequestError extends Error {
     readonly status: number,
     message: string,
     readonly code?: string,
+    /** 结构化错误负载（如 ZONE_DELETE_BLOCKED 的 blocker 清单），有则透传。 */
+    readonly details?: unknown,
   ) {
     super(message)
     this.name = 'ApiRequestError'
@@ -119,7 +121,10 @@ async function responseError(response: Response, fallback: string): Promise<ApiR
   const code = typeof (raw as { code?: unknown } | null)?.code === 'string'
     ? (raw as { code: string }).code
     : undefined
-  return new ApiRequestError(response.status, String(message), code)
+  const details = typeof raw === 'object' && raw !== null
+    ? (raw as { details?: unknown }).details
+    : undefined
+  return new ApiRequestError(response.status, String(message), code, details)
 }
 
 async function refreshSession(baseUrl: string, rejectedAccessToken?: string): Promise<string | null> {

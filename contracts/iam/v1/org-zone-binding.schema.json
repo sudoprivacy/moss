@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.sudo.dev/schemas/iam/v1/org-zone-binding.schema.json",
+  "title": "OrgZoneBinding",
+  "description": "Moss owner-local business intent + projection binding an organization to a Nexus zone. This is NOT a copy of Zone/ZoneGrant: external Zone/ZoneGrant/operation identities appear as opaque strings whose format is owned by their semantic owners (nexus-vfs zone-id projections, Nexus product contracts). Moss may cache display name/status observed from Nexus, but must mark observed revision/time and never treat this projection as authoritative Zone metadata.",
+  "type": "object",
+  "properties": {
+    "api_version": {
+      "const": "iam.sudo.dev/v1",
+      "description": "iam family major. Unknown majors are rejected by this schema (const mismatch)."
+    },
+    "kind": {
+      "const": "OrgZoneBinding"
+    },
+    "binding_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque binding identity; consumers do not parse its structure."
+    },
+    "org_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque Moss organization identity."
+    },
+    "nexus_deployment_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifies which Nexus deployment this binding targets."
+    },
+    "zone_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque external Zone identity. Format rules are owned by nexus-vfs zone-id projections and are intentionally NOT re-validated here (no second truth)."
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1,
+      "x-known-values": ["default", "office", "core", "shared"],
+      "description": "Open string registry. Known values: default, office, core, shared. New purposes may be added within the same major."
+    },
+    "is_default": {
+      "type": "boolean"
+    },
+    "desired_capabilities": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Desired capability codes (open registry; e.g. zone.data.read)."
+    },
+    "resource_prefixes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Zone-internal absolute path prefixes. Canonicalization rules belong to the Nexus product contract; this schema only carries them."
+    },
+    "desired_state": {
+      "enum": ["bound", "detached"],
+      "description": "Business intent, owned by Moss."
+    },
+    "sync_status": {
+      "enum": ["pending", "syncing", "active", "detaching", "detached", "sync_failed", "unknown"],
+      "description": "Projection of the observed Nexus-side state."
+    },
+    "nexus_grant_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque external ZoneGrant identity once a grant exists."
+    },
+    "nexus_operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque external ZoneOperation identity while a Nexus operation is in flight."
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic desired-state generation; reconciliation applies generations in order."
+    },
+    "last_error_code": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Open code registry; machine-readable, from the fixed/known error spaces this binding surfaces."
+    },
+    "created_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "RFC 3339 UTC timestamp."
+    },
+    "updated_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "RFC 3339 UTC timestamp."
+    }
+  },
+  "required": [
+    "api_version",
+    "kind",
+    "binding_id",
+    "org_id",
+    "nexus_deployment_id",
+    "zone_id",
+    "purpose",
+    "is_default",
+    "desired_capabilities",
+    "desired_state",
+    "sync_status",
+    "generation",
+    "created_at",
+    "updated_at"
+  ],
+  "additionalProperties": true,
+  "$comment": "additionalProperties stays true on purpose: under a supported major, unknown optional fields are accepted at the wire layer and dropped when parsed into the object model (see the generated adapter). Setting it to false would turn unknown-optional into a rejection, which contradicts the family wire rules."
+}

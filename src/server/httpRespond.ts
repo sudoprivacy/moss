@@ -9,7 +9,7 @@ import { PlatformConfigError } from './configuration/platformConfigService.js'
 // already needs node:sqlite for DirectConnectStore and therefore runs under
 // `tsx --test`).
 import type http from 'http'
-import { ServerDrainingError, TokenQuotaExceededError, AttemptTakeoverPendingError } from './runtimeService.js'
+import { ServerDrainingError, TokenQuotaExceededError, AttemptTakeoverPendingError, ZoneRequiredError } from './runtimeService.js'
 import { AuthServiceError } from './auth/service.js'
 import type { ServerLogger } from './serverLog.js'
 
@@ -41,6 +41,13 @@ export function writeError(
   // ServerDrainingError never degrades to a 500. Flat `{ error: <string> }`
   // matches every other writeError branch.
   if (error instanceof SessionStartupError) {
+    // The 503 body is fixed user-safe text; the actual startup failure rides
+    // on `cause` and must reach the server log, or it stays invisible.
+    const cause = error.cause
+    const detail = cause instanceof Error
+      ? `${cause.message}${cause.stack ? `\n${cause.stack}` : ''}`
+      : cause !== undefined ? String(cause) : 'no cause captured'
+    logger.error(`session startup failed (attempt ${error.failure.attemptId}, code ${error.failure.code}): ${detail}`)
     writeJson(res, error.statusCode, { error: error.message, startup: error.failure })
     return
   }
@@ -57,6 +64,13 @@ export function writeError(
   // background task drives the respawn.
   if (error instanceof AttemptTakeoverPendingError) {
     writeJson(res, 503, { error: error.message })
+    return
+  }
+  // MOSS_REQUIRE_ZONE strict mode refusal: an answer, not a fault — 409 tells
+  // the caller the org lacks an active Zone binding and retrying changes
+  // nothing until an admin binds one.
+  if (error instanceof ZoneRequiredError) {
+    writeJson(res, 409, { error: error.message })
     return
   }
   // A budget refusal is an answer, not a fault. Left to the fallback below it
