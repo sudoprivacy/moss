@@ -78,7 +78,8 @@ try {
   const initialB = (await invoke(b, { kind: 'state' })).session
   assert.notEqual(initialA.profileId, initialB.profileId)
   for (const binding of [a, b]) {
-    assert.notEqual((await tool(binding, 'browser_launch', { isHeadless: true, transport: 'extension' })).isError, true)
+    const launched = await tool(binding, 'browser_launch', { isHeadless: true, transport: 'extension' })
+    assert.notEqual(launched.isError, true, `browser_launch failed for ${binding.userId}: ${JSON.stringify(launched)}`)
     const { session } = await invoke(binding, { kind: 'state' })
     const owner = binding === a ? 'owner-a' : 'owner-b'
     assert.notEqual((await tool(binding, 'browser_action', { kind: 'navigate', controlEpoch: session.controlEpoch, targetEpoch: session.targetEpoch, url: `http://${fixtureHost}:${port}/${owner}` })).isError, true)
