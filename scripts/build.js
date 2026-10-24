@@ -59,6 +59,24 @@ function build(label, args) {
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
+function buildUpgradeChecker() {
+  for (const [name, entry] of [
+    ['qualify-sqlite-upgrade', 'qualify-sqlite-upgrade'],
+    ['inspect-existing-product', 'inspect-existing-product'],
+  ]) {
+    const outfile = `bin/moss-${name}.mjs`
+    build(outfile, ['build', `scripts/e2e/${entry}.ts`, `--outfile=${outfile}`,
+      '--target=node', '--format=esm', ...aliases, ...defines])
+    sanitizePaths(outfile)
+  }
+}
+
+// Offline deploy qualification needs no admin UI, native tools or daemon fetch.
+if (process.argv.includes('--upgrade-check-only')) {
+  buildUpgradeChecker()
+  process.exit(0)
+}
+
 function ensureAdminBuildDependencies() {
   const requiredPaths = [
     resolve('admin', 'node_modules', 'vite', 'package.json'),
@@ -160,6 +178,7 @@ build('bin/moss-server.mjs', [
   ...external,
 ])
 sanitizePaths('bin/moss-server.mjs')
+buildUpgradeChecker()
 
 // 会话存档 pull child. Forked by MsgAuditWorker so a crash inside the
 // native WeCom SDK kills only this process. It is spawned by path, not

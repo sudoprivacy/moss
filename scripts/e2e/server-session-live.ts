@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import WebSocket from 'ws'
+import { productConversation } from './productConversation.js'
 
 const [baseUrl, credentialsFile, evidence, ...runtimes] = process.argv.slice(2)
 assert.equal(process.env.MOSS_COHOST_LIVE, '1', 'Explicit live-provider opt-in is required')
@@ -25,49 +25,7 @@ async function request(path: string, method = 'GET', body?: unknown, expected = 
   assert.equal(response.status, expected, `${method} ${path} returned ${response.status}`)
   return response.json() as Promise<any>
 }
-function conversation(url: string, name: string) {
-  const socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } })
-  const events: any[] = []
-  let resolveHello: (() => void) | undefined
-  let rejectHello: ((error: Error) => void) | undefined
-  const hello = new Promise<void>((resolve, reject) => { resolveHello = resolve; rejectHello = reject })
-  let pending: { resolve(value: string): void, reject(error: Error): void, text: string } | undefined
-  const fail = (error: Error) => { rejectHello?.(error); pending?.reject(error); pending = undefined }
-  socket.on('error', fail)
-  socket.on('close', () => { if (pending) fail(new Error('WebSocket closed during a live turn')) })
-  socket.on('message', bytes => {
-    try {
-      const event = JSON.parse(bytes.toString())
-      events.push(event)
-      if (event.type === 'hello') resolveHello?.()
-      if (event.type === 'error' || event.type === 'control_request') throw new Error(`Unexpected live event: ${event.type}`)
-      if (event.type === 'assistant' && pending) {
-        const content = event.message?.content
-        pending.text += typeof content === 'string' ? content : Array.isArray(content)
-          ? content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('') : ''
-      }
-      if (event.type === 'result' && pending) {
-        assert.equal(event.status, 'success')
-        pending.resolve(pending.text); pending = undefined
-      }
-    } catch (error) { fail(error instanceof Error ? error : new Error(String(error))) }
-  })
-  return {
-    ready: () => Promise.race([hello, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('WebSocket hello timed out')), 30_000).unref())]),
-    async turn(text: string) {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      try {
-        return await new Promise<string>((resolve, reject) => {
-          assert(!pending)
-          pending = { resolve, reject, text: '' }
-          timer = setTimeout(() => fail(new Error('Live WebSocket turn timed out')), 180_000)
-          socket.send(JSON.stringify({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: text } }))
-        })
-      } finally { clearTimeout(timer) }
-    },
-    close() { writeFileSync(join(evidence, `${name}.private.json`), JSON.stringify(events)); socket.close() },
-  }
-}
+const conversation = (url: string, name: string) => productConversation(url, token, evidence, name)
 const parseReply = (text: string) => JSON.parse(text.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '').trim())
 const login = await request('/api/v1/auth/login', 'POST', { grant_type: 'password', username: credentials.username, password: credentials.password })
 token = login.access_token
