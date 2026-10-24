@@ -18,6 +18,8 @@ const nodeTestFiles = [
   'src/server/runnerExitLifecycle.node-test.ts',
   'src/server/sessionResume.node-test.ts',
   'src/server/sessionSocketAuthorization.node-test.ts',
+  'src/server/runtimeAdmission.node-test.ts',
+  'src/server/runtimeAdmissionDaemon.node-test.ts',
   'src/server/agentManager.node-test.ts',
   'src/server/agentManagerRoutes.node-test.ts',
   'src/server/nexus/agentNamespace.node-test.ts',

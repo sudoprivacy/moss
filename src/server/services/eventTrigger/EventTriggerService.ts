@@ -182,6 +182,10 @@ export class EventTriggerService {
 
   /** Exposed for tests: run a single drain pass synchronously. */
   async tickOnce(): Promise<void> {
+    await this.config.runtimeService.workAdmission.tryRun(() => this.tickAdmittedOnce())
+  }
+
+  private async tickAdmittedOnce(): Promise<void> {
     const slots = MAX_CONCURRENT_RUNS - this.inFlight.size
     if (slots <= 0) return
 
@@ -189,7 +193,7 @@ export class EventTriggerService {
     for (const run of claimed) {
       this.inFlight.add(run.id)
       // Fire-and-forget: executeRun owns its own status transitions.
-      void this.executeRun(run).finally(() => this.inFlight.delete(run.id))
+      void this.config.runtimeService.workAdmission.run(() => this.executeRun(run)).finally(() => this.inFlight.delete(run.id))
     }
   }
 

@@ -13,6 +13,7 @@ import type { RunnerManifest } from './types.js'
 import type { BackendHandle } from './sessionManager.js'
 import { isUninitializedCohostSession, removeCohostSessionState } from './backends/cohostSessionState.js'
 import type { SessionAttemptFence } from './storage/sessionAttemptFence.js'
+import { RunnerInputAdmission } from './runtime/runnerInputAdmission.js'
 
 type SocketWithBuffer = net.Socket & {
   __buffer?: string
@@ -88,6 +89,7 @@ export class SessionRunnerDaemon {
   readonly #store: DirectConnectStore
   readonly #backend: RuntimeBackend
   readonly #clients = new Set<SocketWithBuffer>()
+  readonly #inputAdmission: RunnerInputAdmission
   readonly #applicationHello: ApplicationHelloReplayBuffer
   readonly #heartbeatTimer: NodeJS.Timeout
   #server: net.Server | null = null
@@ -133,6 +135,8 @@ export class SessionRunnerDaemon {
   constructor(private readonly manifest: RunnerManifest, store: DirectConnectStore) {
     if (['external', 'hosted'].includes(manifest.session.runtime.type) || ['external_provider', 'hosted_artifact'].includes(manifest.session.runtime.engine)) throw new Error('Task-managed sessions cannot launch a native session runner')
     this.#store = store
+    this.#inputAdmission = new RunnerInputAdmission({ clients: () => this.#clients,
+      activity: async () => ({ isReady: await this.#checkReady(), isBusy: this.#handle?.isBusy?.() }) })
     this.#applicationHello = new ApplicationHelloReplayBuffer(
       manifest.session.sessionId,
     )
@@ -475,6 +479,7 @@ export class SessionRunnerDaemon {
   }
 
   #onClient(socket: SocketWithBuffer): void {
+    socket.setEncoding('utf8')
     this.#clients.add(socket)
     this.#clearIdleTimer()
     // A-6: only stamp lifecycle while the session is genuinely live — a
@@ -495,7 +500,7 @@ export class SessionRunnerDaemon {
     this.#send(socket, this.#runnerHello())
     this.#applicationHello.replay(message => this.#send(socket, message))
     socket.on('data', chunk => {
-      const text = Buffer.from(chunk).toString('utf8')
+      const text = String(chunk)
       socket.__buffer = (socket.__buffer ?? '') + text
       while (true) {
         const idx = socket.__buffer.indexOf('\n')
@@ -507,10 +512,12 @@ export class SessionRunnerDaemon {
     })
     socket.on('close', () => {
       this.#clients.delete(socket)
+      this.#inputAdmission.disconnected(socket)
       this.#armIdleTimer()
     })
     socket.on('error', () => {
       this.#clients.delete(socket)
+      this.#inputAdmission.disconnected(socket)
       this.#armIdleTimer()
     })
   }
@@ -523,6 +530,7 @@ export class SessionRunnerDaemon {
       sessionId: this.manifest.session.sessionId,
       runtimeType: this.manifest.session.runtime.type,
       state: this.#state,
+      inputPauseSupported: true,
       ...(this.#handle?.managedProcessId ? { managedProcessId: this.#handle.managedProcessId } : {}),
       ...(this.#handle?.cohostSessionBinding ? { cohostSessionBinding: this.#handle.cohostSessionBinding } : {}),
     }
@@ -539,6 +547,24 @@ export class SessionRunnerDaemon {
       return
     }
     process.stderr.write(`[SessionRunnerDaemon] Parsed message type: ${parsed.type}\n`)
+    if (parsed.type === 'pause_input') {
+      if (typeof parsed.pauseId !== 'string' || typeof parsed.requestId !== 'string') return
+      const request = parsed
+      void this.#inputAdmission.pause(request.pauseId, socket).then(activity => {
+        this.#send(socket, { type: 'input_paused', requestId: request.requestId,
+          attemptId: this.manifest.attempt.attemptId, ...activity })
+      }).catch(() => {
+        this.#send(socket, { type: 'input_paused', requestId: request.requestId,
+          attemptId: this.manifest.attempt.attemptId, isInputDrained: false, isReady: false })
+      })
+      return
+    }
+    if (parsed.type === 'resume_input') {
+      if (typeof parsed.pauseId !== 'string' || typeof parsed.requestId !== 'string') return
+      this.#inputAdmission.resume(parsed.pauseId)
+      this.#send(socket, { type: 'input_resumed', requestId: parsed.requestId, attemptId: this.manifest.attempt.attemptId })
+      return
+    }
     if (parsed.type === 'ping') {
       void this.#checkReady().then(isReady => {
         this.#send(socket, { type: 'pong', ts: Date.now(), isReady,
@@ -560,6 +586,10 @@ export class SessionRunnerDaemon {
       return
     }
     if (parsed.type === 'stdin') {
+      if (!this.#inputAdmission.allowsInput(socket)) {
+        this.#send(socket, { type: 'error', message: 'runtime_input_paused' })
+        return
+      }
       process.stderr.write(`[SessionRunnerDaemon] RECEIVED STDIN: ${parsed.data?.slice(0, 100)}...\n`)
       if (this.#handle) {
         this.#handle.writeStdin(parsed.data)
@@ -655,6 +685,7 @@ export class SessionRunnerDaemon {
   }
 
   #send(socket: SocketWithBuffer, message: RunnerServerMessage): void {
+    if (socket.destroyed || !socket.writable) return
     socket.write(`${jsonStringify(message)}\n`)
   }
 

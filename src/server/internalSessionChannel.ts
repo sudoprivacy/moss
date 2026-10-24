@@ -46,6 +46,7 @@ export interface ChannelDeps {
   authService: AuthService
   store: DirectConnectStore
   config: ServerConfig
+  admissionContinuation?: string
 }
 
 function retryDelayMs(retryIndex: number): number {
@@ -129,7 +130,7 @@ export async function openInternalSessionChannel(
     if (!token) throw new Error(`Cannot mint internal token for session ${sessionId}`)
 
     try {
-      return await connectOnce(url, token, options.handshakeTimeoutMs)
+      return await connectOnce(url, token, options.handshakeTimeoutMs, deps.admissionContinuation)
     } catch (error) {
       lastError = error
       // Permanent handshake failures only: 401/403 (auth) and 404
@@ -203,13 +204,14 @@ export async function revokeInternalSessionToken(
   }
 }
 
-function connectOnce(url: string, token: string, handshakeTimeoutMs?: number): Promise<InternalSessionChannel> {
+function connectOnce(url: string, token: string, handshakeTimeoutMs?: number, admissionContinuation?: string): Promise<InternalSessionChannel> {
   return new Promise((resolve, reject) => {
     const emitter = new EventEmitter() as InternalSessionChannel & { destroyed: boolean }
     let settled = false
     let ws: WebSocket
     try {
-      ws = new WebSocket(url, { headers: { authorization: `Bearer ${token}` }, handshakeTimeout: handshakeTimeoutMs })
+      ws = new WebSocket(url, { headers: { authorization: `Bearer ${token}`,
+        ...(admissionContinuation ? { 'x-moss-work-admission': admissionContinuation } : {}) }, handshakeTimeout: handshakeTimeoutMs })
     } catch (error) {
       reject(error)
       return

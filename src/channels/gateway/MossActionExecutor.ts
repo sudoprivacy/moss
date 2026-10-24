@@ -96,6 +96,14 @@ export class MossActionExecutor {
    * Handle incoming message from a channel plugin
    */
   private async handleIncomingMessage(message: IUnifiedIncomingMessage, sourcePlugin: BasePlugin): Promise<void> {
+    const work = this.runtime.workAdmission.tryRun(() => this.handleAdmittedIncomingMessage(message, sourcePlugin));
+    if (work) { await work; return; }
+    await sourcePlugin.sendMessage(message.chatId, {
+      type: 'text', text: 'Runtime maintenance is in progress. Please send your message again after maintenance.',
+    } as any);
+  }
+
+  private async handleAdmittedIncomingMessage(message: IUnifiedIncomingMessage, sourcePlugin: BasePlugin): Promise<void> {
     const { platform, chatId, user, content } = message;
     console.log(`[MossActionExecutor] Incoming message from ${platform}: userId=${user.id}, chatId=${chatId}, type=${content.type}`);
 
