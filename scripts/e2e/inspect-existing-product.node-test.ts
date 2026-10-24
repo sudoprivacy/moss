@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -7,9 +7,17 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { WebSocketServer } from 'ws'
+import { DatabaseSync } from 'node:sqlite'
+import { sessionAgentName } from '../../src/server/agentIdentity.js'
 import { productConversation } from './productConversation.js'
 
-async function journey(redirect: boolean, resume = false, terminate = false, ownerMatches = true, inspectOnly = false) {
+// Exercise the actual portable producer. Its production build resolves the
+// feature macros that plain Node/tsx cannot load from `bun:bundle` sources.
+const built = spawnSync('bun',['run','build:upgrade-check'],{encoding:'utf8'})
+assert.equal(built.status,0,`Build the real product producer: ${built.stderr}`)
+
+async function journey(redirect: boolean, resume = false, terminate = false, ownerMatches = true, inspectOnly = false,
+  native?: 'canonical' | 'mismatch' | 'wrong-owner') {
   const root = mkdtempSync(join(tmpdir(), 'moss-product-inspect-'))
   const calls: string[] = []
   let redirectedCalls = 0
@@ -35,17 +43,29 @@ async function journey(redirect: boolean, resume = false, terminate = false, own
     untrusted.listen(0, '127.0.0.1'); await once(untrusted, 'listening')
     server.listen(0, '127.0.0.1'); await once(server, 'listening')
     const config = join(root, 'server.json'), evidence = join(root, 'evidence')
+    const databasePath = join(root,'native.sqlite')
+    const binding = {ownerId:'owner-existing',agentId:sessionAgentName('owner-existing',undefined),
+      durableSessionId:'native-original',repositoryPath:`/agents/${sessionAgentName('owner-existing',undefined)}/workspaces/old-session`}
+    const database = new DatabaseSync(databasePath)
+    database.exec('CREATE TABLE cohost_sessions (session_id TEXT PRIMARY KEY, owner_user_id TEXT, native_agent_id TEXT, durable_session_id TEXT, repository_path TEXT)')
+    if (native) database.prepare('INSERT INTO cohost_sessions VALUES (?,?,?,?,?)').run('old-session',native === 'wrong-owner' ? 'other-owner' : binding.ownerId,binding.agentId,binding.durableSessionId,binding.repositoryPath)
+    database.close()
+    const originalDatabase = readFileSync(databasePath)
+    const expected = join(root,'expected-binding.json')
+    if (native) writeFileSync(expected,JSON.stringify({...binding,...(native === 'mismatch' ? {durableSessionId:'different'} : {})}),{mode:0o600})
     writeFileSync(config, JSON.stringify({ server: { port: (server.address() as any).port },
+      storage:{dbBackend:'sqlite',dbPath:databasePath},
       bootstrapAdmin: { username: 'existing', password: 'private-password' } }), { mode: 0o600 })
-    const child = spawn(process.execPath, [resolve('node_modules/tsx/dist/cli.mjs'),
-      resolve('scripts/e2e/inspect-existing-product.ts'), config, evidence,
-      ...(inspectOnly ? ['--inspect-existing','old-session'] : resume ? ['--resume-existing','old-session'] : terminate ? ['--terminate-existing','old-session'] : [])], { stdio: ['ignore','pipe','pipe'] })
+    const child = spawn(process.execPath, [resolve('bin/moss-inspect-existing-product.mjs'), config, evidence,
+      ...(inspectOnly ? ['--inspect-existing','old-session'] : resume ? ['--resume-existing','old-session'] : terminate ? ['--terminate-existing','old-session'] : []),
+      ...(native ? ['--expected-binding',expected] : [])], { stdio: ['ignore','pipe','pipe'],env:{...process.env,MOSS_DB_BACKEND:'sqlite',MOSS_DATABASE_URL:''} })
     let stdout = '', stderr = ''
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
     const [exit] = await once(child, 'close')
     assert(existsSync(join(evidence, 'receipt.json')), `Product probe exited ${exit} before its receipt: ${stderr}`)
     const result = JSON.parse(readFileSync(join(evidence, 'receipt.json'), 'utf8'))
+    assert.deepEqual(readFileSync(databasePath),originalDatabase,'Inspection must not migrate or rewrite the native binding store')
     for (const secret of ['private-password','private-token','private-refresh','private-history']) {
       assert(!JSON.stringify(result).includes(secret)); assert(!stdout.includes(secret)); assert(!stderr.includes(secret))
     }
@@ -86,6 +106,22 @@ void test('explicit inspection selects the original owned session without resumi
 
 void test('explicit inspection refuses another owner before any execution request', async () => {
   const result = await journey(false,false,false,false,true)
+  assert.equal(result.exit,1)
+  assert.equal(result.result.turnSubmitted,false)
+  assert.equal(result.result.probeTokenLoggedOut,true)
+  assert(!result.calls.some(call => call.endsWith('/resume')))
+})
+
+void test('native inspection uses the canonical repository after the legacy locator was removed', async () => {
+  const result = await journey(false,false,false,true,true,'canonical')
+  assert.equal(result.exit,0)
+  assert.equal(result.result.nativeBindingObserved.durableSessionId,'native-original')
+  assert.equal(result.result.turnSubmitted,false)
+  assert(!result.calls.some(call => call.endsWith('/resume')))
+})
+
+for (const mode of ['mismatch','wrong-owner'] as const) void test(`native ${mode} refuses before resume or model submission`, async () => {
+  const result = await journey(false,true,false,true,false,mode)
   assert.equal(result.exit,1)
   assert.equal(result.result.turnSubmitted,false)
   assert.equal(result.result.probeTokenLoggedOut,true)

@@ -9,22 +9,31 @@ import { isAbsolute, join } from 'node:path'
 import { serverFileConfigSchema } from '../../src/server/types.js'
 import { sessionAgentName } from '../../src/server/agentIdentity.js'
 import { readCohostSessionState } from '../../src/server/backends/cohostSessionState.js'
-import { CohostSessionRepository } from '../../src/server/runtime/cohostSessionRepository.js'
+import { CohostSessionRepository, parseCohostSessionBinding } from '../../src/server/runtime/cohostSessionRepository.js'
 import { SqliteDriver } from '../../src/server/db/driver.js'
 import { DatabaseSync } from 'node:sqlite'
 import { productConversation } from './productConversation.js'
 
-const [configPath, evidence, action, requestedSessionId] = process.argv.slice(2)
+const [configPath, evidence, action, requestedSessionId, expectedFlag, expectedPath, ...extra] = process.argv.slice(2)
 assert(configPath && evidence && isAbsolute(configPath) && isAbsolute(evidence), 'Use absolute existing-config and new-evidence paths')
 assert((action === undefined && requestedSessionId === undefined) ||
   (['--inspect-existing','--resume-existing','--exercise-existing','--terminate-existing'].includes(action!) && requestedSessionId),
 'Use an explicit existing-session recovery, model journey or cleanup action')
+assert(extra.length === 0 && ((expectedFlag === undefined && expectedPath === undefined) ||
+  (expectedFlag === '--expected-binding' && expectedPath && isAbsolute(expectedPath) &&
+    ['--inspect-existing','--resume-existing','--exercise-existing'].includes(action!))), 'Use an explicit private expected native binding')
 const resume = action === '--resume-existing' || action === '--exercise-existing'
 if (process.platform !== 'win32') {
   const metadata = statSync(configPath)
   assert.equal(metadata.uid, process.getuid?.(), 'Use the current owner configuration')
   assert.equal(metadata.mode & 0o077, 0, 'Configuration with credentials must be owner-only')
+  if (expectedPath) {
+    const expectedMetadata = statSync(expectedPath)
+    assert.equal(expectedMetadata.uid, process.getuid?.(), 'Use the current owner binding expectation')
+    assert.equal(expectedMetadata.mode & 0o077, 0, 'The expected binding must be owner-only')
+  }
 }
+const expectedBinding = expectedPath ? parseCohostSessionBinding(JSON.parse(readFileSync(expectedPath,'utf8'))) : undefined
 const raw = JSON.parse(readFileSync(configPath, 'utf8'))
 const config = serverFileConfigSchema().parse(raw)
 // Never try a parser's default credential or a credential for a different app.
@@ -85,69 +94,79 @@ try {
       await request(`/api/v1/sessions/${encodeURIComponent(id)}/terminate`, 'POST', {})
       report.executionTerminationHttpAccepted = true
     }
-    if (resume) {
+    if (resume || (action === '--inspect-existing' && expectedBinding)) {
       assert.equal(result.session?.userId, me.user.id, 'Recovery requires the actual existing owner')
       // The public context response serializes its native cwd as workDir.
       assert(typeof result.session.workDir === 'string' && result.session.workDir, 'Existing workspace is required')
-      const legacy = await readCohostSessionState(result.session.workDir)
-      assert(legacy?.durableSessionId && legacy.repositoryPath, 'Keep the existing native locator; never initialize a replacement')
       const expectedAgent = sessionAgentName(me.user.id, result.session.assistantName)
-      // Match the existing deployed-session journey's REST recovery budget;
-      // ordinary read/login probes retain their separate 15-second bound.
-      const resumed = await request(`/api/v1/sessions/${encodeURIComponent(id)}/resume`, 'POST', {}, 180_000)
-      assert.equal(resumed.session?.sessionId, id, 'Logical product session changed')
-      // The full configuration resolver reaches producer-bundled feature
-      // imports. Keep it out of the standalone read-only inspection path.
       const { readServerConfig } = await import('../../src/server/config.js')
       const resolved = (await readServerConfig(configPath)).config
       assert.equal(resolved.dbBackend, 'sqlite', 'This recovery journey requires the existing SQLite store')
-      const db = new DatabaseSync(resolved.dbPath, { readOnly:true })
-      let binding
-      try { binding = await new CohostSessionRepository(new SqliteDriver(db)).get(id) } finally { db.close() }
-      assert.deepEqual(binding, { ownerId:me.user.id,agentId:expectedAgent,
-        durableSessionId:legacy.durableSessionId,repositoryPath:legacy.repositoryPath }, 'Native recovery binding changed')
-      const after = await request(`/api/v1/sessions/${encodeURIComponent(id)}/context`)
-      assert.equal(createHash('sha256').update(JSON.stringify(after.context?.messages)).digest('hex'), messagesSha256,
-        'Persisted UI history changed during resume without a turn')
-      // HTTP acceptance can precede an asynchronous native session/load
-      // failure. The enclosing fixture must inspect the live native process;
-      // this producer read alone does not prove an engine resumed.
-      report.resumeHttpAccepted = true
-      report.nativeBindingPreserved = binding
-      report.projectedContextPreserved = true
-      report.executionLifecycleOwner = 'Moss operator or enclosing private-copy fixture'
-      if (action === '--exercise-existing') {
-        const marker = `DEPLOY_${randomUUID().replaceAll('-','')}`
-        const first = 17 * 29 + 47
-        const parseReply = (text: string) => JSON.parse(text.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '').trim())
-        const connect = async (url: string, name: string) => {
-          const target = new URL(url)
-          assert.equal(target.protocol,'ws:','Use the original local Moss WebSocket')
-          assert.equal(target.hostname,'127.0.0.1','Refuse forwarding the product token to another host')
-          assert.equal(target.port,String(config.server.port),'Refuse another product port')
-          const controller = productConversation(url,token,evidence,name)
-          try { await controller.ready(); return controller } catch (error) { controller.close(); throw error }
+      const readBinding = async () => {
+        const db = new DatabaseSync(resolved.dbPath, { readOnly:true })
+        try { return await new CohostSessionRepository(new SqliteDriver(db)).get(id) } finally { db.close() }
+      }
+      let originalBinding = await readBinding()
+      if (!originalBinding) {
+        const legacy = await readCohostSessionState(result.session.workDir)
+        assert(legacy?.durableSessionId && legacy.repositoryPath, 'Keep the existing native locator or repository binding; never initialize a replacement')
+        originalBinding = parseCohostSessionBinding({ownerId:me.user.id,agentId:expectedAgent,
+          durableSessionId:legacy.durableSessionId,repositoryPath:legacy.repositoryPath})
+      }
+      assert.equal(originalBinding.ownerId,me.user.id,'Native binding belongs to another owner')
+      assert.equal(originalBinding.agentId,expectedAgent,'Native binding belongs to another Agent')
+      if (expectedBinding) assert.deepEqual(originalBinding,expectedBinding,'Original native binding changed before resume')
+      report.nativeBindingObserved = originalBinding
+      if (resume) {
+        // Match the existing deployed-session journey's REST recovery budget;
+        // ordinary read/login probes retain their separate 15-second bound.
+        const resumed = await request(`/api/v1/sessions/${encodeURIComponent(id)}/resume`, 'POST', {}, 180_000)
+        assert.equal(resumed.session?.sessionId, id, 'Logical product session changed')
+        const binding = await readBinding()
+        assert.deepEqual(binding,originalBinding,'Native recovery binding changed')
+        const after = await request(`/api/v1/sessions/${encodeURIComponent(id)}/context`)
+        assert.equal(createHash('sha256').update(JSON.stringify(after.context?.messages)).digest('hex'), messagesSha256,
+          'Persisted UI history changed during resume without a turn')
+        // HTTP acceptance can precede an asynchronous native session/load
+        // failure. The enclosing fixture must inspect the live native process;
+        // this producer read alone does not prove an engine resumed.
+        report.resumeHttpAccepted = true
+        report.nativeBindingPreserved = binding
+        report.projectedContextPreserved = true
+        report.executionLifecycleOwner = 'Moss operator or enclosing private-copy fixture'
+        if (action === '--exercise-existing') {
+          const marker = `DEPLOY_${randomUUID().replaceAll('-','')}`
+          const first = 17 * 29 + 47
+          const parseReply = (text: string) => JSON.parse(text.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '').trim())
+          const connect = async (url: string, name: string) => {
+            const target = new URL(url)
+            assert.equal(target.protocol,'ws:','Use the original local Moss WebSocket')
+            assert.equal(target.hostname,'127.0.0.1','Refuse forwarding the product token to another host')
+            assert.equal(target.port,String(config.server.port),'Refuse another product port')
+            const controller = productConversation(url,token,evidence,name)
+            try { await controller.ready(); return controller } catch (error) { controller.close(); throw error }
+          }
+          let controller: ReturnType<typeof productConversation> | undefined
+          try {
+            controller = await connect(resumed.ws_url,'existing-first')
+            report.turnSubmitted = true
+            assert.deepEqual(parseReply(await controller.turn(`Deployment qualification code ${marker}: 17 units at 29 each, plus delivery 47. Calculate the subtotal. Reply only JSON with code and subtotal. Do not use tools.`)),{code:marker,subtotal:first})
+            assert.deepEqual(parseReply(await controller.turn('Add a handling fee of 13 to that subtotal. Use the code from this conversation. Reply only JSON with code and total. Do not use tools.')),{code:marker,total:first+13})
+            controller.close(); controller = undefined
+            const reattached = await request(`/api/v1/sessions/${encodeURIComponent(id)}/resume`,'POST',{},180_000)
+            assert.equal(reattached.session?.sessionId,id,'Reattach changed the existing product session')
+            controller = await connect(reattached.ws_url,'existing-reattached')
+            assert.deepEqual(parseReply(await controller.turn('Recall the qualification code and final total from this conversation. Reply only JSON with code and total. Do not use tools.')),{code:marker,total:first+13})
+            const persisted = await request(`/api/v1/sessions/${encodeURIComponent(id)}/context`)
+            assert(JSON.stringify(persisted.context?.messages).includes(marker),'Fresh conversation missing from persisted product context')
+            assert(persisted.context.messages.length > result.context.messages.length,'No new product history was persisted')
+            report.modelJourneyAccepted = true
+            report.dependentReplyAndReattachAccepted = true
+            report.modelTurnsCompleted = 3
+            report.modelConfigurationChanged = false
+            report.originalHistoryBeforeJourneySha256 = messagesSha256
+          } finally { controller?.close() }
         }
-        let controller: ReturnType<typeof productConversation> | undefined
-        try {
-          controller = await connect(resumed.ws_url,'existing-first')
-          report.turnSubmitted = true
-          assert.deepEqual(parseReply(await controller.turn(`Deployment qualification code ${marker}: 17 units at 29 each, plus delivery 47. Calculate the subtotal. Reply only JSON with code and subtotal. Do not use tools.`)),{code:marker,subtotal:first})
-          assert.deepEqual(parseReply(await controller.turn('Add a handling fee of 13 to that subtotal. Use the code from this conversation. Reply only JSON with code and total. Do not use tools.')),{code:marker,total:first+13})
-          controller.close(); controller = undefined
-          const reattached = await request(`/api/v1/sessions/${encodeURIComponent(id)}/resume`,'POST',{},180_000)
-          assert.equal(reattached.session?.sessionId,id,'Reattach changed the existing product session')
-          controller = await connect(reattached.ws_url,'existing-reattached')
-          assert.deepEqual(parseReply(await controller.turn('Recall the qualification code and final total from this conversation. Reply only JSON with code and total. Do not use tools.')),{code:marker,total:first+13})
-          const persisted = await request(`/api/v1/sessions/${encodeURIComponent(id)}/context`)
-          assert(JSON.stringify(persisted.context?.messages).includes(marker),'Fresh conversation missing from persisted product context')
-          assert(persisted.context.messages.length > result.context.messages.length,'No new product history was persisted')
-          report.modelJourneyAccepted = true
-          report.dependentReplyAndReattachAccepted = true
-          report.modelTurnsCompleted = 3
-          report.modelConfigurationChanged = false
-          report.originalHistoryBeforeJourneySha256 = messagesSha256
-        } finally { controller?.close() }
       }
     }
     if (result.context.messages.length > 0) break

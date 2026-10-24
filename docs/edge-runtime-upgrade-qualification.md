@@ -82,6 +82,17 @@ turn. Deployment orchestration uses this preflight before the separately
 authorized `--exercise-existing` journey; it must not infer that a read-only
 inspection started an engine.
 
+The optional `--expected-binding PRIVATE_JSON` verifies the original
+`ownerId`, `agentId`, `durableSessionId` and `repositoryPath` before any resume
+request. Read the current `CohostSessionRepository` first; the legacy locator
+is only the migration fallback when no canonical binding exists. A successful
+Moss adoption removes that old file, so its later absence must not cause a new
+SID or require the operator to recreate it. The expected file supplies a
+comparison, not authority. Native binding reads open SQLite read-only and
+report `nativeBindingObserved`; ownership, malformed/missing state and changed
+expectations refuse before execution. Shared deploy runs this mode during its
+read-only preflight as well as the subsequent model journey.
+
 The explicit `CONFIG EVIDENCE --resume-existing SESSION_ID` mode instead
 resumes that already-visible, same-owner cohost session through the normal
 Moss API. It requires the original locator, verifies the native repository's
