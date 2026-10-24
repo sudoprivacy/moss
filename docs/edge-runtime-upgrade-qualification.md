@@ -28,8 +28,11 @@ Its private copy is removed afterward. The in-repository process tests cover
 source-file preservation, committed WAL data with the source still open, and
 refusal of an invalid database without repairing the original.
 
-Bundle the checker and its exact dependencies for an offline target rather
-than installing a compiler or a new production service there. Bind the receipt
+`bun run build:upgrade-check` builds only the self-contained Node checker at
+`bin/moss-qualify-sqlite-upgrade.mjs`, using the same production bundle settings.
+The normal build also includes it in `bin` for a producer release. On an offline
+target run `node /pinned/bin/moss-qualify-sqlite-upgrade.mjs /absolute/moss.db`;
+no compiler, package installation or new service is required. Bind the receipt
 to the source and generated bundle hashes. Dependency/source equivalence must
 be established before using an older producer artifact's migration result.
 
