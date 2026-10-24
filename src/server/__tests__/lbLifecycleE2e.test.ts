@@ -10,6 +10,7 @@
 // never runs the child's listener (verified by probe), so the signal path is
 // covered by the docker E2E (Linux) instead.
 import { afterEach, describe, expect, it } from 'bun:test'
+import { randomUUID } from 'node:crypto'
 
 // Every case passes 60_000 as bun:test's per-case timeout (third argument):
 // each spawns a real server process (DB migrations + service init take 3-8s on
@@ -179,6 +180,55 @@ afterEach(async () => {
 })
 
 describe('LB lifecycle E2E (real server process, node runtime)', () => {
+  it('pauses actual HTTP and public WebSocket admission, preserves the session, and releases the matching epoch', async () => {
+    const fixture = await startFixture()
+    const root = `${fixture.baseUrl}/api/v1/admin/runtime-admission`
+    const headers = { Authorization: `Bearer ${fixture.token}`, 'Content-Type': 'application/json' }
+    expect((await fetch(root)).status).toBe(401)
+    const initial = await fetch(root, { headers })
+    expect(initial.status, fixture.stderrOutput.join('')).toBe(200)
+    const identity = await initial.json() as { instanceId: string; epochId: string; isPaused: boolean }
+    expect(identity.isPaused).toBe(false)
+    const pauseId = randomUUID()
+    const target = `${root}/pauses/${pauseId}`
+    const stale = { ...identity, epochId: randomUUID() }
+    expect((await fetch(target, { method: 'PUT', headers, body: JSON.stringify(stale) })).status).toBe(409)
+    const prepare = await fetch(target, { method: 'PUT', headers, body: JSON.stringify(identity) })
+    expect(prepare.status, fixture.stderrOutput.join('')).toBe(200)
+    expect(await prepare.json()).toMatchObject({ isPaused: true, isInputDrained: true, pauseIds: [pauseId] })
+    const created = await fetch(`${fixture.baseUrl}/api/v1/sessions`, {
+      method: 'POST', headers, body: JSON.stringify({ cwd: fixture.rootDir }),
+    })
+    expect(created.status, fixture.stderrOutput.join('')).toBe(503)
+    expect(await created.json()).toEqual({ error: 'Runtime work admission is paused' })
+    const client = Bun.spawnSync(['node', '-e', `
+      const WebSocket = require(process.argv[1]);
+      const ws = new WebSocket(process.argv[2], { headers: {
+        Authorization: 'Bearer ' + process.argv[3], 'x-moss-work-admission': 'untrusted-public-ticket'
+      } });
+      const timeout = setTimeout(() => { console.error('Maintenance handshake did not finish'); ws.terminate(); process.exitCode = 1; }, 3000);
+      ws.once('unexpected-response', (_, response) => { clearTimeout(timeout); console.log(response.statusCode); response.resume(); ws.terminate(); });
+      ws.once('open', () => { clearTimeout(timeout); console.error('Paused public input was admitted'); ws.terminate(); process.exitCode = 1; });
+      ws.once('error', error => { clearTimeout(timeout); if (!error.message.includes('closed before')) { console.error(error.message); process.exitCode = 1; } });
+    `, resolve(import.meta.dir, '../../../node_modules/ws'),
+    `${fixture.baseUrl.replace('http:', 'ws:')}/ws/sessions/lb-e2e-seed-session`, fixture.token])
+    expect(client.exitCode, client.stderr.toString()).toBe(0)
+    expect(client.stdout.toString().trim()).toBe('503')
+    const retained = await fetch(`${fixture.baseUrl}/api/v1/sessions/lb-e2e-seed-session`, { headers })
+    expect(retained.status, fixture.stderrOutput.join('')).toBe(200)
+    expect(await retained.json()).toMatchObject({ session: { sessionId: 'lb-e2e-seed-session',
+      transcriptSessionId: 'lb-e2e-seed-session', attemptId: null, status: 'active', desiredState: 'active' } })
+    const health = await fetch(`${fixture.baseUrl}/api/v1/admin/health`, { headers })
+    expect(await health.json()).toMatchObject({ checks: { draining: true } })
+    expect((await fetch(target, { method: 'DELETE', headers, body: JSON.stringify(stale) })).status).toBe(409)
+    const release = await fetch(target, { method: 'DELETE', headers, body: JSON.stringify(identity) })
+    expect(release.status).toBe(200)
+    expect(await release.json()).toMatchObject({ isPaused: false, pauseIds: [] })
+    const resumed = await fetch(`${fixture.baseUrl}/api/v1/admin/health`, { headers })
+    expect(await resumed.json()).toMatchObject({ checks: { draining: false } })
+    expect(fixture.process.exitCode).toBe(null)
+  }, 60_000)
+
   it('delivers the first frame sent at open while the runner attachment is delayed', async () => {
     const fixture = await startFixture({ MOSS_TEST_DELAYED_RUNNER: '1' })
     // Node's ws is the production client; Bun substitutes its own WebSocket.

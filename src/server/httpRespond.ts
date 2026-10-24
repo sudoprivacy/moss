@@ -1,6 +1,7 @@
 import { SessionStartupError } from './sessionStartup.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { PlatformConfigError } from './configuration/platformConfigService.js'
+import { WorkAdmissionPausedError } from '@sudo/user-runtime'
 // Extracted from server.ts for testability: importing the whole server.js
 // pulls in node:sqlite (bun cannot load it) AND bun:bundle (node cannot load
 // it), so its unit tests ran under neither runner. This module may transitively
@@ -55,7 +56,7 @@ export function writeError(
     writeJson(res, error.statusCode, { error: error.message })
     return
   }
-  if (error instanceof ServerDrainingError) {
+  if (error instanceof ServerDrainingError || error instanceof WorkAdmissionPausedError) {
     writeJson(res, 503, { error: error.message })
     return
   }
