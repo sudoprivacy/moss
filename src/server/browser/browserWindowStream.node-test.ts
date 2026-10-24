@@ -1,10 +1,60 @@
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { once } from 'node:events'
+import { createHash } from 'node:crypto'
 import { test } from 'node:test'
 import WebSocket, { WebSocketServer } from 'ws'
 import { browserAction, browserController, HttpBrowserWorker } from './browserGateway.js'
 import { bridgeBrowserWindowStream } from './browserWindowStream.js'
+
+void test('first RFB frame survives coalescing with the worker HTTP upgrade', { timeout: 5000 }, async t => {
+  const banner = Buffer.from('RFB 003.008\n')
+  const workerServer = http.createServer()
+  const gateway = http.createServer()
+  const gatewayWss = new WebSocketServer({ noServer: true })
+  const rawSockets = new Set<import('node:stream').Duplex>()
+  let upstream: WebSocket | undefined
+  let client: WebSocket | undefined
+  t.after(async () => {
+    client?.terminate()
+    upstream?.terminate()
+    for (const socket of gatewayWss.clients) socket.terminate()
+    for (const socket of rawSockets) socket.destroy()
+    gatewayWss.close()
+    await Promise.all([workerServer, gateway].map(server =>
+      new Promise<void>(resolve => server.close(() => resolve()))))
+  })
+  workerServer.on('upgrade', (request, socket) => {
+    rawSockets.add(socket)
+    const accept = createHash('sha1')
+      .update(request.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+      .digest('base64')
+    // Exercise a single TCP write containing both the upgrade and first RFB frame.
+    socket.write(Buffer.concat([
+      Buffer.from('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+        'Sec-WebSocket-Protocol: binary\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n'),
+      Buffer.from([0x82, banner.length]), banner,
+    ]))
+  })
+  workerServer.listen(0, '127.0.0.1')
+  await once(workerServer, 'listening')
+  const worker = new HttpBrowserWorker(`http://127.0.0.1:${(workerServer.address() as { port: number }).port}/`, 'fixture-only')
+  gateway.on('upgrade', (request, socket, head) => {
+    void worker.openWindowStream({ orgId: 'org', userId: 'owner', sessionId: 'task' }, 'user-owner',
+      { viewerId: 'viewer', controlEpoch: 1, targetEpoch: 1 }).then(channel => {
+      upstream = channel
+      gatewayWss.handleUpgrade(request, socket, head, downstream => {
+        bridgeBrowserWindowStream(downstream, channel, async () => true)
+      })
+    }).catch(() => socket.destroy())
+  })
+  gateway.listen(0, '127.0.0.1')
+  await once(gateway, 'listening')
+  client = new WebSocket(`ws://127.0.0.1:${(gateway.address() as { port: number }).port}/`, ['binary'])
+  const [message, isBinary] = await once(client, 'message')
+  assert.equal(isBinary, true)
+  assert.deepEqual(message, banner)
+})
 
 for (const trigger of ['frame', 'idle']) {
 void test(`real binary browser stream stops both directions after ${trigger} revocation`, { timeout: 8000 }, async t => {

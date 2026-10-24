@@ -19,7 +19,11 @@ export function connectWorkerWindowStream(
       followRedirects: false, handshakeTimeout: 10_000,
       maxPayload: 16 * 1024 * 1024, perMessageDeflate: false,
     })
-    upstream.once('open', () => resolve(upstream))
+    upstream.once('open', () => {
+      // The upgrade head may already contain the server's first RFB frame.
+      upstream.pause()
+      resolve(upstream)
+    })
     upstream.once('error', () => reject(new HttpError(503, 'browser_window_stream_unavailable')))
     upstream.once('unexpected-response', (_request, response) => {
       response.resume()
@@ -97,4 +101,5 @@ export function bridgeBrowserWindowStream(
   heartbeat.unref()
   pipe(client, upstream)
   pipe(upstream, client)
+  upstream.resume()
 }
