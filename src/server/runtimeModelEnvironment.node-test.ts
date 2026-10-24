@@ -5,6 +5,7 @@ import { test, type TestContext } from 'node:test'
 import { DirectConnectStore } from './db.js'
 import { RuntimeService } from './runtimeService.js'
 import { clearModelCache } from './modelListCache.js'
+import { ResourceAccessError } from './catalog/resourceError.js'
 import { normalizeModelProviders } from './modelProviders.js'
 import { clearUserModelPreference, getUserModelPreference, setUserModelPreference } from './userModelPreference.js'
 import type { ServerConfig, SessionRecord } from './types.js'
@@ -105,7 +106,9 @@ void test('runtime upgrade refuses missing owner model credentials without a sha
 void test('runtime upgrade refuses a disabled provider before changing placement', async t => {
   const f = await fixture(t)
   f.settings.modelProviders[0]!.enabled = false
-  await assert.rejects(f.service.upgradeUserRuntime(f.ownerId, 'org'), /No enabled model provider/)
+  await assert.rejects(f.service.upgradeUserRuntime(f.ownerId, 'org'), error =>
+    error instanceof ResourceAccessError && error.statusCode === 409 &&
+    error.message === 'Selected model provider is unavailable; select an available provider')
   assert.equal(f.requestCount(), 0)
   assert.equal(f.upgrades.length, 0)
   assert.equal(f.service.isUserRuntimeUpgrading(f.ownerId), false)
@@ -119,3 +122,33 @@ void test('an explicit runtime configuration does not resolve an unrelated prefe
   assert.equal(f.upgrades.length, 1)
   assert.equal(f.upgrades[0], config)
 })
+
+for (const isRemoved of [false, true]) {
+  void test(`a ${isRemoved ? 'removed' : 'disabled'} preferred provider cannot route runtime configuration to another provider`, async t => {
+    const f = await fixture(t)
+    const provider = f.settings.modelProviders[0]!
+    f.settings.modelProviders = [{ ...provider, id: 'other-provider' },
+      ...(isRemoved ? [] : [{ ...provider, enabled: false }])]
+    f.settings.defaultModelProviderId = 'other-provider'
+    await assert.rejects(f.service.upgradeUserRuntime(f.ownerId, 'org'), /Selected model provider is unavailable/)
+    await assert.rejects(f.startModel(), /Selected model provider is unavailable/)
+    assert.equal(f.requestCount(), 0)
+    assert.equal(f.upgrades.length, 0)
+  })
+}
+
+for (const isPreference of [false, true]) {
+  void test(`a colon in a ${isPreference ? 'qualified preferred' : 'raw default'} model ID preserves the configured provider`, async t => {
+    const f = await fixture(t)
+    f.settings.model = 'qwen:8b'
+    if (isPreference) await setUserModelPreference(f.ownerId, 'legacy-default:qwen:8b')
+    else await clearUserModelPreference(f.ownerId)
+    await f.service.upgradeUserRuntime(f.ownerId, 'org')
+    const config = f.upgrades[0]!
+    assert(JSON.parse(config['sudocode.json']).models['qwen:8b'])
+    const backend = JSON.parse(config['backend-config.json']).mounts[0].backend_params
+    assert.equal(backend.openai_base_url, f.endpoint)
+    assert.equal(backend.api_key, 'owner-only-test-key')
+    assert.equal(f.requestCount(), 0)
+  })
+}

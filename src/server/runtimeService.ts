@@ -1938,6 +1938,16 @@ export class RuntimeService {
       || process.env.MOSS_DEFAULT_MODEL
       || 'gemini-3-flash-preview'
 
+    // Stored choices are provider-qualified. A removed provider must not turn
+    // its old choice into an unqualified model on another provider. Organization
+    // defaults may still be raw model IDs containing a colon, such as qwen:8b.
+    if (!isCabinSession && userModelPref?.modelId.includes(':')) {
+      const providerId = userModelPref.modelId.slice(0, userModelPref.modelId.indexOf(':'))
+      if (!systemSettings.modelProviders.some(provider => provider.id === providerId && provider.enabled)) {
+        throw new ResourceAccessError(409, 'Selected model provider is unavailable; select an available provider')
+      }
+    }
+
     // Resolve the selected Provider before configuring either a runtime or a
     // session so neither can inherit an unrelated process-global endpoint.
     const selection = !isCabinSession ? resolveModelSelection(systemSettings.modelProviders, systemSettings.defaultModelProviderId, systemSettings.model, requestedModel) : null
