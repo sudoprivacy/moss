@@ -49,8 +49,9 @@ import { isUserActive, invalidateUserStatusCache } from './auth/userStatusCache.
 import { RuntimeService, ServerDrainingError, AttemptTakeoverPendingError } from './runtimeService.js'
 import { respondAfterSessionResume } from './sessionResume.js'
 import { HttpError, writeError, writeJson } from './httpRespond.js'
-import { authorizeSessionBrowser, browserController, invokeSessionBrowser } from './browser/browserGateway.js'
+import { authorizeSessionBrowser, browserAction, browserController, invokeSessionBrowser } from './browser/browserGateway.js'
 import { browserOwnerAllowed } from './browser/browserDeploymentPolicy.js'
+import { bridgeBrowserWindowStream } from './browser/browserWindowStream.js'
 import { BrowserWorkerRegistry, managedBrowserConfigured } from './browser/browserWorkerRegistry.js'
 import { notifyBrowserReturn } from './browser/browserHandoff.js'
 import { browserConversationIntent } from './browser/browserConversation.js'
@@ -2053,6 +2054,7 @@ export function startServer(
   })
   const privateAgentArchives = new PrivateAgentArchives(join(config.rootDir, 'private-agent-archives'))
   const wss = new WebSocketServer({ noServer: true })
+  const browserWss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, perMessageDeflate: false })
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
     cabinEnabled: config.cabin.enabled,
     getClientCronEnabled: orgId => authService.isOrganizationClientCronEnabled(orgId),
@@ -11263,6 +11265,36 @@ export function startServer(
         const url = new URL(req.url || '/', 'http://localhost')
         const pathname = url.pathname
 
+        const browserStreamMatch = pathname.match(/^\/ws\/sessions\/([^/]+)\/browser\/window$/)
+        if (browserStreamMatch) {
+          if (!managedBrowserConfigured()) throw new HttpError(503, 'Managed browser is not configured')
+          const sessionId = decodeURIComponent(browserStreamMatch[1]!)
+          const access = {
+            getSession: (id: string) => runtime.getSession(id),
+            isUserActive: async (principal: { userId: string; orgId: string }) =>
+              (await authService.getUserOrNull(principal.userId, principal.orgId))?.status === 'active',
+          }
+          const binding = await authorizeSessionBrowser(access, auth, sessionId)
+          const action = browserAction({ kind: 'window-stream', viewerId: url.searchParams.get('viewerId'),
+            controlEpoch: url.searchParams.has('controlEpoch') ? Number(url.searchParams.get('controlEpoch')) : undefined,
+            targetEpoch: url.searchParams.has('targetEpoch') ? Number(url.searchParams.get('targetEpoch')) : undefined })
+          const upstream = await browserWorkers.openWindowStream(binding, browserController(auth), action)
+          try {
+            browserWss.handleUpgrade(req, socket, head, ws => {
+              bridgeBrowserWindowStream(ws, upstream, async () => {
+                const current = token ? await authService.verifyAccessToken(token) : null
+                if (!current || current.orgId !== binding.orgId || current.userId !== binding.userId || !browserOwnerAllowed(binding)) return false
+                try { await authorizeSessionBrowser(access, current, sessionId); return true }
+                catch { return false }
+              })
+            })
+          } catch (error) {
+            upstream.terminate()
+            throw error
+          }
+          return
+        }
+
         // Internal server-side channel (HA): bare newline-delimited
         // runnerProtocol passthrough in BOTH directions — unlike the
         // Electron-facing /ws/sessions endpoint (which wraps any message as
@@ -11569,6 +11601,11 @@ export function startServer(
           socket.destroy()
           return
         }
+        if (error instanceof HttpError && /\/browser\/window(?:\?|$)/.test(req.url || '')) {
+          const status = [400, 403, 404, 409, 502, 503].includes(error.statusCode) ? error.statusCode : 500
+          socket.end(`HTTP/1.1 ${status} Browser Stream Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`)
+          return
+        }
         socket.destroy()
       }
     })()
@@ -11733,6 +11770,8 @@ export function startServer(
       cronService.stop()
       cabinFlightAutomation?.stop()
       wss.close()
+      for (const socket of browserWss.clients) socket.close(1001, 'Server stopping')
+      browserWss.close()
       msgAuditWorker.stop()
       // B-2: event triggers must stop claiming runs during the drain window
       // too — otherwise the ≤2s tick keeps claimQueuedRuns'ing runs that die

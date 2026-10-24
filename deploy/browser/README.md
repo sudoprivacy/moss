@@ -98,6 +98,36 @@ acknowledgement is reported and never retried.
 
 ## Explicit lifecycle
 
+### Optional read-only window stream
+
+The new `window-stream` browser action and
+`/ws/sessions/:sessionId/browser/window?viewerId=...&controlEpoch=...&targetEpoch=...`
+upgrade adapt the public worker's read-only RFB transport. The host validates
+the exact personal owner and current account access before opening the worker
+connection, before forwarding binary messages in either direction, and during
+idle periods. Revocation closes both sockets. Per-connection message and queue
+limits bound slow viewers; a failed handshake is returned without reconnecting
+or disclosing internal endpoints.
+
+The WebSocket uses the existing authenticated server upgrade route. Public
+browser clients must use the WebUI's session-authenticated proxy; they must not
+receive a Moss bearer token or a privileged worker header. Only an existing
+worker/profile bound to that exact task can stream. Opening a socket does not
+allocate a worker, claim an ended task's profile or release human control.
+
+VNC carries pixels and protocol negotiation. Keyboard, pointer and clipboard
+writes remain server-disabled in the public worker and use the ordinary
+epoch/lease-checked browser action API instead. This preserves conversation
+interrupt and native agent communication without adding business handoff
+buttons. The new worker capability is optional, so older workers continue to
+offer the existing JPEG/native-input path.
+
+This source adapter requires a public SDK release containing `windowStream`.
+The Dockerfile's current 0.58.3 pin does not provide it. The SDK release/pin,
+shared renderer and WebUI proxy, actual public graph/phone acceptance and
+production rollout remain separate delivery gates. Local real WebSocket proxy
+tests are not public end-to-end acceptance.
+
 `browser_launch` requires a launch mode and keeps an existing browser in that
 mode. A different mode returns `browser_restart_required`.
 `browser_restart` requires current control/target epochs, explicit transport
