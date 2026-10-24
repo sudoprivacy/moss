@@ -120,7 +120,8 @@ void test('an explicit runtime configuration does not resolve an unrelated prefe
   await f.service.upgradeUserRuntime(f.ownerId, 'org', config)
   assert.equal(f.requestCount(), 0)
   assert.equal(f.upgrades.length, 1)
-  assert.equal(f.upgrades[0], config)
+  assert.deepEqual(f.upgrades[0], { ...config, 'egress-policy.json': JSON.stringify(await f.service.egressPolicies.policy('org')) })
+  assert.deepEqual(config, { 'sudocode.json': '{}', 'backend-config.json': '{"mounts":[]}' }, 'Policy delivery must not mutate caller model configuration')
 })
 
 for (const isRemoved of [false, true]) {

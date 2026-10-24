@@ -1905,6 +1905,15 @@ export class AuthService {
       scopes: defaultScopesForRole(user.role) } : null
   }
 
+  /** Internal policy delivery inventory; authenticated admin routes select its scope. */
+  async listEgressPolicyOwners(organizationId?: string) {
+    const organizationIds = organizationId ? [organizationId] : (await this.db.listOrganizations()).map(org => org.id)
+    const rows = await Promise.all(organizationIds.map(async orgId =>
+      (await this.db.listUsersByOrg(orgId)).filter(user => user.status === 'active')
+        .map(user => ({ ownerId: user.id, organizationId: orgId }))))
+    return rows.flat()
+  }
+
   async listUsers(
     orgId: string,
     auth?: AuthContext,
