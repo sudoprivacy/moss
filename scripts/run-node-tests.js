@@ -62,6 +62,7 @@ const nodeTestFiles = [
   'src/server/backends/liveManagedExecution.node-test.ts',
   'src/server/storage/cohostSessionBinding.node-test.ts',
   'src/server/storage/cohostAgentHome.node-test.ts',
+  'src/server/storage/sqliteUpgradeQualification.node-test.ts',
   'src/server/testing/fixtureReady.node-test.ts',
   'src/server/testing/sqliteBootstrap.node-test.ts',
   'src/server/skillImportValidation.node-test.ts',

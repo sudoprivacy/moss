@@ -11,6 +11,31 @@ const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"'
 const MAX_ROWS_PER_TABLE = 100_000
 type Inventory = Record<string, { columns: string[]; rows: number; sha256: string }>
 
+/** Read the running controller's operational identity before a stop, never mint one.
+ * The deployment caller must independently bind expectedPid to the owned service.
+ * This row is a heartbeat observation, not authentication or process liveness proof.
+ */
+export function inspectSqliteController(source: string, expectedPid: number, heartbeatTimeoutMs: number) {
+  assert(isAbsolute(source), 'Use an absolute source database path')
+  assert(Number.isSafeInteger(expectedPid) && expectedPid > 0, 'Expected service PID is required')
+  assert(Number.isSafeInteger(heartbeatTimeoutMs) && heartbeatTimeoutMs > 0, 'Use the controller heartbeat timeout')
+  const db = new DatabaseSync(source, { readOnly: true })
+  try {
+    const observedAt = Date.now()
+    const rows = db.prepare(`SELECT instance_id, host, pid, heartbeat_at FROM server_instances
+      WHERE status = 'running' AND heartbeat_at >= ?`).all(observedAt - heartbeatTimeoutMs)
+    assert.equal(rows.length, 1, 'Require exactly one fresh controller; do not bypass live-peer fencing')
+    const row = rows[0]!
+    assert.equal(row.pid, expectedPid, 'Controller row does not match the independently verified service PID')
+    assert(typeof row.instance_id === 'string' && row.instance_id.length > 0, 'Missing registered instance identity')
+    assert(typeof row.heartbeat_at === 'number' && row.heartbeat_at <= observedAt, 'Controller clock is ahead of this host')
+    return { schemaVersion: 1, sourceOpenedReadOnly: true, instanceId: row.instance_id,
+      pid: expectedPid, bindHost: row.host, observedAt, heartbeatTimeoutMs,
+      heartbeatAgeMs: observedAt - row.heartbeat_at, authenticationClaimed: false,
+      runtimeStarted: false, databaseChanged: false }
+  } finally { db.close() }
+}
+
 function valueHash(value: unknown): unknown {
   if (value instanceof Uint8Array) return ['bytes', Buffer.from(value).toString('base64')]
   if (typeof value === 'bigint') return ['bigint', value.toString()]

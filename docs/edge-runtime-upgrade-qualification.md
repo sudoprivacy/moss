@@ -41,3 +41,21 @@ runtime rollback, owner credential, model/content-policy, cross-domain join or
 seven-party acceptance. Those remain separate steps of the same real product
 deploy. Keep `runtimeStarted`, `nativeHistoryRecoveryAccepted` and
 `authenticatedReady` false in this receipt.
+
+Before stopping an existing controller without `MOSS_INSTANCE_ID`, inspect its
+registered identity using the same producer bundle:
+
+```sh
+node /pinned/bin/moss-qualify-sqlite-upgrade.mjs --inspect-controller /absolute/moss.db "$verified_service_pid" "$configured_heartbeat_timeout_ms"
+```
+
+The deployment adapter must obtain the PID from the owned service and the timeout
+from its existing Moss recovery configuration (30,000 ms when absent). This is
+a read-only observation of exactly one fresh `server_instances` row, matched to
+that PID. It refuses another live controller, stale rows or a future heartbeat.
+Persist the returned operational identity in the deployment's private config
+for its next controlled stop/start; never edit heartbeat/status rows to evade
+fencing. It does not establish Agent identity or authentication. The configured
+`/readyz.instance_id` may remain null until that migration and must not be
+confused with the registered runtime identity. Stop the old owner before starting
+its replacement, then require actual HTTP readiness as well as process ownership.

@@ -5,7 +5,31 @@ import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { DirectConnectStore } from '../db.js'
-import { qualifySqliteUpgrade } from './sqliteUpgradeQualification.js'
+import { inspectSqliteController, qualifySqliteUpgrade } from './sqliteUpgradeQualification.js'
+
+void test('controller inspection binds the service PID and refuses ambiguous or stale ownership without writes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'moss-upgrade-controller-'))
+  const path = join(root, 'moss.db')
+  const store = new DirectConnectStore(path)
+  try {
+    const registered = await store.registerServerInstance('127.0.0.1', 12345)
+    const before = store.db!.prepare('SELECT * FROM server_instances').all()
+    const result = inspectSqliteController(path, 12345, 30_000)
+    assert.equal(result.instanceId, registered.instanceId)
+    assert.equal(result.authenticationClaimed, false)
+    assert.equal(result.databaseChanged, false)
+    assert.throws(() => inspectSqliteController(path, 67890, 30_000), /does not match/)
+    assert.deepEqual(store.db!.prepare('SELECT * FROM server_instances').all(), before)
+    await store.registerServerInstance('127.0.0.1', 67890)
+    assert.throws(() => inspectSqliteController(path, 12345, 30_000), /exactly one fresh/)
+    store.db!.exec('UPDATE server_instances SET heartbeat_at=0')
+    assert.throws(() => inspectSqliteController(path, 12345, 30_000), /exactly one fresh/)
+  } finally {
+    await store.close()
+    assert.equal(dirname(root), resolve(tmpdir()))
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 void test('qualification migrates only its backup and preserves typed private rows', async () => {
   const root = mkdtempSync(join(tmpdir(), 'moss-upgrade-source-'))

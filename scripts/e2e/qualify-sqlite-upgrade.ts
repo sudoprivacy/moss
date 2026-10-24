@@ -1,6 +1,11 @@
 /** Runs only the database-copy journey, never a Moss controller or runtime. */
 import assert from 'node:assert/strict'
-import { qualifySqliteUpgrade } from '../../src/server/storage/sqliteUpgradeQualification.js'
+import { inspectSqliteController, qualifySqliteUpgrade } from '../../src/server/storage/sqliteUpgradeQualification.js'
 
-assert(process.argv[2], 'Usage: qualify-sqlite-upgrade <absolute-existing-database-path>')
-console.log(JSON.stringify(await qualifySqliteUpgrade(process.argv[2]), null, 2))
+if (process.argv[2] === '--inspect-controller') {
+  assert.equal(process.argv.length, 6, 'Usage: --inspect-controller <absolute-db> <verified-service-pid> <heartbeat-timeout-ms>')
+  console.log(JSON.stringify(inspectSqliteController(process.argv[3]!, Number(process.argv[4]), Number(process.argv[5])), null, 2))
+} else {
+  assert.equal(process.argv.length, 3, 'Usage: qualify-sqlite-upgrade <absolute-existing-database-path>')
+  console.log(JSON.stringify(await qualifySqliteUpgrade(process.argv[2]!), null, 2))
+}
