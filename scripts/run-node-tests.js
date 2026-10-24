@@ -8,6 +8,7 @@ const nodeTestFiles = [
   'scripts/contracts/registry-source.test.mjs',
   'scripts/contracts/nexus-prewrite-source.test.mjs',
   'scripts/e2e/workspace-proof.test.mjs',
+  'scripts/e2e/inspect-existing-product.node-test.ts',
   'scripts/e2e/http-agent-artifact.test.mjs',
   'scripts/e2e/fetch-nexus-runtime.test.mjs',
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',

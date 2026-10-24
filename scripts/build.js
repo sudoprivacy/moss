@@ -60,12 +60,15 @@ function build(label, args) {
 }
 
 function buildUpgradeChecker() {
-  build('bin/moss-qualify-sqlite-upgrade.mjs', [
-    'build', 'scripts/e2e/qualify-sqlite-upgrade.ts',
-    '--outfile=bin/moss-qualify-sqlite-upgrade.mjs',
-    '--target=node', '--format=esm', ...aliases, ...defines,
-  ])
-  sanitizePaths('bin/moss-qualify-sqlite-upgrade.mjs')
+  for (const [name, entry] of [
+    ['qualify-sqlite-upgrade', 'qualify-sqlite-upgrade'],
+    ['inspect-existing-product', 'inspect-existing-product'],
+  ]) {
+    const outfile = `bin/moss-${name}.mjs`
+    build(outfile, ['build', `scripts/e2e/${entry}.ts`, `--outfile=${outfile}`,
+      '--target=node', '--format=esm', ...aliases, ...defines])
+    sanitizePaths(outfile)
+  }
 }
 
 // Offline deploy qualification needs no admin UI, native tools or daemon fetch.

@@ -66,3 +66,11 @@ configuration. It preserves all original fields, changing only
 `server.instanceId`, refuses a conflicting configured/environment ID, and never
 overwrites either the source or an existing output. The product adapter owns
 exclusive configuration installation, service stop/start and readiness checks.
+
+The producer also builds a separate `moss-inspect-existing-product.mjs`. Given
+an absolute existing config and a new evidence directory, it authenticates
+once to that config's loopback Moss port using its explicitly configured
+Moss credential, reads existing session metadata and a persisted UI context,
+and logs out its own token. It does not change accounts, model selection,
+Agents or sessions, nor submit a turn. Only context hashes/counts enter the
+receipt. UI history readability is distinct from native engine resume.
