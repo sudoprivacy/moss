@@ -81,7 +81,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   }
   const reevaluateBusy = (): void => {
     // A completed or failed prompt releases busy only when no work remains.
-    if (pendingPromptIds.size > 0 || pendingAskUserQuestions.size > 0 || pendingPermissions.size > 0) {
+    if (pendingRpcRequests.size > 0 || pendingPromptIds.size > 0 || pendingAskUserQuestions.size > 0 || pendingPermissions.size > 0) {
       setBusy(true)
       return
     }
@@ -324,16 +324,22 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     }
   }
 
+  const failPendingRequests = (failure: Error): void => {
+    const requests = [...pendingRpcRequests.values()]
+    pendingRpcRequests.clear()
+    for (const pending of requests) clearTimeout(pending.timeoutId)
+    // A failed transport cannot safely carry another copy of a pending mutation.
+    void (async () => transport.close())().catch(error => {
+      for (const listener of stderrListeners) listener(`${String(error)}\n`)
+    })
+    reevaluateBusy()
+    for (const pending of requests) pending.reject(failure)
+    for (const listener of stderrListeners) listener(`${failure.message}\n`)
+  }
+
   const sendMessage = (message: SessionRpcMessage): void => {
     void transport.send(message).catch(error => {
-      const failure = error instanceof Error ? error : new Error(String(error))
-      for (const pending of pendingRpcRequests.values()) {
-        clearTimeout(pending.timeoutId)
-        pending.reject(failure)
-      }
-      pendingRpcRequests.clear()
-      for (const listener of stderrListeners) listener(`${failure.message}\n`)
-      void transport.close()
+      failPendingRequests(error instanceof Error ? error : new Error(String(error)))
     })
   }
 
@@ -363,21 +369,22 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     flushPending()
   }
 
-  // Send RPC and wait for response (for model switching)
-  const sendRpcAndWait = (method: string, params: any, customId?: string, timeoutMs = 30000): Promise<any> => {
-    const id = customId || `m-${rpcId++}`
+  const sendRpcWithReply = (method: string, params: any, callbacks: {
+    onReply(result: unknown): void
+    onError(error: Error): void
+    onTimeout(): void
+  }, timeoutMs = 30000): void => {
+    const id = `m-${rpcId++}`
     const msg: SessionRpcMessage = { jsonrpc: '2.0', id, method, params }
     process.stderr.write(`[AcpBridge] Sending RPC (wait): ${JSON.stringify({ id, method })}\n`)
+    const timeoutId = setTimeout(() => {
+      // A deadline does not prove that the execution refused the operation.
+      // Keep its callback and activity until a definitive reply or stream close.
+      if (pendingRpcRequests.has(id)) callbacks.onTimeout()
+    }, timeoutMs)
+    pendingRpcRequests.set(id, { resolve: callbacks.onReply, reject: callbacks.onError, timeoutId })
+    reevaluateBusy()
     sendMessage(msg)
-
-    return new Promise((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        pendingRpcRequests.delete(id)
-        reject(new Error(`RPC ${method} timed out after ${timeoutMs / 1000}s`))
-      }, timeoutMs)
-
-      pendingRpcRequests.set(id, { resolve, reject, timeoutId })
-    })
   }
 
   const emitStdout = (line: string) => {
@@ -708,13 +715,12 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           return
         }
 
-        // Handle session/setModel response
-        if (parsed.id === 'm-set-model') {
-          process.stderr.write(`[AcpBridge] session/setModel response: ${JSON.stringify(parsed)}\n`)
-          const pending = pendingRpcRequests.get('m-set-model')
+        if (typeof parsed.id === 'string' && !parsed.method && (parsed.result !== undefined || parsed.error !== undefined)) {
+          const pending = pendingRpcRequests.get(parsed.id)
           if (pending) {
             clearTimeout(pending.timeoutId)
-            pendingRpcRequests.delete('m-set-model')
+            pendingRpcRequests.delete(parsed.id)
+            reevaluateBusy()
             if (parsed.error) {
               process.stderr.write(`[AcpBridge] Model switch failed: ${JSON.stringify(parsed.error)}\n`)
               pending.reject(new Error(parsed.error.message || JSON.stringify(parsed.error)))
@@ -722,8 +728,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               process.stderr.write(`[AcpBridge] Model switch succeeded\n`)
               pending.resolve(parsed.result)
             }
+            return
           }
-          return
         }
 
         if (typeof parsed.id === 'string' && pendingPromptIds.has(parsed.id) && (parsed.result || parsed.error)) {
@@ -1272,9 +1278,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         // Not JSON or not an interrupt — fall through to normal handling.
       }
 
-      // A2: user kicked off a turn. Stays busy until stopReason or destroy.
-      setBusy(true)
-
       // Handle control_request for model switching (async)
       try {
         const parsed = JSON.parse(data)
@@ -1325,14 +1328,17 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
           process.stderr.write(`[AcpBridge] Model switch requested: ${scodeModelName}, acpSessionId: ${acpSessionId}\n`)
 
-          // Send ACP SetSessionModelRequest and wait for response
-          // Use async handling to ensure model switch completes before next message
-          // Note: method name is "session/set_model" (underscore), not "session/setModel" (camelCase)
-          sendRpcAndWait('session/set_model', {
+          // A late definitive reply remains authoritative after the UI deadline.
+          const onRejected = (reason: string, message: string): void => {
+            process.stderr.write(`[AcpBridge] Model switch: ${message}\n`)
+            emitStdout(JSON.stringify({ type: 'system', subtype: 'model_switch_rejected', session_id: sessionId,
+              model: scodeModelName, reason, message }) + '\n')
+          }
+          sendRpcWithReply('session/set_model', {
             sessionId: acpSessionId,
             modelId: scodeModelName,
-          }, 'm-set-model', 30000)
-            .then((result) => {
+          }, {
+            onReply(result) {
               process.stderr.write(`[AcpBridge] Model switch completed: ${JSON.stringify(result)}\n`)
               // Update current model tracking
               currentModel = scodeModelName
@@ -1346,24 +1352,19 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               })
               process.stderr.write(`[AcpBridge] Emitting model_changed event: ${modelChangedEvent}\n`)
               emitStdout(modelChangedEvent + '\n')
-            })
-            .catch((error) => {
-              process.stderr.write(`[AcpBridge] Model switch failed: ${error.message}\n`)
-              const rejectedEvent = JSON.stringify({
-                type: 'system',
-                subtype: 'model_switch_rejected',
-                session_id: sessionId,
-                model: scodeModelName,
-                reason: 'runtime_rejected_model',
-              })
-              emitStdout(rejectedEvent + '\n')
-            })
+            },
+            onError: error => onRejected('runtime_rejected_model', error.message),
+            onTimeout: () => onRejected('model_change_outcome_unknown', 'Model change is still unconfirmed; existing work continues while waiting for its response'),
+          })
 
           return
         }
       } catch {
         // Not a JSON message or not a control_request, continue with normal processing
       }
+
+      // A2: user kicked off a turn. Stays busy until stopReason or destroy.
+      setBusy(true)
 
       if (!acpSessionId) {
         process.stderr.write(`[AcpBridge] Session not ready, buffering message...\n`)
