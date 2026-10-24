@@ -348,6 +348,20 @@ export class ZoneRequiredError extends Error {
  */
 const USAGE_CACHE_TTL_MS = 15_000
 
+type RunnerModelSession = Pick<SessionRecord, 'userId' | 'orgId' | 'sessionId' | 'source' | 'runtime'>
+
+interface RunnerModelContext {
+  session: RunnerModelSession
+  systemSettings: Awaited<ReturnType<AuthService['getOrganizationSystemSettings']>>
+  sharedBilling: ReturnType<AuthService['getOrganizationBillingService']>
+  userModelKey: string | undefined
+  userModelPref: Awaited<ReturnType<typeof getUserModelPreference>>
+  isManagedModelAccount: boolean
+  isCabinSession: boolean
+  requestedModel: string
+  selection: ReturnType<typeof resolveModelSelection> | null
+}
+
 export class RuntimeService {
   private readonly userPods?: UserPodService
   private readonly ownerRuntime?: CohostOwnerRuntime
@@ -710,12 +724,16 @@ export class RuntimeService {
     this.upgradingOwners.add(ownerId)
     const paused = new Set<string>()
     try {
-      const environment = await withOrganizationResources(await this.resourceScope({ orgId, userId: ownerId,
-        role: owner.role, scopes: owner.scopes }), () => this.buildRunnerModelEnvironment({
-        userId: ownerId, orgId, sessionId: 'owner-runtime-upgrade', runtime: { type: 'cohost', engine: 'scode' },
-      }))
-      configuration ??= buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
-        environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!)
+      configuration ??= await withOrganizationResources(await this.resourceScope({ orgId, userId: ownerId,
+        role: owner.role, scopes: owner.scopes }), async () => {
+        const context = await this.resolveRunnerModelContext({ userId: ownerId, orgId,
+          sessionId: 'owner-runtime-upgrade', runtime: { type: 'cohost', engine: 'scode' } })
+        // Replacing a runtime configures its authorized transport; it does not
+        // execute the user's selected model. Model admission stays at session start.
+        const environment = this.buildModelEnvironment(context)
+        return buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
+          environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!)
+      })
       const sessions = (await this.store.listUserSessions(orgId, ownerId))
         .filter(session => session.runtime.type === 'cohost' && session.desiredState === 'active')
       const bindings = await Promise.all(sessions.map(async session => ({ session,
@@ -1898,7 +1916,7 @@ export class RuntimeService {
     setTimeout(poll, FENCING_POLL_INTERVAL_MS).unref?.()
   }
 
-  private async buildRunnerModelEnvironment(session: Pick<SessionRecord, 'userId' | 'orgId' | 'sessionId' | 'source' | 'runtime'>): Promise<Record<string, string>> {
+  private async resolveRunnerModelContext(session: RunnerModelSession): Promise<RunnerModelContext> {
     // Build environment for runner from system settings
     const systemSettings = await this.authService.getOrganizationSystemSettings(session.orgId)
     const userModelKey = session.userId
@@ -1920,11 +1938,18 @@ export class RuntimeService {
       || process.env.MOSS_DEFAULT_MODEL
       || 'gemini-3-flash-preview'
 
-    // A selected Provider is a routing boundary.  Do not fall back to the
-    // process-global endpoint when its catalog cannot be resolved: that would
-    // make an unavailable/stale selection call a different Provider.
-    const requestedProvider = !isCabinSession ? resolveModelSelection(systemSettings.modelProviders, systemSettings.defaultModelProviderId, systemSettings.model, requestedModel).provider : null
+    // Resolve the selected Provider before configuring either a runtime or a
+    // session so neither can inherit an unrelated process-global endpoint.
+    const selection = !isCabinSession ? resolveModelSelection(systemSettings.modelProviders, systemSettings.defaultModelProviderId, systemSettings.model, requestedModel) : null
+    const requestedProvider = selection?.provider
     if (isManagedModelAccount && requestedProvider && (requestedProvider.id === 'legacy-default' || requestedProvider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl) && !userModelKey) throw new Error('用户模型凭据不可用，请联系管理员')
+    return { session, systemSettings, sharedBilling, userModelKey, userModelPref,
+      isManagedModelAccount, isCabinSession, requestedModel, selection }
+  }
+
+  private async buildRunnerModelEnvironment(session: RunnerModelSession): Promise<Record<string, string>> {
+    const context = await this.resolveRunnerModelContext(session)
+    const { isCabinSession, requestedModel, systemSettings, userModelKey } = context
     const providerCatalog = !isCabinSession
       ? await getModelsForSelection(requestedModel, {
         settings: systemSettings,
@@ -1936,7 +1961,13 @@ export class RuntimeService {
         allowUnverified: process.env.MOSS_ALLOW_UNVERIFIED_MODEL === '1',
       })
       : null
-    const defaultModel = providerCatalog?.selection.modelId || requestedModel
+    return this.buildModelEnvironment(context, providerCatalog?.unverified)
+  }
+
+  private buildModelEnvironment(context: RunnerModelContext, isUnverified = false): Record<string, string> {
+    const { session, systemSettings, sharedBilling, userModelKey, userModelPref,
+      isManagedModelAccount, isCabinSession, requestedModel, selection } = context
+    const defaultModel = selection?.modelId || requestedModel
 
     process.stderr.write(`[RuntimeService] Model selection for session ${session.sessionId}:\n`)
     process.stderr.write(`  - userId: ${session.userId}\n`)
@@ -1948,17 +1979,17 @@ export class RuntimeService {
       ...process.env as Record<string, string>,
       MOSS_DEFAULT_MODEL: defaultModel,
     }
-    if (providerCatalog?.unverified) {
+    if (isUnverified) {
       // 4A：发现失败被降级透传的会话显式可辨（stderr + runner 环境），便于
       // 部署方审计降级流量；真实 LLM 调用失败仍会在调用点原样暴露。
       runnerEnv.MOSS_MODEL_UNVERIFIED = '1'
       process.stderr.write(`  - model unverified: discovery failed, passing through '${defaultModel}' (MOSS_ALLOW_UNVERIFIED_MODEL)\n`)
     }
     for (const key of ['MOSS_BROWSER_GATEWAY_URL', 'MOSS_BROWSER_GATEWAY_TOKEN', 'MOSS_BROWSER_GATEWAY_AI_TOKEN', 'MOSS_BROWSER_SECRET', 'MOSS_BROWSER_ALLOWED_OWNERS']) delete runnerEnv[key]
-    if (providerCatalog) {
-      runnerEnv.MOSS_MODEL_PROVIDER_ID = providerCatalog.selection.provider.id
+    if (selection) {
+      runnerEnv.MOSS_MODEL_PROVIDER_ID = selection.provider.id
       runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
-      runnerEnv.ANTHROPIC_BASE_URL = providerCatalog.selection.provider.baseUrl
+      runnerEnv.ANTHROPIC_BASE_URL = selection.provider.baseUrl
     }
     // A metered deployment keys its credit ledger on a per-user gateway token,
     // so a session must spend the token of the user who owns it. Falling back to
@@ -1966,18 +1997,18 @@ export class RuntimeService {
     // balance untouched. Users without a token (private / on-prem deployments,
     // where no metered gateway exists) keep the shared key. Resolved here in the
     // main process: the runner subprocess has no database.
-    const providerApiKey = providerCatalog
-      ? getModelProviderApiKey(providerCatalog.selection.provider.id, systemSettings.apiKey, session.orgId)
+    const providerApiKey = selection
+      ? getModelProviderApiKey(selection.provider.id, systemSettings.apiKey, session.orgId)
       : undefined
     // Per-user Sudorouter keys only apply to the legacy default provider. A
     // configured Provider must never receive a process-global or legacy key;
     // local unauthenticated endpoints intentionally run with no credential.
-    const isLegacyProvider = providerCatalog?.selection.provider.id === 'legacy-default'
-    const isManagedRouter = isManagedModelAccount && (isLegacyProvider || providerCatalog?.selection.provider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl)
+    const isLegacyProvider = selection?.provider.id === 'legacy-default'
+    const isManagedRouter = isManagedModelAccount && (isLegacyProvider || selection?.provider.baseUrl.replace(/\/+$/, '') === sharedBilling?.router.modelBaseUrl)
     const sessionApiKey = isManagedRouter ? userModelKey : isLegacyProvider
       ? userModelKey || providerApiKey
       : providerApiKey
-    if (providerCatalog) {
+    if (selection) {
       delete runnerEnv.ANTHROPIC_AUTH_TOKEN
       delete runnerEnv.ANTHROPIC_API_KEY
     }

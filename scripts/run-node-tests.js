@@ -13,6 +13,7 @@ const nodeTestFiles = [
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',
   'src/server/runtime/cohostOwnerRuntime.node-test.ts',
   'src/server/runnerReadiness.node-test.ts',
+  'src/server/runtimeModelEnvironment.node-test.ts',
   'src/server/runnerExitLifecycle.node-test.ts',
   'src/server/sessionResume.node-test.ts',
   'src/server/sessionSocketAuthorization.node-test.ts',
