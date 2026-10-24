@@ -7,6 +7,7 @@ import { HttpBrowserWorker, browserController, type BrowserBinding, type Browser
 import browserTools from '../../../deploy/browser/mcp-tools.json' with { type: 'json' }
 import { browserAllowedOwners, browserOwnerAllowed } from './browserDeploymentPolicy.js'
 import { browserConversationGuidance, changeBrowserConversationControl } from './browserConversation.js'
+import type WebSocket from 'ws'
 
 type SessionLookup = (id: string) => Promise<(BrowserBinding & { desiredState: string }) | null>
 
@@ -166,6 +167,14 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
       if (!worker) return { changed: false }
       return changeBrowserConversationControl(worker, binding, controller, intent)
     })
+  }
+
+  async openWindowStream(binding: BrowserBinding, controller: string, action: Record<string, unknown>): Promise<WebSocket> {
+    if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
+    // A read connection cannot allocate a worker or claim another task's profile.
+    const worker = await this.mutex.run(this.ownerKey(binding), () => this.resolve(binding, true))
+    if (!worker) throw new HttpError(409, 'browser_not_started')
+    return worker.openWindowStream(binding, controller, action)
   }
 
   async mcp(binding: BrowserBinding, message: unknown): Promise<unknown | null> {
