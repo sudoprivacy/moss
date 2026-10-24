@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 
-async function journey(redirect: boolean, resume = false) {
+async function journey(redirect: boolean, resume = false, terminate = false, ownerMatches = true) {
   const root = mkdtempSync(join(tmpdir(), 'moss-product-inspect-'))
   const calls: string[] = []
   let redirectedCalls = 0
@@ -21,8 +21,9 @@ async function journey(redirect: boolean, resume = false) {
       '/api/v1/auth/login': { access_token: 'private-token', refresh_token: 'private-refresh' },
       '/api/v1/auth/me': { user: { id: 'owner-existing' } },
       '/api/v1/sessions': { sessions: [{ sessionId: 'old-session', runtime: { type: 'cohost' } }] },
-      '/api/v1/sessions/old-session/context': { session: { sessionId:'old-session',userId:'owner-existing',workDir:join(root,'workspace') },
+      '/api/v1/sessions/old-session/context': { session: { sessionId:'old-session',userId:ownerMatches ? 'owner-existing' : 'other-owner',workDir:join(root,'workspace') },
         context: { messages: [{ role: 'user', content: 'private-history' }] } },
+      '/api/v1/sessions/old-session/terminate': { ok:true },
       '/api/v1/auth/logout': { ok: true },
     }
     assert(req.url && req.url in routes)
@@ -36,7 +37,7 @@ async function journey(redirect: boolean, resume = false) {
       bootstrapAdmin: { username: 'existing', password: 'private-password' } }), { mode: 0o600 })
     const child = spawn(process.execPath, [resolve('node_modules/tsx/dist/cli.mjs'),
       resolve('scripts/e2e/inspect-existing-product.ts'), config, evidence,
-      ...(resume ? ['--resume-existing','old-session'] : [])], { stdio: ['ignore','pipe','pipe'] })
+      ...(resume ? ['--resume-existing','old-session'] : terminate ? ['--terminate-existing','old-session'] : [])], { stdio: ['ignore','pipe','pipe'] })
     let stdout = '', stderr = ''
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
@@ -77,4 +78,21 @@ void test('recovery reads the public workDir and refuses a missing locator befor
   assert.match(result.result.error,/Keep the existing native locator/)
   assert.equal(result.result.probeTokenLoggedOut,true)
   assert(!result.calls.some(call => call.endsWith('/resume')))
+})
+
+void test('explicit execution cleanup terminates only the selected owned product session without resume or a model turn', async () => {
+  const result = await journey(false,false,true)
+  assert.equal(result.exit,0)
+  assert.equal(result.result.executionTerminationHttpAccepted,true)
+  assert.equal(result.result.nativeExecutionResumeRequested,false)
+  assert.equal(result.result.probeTokenLoggedOut,true)
+  assert.deepEqual(result.calls, ['POST /api/v1/auth/login','GET /api/v1/auth/me','GET /api/v1/sessions',
+    'GET /api/v1/sessions/old-session/context','POST /api/v1/sessions/old-session/terminate','POST /api/v1/auth/logout'])
+})
+
+void test('explicit cleanup refuses a session belonging to another owner before termination', async () => {
+  const result = await journey(false,false,true,false)
+  assert.equal(result.exit,1)
+  assert.equal(result.result.probeTokenLoggedOut,true)
+  assert(!result.calls.some(call => call.endsWith('/terminate')))
 })

@@ -16,7 +16,8 @@ import { DatabaseSync } from 'node:sqlite'
 const [configPath, evidence, action, requestedSessionId] = process.argv.slice(2)
 assert(configPath && evidence && isAbsolute(configPath) && isAbsolute(evidence), 'Use absolute existing-config and new-evidence paths')
 assert((action === undefined && requestedSessionId === undefined) ||
-  (action === '--resume-existing' && requestedSessionId), 'Explicit --resume-existing SESSION_ID is required for recovery')
+  (['--resume-existing','--terminate-existing'].includes(action!) && requestedSessionId),
+'Use explicit --resume-existing or --terminate-existing with the existing SESSION_ID')
 if (process.platform !== 'win32') {
   const metadata = statSync(configPath)
   assert.equal(metadata.uid, process.getuid?.(), 'Use the current owner configuration')
@@ -32,7 +33,9 @@ const base = `http://127.0.0.1:${config.server.port}`
 mkdirSync(evidence, { mode: 0o700 })
 const report: Record<string, unknown> = { schemaVersion: 1, baseUrl: base, accountCreated: false,
   agentCreated: false, sessionCreated: false, turnSubmitted: false,
-  nativeHistoryRecoveryAccepted: false, modelJourneyAccepted: false, nativeExecutionResumeRequested: Boolean(action) }
+  nativeHistoryRecoveryAccepted: false, modelJourneyAccepted: false,
+  nativeExecutionResumeRequested: action === '--resume-existing',
+  nativeExecutionTerminationRequested: action === '--terminate-existing' }
 let token = '', refresh = ''
 let failures = 0
 async function request(path: string, method = 'GET', body?: unknown, timeoutMs = 15_000) {
@@ -74,6 +77,11 @@ try {
     const messagesSha256 = createHash('sha256').update(JSON.stringify(result.context.messages)).digest('hex')
     reads.push({ sessionId: id, messages: result.context.messages.length,
       messagesSha256, projectedContextSha256: createHash('sha256').update(bytes).digest('hex') })
+    if (action === '--terminate-existing') {
+      assert.equal(result.session?.userId, me.user.id, 'Termination requires the actual existing owner')
+      await request(`/api/v1/sessions/${encodeURIComponent(id)}/terminate`, 'POST', {})
+      report.executionTerminationHttpAccepted = true
+    }
     if (action === '--resume-existing') {
       assert.equal(result.session?.userId, me.user.id, 'Recovery requires the actual existing owner')
       // The public context response serializes its native cwd as workDir.
