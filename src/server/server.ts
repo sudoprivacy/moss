@@ -36,6 +36,9 @@ import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve,
 import { fileURLToPath } from 'url'
 import { WebSocketServer } from 'ws'
 import { attachSessionSocketAuthorization } from './sessionSocketAuthorization.js'
+import { RuntimeInputBarrier } from './runtime/runtimeInputBarrier.js'
+import { RuntimeAdmissionPauses } from './runtime/runtimeAdmissionPauses.js'
+import { dispatchRuntimeAdmission, isRuntimeAdmissionRoute } from './api/runtimeAdmission.js'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
@@ -2084,6 +2087,8 @@ export function startServer(
   const privateAgentArchives = new PrivateAgentArchives(join(config.rootDir, 'private-agent-archives'))
   const wss = new WebSocketServer({ noServer: true })
   const browserWss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, perMessageDeflate: false })
+  const runtimeInputs = new RuntimeInputBarrier(() => runtime.listRuntimeInputEndpoints())
+  const runtimePauses = new RuntimeAdmissionPauses(runtime.serverInstanceId, runtime.workAdmission, runtimeInputs)
   const enterpriseApi = createEnterpriseApi(runtime.store, config.runtimeDir, {
     cabinEnabled: config.cabin.enabled,
     getClientCronEnabled: orgId => authService.isOrganizationClientCronEnabled(orgId),
@@ -2636,7 +2641,7 @@ export function startServer(
 
       if ((req.method === 'GET' || isHead) && pathname === '/readyz') {
         const readiness = await computeReadiness(config, runtime, {
-          isDraining: () => draining,
+          isDraining: () => draining || runtime.workAdmission.isPaused,
         })
         // Anonymous body carries only ok/ready + instance_id (LB stickiness /
         // ha-p0p2-smoke consume instance_id). The full checks matrix moved to
@@ -4048,6 +4053,16 @@ export function startServer(
         throw new HttpError(401, 'Unauthorized')
       }
 
+      if (isRuntimeAdmissionRoute(pathname)) {
+        res.setHeader('Cache-Control', 'no-store')
+        const result = await dispatchRuntimeAdmission(auth, req.method ?? 'GET', pathname,
+          ['PUT', 'DELETE'].includes(req.method ?? '') ? await readJsonBody(req) : {},
+          { authService, instanceId: runtime.serverInstanceId, pauses: runtimePauses,
+            countLiveOtherInstances: () => runtime.countLiveOtherInstances() })
+        writeJson(res, result.status, result.body)
+        return
+      }
+
       if (toolManagementRoute.test(pathname)) {
         res.setHeader('Cache-Control', 'no-store')
         try {
@@ -4230,7 +4245,7 @@ export function startServer(
         // anonymous /healthz & /readyz. Anonymous callers behind the LB cannot
         // reach this.
         await authService.requireSuperAdmin(auth)
-        const readiness = await computeReadiness(config, runtime, { isDraining: () => draining })
+        const readiness = await computeReadiness(config, runtime, { isDraining: () => draining || runtime.workAdmission.isPaused })
         const { httpStatus: _httpStatus, ...readinessBody } = readiness
         void _httpStatus
         writeJson(res, 200, {
@@ -11320,7 +11335,7 @@ export function startServer(
   }))
 
   server.on('upgrade', (req, socket, head) => {
-    void (async () => {
+    const upgrade = async () => {
       try {
         process.stderr.write(`[WS Upgrade] Incoming request: ${redactWsUrl(req.url)}\n`)
         let token = getBearerToken(req)
@@ -11454,6 +11469,7 @@ export function startServer(
           try {
             const ready = await runtime.ensureSessionReady(sessionId)
             const runnerSocket = await runtime.connectToAttempt(ready.attempt)
+            runnerSocket.setEncoding('utf8')
             wss.handleUpgrade(req, socket, head, ws => {
               let buffer = ''
               attachSessionSocketAuthorization(ws, {
@@ -11471,12 +11487,14 @@ export function startServer(
                     return
                   }
                   const text = wsDataToText(data)
-                  if (!runnerSocket.destroyed) {
-                    runnerSocket.write(text.endsWith('\n') ? text : `${text}\n`)
-                  }
+                  const accepted = runtime.workAdmission.tryRunContinuation(admissionContinuation, () => {
+                    if (!runnerSocket.destroyed) runnerSocket.write(text.endsWith('\n') ? text : `${text}\n`)
+                  })
+                  if (!accepted) ws.close(1013, 'Runtime maintenance is in progress')
+                  else void accepted.catch(() => ws.close(1011, 'Runner input failed'))
                 },
               })
-              ws.on('close', () => runnerSocket.destroy())
+              ws.on('close', () => runnerSocket.end())
               ws.on('error', () => runnerSocket.destroy())
               runnerSocket.on('data', chunk => {
                 buffer += Buffer.from(chunk).toString('utf8')
@@ -11591,11 +11609,12 @@ export function startServer(
         // A client can send as soon as the HTTP upgrade completes. Finish the
         // runner attachment first so its initial message always has a listener.
         const runnerSocket = await runtime.connectToAttempt(ready.attempt)
+        runnerSocket.setEncoding('utf8')
         if (socket.destroyed) {
           runnerSocket.destroy()
           return
         }
-        socket.once('close', () => runnerSocket.destroy())
+        socket.once('close', () => runnerSocket.end())
         wss.handleUpgrade(req, socket, head, ws => {
           let buffer = ''
           const sendToRunner = (payload: Record<string, unknown>) => {
@@ -11603,12 +11622,16 @@ export function startServer(
               ws.close(1013, 'User runtime is draining for an upgrade')
               return
             }
-            if (!runnerSocket.destroyed) {
-              process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
-              runnerSocket.write(`${jsonStringify(payload)}\n`)
-            } else {
-              process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
-            }
+            const accepted = runtime.workAdmission.tryRun(() => {
+              if (!runnerSocket.destroyed) {
+                process.stderr.write(`[WS Message] Sending to runner: ${JSON.stringify(payload).slice(0, 200)}...\n`)
+                runnerSocket.write(`${jsonStringify(payload)}\n`)
+              } else {
+                process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
+              }
+            })
+            if (!accepted) ws.close(1013, 'Runtime maintenance is in progress')
+            else void accepted.catch(() => ws.close(1011, 'Runner input failed'))
           }
 
           attachSessionSocketAuthorization(ws, {
@@ -11629,7 +11652,7 @@ export function startServer(
             },
           })
           ws.on('close', () => {
-            runnerSocket.destroy()
+            runnerSocket.end()
           })
           ws.on('error', () => {
             runnerSocket.destroy()
@@ -11708,7 +11731,17 @@ export function startServer(
         }
         socket.destroy()
       }
-    })()
+    }
+    let pathname: string
+    try { pathname = new URL(req.url || '/', 'http://localhost').pathname }
+    catch { socket.destroy(); return }
+    const isSession = /^\/ws\/(?:internal\/)?sessions\//.test(pathname)
+    const isInternal = /^\/ws\/internal\/sessions\//.test(pathname)
+    const header = req.headers['x-moss-work-admission']
+    const admissionContinuation = isInternal && typeof header === 'string' ? header : undefined
+    const pending = isSession ? runtime.workAdmission.tryRunContinuation(admissionContinuation, upgrade) : upgrade()
+    if (!pending) socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')
+    else void pending
   })
 
   const ready = new Promise<number | null>((resolvePort, reject) => {
@@ -11885,6 +11918,7 @@ export function startServer(
       await channelManager.stopAllPlugins().catch(err =>
         console.error('[server] stopAllPlugins failed:', err),
       )
+      runtimeInputs.close()
       if (callbackServer) {
         await new Promise<void>((resolveClose) => {
           callbackServer!.close(() => resolveClose())
