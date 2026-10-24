@@ -3,7 +3,7 @@
  * Tokens stay in memory. The owning fixture/operator controls its lifecycle.
  */
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { serverFileConfigSchema } from '../../src/server/types.js'
@@ -12,12 +12,14 @@ import { readCohostSessionState } from '../../src/server/backends/cohostSessionS
 import { CohostSessionRepository } from '../../src/server/runtime/cohostSessionRepository.js'
 import { SqliteDriver } from '../../src/server/db/driver.js'
 import { DatabaseSync } from 'node:sqlite'
+import { productConversation } from './productConversation.js'
 
 const [configPath, evidence, action, requestedSessionId] = process.argv.slice(2)
 assert(configPath && evidence && isAbsolute(configPath) && isAbsolute(evidence), 'Use absolute existing-config and new-evidence paths')
 assert((action === undefined && requestedSessionId === undefined) ||
-  (['--resume-existing','--terminate-existing'].includes(action!) && requestedSessionId),
-'Use explicit --resume-existing or --terminate-existing with the existing SESSION_ID')
+  (['--resume-existing','--exercise-existing','--terminate-existing'].includes(action!) && requestedSessionId),
+'Use an explicit existing-session recovery, model journey or cleanup action')
+const resume = action === '--resume-existing' || action === '--exercise-existing'
 if (process.platform !== 'win32') {
   const metadata = statSync(configPath)
   assert.equal(metadata.uid, process.getuid?.(), 'Use the current owner configuration')
@@ -34,7 +36,7 @@ mkdirSync(evidence, { mode: 0o700 })
 const report: Record<string, unknown> = { schemaVersion: 1, baseUrl: base, accountCreated: false,
   agentCreated: false, sessionCreated: false, turnSubmitted: false,
   nativeHistoryRecoveryAccepted: false, modelJourneyAccepted: false,
-  nativeExecutionResumeRequested: action === '--resume-existing',
+  nativeExecutionResumeRequested: resume,
   nativeExecutionTerminationRequested: action === '--terminate-existing' }
 let token = '', refresh = ''
 let failures = 0
@@ -82,7 +84,7 @@ try {
       await request(`/api/v1/sessions/${encodeURIComponent(id)}/terminate`, 'POST', {})
       report.executionTerminationHttpAccepted = true
     }
-    if (action === '--resume-existing') {
+    if (resume) {
       assert.equal(result.session?.userId, me.user.id, 'Recovery requires the actual existing owner')
       // The public context response serializes its native cwd as workDir.
       assert(typeof result.session.workDir === 'string' && result.session.workDir, 'Existing workspace is required')
@@ -113,6 +115,39 @@ try {
       report.nativeBindingPreserved = binding
       report.projectedContextPreserved = true
       report.executionLifecycleOwner = 'Moss operator or enclosing private-copy fixture'
+      if (action === '--exercise-existing') {
+        const marker = `DEPLOY_${randomUUID().replaceAll('-','')}`
+        const first = 17 * 29 + 47
+        const parseReply = (text: string) => JSON.parse(text.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '').trim())
+        const connect = async (url: string, name: string) => {
+          const target = new URL(url)
+          assert.equal(target.protocol,'ws:','Use the original local Moss WebSocket')
+          assert.equal(target.hostname,'127.0.0.1','Refuse forwarding the product token to another host')
+          assert.equal(target.port,String(config.server.port),'Refuse another product port')
+          const controller = productConversation(url,token,evidence,name)
+          try { await controller.ready(); return controller } catch (error) { controller.close(); throw error }
+        }
+        let controller: ReturnType<typeof productConversation> | undefined
+        try {
+          controller = await connect(resumed.ws_url,'existing-first')
+          report.turnSubmitted = true
+          assert.deepEqual(parseReply(await controller.turn(`Deployment qualification code ${marker}: 17 units at 29 each, plus delivery 47. Calculate the subtotal. Reply only JSON with code and subtotal. Do not use tools.`)),{code:marker,subtotal:first})
+          assert.deepEqual(parseReply(await controller.turn('Add a handling fee of 13 to that subtotal. Use the code from this conversation. Reply only JSON with code and total. Do not use tools.')),{code:marker,total:first+13})
+          controller.close(); controller = undefined
+          const reattached = await request(`/api/v1/sessions/${encodeURIComponent(id)}/resume`,'POST',{},180_000)
+          assert.equal(reattached.session?.sessionId,id,'Reattach changed the existing product session')
+          controller = await connect(reattached.ws_url,'existing-reattached')
+          assert.deepEqual(parseReply(await controller.turn('Recall the qualification code and final total from this conversation. Reply only JSON with code and total. Do not use tools.')),{code:marker,total:first+13})
+          const persisted = await request(`/api/v1/sessions/${encodeURIComponent(id)}/context`)
+          assert(JSON.stringify(persisted.context?.messages).includes(marker),'Fresh conversation missing from persisted product context')
+          assert(persisted.context.messages.length > result.context.messages.length,'No new product history was persisted')
+          report.modelJourneyAccepted = true
+          report.dependentReplyAndReattachAccepted = true
+          report.modelTurnsCompleted = 3
+          report.modelConfigurationChanged = false
+          report.originalHistoryBeforeJourneySha256 = messagesSha256
+        } finally { controller?.close() }
+      }
     }
     if (result.context.messages.length > 0) break
   }

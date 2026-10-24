@@ -6,6 +6,8 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { WebSocketServer } from 'ws'
+import { productConversation } from './productConversation.js'
 
 async function journey(redirect: boolean, resume = false, terminate = false, ownerMatches = true) {
   const root = mkdtempSync(join(tmpdir(), 'moss-product-inspect-'))
@@ -95,4 +97,41 @@ void test('explicit cleanup refuses a session belonging to another owner before 
   assert.equal(result.exit,1)
   assert.equal(result.result.probeTokenLoggedOut,true)
   assert(!result.calls.some(call => call.endsWith('/terminate')))
+})
+
+for (const control of [false,true]) void test(`shared product conversation ${control ? 'refuses a permission request without retry or approval' : 'uses the real WebSocket protocol and preserves text blocks'}`, async () => {
+  const root = mkdtempSync(join(tmpdir(),'moss-product-ws-'))
+  const server = new WebSocketServer({ host:'127.0.0.1',port:0 })
+  const received: any[] = []
+  let authorization: string | undefined
+  server.on('connection',(socket,request) => {
+    authorization = request.headers.authorization
+    socket.send(JSON.stringify({type:'hello'}))
+    socket.on('message',raw => {
+      received.push(JSON.parse(raw.toString()))
+      if (control) socket.send(JSON.stringify({type:'control_request',request_id:'do-not-approve'}))
+      else {
+        socket.send(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'\u4e2d\u6587\x00'}]}}))
+        socket.send(JSON.stringify({type:'assistant',message:{content:'done'}}))
+        socket.send(JSON.stringify({type:'result',status:'success'}))
+      }
+    })
+  })
+  await once(server,'listening')
+  const port = (server.address() as any).port
+  const conversation = productConversation(`ws://127.0.0.1:${port}`,'fixture-token',root,'case')
+  try {
+    await conversation.ready()
+    if (control) await assert.rejects(conversation.turn('test'),/control_request/)
+    else assert.equal(await conversation.turn('test'),'\u4e2d\u6587\x00done')
+    assert.equal(authorization,'Bearer fixture-token')
+    assert.equal(received.length,1)
+    assert.equal(received[0].type,'user')
+    assert.deepEqual(received[0].message,{role:'user',content:'test'})
+  } finally {
+    conversation.close()
+    for (const client of server.clients) client.terminate()
+    await new Promise<void>(done => server.close(() => done()))
+    rmSync(root,{recursive:true,force:true})
+  }
 })
