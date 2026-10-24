@@ -75,11 +75,12 @@ try {
     reads.push({ sessionId: id, messages: result.context.messages.length,
       messagesSha256, projectedContextSha256: createHash('sha256').update(bytes).digest('hex') })
     if (action === '--resume-existing') {
-      assert.equal(session.userId, me.user.id, 'Recovery requires the actual existing owner')
-      assert(typeof session.cwd === 'string' && session.cwd, 'Existing workspace is required')
-      const legacy = await readCohostSessionState(session.cwd)
+      assert.equal(result.session?.userId, me.user.id, 'Recovery requires the actual existing owner')
+      // The public context response serializes its native cwd as workDir.
+      assert(typeof result.session.workDir === 'string' && result.session.workDir, 'Existing workspace is required')
+      const legacy = await readCohostSessionState(result.session.workDir)
       assert(legacy?.durableSessionId && legacy.repositoryPath, 'Keep the existing native locator; never initialize a replacement')
-      const expectedAgent = sessionAgentName(me.user.id, session.assistantName)
+      const expectedAgent = sessionAgentName(me.user.id, result.session.assistantName)
       // Match the existing deployed-session journey's REST recovery budget;
       // ordinary read/login probes retain their separate 15-second bound.
       const resumed = await request(`/api/v1/sessions/${encodeURIComponent(id)}/resume`, 'POST', {}, 180_000)

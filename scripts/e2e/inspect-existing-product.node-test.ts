@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 
-async function journey(redirect: boolean) {
+async function journey(redirect: boolean, resume = false) {
   const root = mkdtempSync(join(tmpdir(), 'moss-product-inspect-'))
   const calls: string[] = []
   let redirectedCalls = 0
@@ -21,7 +21,8 @@ async function journey(redirect: boolean) {
       '/api/v1/auth/login': { access_token: 'private-token', refresh_token: 'private-refresh' },
       '/api/v1/auth/me': { user: { id: 'owner-existing' } },
       '/api/v1/sessions': { sessions: [{ sessionId: 'old-session', runtime: { type: 'cohost' } }] },
-      '/api/v1/sessions/old-session/context': { context: { messages: [{ role: 'user', content: 'private-history' }] } },
+      '/api/v1/sessions/old-session/context': { session: { sessionId:'old-session',userId:'owner-existing',workDir:join(root,'workspace') },
+        context: { messages: [{ role: 'user', content: 'private-history' }] } },
       '/api/v1/auth/logout': { ok: true },
     }
     assert(req.url && req.url in routes)
@@ -34,7 +35,8 @@ async function journey(redirect: boolean) {
     writeFileSync(config, JSON.stringify({ server: { port: (server.address() as any).port },
       bootstrapAdmin: { username: 'existing', password: 'private-password' } }), { mode: 0o600 })
     const child = spawn(process.execPath, [resolve('node_modules/tsx/dist/cli.mjs'),
-      resolve('scripts/e2e/inspect-existing-product.ts'), config, evidence], { stdio: ['ignore','pipe','pipe'] })
+      resolve('scripts/e2e/inspect-existing-product.ts'), config, evidence,
+      ...(resume ? ['--resume-existing','old-session'] : [])], { stdio: ['ignore','pipe','pipe'] })
     let stdout = '', stderr = ''
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
@@ -67,4 +69,12 @@ void test('product inspection refuses redirects before credentials reach another
   assert.equal(result.exit, 1)
   assert.equal(result.redirectedCalls, 0)
   assert.deepEqual(result.calls, ['POST /api/v1/auth/login'])
+})
+
+void test('recovery reads the public workDir and refuses a missing locator before any resume request', async () => {
+  const result = await journey(false,true)
+  assert.equal(result.exit,1)
+  assert.match(result.result.error,/Keep the existing native locator/)
+  assert.equal(result.result.probeTokenLoggedOut,true)
+  assert(!result.calls.some(call => call.endsWith('/resume')))
 })
