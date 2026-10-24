@@ -1,11 +1,12 @@
 /** Qualify this source's migrations on a private SQLite backup, without starting Moss. */
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, closeSync, fsyncSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
 import { DirectConnectStore } from '../db.js'
+import { serverFileConfigSchema } from '../types.js'
 
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"'
 const MAX_ROWS_PER_TABLE = 100_000
@@ -34,6 +35,30 @@ export function inspectSqliteController(source: string, expectedPid: number, hea
       heartbeatAgeMs: observedAt - row.heartbeat_at, authenticationClaimed: false,
       runtimeStarted: false, databaseChanged: false }
   } finally { db.close() }
+}
+
+/** Prepare, never install, the one native config change needed for stable restart. */
+export function prepareControllerConfiguration(configPath: string, databasePath: string, expectedPid: number,
+  expectedConfigSha256: string, output: string) {
+  assert(isAbsolute(configPath) && isAbsolute(output) && resolve(configPath) !== resolve(output), 'Use distinct absolute configuration paths')
+  const original = readFileSync(configPath)
+  const configSha256 = createHash('sha256').update(original).digest('hex')
+  assert.equal(configSha256, expectedConfigSha256, 'Existing configuration changed; inspect again')
+  const raw = JSON.parse(original.toString('utf8'))
+  const parsed = serverFileConfigSchema().parse(raw)
+  assert(!parsed.storage.dbBackend || parsed.storage.dbBackend === 'sqlite', 'This adoption journey requires SQLite')
+  if (parsed.storage.dbPath) assert.equal(resolve(parsed.storage.dbPath), resolve(databasePath), 'Wrong controller database')
+  const observation = inspectSqliteController(databasePath, expectedPid, parsed.recovery.heartbeatTimeoutMs)
+  assert(!parsed.server.instanceId || parsed.server.instanceId === observation.instanceId, 'Configured identity differs from the live controller')
+  assert(!process.env.MOSS_INSTANCE_ID || process.env.MOSS_INSTANCE_ID.trim() === observation.instanceId, 'Environment overrides the observed identity')
+  const next = { ...raw, server: { ...raw.server, instanceId: observation.instanceId } }
+  serverFileConfigSchema().parse(next)
+  const bytes = Buffer.from(JSON.stringify(next, null, 2) + '\n')
+  const fd = openSync(output, 'wx', 0o600)
+  try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
+  return { ...observation, originalConfigSha256: configSha256,
+    preparedConfigSha256: createHash('sha256').update(bytes).digest('hex'),
+    preparedConfigPath: output, installed: false, exclusiveConfigurationOwnerRequired: true }
 }
 
 function valueHash(value: unknown): unknown {

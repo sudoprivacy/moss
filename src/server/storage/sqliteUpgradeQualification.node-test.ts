@@ -1,11 +1,37 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { DirectConnectStore } from '../db.js'
-import { inspectSqliteController, qualifySqliteUpgrade } from './sqliteUpgradeQualification.js'
+import { inspectSqliteController, prepareControllerConfiguration, qualifySqliteUpgrade } from './sqliteUpgradeQualification.js'
+
+void test('native configuration preparation preserves original settings and refuses stale pins or output reuse', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'moss-upgrade-config-'))
+  const path = join(root, 'moss.db'), config = join(root, 'server.json'), output = join(root, 'prepared.json')
+  const store = new DirectConnectStore(path)
+  try {
+    const instance = await store.registerServerInstance('127.0.0.1', 12345)
+    const original = JSON.stringify({ server: { port: 43127 }, storage: { dbPath: path }, productAdapter: { preserved: true } })
+    writeFileSync(config, original)
+    const hash = createHash('sha256').update(original).digest('hex')
+    const result = prepareControllerConfiguration(config, path, 12345, hash, output)
+    assert.equal(result.instanceId, instance.instanceId)
+    assert.equal(result.installed, false)
+    assert.equal(readFileSync(config, 'utf8'), original)
+    assert.deepEqual(JSON.parse(readFileSync(output, 'utf8')), {
+      server: { port: 43127, instanceId: instance.instanceId }, storage: { dbPath: path }, productAdapter: { preserved: true },
+    })
+    assert.throws(() => prepareControllerConfiguration(config, path, 12345, hash, output), /EEXIST/)
+    assert.throws(() => prepareControllerConfiguration(config, path, 12345, '0'.repeat(64), join(root, 'wrong.json')), /configuration changed/)
+  } finally {
+    await store.close()
+    assert.equal(dirname(root), resolve(tmpdir()))
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 void test('controller inspection binds the service PID and refuses ambiguous or stale ownership without writes', async () => {
   const root = mkdtempSync(join(tmpdir(), 'moss-upgrade-controller-'))

@@ -59,3 +59,10 @@ fencing. It does not establish Agent identity or authentication. The configured
 `/readyz.instance_id` may remain null until that migration and must not be
 confused with the registered runtime identity. Stop the old owner before starting
 its replacement, then require actual HTTP readiness as well as process ownership.
+
+The same bundle's `--prepare-controller-config CONFIG DB PID CONFIG_SHA256 OUTPUT`
+uses that observation and the native config schema to prepare a private new
+configuration. It preserves all original fields, changing only
+`server.instanceId`, refuses a conflicting configured/environment ID, and never
+overwrites either the source or an existing output. The product adapter owns
+exclusive configuration installation, service stop/start and readiness checks.
