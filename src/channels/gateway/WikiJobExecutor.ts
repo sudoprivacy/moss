@@ -160,6 +160,10 @@ export class WikiJobExecutor {
   }
 
   private async tickOnce(): Promise<void> {
+    await this.runtime.workAdmission.tryRun(() => this.tickAdmittedOnce())
+  }
+
+  private async tickAdmittedOnce(): Promise<void> {
     const now = Date.now()
     // Local reap: this instance's own in-memory builds that blew the timeout.
     for (const [jobId, state] of this.running.entries()) {
@@ -199,7 +203,7 @@ export class WikiJobExecutor {
     for (const job of claimed) {
       // Fire-and-forget — runJob handles its own state updates.
       this.running.set(job.id, { jobId: job.id, wikiId: job.wikiId, startedAt: Date.now() })
-      void this.runJob(job).finally(() => {
+      void this.runtime.workAdmission.run(() => this.runJob(job)).finally(() => {
         this.running.delete(job.id)
       })
     }

@@ -381,6 +381,10 @@ export class CronService {
   }
 
   private async executeDueJob(jobId: string, nowTs = Date.now()): Promise<void> {
+    await this.config.runtimeService.workAdmission.tryRun(() => this.executeAdmittedDueJob(jobId, nowTs))
+  }
+
+  private async executeAdmittedDueJob(jobId: string, nowTs: number): Promise<void> {
     const job = await this.store.getById(jobId)
     if (!job) return
     if (!(await this.acquireLease(job, nowTs))) return
@@ -788,6 +792,10 @@ export class CronService {
    * callers/tests that have no human triggerer).
    */
   async triggerJob(jobId: string, actor?: CronActor): Promise<CronJobRun> {
+    return this.config.runtimeService.workAdmission.run(() => this.triggerAdmittedJob(jobId, actor))
+  }
+
+  private async triggerAdmittedJob(jobId: string, actor?: CronActor): Promise<CronJobRun> {
     const job = await this.store.getById(jobId)
     if (!job) {
       throw new Error(`Job ${jobId} not found`)
@@ -827,7 +835,7 @@ export class CronService {
       const sessionId = await this.resolveSessionForRun(job, run, actorAuth, `manual trigger of job ${job.id}`)
       await this.markRunSessionStarted(job, run, sessionId)
 
-      void this.completeRunInSession(job, run, sessionId, `Cron job "${job.name}" triggered manually`)
+      void this.config.runtimeService.workAdmission.run(() => this.completeRunInSession(job, run, sessionId, `Cron job "${job.name}" triggered manually`))
 
       return (await this.store.getRunById(run.id))!
     } catch (error) {

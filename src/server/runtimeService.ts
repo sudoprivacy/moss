@@ -75,7 +75,7 @@ import {
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import { buildAgentInstructions } from './agentInstructions.js'
 import type { NexusClient } from './nexus/nexusClient.js'
-import { UserPodService, writeEgressPolicyFile, readEgressPolicyFile } from '@sudo/user-runtime'
+import { UserPodService, WorkAdmission, writeEgressPolicyFile, readEgressPolicyFile } from '@sudo/user-runtime'
 import { createEgressPolicy, EgressPolicyRepository, POLICY_FILENAME, readEgressPolicyStatus, policyApplicationStatus } from '@sudo/egress-policy'
 import { EgressPolicyService, type EgressRuntimeReceipt, type EgressRuntimeTarget } from './configuration/egressPolicyService.js'
 import type { EgressPolicy } from '@sudo/egress-policy'
@@ -372,6 +372,7 @@ interface RunnerModelContext {
 
 export class RuntimeService {
   readonly egressPolicies: EgressPolicyService
+  readonly workAdmission = new WorkAdmission()
   private readonly userPods?: UserPodService
   private readonly ownerRuntime?: CohostOwnerRuntime
   private readonly upgradingOwners = new Set<string>()
@@ -398,6 +399,16 @@ export class RuntimeService {
   draining = false
 
   get serverInstanceId(): string { return this.options.serverInstanceId }
+
+  /** Observe runner endpoints without adopting attempts or starting work. */
+  async listRuntimeInputEndpoints() {
+    const attempts = await this.store.listAttemptsByRuntimeState(['starting', 'running', 'detached'])
+    return Promise.all(attempts.map(async attempt => ({
+      attemptId: attempt.attemptId, attachPath: attempt.attachPath,
+      isOwned: attempt.serverInstanceId === this.serverInstanceId &&
+        await this.#readAttemptRunnerInstanceId(attempt.sessionId, attempt.generation) === this.serverInstanceId,
+    })))
+  }
 
   constructor(private readonly options: RuntimeServiceOptions) {
     if (!options.store && options.config.dbBackend === 'postgres') {
@@ -641,6 +652,10 @@ export class RuntimeService {
   }
 
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
+    return this.workAdmission.run(() => this.createAdmittedSession(input))
+  }
+
+  private async createAdmittedSession(input: SessionCreateInput): Promise<SessionRecord> {
     if (this.draining) throw new ServerDrainingError()
     if (this.upgradingOwners.has(input.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
     return withOrganizationResources(await this.resourceScope(input), async () => {
@@ -719,29 +734,31 @@ export class RuntimeService {
 
   /** Main-process placement shared by session runners and authenticated workspace I/O. */
   async resolveCohostConnection(ownerId: string, agentId: string, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
-    if (configuration) {
-      const organizationId = await this.store.getUserOrgId(ownerId)
-      if (!organizationId) throw new ResourceAccessError(403, 'Runtime owner organization is unavailable')
-      const policy = await this.egressPolicies.policy(organizationId)
-      configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(policy) }
-      const managedConnection = this.ownerRuntime ? await this.ownerRuntime.connection(ownerId, agentId, configuration) : undefined
-      if (managedConnection && policy.enabled) {
-        try {
-          const status = await this.readRuntimeEgressStatus(managedConnection, ownerId)
-          if (policyApplicationStatus(policy, status).state !== 'applied') throw new Error('Policy delivery is pending')
-        } catch {
-          throw new ResourceAccessError(503, 'Runtime egress policy is not applied; upgrade the runtime or retry delivery')
+    return this.workAdmission.run(async () => {
+      if (configuration) {
+        const organizationId = await this.store.getUserOrgId(ownerId)
+        if (!organizationId) throw new ResourceAccessError(403, 'Runtime owner organization is unavailable')
+        const policy = await this.egressPolicies.policy(organizationId)
+        configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(policy) }
+        const managedConnection = this.ownerRuntime ? await this.ownerRuntime.connection(ownerId, agentId, configuration) : undefined
+        if (managedConnection && policy.enabled) {
+          try {
+            const status = await this.readRuntimeEgressStatus(managedConnection, ownerId)
+            if (policyApplicationStatus(policy, status).state !== 'applied') throw new Error('Policy delivery is pending')
+          } catch {
+            throw new ResourceAccessError(503, 'Runtime egress policy is not applied; upgrade the runtime or retry delivery')
+          }
         }
-      }
-      if (!this.ownerRuntime && this.options.config.egressGate?.localOrganizationId === organizationId) {
-        const receipts = await this.observeEgressRuntime({ ownerId, organizationId }, policy)
-        if (!receipts.length || receipts.some(receipt => receipt.error || policyApplicationStatus(policy, receipt.status).state !== 'applied')) {
-          throw new ResourceAccessError(503, 'Local runtime egress policy is not applied; upgrade the runtime or retry delivery')
+        if (!this.ownerRuntime && this.options.config.egressGate?.localOrganizationId === organizationId) {
+          const receipts = await this.observeEgressRuntime({ ownerId, organizationId }, policy)
+          if (!receipts.length || receipts.some(receipt => receipt.error || policyApplicationStatus(policy, receipt.status).state !== 'applied')) {
+            throw new ResourceAccessError(503, 'Local runtime egress policy is not applied; upgrade the runtime or retry delivery')
+          }
         }
+        if (managedConnection) return managedConnection
       }
-      if (managedConnection) return managedConnection
-    }
-    return this.ownerRuntime ? this.ownerRuntime.connection(ownerId, agentId, configuration) : externalCohostConnection()
+      return this.ownerRuntime ? this.ownerRuntime.connection(ownerId, agentId, configuration) : externalCohostConnection()
+    })
   }
 
   private async readRuntimeEgressStatus(configuration: SessionConnectionConfig, ownerId: string) {
@@ -825,6 +842,10 @@ export class RuntimeService {
 
   /** Drain only tracked idle native sessions, replace placement, then resume their durable histories. */
   async upgradeUserRuntime(ownerId: string, orgId: string, configuration?: Record<string, string>) {
+    return this.workAdmission.run(() => this.upgradeAdmittedUserRuntime(ownerId, orgId, configuration))
+  }
+
+  private async upgradeAdmittedUserRuntime(ownerId: string, orgId: string, configuration?: Record<string, string>) {
     const ownerRuntime = this.ownerRuntime
     if (!ownerRuntime) throw new ResourceAccessError(409, 'User runtime placement is not enabled')
     this.assertCohostDeploymentAccess('cohost', ownerId)
@@ -1143,6 +1164,10 @@ export class RuntimeService {
     session: SessionRecord
     attempt: AttemptRecord
   }> {
+    return this.workAdmission.run(() => this.ensureAdmittedSessionReady(sessionId))
+  }
+
+  private async ensureAdmittedSessionReady(sessionId: string): Promise<{ session: SessionRecord; attempt: AttemptRecord }> {
     const session = await this.store.getSession(sessionId)
     if (session) await this.requireSessionAgentAccess(session)
     if (!session) {
@@ -1172,6 +1197,14 @@ export class RuntimeService {
   async ensureSessionReadyNonBlocking(
     sessionId: string,
   ): Promise<{ session: SessionRecord }> {
+    const admitted = this.workAdmission.tryRun(() => this.ensureAdmittedSessionReadyNonBlocking(sessionId))
+    if (admitted) return admitted
+    const session = await this.store.getSession(sessionId)
+    if (!session) throw new Error('Session not found')
+    return { session }
+  }
+
+  private async ensureAdmittedSessionReadyNonBlocking(sessionId: string): Promise<{ session: SessionRecord }> {
     const session = await this.store.getSession(sessionId)
     if (session && ['external', 'hosted'].includes(session.runtime.type)) throw new ResourceAccessError(409, 'Use the task API for this session')
     if (!session) {
@@ -1272,6 +1305,10 @@ export class RuntimeService {
    * heartbeat timeout instead of on the next restart.
    */
   async adoptOrphanedSessions(): Promise<void> {
+    await this.workAdmission.tryRun(() => this.adoptAdmittedOrphanedSessions())
+  }
+
+  private async adoptAdmittedOrphanedSessions(): Promise<void> {
     // Graceful drain: an exiting instance must not take over other instances'
     // orphans — it can't keep serving them, and would just turn them into
     // orphans again on exit. Heartbeat continues (owned attempts stay ours).
@@ -1726,6 +1763,7 @@ export class RuntimeService {
         authService: this.options.authService,
         store: this.store,
         config: this.options.config,
+        admissionContinuation: this.workAdmission.captureContinuation(),
       },
       sessionId,
     )
@@ -1738,7 +1776,7 @@ export class RuntimeService {
       return pending
     }
 
-    const ensurePromise = this.ensureAttemptInternal(session).finally(() => {
+    const ensurePromise = this.workAdmission.run(() => this.ensureAttemptInternal(session)).finally(() => {
       if (this.pendingEnsures.get(session.sessionId) === ensurePromise) {
         this.pendingEnsures.delete(session.sessionId)
       }
@@ -1951,12 +1989,9 @@ export class RuntimeService {
    * spawn. Fire-and-forget by design; deduped per session.
    */
   /**
-   * Read the runner manifest's owning instanceId from disk for one attempt
-   * generation. Returns null on any read/parse failure or when the manifest
-   * carries no instanceId (single-instance) so callers fall back to their
-   * normal path (safe default). Used by the non-blocking GET to tell a
-   * self-owned (DB) attempt whose live socket is still served by another
-   * instance's not-yet-fenced daemon apart from a genuinely self-served one.
+   * Read the runner's recorded creator, including automatically assigned
+   * instance IDs. The attempt owns this fact; older manifests may carry it
+   * only in config. Callers decide whether an unknown owner can be used.
    */
   async #readAttemptRunnerInstanceId(
     sessionId: string,
@@ -1965,8 +2000,9 @@ export class RuntimeService {
     try {
       const attemptDir = getAttemptDir(this.options.config, sessionId, generation)
       const raw = await readFile(join(attemptDir, 'manifest.json'), 'utf8')
-      const parsed = JSON.parse(raw) as { config?: { instanceId?: string } }
-      return parsed.config?.instanceId ?? null
+      const parsed = JSON.parse(raw) as { attempt?: { serverInstanceId?: unknown }; config?: { instanceId?: unknown } }
+      const owner = parsed.attempt?.serverInstanceId ?? parsed.config?.instanceId
+      return typeof owner === 'string' && owner.length > 0 ? owner : null
     } catch {
       return null
     }

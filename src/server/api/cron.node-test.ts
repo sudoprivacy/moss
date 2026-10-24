@@ -9,6 +9,7 @@ import type { CronJobSchedule } from '../services/cron/CronStore.js'
 
 const settingsHome = mkdtempSync(join(os.tmpdir(), 'moss-cron-settings-'))
 const homeMock = mock.method(os, 'homedir', () => settingsHome)
+const { WorkAdmission } = await import('@sudo/user-runtime')
 const { DirectConnectStore } = await import('../db.js')
 const { createCronApi } = await import('./cron.js')
 const { CronService: RealCronService } = await import('../services/cron/CronService.js')
@@ -67,6 +68,7 @@ async function setupService(t: TestContext, overrides: Partial<CronServiceConfig
     async getUserAuth() { return { role: 'user', scopes: [] } },
     async getClientCronEnabled() { return true },
     runtimeService: {
+      workAdmission: new WorkAdmission(),
       async createSession(auth: { userId: string; orgId: string; role: string; scopes: string[] }) {
         sessionAuth.push(auth)
         return { sessionId: `session-${sessionAuth.length}` }
@@ -365,7 +367,7 @@ void describe('Cron API organization policy', () => {
       conversationMode: 'new',
     })
     const service = new RealCronService(store.driver, {
-      runtimeService: {} as never,
+      runtimeService: { workAdmission: new WorkAdmission() } as never,
       runtimeDir: '/tmp/moss-cron-test',
       defaultRuntime: 'host',
       dockerContainerMode: 'session',

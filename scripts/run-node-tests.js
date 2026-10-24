@@ -20,6 +20,8 @@ const nodeTestFiles = [
   'src/server/sessionResume.node-test.ts',
   'src/server/sessionSocketAuthorization.node-test.ts',
   'src/server/browser/browserWindowStream.node-test.ts',
+  'src/server/runtimeAdmission.node-test.ts',
+  'src/server/runtimeAdmissionDaemon.node-test.ts',
   'src/server/agentManager.node-test.ts',
   'src/server/agentManagerRoutes.node-test.ts',
   'src/server/auth/agentControlAudience.node-test.ts',

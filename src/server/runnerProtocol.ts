@@ -12,6 +12,8 @@ export type RunnerClientMessage =
   | {
       type: 'ping'
     }
+  | { type: 'pause_input'; pauseId: string; requestId: string }
+  | { type: 'resume_input'; pauseId: string; requestId: string }
 
 export type RunnerServerMessage =
   | {
@@ -20,6 +22,7 @@ export type RunnerServerMessage =
       sessionId: string
       runtimeType: 'host' | 'docker' | 'k8s' | 'cohost'
       state: string
+      inputPauseSupported?: true
       managedProcessId?: string
       cohostSessionBinding?: CohostSessionBinding
     }
@@ -42,6 +45,15 @@ export type RunnerServerMessage =
       attemptId?: string
       isBusy?: boolean
     }
+  | {
+      type: 'input_paused'
+      requestId: string
+      attemptId: string
+      isInputDrained: boolean
+      isReady: boolean
+      isBusy?: boolean
+    }
+  | { type: 'input_resumed'; requestId: string; attemptId: string }
   | {
       // Acknowledgement of a 'stdin' message, sent by the daemon right after
       // dispatching the payload (sessionRunnerDaemon #handleClientMessage).

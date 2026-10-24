@@ -11,6 +11,7 @@ import type { CronActor, CronServiceConfig } from '../services/cron/CronService.
 
 const settingsHome = mkdtempSync(join(tmpdir(), 'moss-enterprise-settings-'))
 const homeMock = mock.method(os, 'homedir', () => settingsHome)
+const { WorkAdmission } = await import('@sudo/user-runtime')
 const { DirectConnectStore, forPostgresDirectConnectStore } = await import('../db.js')
 const { createEnterpriseApi } = await import('../api/enterprise.js')
 const { getSystemSettings, updateSystemSettings, SYSTEM_SETTINGS_PATH } = await import('../systemSettings.js')
@@ -181,6 +182,7 @@ for (const kind of ['sqlite', 'postgres'] as const) {
         getClientCronEnabled,
         getUserAuth: async () => active ? { role: 'user', scopes: [] } : null,
         runtimeService: {
+          workAdmission: new WorkAdmission(),
           async createSession(actor: CronActor) {
             sessionActors.push(actor)
             return { sessionId: 'cron-session' }
