@@ -74,3 +74,12 @@ Moss credential, reads existing session metadata and a persisted UI context,
 and logs out its own token. It does not change accounts, model selection,
 Agents or sessions, nor submit a turn. Only context hashes/counts enter the
 receipt. UI history readability is distinct from native engine resume.
+
+The explicit `CONFIG EVIDENCE --resume-existing SESSION_ID` mode instead
+resumes that already-visible, same-owner cohost session through the normal
+Moss API. It requires the original locator, verifies the native repository's
+stored owner/Agent/durable-SID/repository binding and unchanged projected
+messages, and sends no model turn. It leaves the resumed execution with Moss;
+the enclosing private-copy fixture owns cleanup. This mode is a real state
+change and must not be used as a read-only probe. A successful native resume
+still does not prove a dependent real-model turn used the recovered history.

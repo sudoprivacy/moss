@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -39,6 +39,7 @@ async function journey(redirect: boolean) {
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
     const [exit] = await once(child, 'close')
+    assert(existsSync(join(evidence, 'receipt.json')), `Product probe exited ${exit} before its receipt: ${stderr}`)
     const result = JSON.parse(readFileSync(join(evidence, 'receipt.json'), 'utf8'))
     for (const secret of ['private-password','private-token','private-refresh','private-history']) {
       assert(!JSON.stringify(result).includes(secret)); assert(!stdout.includes(secret)); assert(!stderr.includes(secret))
