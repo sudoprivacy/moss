@@ -5,6 +5,8 @@
  */
 import { createHash } from 'node:crypto'
 import { HttpError } from '../httpError.js'
+import { connectWorkerWindowStream } from './browserWindowStream.js'
+import type WebSocket from 'ws'
 
 export interface BrowserPrincipal { orgId: string; userId: string }
 export interface BrowserBinding extends BrowserPrincipal { sessionId: string }
@@ -21,6 +23,7 @@ const actionFields: Record<string, string[]> = {
   stop: ['controlEpoch', 'targetEpoch'],
   restart: ['controlEpoch', 'targetEpoch', 'isHeadless', 'transport', 'acknowledgeStateLoss'],
   frame: ['viewerId', 'controlEpoch', 'targetEpoch', 'surface'],
+  'window-stream': ['viewerId', 'controlEpoch', 'targetEpoch'],
   take: ['controlEpoch', 'targetEpoch'], return: ['controlEpoch', 'targetEpoch', 'note'],
   input: ['controlEpoch', 'targetEpoch', 'input', 'surface'], navigate: ['controlEpoch', 'targetEpoch', 'url'],
   back: ['controlEpoch', 'targetEpoch'], forward: ['controlEpoch', 'targetEpoch'],
@@ -138,6 +141,10 @@ export class HttpBrowserWorker implements BrowserWorkerPort {
     if (response.status === 202) return null
     if (!response.ok) throw new HttpError(502, 'Managed browser MCP unavailable')
     return response.json()
+  }
+
+  openWindowStream(binding: BrowserBinding, controller: string, action: Record<string, unknown>): Promise<WebSocket> {
+    return connectWorkerWindowStream(this.endpoint, this.token, binding, controller, action)
   }
 
   private async transfer(path: string, context: Record<string, unknown>, data?: Uint8Array, name?: string): Promise<Response> {
