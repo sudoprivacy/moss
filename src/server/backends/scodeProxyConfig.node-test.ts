@@ -6,6 +6,7 @@ void test('native calls use a private model mount containing the same owner key 
   for (const apiKey of ['owner-alice-key', 'owner-bob-key']) {
     const direct = JSON.parse(buildScodeProxyConfig('https://router.example/v1', apiKey)['sudocode.json']!)
     const native = buildCohostProxyConfig('https://router.example/v1/', apiKey, 'qa-model')
+    assert.equal(JSON.parse(native['backend-config.json']).mounts[0].backend_name, 'moss-model-proxy')
     const engine = JSON.parse(native['sudocode.json']!)
     const backend = JSON.parse(native['backend-config.json']!).mounts[0]
     assert.equal(engine.auth_modes.proxy['moss-proxy'].baseUrl, 'nexus:///model')

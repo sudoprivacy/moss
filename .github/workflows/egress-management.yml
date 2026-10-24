@@ -1,0 +1,33 @@
+name: egress-management
+on:
+  pull_request:
+    paths:
+      - 'src/server/configuration/egressPolicyService*'
+      - 'src/server/runtimeService.ts'
+      - 'src/server/server.ts'
+      - 'admin/src/pages/egress-policy-page.tsx'
+      - 'admin/lib/api/egress-policy.ts'
+      - 'package.json'
+      - 'bun.lock'
+      - '.github/workflows/egress-management.yml'
+jobs:
+  policy-and-admin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - run: bun install --frozen-lockfile
+      - name: Maintenance CLI test prerequisite
+        run: sudo apt-get update && sudo apt-get install -y lsof
+      - run: bun run typecheck
+      - name: Full server and registered Node suites
+        run: bun run test
+      - run: bun install --frozen-lockfile
+        working-directory: admin
+      - run: bun run build
+        working-directory: admin

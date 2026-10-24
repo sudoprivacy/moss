@@ -70,7 +70,10 @@ import {
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import { buildAgentInstructions } from './agentInstructions.js'
 import type { NexusClient } from './nexus/nexusClient.js'
-import { UserPodService } from '@sudo/user-runtime'
+import { UserPodService, writeEgressPolicyFile, readEgressPolicyFile } from '@sudo/user-runtime'
+import { createEgressPolicy, EgressPolicyRepository, POLICY_FILENAME, readEgressPolicyStatus, policyApplicationStatus } from '@sudo/egress-policy'
+import { EgressPolicyService, type EgressRuntimeReceipt, type EgressRuntimeTarget } from './configuration/egressPolicyService.js'
+import type { EgressPolicy } from '@sudo/egress-policy'
 import { CohostOwnerRuntime } from './runtime/cohostOwnerRuntime.js'
 import type { NexusSessionEndpoint } from '@nexus-ai-fs/vfs-client'
 import { assertRuntimePlacement } from './runtime/runtimePlacementPolicy.js'
@@ -363,6 +366,7 @@ interface RunnerModelContext {
 }
 
 export class RuntimeService {
+  readonly egressPolicies: EgressPolicyService
   private readonly userPods?: UserPodService
   private readonly ownerRuntime?: CohostOwnerRuntime
   private readonly upgradingOwners = new Set<string>()
@@ -418,12 +422,19 @@ export class RuntimeService {
         runtimeClassName: k8s.runtimeClassName, cpuLimit: k8s.cpuLimit, memoryLimit: k8s.memoryLimit,
         imagePullPolicy: k8s.imagePullPolicy, imagePullSecrets: k8s.imagePullSecrets,
         issuer: { endpoint: issuer.endpoint, tls: issuer.tls },
+        ...(options.config.egressGate?.analyzerImage ? { egressAnalyzer: { image: options.config.egressGate.analyzerImage } } : {}),
+        ...(options.config.egressGate?.analyzerRelay ? { egressAnalyzerRelay: options.config.egressGate.analyzerRelay } : {}),
       }, undefined, waitForSessionRuntime)
     }
     if (this.userPods) {
       this.ownerRuntime = new CohostOwnerRuntime(this.userPods, this.store.cohostAgentHomes,
         k8s?.userRuntimeAgentsPerAllocation)
     }
+    this.egressPolicies = new EgressPolicyService(new EgressPolicyRepository(this.store.driver,
+      options.config.egressGate?.defaultPolicyFile ? readEgressPolicyFile(options.config.egressGate.defaultPolicyFile) : createEgressPolicy()), {
+      targets: organizationId => this.authService.listEgressPolicyOwners(organizationId),
+      observe: (target, policy) => this.observeEgressRuntime(target, policy),
+    })
     if (options.nexusClient) {
       this.mcpStore = new McpStore(this.store.driver)
       this.mcpUserConfig = createMcpUserConfigApi({
@@ -677,7 +688,48 @@ export class RuntimeService {
 
   /** Main-process placement shared by session runners and authenticated workspace I/O. */
   async resolveCohostConnection(ownerId: string, agentId: string, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
+    if (configuration) {
+      const organizationId = await this.store.getUserOrgId(ownerId)
+      if (!organizationId) throw new ResourceAccessError(403, 'Runtime owner organization is unavailable')
+      const policy = await this.egressPolicies.policy(organizationId)
+      configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(policy) }
+      if (!this.ownerRuntime && this.options.config.egressGate?.localOrganizationId === organizationId) {
+        const receipts = await this.observeEgressRuntime({ ownerId, organizationId }, policy)
+        if (!receipts.length || receipts.some(receipt => receipt.error || policyApplicationStatus(policy, receipt.status).state !== 'applied')) {
+          throw new ResourceAccessError(503, 'Local runtime egress policy is not applied; upgrade the runtime or retry delivery')
+        }
+      }
+    }
     return this.ownerRuntime ? this.ownerRuntime.connection(ownerId, agentId, configuration) : externalCohostConnection()
+  }
+
+  private async observeEgressRuntime(target: EgressRuntimeTarget, policy?: EgressPolicy): Promise<EgressRuntimeReceipt[]> {
+    const placements = this.ownerRuntime ? await this.ownerRuntime.placements(target.ownerId) : []
+    if (!this.ownerRuntime) {
+      const deployment = this.options.config.egressGate
+      if (!deployment?.localPolicyFile || deployment.localOrganizationId !== target.organizationId) {
+        return [{ ownerId: target.ownerId, allocationId: 'local', isPresent: false }]
+      }
+      try {
+        if (policy) await writeEgressPolicyFile(deployment.localPolicyFile, policy)
+        const connection = await connectSessionRuntime(externalCohostConnection(), target.ownerId)
+        try { return [{ ownerId: target.ownerId, allocationId: 'local', isPresent: true,
+          status: await readEgressPolicyStatus(connection.client, connection.authToken) }] }
+        finally { connection.client.close() }
+      } catch { return [{ ownerId: target.ownerId, allocationId: 'local', isPresent: true, error: 'Local runtime policy is unavailable; verify the runtime version and deployment configuration' }] }
+    }
+    return await Promise.all(placements.map(async placement => {
+      const identity = { ownerId: target.ownerId, allocationId: placement.allocationId }
+      try {
+        const configuration = policy
+          ? await placement.service.configurePolicy?.(target.ownerId, policy)
+          : await placement.service.find(target.ownerId)
+        if (!configuration) return { ...identity, isPresent: false }
+        const connection = await connectSessionRuntime(configuration, target.ownerId)
+        try { return { ...identity, isPresent: true, status: await readEgressPolicyStatus(connection.client, connection.authToken) } }
+        finally { connection.client.close() }
+      } catch { return { ...identity, isPresent: true, error: 'Runtime policy is unavailable; upgrade the runtime or retry delivery' } }
+    }))
   }
 
   /** Connect with a fresh owner-delegated identity at the execution endpoint. */
@@ -734,6 +786,7 @@ export class RuntimeService {
         return buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
           environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!)
       })
+      configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(await this.egressPolicies.policy(orgId)) }
       const sessions = (await this.store.listUserSessions(orgId, ownerId))
         .filter(session => session.runtime.type === 'cohost' && session.desiredState === 'active')
       const bindings = await Promise.all(sessions.map(async session => ({ session,
@@ -1300,6 +1353,12 @@ export class RuntimeService {
   }
 
   async reconcileOnStartup(): Promise<void> {
+    const localGate = this.options.config.egressGate
+    if (!this.ownerRuntime && localGate?.localPolicyFile && localGate.localOrganizationId) {
+      // Restore desired policy before accepting work, even if the controller
+      // stopped after saving SQL but before the local file was delivered.
+      await writeEgressPolicyFile(localGate.localPolicyFile, await this.egressPolicies.policy(localGate.localOrganizationId))
+    }
     // Rebuild UserContainerRegistry from `docker ps` before touching sessions
     // so ensureAttempt() reuses existing user containers rather than spawning
     // duplicates. Silent on error — Docker may not be available in this
