@@ -1,0 +1,94 @@
+/** Qualify this source's migrations on a private SQLite backup, without starting Moss. */
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { backup, DatabaseSync } from 'node:sqlite'
+import { DirectConnectStore } from '../db.js'
+
+const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"'
+const MAX_ROWS_PER_TABLE = 100_000
+type Inventory = Record<string, { columns: string[]; rows: number; sha256: string }>
+
+function valueHash(value: unknown): unknown {
+  if (value instanceof Uint8Array) return ['bytes', Buffer.from(value).toString('base64')]
+  if (typeof value === 'bigint') return ['bigint', value.toString()]
+  return [value === null ? 'null' : typeof value, value]
+}
+
+/** Only hashes/counts leave the process; database values and prompts never do. */
+function inventory(db: DatabaseSync, original?: Inventory): Inventory {
+  const tables = original ? Object.keys(original) : db.prepare(
+    "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
+  ).all().map(row => String(row.name))
+  return Object.fromEntries(tables.map(table => {
+    const available = db.prepare(`PRAGMA table_info(${quote(table)})`).all().map(row => String(row.name))
+    const columns = original?.[table]?.columns ?? available
+    assert(columns.length && columns.every(column => available.includes(column)), `Existing columns removed: ${table}`)
+    const count = Number(db.prepare(`SELECT count(*) AS count FROM ${quote(table)}`).get()!.count)
+    assert(count <= MAX_ROWS_PER_TABLE, `Qualification row bound exceeded: ${table}; use a reviewed larger-data journey`)
+    const query = db.prepare(`SELECT ${columns.map(quote).join(',')} FROM ${quote(table)}`)
+    query.setReadBigInts(true)
+    const rows = query.all().map(row => createHash('sha256').update(JSON.stringify(
+      columns.map(column => valueHash(row[column])),
+    )).digest('hex')).sort()
+    const sha256 = createHash('sha256').update(JSON.stringify(rows)).digest('hex')
+    return [table, { columns, rows: count, sha256 }]
+  }))
+}
+
+function integrity(db: DatabaseSync): void {
+  assert.deepEqual(db.prepare('PRAGMA integrity_check').all().map(row => row.integrity_check), ['ok'])
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), [], 'Foreign-key violations require review')
+}
+
+export async function qualifySqliteUpgrade(source: string) {
+  assert(isAbsolute(source), 'Use an absolute source database path')
+  const directory = mkdtempSync(join(tmpdir(), 'moss-db-upgrade-'))
+  chmodSync(directory, 0o700)
+  const copy = join(directory, 'moss.db')
+  let sourceDb: DatabaseSync | undefined
+  let store: DirectConnectStore | undefined
+  try {
+    // Read-only source plus the SQLite backup API includes WAL commits. A raw
+    // filesystem copy of a running database is not an upgrade qualification.
+    sourceDb = new DatabaseSync(source, { readOnly: true })
+    await backup(sourceDb, copy)
+    sourceDb.close(); sourceDb = undefined
+    chmodSync(copy, 0o600)
+    const snapshot = new DatabaseSync(copy, { readOnly: true })
+    let before: Inventory
+    try { integrity(snapshot); before = inventory(snapshot) }
+    finally { snapshot.close() }
+
+    const errors: unknown[][] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { errors.push(args); originalError(...args) }
+    try { store = new DirectConnectStore(copy) }
+    finally { console.error = originalError }
+    assert.equal(errors.length, 0, 'Migration emitted errors; retain the original diagnostic')
+    integrity(store.db!)
+    assert.deepEqual(inventory(store.db!, before), before, 'Migration changed existing rows or columns')
+    const migrated = inventory(store.db!)
+    await store.close(); store = undefined
+    // An ordinary restart must not perform another logical data mutation.
+    store = new DirectConnectStore(copy)
+    integrity(store.db!)
+    assert.deepEqual(inventory(store.db!), migrated, 'Migration is not idempotent on reopen')
+    return { schemaVersion: 1, sourceOpenedReadOnly: true, sourceBackupApi: 'node:sqlite.backup',
+      sourceTables: Object.fromEntries(Object.entries(before).map(([name, value]) =>
+        [name, { rows: value.rows, sha256: value.sha256 }])),
+      addedTables: Object.keys(migrated).filter(table => !(table in before)),
+      existingRowsPreserved: true, idempotentReopen: true,
+      runtimeStarted: false, nativeHistoryRecoveryAccepted: false, authenticatedReady: false }
+  } finally {
+    sourceDb?.close()
+    await store?.close()
+    // Remove only the exact private directory created above, on either outcome.
+    assert.equal(dirname(directory), resolve(tmpdir()))
+    assert(directory.startsWith(resolve(tmpdir()) + sep + 'moss-db-upgrade-'))
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
