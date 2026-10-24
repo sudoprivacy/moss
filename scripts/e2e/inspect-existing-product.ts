@@ -98,7 +98,10 @@ try {
       const after = await request(`/api/v1/sessions/${encodeURIComponent(id)}/context`)
       assert.equal(createHash('sha256').update(JSON.stringify(after.context?.messages)).digest('hex'), messagesSha256,
         'Persisted UI history changed during resume without a turn')
-      report.nativeResumeAccepted = true
+      // HTTP acceptance can precede an asynchronous native session/load
+      // failure. The enclosing fixture must inspect the live native process;
+      // this producer read alone does not prove an engine resumed.
+      report.resumeHttpAccepted = true
       report.nativeBindingPreserved = binding
       report.projectedContextPreserved = true
       report.executionLifecycleOwner = 'Moss operator or enclosing private-copy fixture'
