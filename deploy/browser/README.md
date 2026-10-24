@@ -6,13 +6,13 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.58.3 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.58.6 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
 the consumer test verifies it against the installed public package.
 
-The managed-browser workflow builds the SDK v0.58.3 base, applies
+The managed-browser workflow builds the SDK v0.58.6 base, applies
 `chrome-version.Dockerfile`, then builds this worker. The Chrome layer downloads
 the versioned official package, verifies its SHA-256 before installation and
 checks the installed package version. The current runtime uses Chrome
@@ -122,11 +122,14 @@ interrupt and native agent communication without adding business handoff
 buttons. The new worker capability is optional, so older workers continue to
 offer the existing JPEG/native-input path.
 
-This source adapter requires a public SDK release containing `windowStream`.
-The Dockerfile's current 0.58.3 pin does not provide it. The SDK release/pin,
-shared renderer and WebUI proxy, actual public graph/phone acceptance and
-production rollout remain separate delivery gates. Local real WebSocket proxy
-tests are not public end-to-end acceptance.
+This source adapter pins SDK v0.58.6, tagged from merged SDK PR #39, and the
+managed-browser workflow uses its matching source commit. Public artifact
+verification, the shared renderer and WebUI proxy, actual public graph/phone
+acceptance and production rollout remain separate delivery gates. Local real
+WebSocket proxy tests are not public end-to-end acceptance. Both proxy hops
+test a first RFB banner coalesced with the HTTP upgrade: the upstream stays
+paused until both relay directions are installed, so no banner is lost while
+the caller resumes asynchronously.
 
 `browser_launch` requires a launch mode and keeps an existing browser in that
 mode. A different mode returns `browser_restart_required`.

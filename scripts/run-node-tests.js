@@ -11,6 +11,7 @@ const nodeTestFiles = [
   'scripts/e2e/inspect-existing-product.node-test.ts',
   'scripts/e2e/http-agent-artifact.test.mjs',
   'scripts/e2e/fetch-nexus-runtime.test.mjs',
+  'scripts/e2e/packaged-pg-ha-fixture.test.mjs',
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',
   'src/server/runtime/cohostOwnerRuntime.node-test.ts',
   'src/server/runnerReadiness.node-test.ts',
