@@ -63,6 +63,7 @@ import { computeReadiness, setRouteCookieHeader, tryParseUrl } from './readiness
 import { DRAFTS_DIR_NAME, ensureDraftsDirectory } from './draftsCleanup.js'
 import { getSystemSettings, SystemSettingsScopeError, updateSystemSettings } from './systemSettings.js'
 import { ConfigurationScopeError, resolveConfigurationActor } from './configuration/adminScope.js'
+import { EgressPolicyConflict } from '@sudo/egress-policy'
 import { buildPublicSystemConfig, toSudorouterRoot } from './publicSystemConfig.js'
 import { normalizePhone, PhoneAuthError } from './auth/phoneAuth.js'
 import { importPhoneUsers, parsePhoneImportRequest } from './auth/phoneImport.js'
@@ -8544,6 +8545,39 @@ export function startServer(
           writeJson(res, 200, result)
           return
         }
+      }
+
+      if (pathname === '/api/v1/settings/egress' || pathname === '/api/v1/settings/egress/apply' || pathname === '/api/v1/settings/egress/inherit') {
+        authService.requireScope(auth, 'admin:settings')
+        const organizationId = await resolveSystemSettingsOrgScope(auth, authService, url.searchParams.get('scope'))
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method === 'GET' && pathname === '/api/v1/settings/egress') {
+          writeJson(res, 200, await runtime.egressPolicies.view(organizationId))
+          return
+        }
+        if (req.method === 'POST' && pathname === '/api/v1/settings/egress/apply') {
+          writeJson(res, 200, await runtime.egressPolicies.view(organizationId, true))
+          return
+        }
+        if ((req.method === 'PUT' && pathname === '/api/v1/settings/egress') || (req.method === 'POST' && pathname === '/api/v1/settings/egress/inherit')) {
+          const body = await readJsonBody(req)
+          if (typeof body.expectedRevision !== 'number') throw new HttpError(400, 'Expected policy revision is required')
+          try {
+            if (pathname === '/api/v1/settings/egress/inherit') {
+              if (!organizationId) throw new HttpError(400, 'Only an organization policy can inherit defaults')
+              writeJson(res, 200, await runtime.egressPolicies.inherit(organizationId, body.expectedRevision))
+            } else {
+              writeJson(res, 200, await runtime.egressPolicies.save(organizationId, body.policy, body.expectedRevision, auth.userId))
+            }
+          } catch (error) {
+            if (error instanceof EgressPolicyConflict) throw new HttpError(409, error.message)
+            if (error instanceof HttpError) throw error
+            if (error instanceof Error && /Invalid|requires|exceeds|invalid/i.test(error.message)) throw new HttpError(400, error.message)
+            throw error
+          }
+          return
+        }
+        throw new HttpError(405, 'Unsupported egress policy operation')
       }
 
       if (req.method === 'GET' && pathname === '/api/v1/settings/system') {

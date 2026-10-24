@@ -14,6 +14,7 @@ const OperationsBillingPage = lazy(() => import('./pages/operations-billing-page
 const ApiKeysPage = lazy(() => import('./pages/api-keys-page'))
 const ZonesPage = lazy(() => import('./pages/zones-page'))
 const SystemSettingsPage = lazy(() => import('./pages/system-settings-page'))
+const EgressPolicyPage = lazy(() => import('./pages/egress-policy-page'))
 const PlatformConfigPage = lazy(() => import('./pages/platform-config-page'))
 const AccountSecurityPage = lazy(() => import('./pages/account-security-page'))
 const ServerCredentialsPage = lazy(() => import('./pages/server-credentials-page'))
@@ -88,6 +89,7 @@ export default function App() {
         }
       />
       <Route element={<DashboardShell />}>
+        <Route path="/egress-policy" element={<SuspendedRoute><EgressPolicyPage /></SuspendedRoute>} />
         <Route
           index
           element={

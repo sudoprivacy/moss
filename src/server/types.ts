@@ -172,6 +172,16 @@ export const serverFileConfigSchema = lazySchema(() =>
     }),
     // gvisor-isolated k8s pod runtime (single-node k3s PoC). Only consulted
     // when runtimeDefaults.type='k8s' or a session requests runtime.type='k8s'.
+    egressGate: z.object({
+      defaultPolicyFile: z.string().min(1).optional(),
+      analyzerImage: z.string().min(1).optional(),
+      analyzerRelay: z.object({ image: z.string().min(1), secretName: z.string().regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/) }).optional(),
+      localPolicyFile: z.string().min(1).optional(),
+      localOrganizationId: z.string().min(1).optional(),
+    }).refine(value => Boolean(value.localPolicyFile) === Boolean(value.localOrganizationId),
+      { message: 'Local egress policy delivery requires its organization binding' })
+      .refine(value => !(value.analyzerImage && value.analyzerRelay),
+        { message: 'Choose a dedicated analyzer or a node analyzer relay' }).optional(),
     k8s: z.object({
       image: z.string().optional(),
       userRuntimeImage: z.string().min(1).optional(),
@@ -699,6 +709,13 @@ export type ServerConfig = {
    * MOSS_SCODE_IMAGE, MOSS_K8S_NAMESPACE, MOSS_K8S_RUNTIME_CLASS,
    * MOSS_K8S_KUBECONFIG. (scode ships in the image — no node-side path.)
    */
+  egressGate?: {
+    defaultPolicyFile?: string
+    analyzerImage?: string
+    analyzerRelay?: { image: string; secretName: string }
+    localPolicyFile?: string
+    localOrganizationId?: string
+  }
   k8s?: {
     image?: string
     userRuntimeImage?: string

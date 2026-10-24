@@ -5,7 +5,7 @@ import { ResourceAccessError } from '../catalog/resourceError.js'
 import { readAgentNamespace } from '../nexus/agentNamespace.js'
 import { connectSessionRuntime, type SessionConnectionConfig } from '../nexus/sessionConnection.js'
 
-type PlacementService = Pick<UserPodService, 'resolve' | 'find' | 'inspect' | 'upgrade'>
+type PlacementService = Pick<UserPodService, 'resolve' | 'find' | 'inspect' | 'upgrade'> & Partial<Pick<UserPodService, 'configurePolicy'>>
 type PlacementRoot = { forAllocation(allocationId: string): PlacementService }
 type NamespaceReader = (config: UserRuntimeConnectionConfig, ownerId: string) => Promise<RuntimeAgentNamespace>
 
