@@ -80,6 +80,11 @@ export abstract class BasePlugin {
     return this.errorMessage;
   }
 
+  /** Whether the platform connection can currently receive events. */
+  get isConnectionReady(): boolean {
+    return this._status === 'running';
+  }
+
   /**
    * Set status and log transition
    */

@@ -15,6 +15,7 @@ import { convertHtmlToLarkMarkdown, extractCardAction, LARK_MESSAGE_LIMIT, toLar
 // Event deduplication settings
 const EVENT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const EVENT_CACHE_CLEANUP_INTERVAL = 60 * 1000; // 1 minute
+const CONNECTION_START_TIMEOUT_MS = 10_000;
 
 /**
  * LarkPlugin - Lark/Feishu Bot integration for Moss Server
@@ -29,11 +30,6 @@ export class LarkPlugin extends BasePlugin {
   private wsClient: lark.WSClient | null = null;
   private eventDispatcher: lark.EventDispatcher | null = null;
   private botInfo: { appId: string; name?: string } | null = null;
-  private isConnected: boolean = false;
-
-  // Token management
-  private accessToken: string | null = null;
-  private tokenExpiresAt: number = 0;
 
   // Track active users for status reporting
   private activeUsers: Set<string> = new Set();
@@ -45,6 +41,10 @@ export class LarkPlugin extends BasePlugin {
   // Media directory for downloaded files
   private mediaDir: string = '';
 
+  override get isConnectionReady(): boolean {
+    return this.status === 'running' && this.wsClient?.getConnectionStatus().state === 'connected';
+  }
+
   /**
    * Initialize the Lark client instance
    */
@@ -54,6 +54,9 @@ export class LarkPlugin extends BasePlugin {
 
     if (!appId || !appSecret) {
       throw new Error('Lark App ID and App Secret are required');
+    }
+    if (!/^cli_[0-9a-fA-F]{16}$/.test(appId)) {
+      throw new Error('Invalid Lark App ID');
     }
 
     // Create Lark client
@@ -87,8 +90,6 @@ export class LarkPlugin extends BasePlugin {
     }
 
     try {
-      await this.refreshAccessToken();
-
       const encryptKey = this.config?.credentials?.encryptKey;
       const verificationToken = this.config?.credentials?.verificationToken;
 
@@ -99,26 +100,51 @@ export class LarkPlugin extends BasePlugin {
 
       this.setupEventHandlers();
 
-      this.wsClient = new lark.WSClient({
-        appId,
-        appSecret,
-        domain: lark.Domain.Feishu,
-        loggerLevel: lark.LoggerLevel.info,
-      });
-
-      this.wsClient
-        .start({
-          eventDispatcher: this.eventDispatcher,
-        })
-        .catch((err: unknown) => {
-          console.error(`[LarkPlugin] WebSocket start() error:`, err);
+      const dispatcher = this.eventDispatcher;
+      await new Promise<void>((resolve, reject) => {
+        let isSettled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = (error?: Error): void => {
+          if (isSettled) return;
+          isSettled = true;
+          if (timer) clearTimeout(timer);
+          if (error) reject(error);
+          else resolve();
+        };
+        const wsClient = new lark.WSClient({
+          appId,
+          appSecret,
+          domain: lark.Domain.Feishu,
+          loggerLevel: lark.LoggerLevel.info,
+          handshakeTimeoutMs: CONNECTION_START_TIMEOUT_MS,
+          onReady: () => {
+            if (this.wsClient === wsClient) finish();
+          },
+          onError: (error: Error) => {
+            if (this.wsClient !== wsClient) return;
+            if (!isSettled) finish(error);
+            else {
+              this.closeConnection();
+              this.stopEventCleanup();
+              this.setStatus('error', error.message);
+            }
+          },
         });
+        this.wsClient = wsClient;
+        timer = setTimeout(() => {
+          finish(new Error('Lark WebSocket connection timed out'));
+        }, CONNECTION_START_TIMEOUT_MS);
+        // SDK start() resolves before its first handshake. Only onReady proves
+        // that the long connection can receive events.
+        void Promise.resolve().then(() => wsClient.start({ eventDispatcher: dispatcher })).catch(finish);
+      });
+      if (this.status === 'error') throw new Error(this.error ?? 'Lark connection failed');
 
-      this.isConnected = true;
       this.startEventCleanup();
 
       console.log(`[LarkPlugin] Started`);
     } catch (error) {
+      this.closeConnection();
       console.error('[LarkPlugin] Failed to start:', error);
       throw error;
     }
@@ -130,20 +156,20 @@ export class LarkPlugin extends BasePlugin {
   protected async onStop(): Promise<void> {
     this.stopEventCleanup();
 
-    if (this.wsClient) {
-      this.wsClient = null;
-    }
-
-    this.eventDispatcher = null;
+    this.closeConnection();
     this.client = null;
     this.botInfo = null;
-    this.accessToken = null;
-    this.tokenExpiresAt = 0;
     this.activeUsers.clear();
     this.processedEvents.clear();
-    this.isConnected = false;
 
     console.log('[LarkPlugin] Stopped and cleaned up');
+  }
+
+  private closeConnection(): void {
+    const client = this.wsClient;
+    this.wsClient = null;
+    this.eventDispatcher = null;
+    client?.close({ force: true });
   }
 
   /**
@@ -192,8 +218,6 @@ export class LarkPlugin extends BasePlugin {
         throw new Error('Client not initialized');
       }
     }
-
-    await this.ensureAccessToken();
 
     const receiveIdType = this.getReceiveIdType(chatId);
 
@@ -315,8 +339,6 @@ export class LarkPlugin extends BasePlugin {
       }
     }
 
-    await this.ensureAccessToken();
-
     const { contentType, content, rawText } = toLarkSendParams(message);
 
     try {
@@ -362,27 +384,35 @@ export class LarkPlugin extends BasePlugin {
    */
   private setupEventHandlers(): void {
     if (!this.eventDispatcher) return;
+    const dispatcher = this.eventDispatcher;
 
-    this.eventDispatcher.register({
+    dispatcher.register({
       'im.message.receive_v1': async (data: Record<string, unknown>) => {
-        void this.handleMessageEvent({ event: data });
+        if (!this.isCurrentDispatcher(dispatcher)) return;
+        void this.handleMessageEvent({ event: data }, dispatcher);
       },
 
       'card.action.trigger': async (data: Record<string, unknown>) => {
+        if (!this.isCurrentDispatcher(dispatcher)) return {};
         void this.handleCardAction({ event: data });
         return {};
       },
 
       'application.bot.menu_v6': async (data: Record<string, unknown>) => {
+        if (!this.isCurrentDispatcher(dispatcher)) return;
         void this.handleBotMenuEvent({ event: data });
       },
     });
   }
 
+  private isCurrentDispatcher(dispatcher: lark.EventDispatcher): boolean {
+    return this.eventDispatcher === dispatcher && (this.status === 'starting' || this.status === 'running');
+  }
+
   /**
    * Handle incoming message events
    */
-  private async handleMessageEvent(event: any): Promise<void> {
+  private async handleMessageEvent(event: any, dispatcher: lark.EventDispatcher): Promise<void> {
     try {
       const message = event?.event?.message;
       const sender = event?.event?.sender;
@@ -410,6 +440,7 @@ export class LarkPlugin extends BasePlugin {
         if (unifiedMessage.content.attachments?.length) {
           await this.downloadMediaAttachments(unifiedMessage, eventId || '');
         }
+        if (!this.isCurrentDispatcher(dispatcher)) return;
 
         if (unifiedMessage.content.type === 'text' && unifiedMessage.content.text) {
           const buttonAction = this.getMenuButtonAction(unifiedMessage.content.text);
@@ -646,32 +677,6 @@ export class LarkPlugin extends BasePlugin {
       }
     } catch (error) {
       console.error('[LarkPlugin] Error processing card action:', error);
-    }
-  }
-
-  /**
-   * Refresh access token
-   */
-  private async refreshAccessToken(): Promise<void> {
-    if (!this.client) {
-      throw new Error('Client not initialized');
-    }
-
-    try {
-      // The SDK handles token refresh internally
-    } catch (error) {
-      console.error('[LarkPlugin] Failed to refresh access token:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Ensure access token is valid
-   */
-  private async ensureAccessToken(): Promise<void> {
-    const now = Date.now();
-    if (this.tokenExpiresAt - now < 5 * 60 * 1000) {
-      await this.refreshAccessToken();
     }
   }
 
