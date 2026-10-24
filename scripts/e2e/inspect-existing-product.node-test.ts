@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import { WebSocketServer } from 'ws'
 import { productConversation } from './productConversation.js'
 
-async function journey(redirect: boolean, resume = false, terminate = false, ownerMatches = true) {
+async function journey(redirect: boolean, resume = false, terminate = false, ownerMatches = true, inspectOnly = false) {
   const root = mkdtempSync(join(tmpdir(), 'moss-product-inspect-'))
   const calls: string[] = []
   let redirectedCalls = 0
@@ -22,7 +22,7 @@ async function journey(redirect: boolean, resume = false, terminate = false, own
     const routes: Record<string, unknown> = {
       '/api/v1/auth/login': { access_token: 'private-token', refresh_token: 'private-refresh' },
       '/api/v1/auth/me': { user: { id: 'owner-existing' } },
-      '/api/v1/sessions': { sessions: [{ sessionId: 'old-session', runtime: { type: 'cohost' } }] },
+      '/api/v1/sessions': { sessions: [...(inspectOnly ? [{sessionId:'other-session',runtime:{type:'cohost'}}] : []),{ sessionId: 'old-session', runtime: { type: 'cohost' } }] },
       '/api/v1/sessions/old-session/context': { session: { sessionId:'old-session',userId:ownerMatches ? 'owner-existing' : 'other-owner',workDir:join(root,'workspace') },
         context: { messages: [{ role: 'user', content: 'private-history' }] } },
       '/api/v1/sessions/old-session/terminate': { ok:true },
@@ -39,7 +39,7 @@ async function journey(redirect: boolean, resume = false, terminate = false, own
       bootstrapAdmin: { username: 'existing', password: 'private-password' } }), { mode: 0o600 })
     const child = spawn(process.execPath, [resolve('node_modules/tsx/dist/cli.mjs'),
       resolve('scripts/e2e/inspect-existing-product.ts'), config, evidence,
-      ...(resume ? ['--resume-existing','old-session'] : terminate ? ['--terminate-existing','old-session'] : [])], { stdio: ['ignore','pipe','pipe'] })
+      ...(inspectOnly ? ['--inspect-existing','old-session'] : resume ? ['--resume-existing','old-session'] : terminate ? ['--terminate-existing','old-session'] : [])], { stdio: ['ignore','pipe','pipe'] })
     let stdout = '', stderr = ''
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
@@ -72,6 +72,24 @@ void test('product inspection refuses redirects before credentials reach another
   assert.equal(result.exit, 1)
   assert.equal(result.redirectedCalls, 0)
   assert.deepEqual(result.calls, ['POST /api/v1/auth/login'])
+})
+
+void test('explicit inspection selects the original owned session without resuming or a model turn', async () => {
+  const result = await journey(false,false,false,true,true)
+  assert.equal(result.exit,0)
+  assert.equal(result.result.nativeExecutionResumeRequested,false)
+  assert.equal(result.result.turnSubmitted,false)
+  assert.equal(result.result.existingHistoryReads[0].sessionId,'old-session')
+  assert.deepEqual(result.calls,['POST /api/v1/auth/login','GET /api/v1/auth/me','GET /api/v1/sessions',
+    'GET /api/v1/sessions/old-session/context','POST /api/v1/auth/logout'])
+})
+
+void test('explicit inspection refuses another owner before any execution request', async () => {
+  const result = await journey(false,false,false,false,true)
+  assert.equal(result.exit,1)
+  assert.equal(result.result.turnSubmitted,false)
+  assert.equal(result.result.probeTokenLoggedOut,true)
+  assert(!result.calls.some(call => call.endsWith('/resume')))
 })
 
 void test('recovery reads the public workDir and refuses a missing locator before any resume request', async () => {

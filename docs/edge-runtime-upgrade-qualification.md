@@ -75,6 +75,13 @@ and logs out its own token. It does not change accounts, model selection,
 Agents or sessions, nor submit a turn. Only context hashes/counts enter the
 receipt. UI history readability is distinct from native engine resume.
 
+Use `CONFIG EVIDENCE --inspect-existing SESSION_ID` to select one original
+session explicitly. It verifies that session belongs to the authenticated
+owner, reads its history and logs out, without resume, termination or a model
+turn. Deployment orchestration uses this preflight before the separately
+authorized `--exercise-existing` journey; it must not infer that a read-only
+inspection started an engine.
+
 The explicit `CONFIG EVIDENCE --resume-existing SESSION_ID` mode instead
 resumes that already-visible, same-owner cohost session through the normal
 Moss API. It requires the original locator, verifies the native repository's

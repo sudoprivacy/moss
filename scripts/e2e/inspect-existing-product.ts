@@ -17,7 +17,7 @@ import { productConversation } from './productConversation.js'
 const [configPath, evidence, action, requestedSessionId] = process.argv.slice(2)
 assert(configPath && evidence && isAbsolute(configPath) && isAbsolute(evidence), 'Use absolute existing-config and new-evidence paths')
 assert((action === undefined && requestedSessionId === undefined) ||
-  (['--resume-existing','--exercise-existing','--terminate-existing'].includes(action!) && requestedSessionId),
+  (['--inspect-existing','--resume-existing','--exercise-existing','--terminate-existing'].includes(action!) && requestedSessionId),
 'Use an explicit existing-session recovery, model journey or cleanup action')
 const resume = action === '--resume-existing' || action === '--exercise-existing'
 if (process.platform !== 'win32') {
@@ -74,6 +74,7 @@ try {
     const id = session.sessionId ?? session.session_id
     assert(typeof id === 'string' && id, 'Missing existing session identity')
     const result = await request(`/api/v1/sessions/${encodeURIComponent(id)}/context`)
+    if (requestedSessionId) assert.equal(result.session?.userId, me.user.id, 'The selected session must belong to the actual authenticated owner')
     assert(Array.isArray(result.context?.messages), 'No persisted context returned')
     const bytes = JSON.stringify(result.context)
     const messagesSha256 = createHash('sha256').update(JSON.stringify(result.context.messages)).digest('hex')
