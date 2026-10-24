@@ -61,6 +61,9 @@ export function registerPlugin(pluginId: string, constructor: PluginConstructor)
 export class PluginManager {
   // Active plugin instances
   private plugins: Map<string, BasePlugin> = new Map();
+  private lifecycleOperations = new Map<string, Promise<void>>();
+  private isStopping = false;
+  private leasePass: Promise<void> | null = null;
 
   // Reference to session manager
   private sessionManager: SessionManager;
@@ -170,13 +173,34 @@ export class PluginManager {
    * In enterprise mode, use "pluginId:userId" to support per-user plugin instances.
    */
   async startPlugin(config: IChannelPluginConfig, instanceKey?: string): Promise<void> {
+    const key = instanceKey || config.id;
+    await this.runLifecycle(key, () => this.startPluginInstance(config, instanceKey));
+  }
+
+  /** Serialize one connection's lifecycle without blocking unrelated bots. */
+  private async runLifecycle(key: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.lifecycleOperations.get(key) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    this.lifecycleOperations.set(key, current);
+    try {
+      await current;
+    } finally {
+      if (this.lifecycleOperations.get(key) === current) this.lifecycleOperations.delete(key);
+    }
+  }
+
+  private async startPluginInstance(config: IChannelPluginConfig, instanceKey?: string): Promise<void> {
+    if (this.isStopping) throw new Error('Plugin manager is stopping');
     const { type } = config;
     const key = instanceKey || config.id;
 
     this.pluginErrors.delete(key);
 
-    if (this.plugins.has(key)) {
-      return;
+    const existing = this.plugins.get(key);
+    if (existing) {
+      if (existing.status !== 'error') return;
+      await existing.stop();
+      this.plugins.delete(key);
     }
 
     const Constructor = pluginRegistry.get(type);
@@ -189,32 +213,21 @@ export class PluginManager {
     const plugin = new Constructor();
     const userId = instanceKey ? instanceKey.split(':').pop() : undefined;
 
+    let phase = 'initialization';
     try {
       await plugin.initialize(config);
-    } catch (error) {
-      const errorMsg = `Plugin initialization failed: ${error instanceof Error ? error.message : String(error)}`;
-      console.error(`[PluginManager] ${errorMsg}`, error);
-      this.pluginErrors.set(key, errorMsg);
-
-      await this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
-
-      throw error;
-    }
-
-    if (this.messageHandler) {
-      plugin.onMessage(this.messageHandler);
-    }
-
-    if (this.confirmHandler) {
-      plugin.onConfirm(this.confirmHandler);
-    }
-
-    try {
+      if (this.messageHandler) plugin.onMessage(this.messageHandler);
+      if (this.confirmHandler) plugin.onConfirm(this.confirmHandler);
+      phase = 'start';
       await plugin.start();
     } catch (error) {
-      const errorMsg = `Plugin start failed: ${error instanceof Error ? error.message : String(error)}`;
+      const errorMsg = `Plugin ${phase} failed: ${error instanceof Error ? error.message : String(error)}`;
       console.error(`[PluginManager] ${errorMsg}`, error);
       this.pluginErrors.set(key, errorMsg);
+
+      await plugin.stop().catch((stopError: unknown) => {
+        console.error(`[PluginManager] Failed to clean up ${key} after start failure:`, stopError);
+      });
 
       await this.db.updateChannelPluginStatus(config.id, 'error', undefined, userId);
 
@@ -232,6 +245,10 @@ export class PluginManager {
    * Stop a plugin
    */
   async stopPlugin(pluginId: string): Promise<void> {
+    await this.runLifecycle(pluginId, () => this.stopPluginInstance(pluginId));
+  }
+
+  private async stopPluginInstance(pluginId: string): Promise<void> {
     const plugin = this.plugins.get(pluginId);
     if (!plugin) {
       return;
@@ -254,30 +271,31 @@ export class PluginManager {
    *  plugin.stop() + map removal, deliberately NO DB status write — the row's
    *  lease owner (the peer now running it) owns its status. */
   private async stopPluginLocally(instanceKey: string): Promise<void> {
-    const plugin = this.plugins.get(instanceKey);
-    if (!plugin) return;
-    // M-11: remove the map entry even when stop() throws — the lease is gone
-    // (a peer owns it), so keeping the entry makes every leaseTick retry the
-    // same failing stop forever while the peer and this process both poll the
-    // bot. An un-stoppable plugin object is abandoned either way; the entry
-    // must not be.
-    try {
-      await plugin.stop();
-    } catch (err) {
-      console.error(`[PluginManager] failed to stop lost-lease plugin ${instanceKey}:`, err);
-    }
-    this.plugins.delete(instanceKey);
+    await this.runLifecycle(instanceKey, async () => {
+      const plugin = this.plugins.get(instanceKey);
+      if (!plugin) return;
+      try {
+        await plugin.stop();
+      } catch (err) {
+        console.error(`[PluginManager] failed to stop lost-lease plugin ${instanceKey}:`, err);
+      } finally {
+        this.plugins.delete(instanceKey);
+      }
+    });
   }
 
   /**
    * Stop all plugins
    */
   async stopAll(): Promise<void> {
+    this.isStopping = true;
     if (this.leaseTimer) {
       clearInterval(this.leaseTimer);
       this.leaseTimer = null;
     }
-    const stopPromises = Array.from(this.plugins.keys()).map((id) => this.stopPlugin(id));
+    await this.leasePass?.catch(err => console.error('[PluginManager] final lease pass failed:', err));
+    const keys = new Set([...this.plugins.keys(), ...this.lifecycleOperations.keys()]);
+    const stopPromises = Array.from(keys, (id) => this.stopPlugin(id));
     await Promise.allSettled(stopPromises);
     // Release our leases so a peer can take these plugins over immediately on a
     // graceful stop, rather than waiting out the lease TTL.
@@ -326,7 +344,7 @@ export class PluginManager {
       type: config.type,
       name: config.name,
       enabled: config.enabled,
-      connected: plugin?.status === 'running',
+      connected: plugin?.isConnectionReady ?? false,
       status: plugin?.status ?? config.status,
       lastConnected: config.lastConnected,
       error: errorMessage,
@@ -395,6 +413,7 @@ export class PluginManager {
    * instance's own failed rows.
    */
   async startEnabledPlugins(): Promise<void> {
+    this.isStopping = false;
     const rows = await this.db.listChannelPlugins();
     console.log(`[PluginManager] Starting enabled plugins, found ${rows.length} rows`);
 
@@ -413,19 +432,19 @@ export class PluginManager {
   /** Build a plugin config from a DB row and start it (hydrating secrets). */
   private async startFromRow(row: SqlRow): Promise<void> {
     const userId = row.user_id ? String(row.user_id) : undefined;
-    const config: IChannelPluginConfig = {
-      id: String(row.id),
-      type: String(row.type) as PluginType,
-      name: String(row.name),
-      enabled: true,
-      status: String(row.status) as IChannelPluginStatus['status'],
-      credentials: row.credentials_json ? JSON.parse(String(row.credentials_json)) : undefined,
-      config: row.config_json ? JSON.parse(String(row.config_json)) : undefined,
-      lastConnected: row.last_connected ? Number(row.last_connected) : undefined,
-      createdAt: Number(row.created_at),
-      updatedAt: Number(row.updated_at),
-    };
     try {
+      const config: IChannelPluginConfig = {
+        id: String(row.id),
+        type: String(row.type) as PluginType,
+        name: String(row.name),
+        enabled: true,
+        status: String(row.status) as IChannelPluginStatus['status'],
+        credentials: row.credentials_json ? JSON.parse(String(row.credentials_json)) : undefined,
+        config: row.config_json ? JSON.parse(String(row.config_json)) : undefined,
+        lastConnected: row.last_connected ? Number(row.last_connected) : undefined,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at),
+      };
       const instanceKey = userId ? `${config.id}:${userId}` : config.id;
       if (this.nexus && userId) {
         // Sensitive fields live only in Nexus; hydrate before starting. Inside this
@@ -437,12 +456,12 @@ export class PluginManager {
       console.log(`[PluginManager] Starting plugin ${config.id} with instanceKey=${instanceKey}`);
       await this.startPlugin(config, instanceKey);
     } catch (error) {
-      console.error(`[PluginManager] Failed to start plugin ${config.id}:`, error);
+      console.error(`[PluginManager] Failed to start plugin ${String(row.id)}:`, error);
     }
   }
 
   private startLeaseTick(): void {
-    if (this.leaseTimer) return;
+    if (this.isStopping || this.leaseTimer) return;
     this.leaseTimer = setInterval(() => {
       this.leaseTick().catch(err => console.error('[PluginManager] lease tick failed:', err));
     }, PluginManager.LEASE_TICK_MS);
@@ -457,12 +476,26 @@ export class PluginManager {
    * dead peer does not miss the sessions that peer created (duplicate rows).
    */
   private async leaseTick(): Promise<void> {
+    if (this.isStopping) return;
+    if (this.leasePass) return this.leasePass;
+    const pass = this.runLeasePass();
+    this.leasePass = pass;
+    try {
+      await pass;
+    } finally {
+      if (this.leasePass === pass) this.leasePass = null;
+    }
+  }
+
+  private async runLeasePass(): Promise<void> {
     if (!this.instanceId) return;
     const now = Date.now();
     const leaseUntil = now + PluginManager.LEASE_TTL_MS;
     let acquiredNew = false;
+    const starts: Promise<void>[] = [];
     const rows = await this.db.listChannelPlugins();
     for (const row of rows) {
+      if (this.isStopping) break;
       if (!Boolean(row.enabled)) continue;
       const userId = row.user_id ? String(row.user_id) : undefined;
       if (!userId) continue; // enterprise rows are always keyed by user_id
@@ -482,12 +515,13 @@ export class PluginManager {
       const instanceKey = `${id}:${userId}`;
       // Not currently running here → new acquire / takeover / self error-retry.
       // (A failed start is never added to this.plugins, so it retries here.)
-      if (!this.plugins.has(instanceKey)) {
-        await this.startFromRow(row);
+      if (!this.plugins.has(instanceKey) || this.plugins.get(instanceKey)?.status === 'error') {
+        starts.push(this.startFromRow(row));
         acquiredNew = true;
       }
     }
-    if (acquiredNew) {
+    await Promise.all(starts);
+    if (acquiredNew && !this.isStopping) {
       // Sessions created by a previous lease holder predate our snapshot.
       await this.sessionManager.reload().catch(err =>
         console.error('[PluginManager] session reload after lease acquire failed:', err),

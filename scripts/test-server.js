@@ -34,7 +34,7 @@ const SUITES = [
 
 // Module-level HOME mocks and ConfigStore singletons must not share a Bun process
 // with other suites, which may have already imported systemSettings.
-const BUN_ISOLATED = ['configStore.test.ts']
+const BUN_ISOLATED = ['configStore.test.ts', 'channelPluginLifecycle.test.ts', 'larkSocketLifecycle.test.ts']
 
 const BUN = [
   // src/server/nexus/__tests__
