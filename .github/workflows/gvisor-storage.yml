@@ -22,8 +22,17 @@ jobs:
     name: Host sync error propagation
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      GVISOR_QUALIFICATION_ROOT: /tmp/moss-gvisor-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare isolated qualification directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -m 0755 "$GVISOR_QUALIFICATION_ROOT"
+          mkdir -m 0755 "$GVISOR_QUALIFICATION_ROOT/source" "$GVISOR_QUALIFICATION_ROOT/output"
+          mkdir -m 0700 "$RUNNER_TEMP/gvisor-workspaces"
       - name: Resolve the pinned Nexus storage suite
         id: nexus
         shell: python
@@ -61,7 +70,7 @@ jobs:
           set -euo pipefail
           python3 scripts/e2e/gvisor-sync/build_storage.py \
             --source="$PWD/nexus-storage-source" --target="$RUNNER_TEMP/nexus-storage-target" \
-            --output="$RUNNER_TEMP/gvisor-qualification/output/nexus-payload"
+            --output="$GVISOR_QUALIFICATION_ROOT/output/nexus-payload"
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/gvisor-cache
@@ -73,7 +82,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          task_root="$RUNNER_TEMP/gvisor-qualification"
+          task_root="$GVISOR_QUALIFICATION_ROOT"
           mkdir -p "$task_root/source" "$task_root/output" "$RUNNER_TEMP/gvisor-cache"
           for mode in baseline candidate; do
             build_args=()
@@ -94,14 +103,16 @@ jobs:
             sha256="$(sha256sum "$manifest" | cut -d' ' -f1)"
             sudo python3 scripts/e2e/gvisor-sync/qualify.py \
               --runtime="$runtime" --manifest="$manifest" --sha256="$sha256" \
-              --results="$task_root/output/$mode-qualification" --expect="$expected"
+              --results="$task_root/output/$mode-qualification" --expect="$expected" \
+              --work-dir="$RUNNER_TEMP/gvisor-workspaces/$mode"
             if [ "$mode" = candidate ]; then
               payload="$task_root/output/nexus-payload/manifest.json"
               payload_sha256="$(sha256sum "$payload" | cut -d' ' -f1)"
               sudo python3 scripts/e2e/gvisor-sync/nexus_storage.py \
                 --runtime="$runtime" --manifest="$manifest" --sha256="$sha256" \
                 --payload="$payload" --payload-sha256="$payload_sha256" \
-                --results="$task_root/output/nexus-qualification"
+                --results="$task_root/output/nexus-qualification" \
+                --work-dir="$RUNNER_TEMP/gvisor-workspaces/nexus"
             fi
           done
       - name: Make the owned cache readable for artifact upload
@@ -109,7 +120,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for path in "$RUNNER_TEMP/gvisor-cache" "$RUNNER_TEMP/gvisor-qualification"; do
+          for path in "$RUNNER_TEMP/gvisor-cache" "$GVISOR_QUALIFICATION_ROOT/output"; do
             if [ -d "$path" ]; then
               sudo chown -R "$(id -u):$(id -g)" "$path"
             fi
@@ -118,5 +129,5 @@ jobs:
         if: always()
         with:
           name: gvisor-storage-qualification
-          path: ${{ runner.temp }}/gvisor-qualification/output
+          path: ${{ env.GVISOR_QUALIFICATION_ROOT }}/output
           retention-days: 7

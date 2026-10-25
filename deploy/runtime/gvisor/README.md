@@ -54,7 +54,11 @@ manifest. Runtime execution uses the same release verifier, configuration and
 log writer as syscall qualification.
 
 Run the fixture on an isolated Linux machine with the namespace capabilities
-needed by runsc. Its release manifest hash is an explicit input:
+needed by runsc. The release directory and its ancestors must allow search by
+UID 65534, which starts the LISAFS Sentry sidecar. CI stages executables under
+an owned `/tmp` directory. Private workspaces hold guest data and namespace
+mounts; a separate results directory holds uploadable logs and receipts.
+Its release manifest hash is an explicit input:
 
 ```sh
 sudo python3 scripts/e2e/gvisor-sync/qualify.py \

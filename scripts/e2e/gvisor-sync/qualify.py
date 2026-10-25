@@ -43,6 +43,10 @@ def run_logged(results, label, command, timeout=90, env=None):
          (results / (label + '.stderr.log')).open('wb') as err:
         process = subprocess.run(command, stdout=out, stderr=err, timeout=timeout, env=env)
     (results / (label + '.exit')).write_text(str(process.returncode))
+    if process.returncode:
+        with (results / (label + '.stderr.log')).open('rb') as error:
+            error.seek(max(0, error.seek(0, os.SEEK_END) - 4096))
+            print(label + ': ' + error.read().decode('utf-8', errors='replace'), file=sys.stderr, flush=True)
     assert process.returncode == 0, f'{label}: exit {process.returncode}; logs retained'
     return (results / (label + '.stdout.log')).read_text()
 
