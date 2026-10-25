@@ -77,8 +77,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/gvisor-cache
-          key: gvisor-bazel-${{ runner.os }}-${{ hashFiles('deploy/runtime/gvisor/runtime.lock.json') }}
-          restore-keys: gvisor-bazel-${{ runner.os }}-
+          key: gvisor-content-v1-${{ runner.os }}-${{ hashFiles('deploy/runtime/gvisor/runtime.lock.json') }}
+          restore-keys: gvisor-content-v1-${{ runner.os }}-
       - name: Build the pinned toolchain image
         run: docker build -t moss-gvisor-builder deploy/runtime/gvisor
       - name: Build and qualify upstream and the candidate
@@ -93,6 +93,9 @@ jobs:
             if [ "$mode" = baseline ]; then
               build_args+=(--baseline)
               expected=lost
+            else
+              # Match actions/cache ownership before the second real build.
+              sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/gvisor-cache"
             fi
             docker run --rm --cpus=1 --memory=3g \
               --mount "type=bind,source=$PWD,target=/recipe,readonly" \

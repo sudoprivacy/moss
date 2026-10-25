@@ -32,6 +32,10 @@ bounded container. The Go SDK source manifest determines the compiler and
 analyzer inputs; upstream actions marked `no-sandbox` retain their explicit
 local execution strategy. Actual Gofer tests
 run at normal priority.
+Each build owns a temporary Bazel output root. The shared cache retains verified
+downloads, repository objects, Go modules and completed action results. Gazelle's
+host-module-cache interface retains the source-pinned module checksums. Execution state and
+its OS ownership stay within the current build.
 
 [The real runtime fixture](../../../scripts/e2e/gvisor-sync/qualify.py) injects
 `EIO`, `ENOSPC` and `EDQUOT` into host `fsync` and `fdatasync` calls. Native
