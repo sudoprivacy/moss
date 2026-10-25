@@ -570,7 +570,6 @@ export class MossActionExecutor {
 
     // Try to reuse an existing DB session for this channel user
     const existingSession = await this.db.findChannelSession(platform, sChatId, mossUserId);
-    const displayName = channelUser.displayName || chatId;
 
     // Recovery classification is shared with cabin/cron (see sessionRecovery.ts).
     // The status allowlist this used to hard-code excluded 'ended', which is what
@@ -657,10 +656,9 @@ export class MossActionExecutor {
       }
     }
 
-    // Bind the agent (智能体) this chat is set to. `assistantName` is what RuntimeService
-    // resolves memory_mode / enabledSkills from and signs into the session token, so it must
-    // be the agent's name — not the chat user's display name, which never matches an agent
-    // and silently degrades to a generic session with every skill enabled.
+    // Preserve an explicit Agent selection. An unbound chat must omit assistantName
+    // so RuntimeService selects the owner's personal Agent. A sender display name
+    // is not a resource identifier and is rejected by the runtime's access checks.
     let activeAgent: IChannelAgentOption | null = null;
     if (this.agentResolver) {
       try {
@@ -690,7 +688,7 @@ export class MossActionExecutor {
       channelChatId: sChatId,
       ...(activeAgent
         ? { assistantName: activeAgent.name, assistantDisplayName: activeAgent.displayName }
-        : { assistantName: displayName }),
+        : {}),
     });
 
     const sessionId = created.sessionId;
