@@ -128,11 +128,16 @@ jobs:
                 --payload="$payload" --payload-sha256="$payload_sha256" \
                 --results="$task_root/output/nexus-qualification" \
                 --work-dir="$RUNNER_TEMP/gvisor-workspaces/nexus"
+              sudo python3 scripts/e2e/gvisor-sync/containerd.py \
+                --installed="$(dirname "$(dirname "$runtime")")" --manifest-sha256="$sha256" \
+                --results="$task_root/output/shim-qualification" \
+                --work-dir="$RUNNER_TEMP/gvisor-workspaces/shim"
               python3 deploy/runtime/gvisor/package.py qualify \
                 --distribution="$task_root/output/distribution" \
                 --installation="$task_root/output/installation.json" \
                 --syscalls="$task_root/output/candidate-qualification/receipt.json" \
                 --storage="$task_root/output/nexus-qualification/receipt.json" \
+                --shim="$task_root/output/shim-qualification/receipt.json" \
                 --revision="$(git rev-parse HEAD)"
             fi
           done

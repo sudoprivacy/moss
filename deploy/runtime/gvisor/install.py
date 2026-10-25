@@ -9,7 +9,8 @@ import stat
 import shutil
 import sys
 import tempfile
-from release import sha256, verified_archive, verify_archive, verify_release
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from deploy.runtime.gvisor.release import sha256, verified_archive, verify_archive, verify_release
 
 
 def sync_directory(path):
@@ -199,6 +200,9 @@ def write_template(paths, template, config_version):
         raise ValueError('Containerd template must be a materialized file')
     previous = template.read_text() if template.exists() else '{{ template "base" . }}\n'
     if stanza in previous and previous.count(paths['handler']) == 2:
+        with template.open('rb') as file:
+            os.fsync(file.fileno())
+        sync_directory(template.parent)
         return {**paths, 'changed': False}
     if paths['handler'] in previous:
         raise ValueError('Existing runtime handler configuration differs')

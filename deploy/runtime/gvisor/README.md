@@ -57,6 +57,14 @@ fileset, Apache license and build provenance. CI installs this archive, then
 runs the full syscall and Nexus matrices from its installed path. The resulting
 qualification binds the archive SHA256, executable manifest and source revision.
 
+The [private containerd fixture](../../../scripts/e2e/gvisor-sync/containerd.py)
+starts the installed shim through containerd's config-path interface. A CRI
+sandbox and its workload container share one sandbox. Both guests complete
+file and directory fsync, deliver stdout and stderr, and exit successfully.
+The fixture verifies the live shim and Sentry executable hashes and the
+versioned runtime root before releasing the guests. Publication requires this
+qualification alongside the syscall and Nexus matrices.
+
 The [publication workflow](../../../.github/workflows/publish-gvisor.yml)
 consumes a successful `dev` push qualification run. All latest source workflows
 and their jobs must succeed before publication. GitHub and Tencent COS receive

@@ -69,10 +69,10 @@ def package(build, source, output):
     return result
 
 
-def qualify(distribution, installation, syscalls, storage, revision):
+def qualify(distribution, installation, syscalls, storage, shim, revision):
     """Bind a packaged archive to its actual installed full-matrix qualification."""
     result = release_metadata(json.loads((distribution / 'release.json').read_text()))
-    installed, calls, nexus = [json.loads(path.read_text()) for path in [installation, syscalls, storage]]
+    installed, calls, nexus, runtime = [json.loads(path.read_text()) for path in [installation, syscalls, storage, shim]]
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('An exact source revision is required')
     if (installed['archiveSha256'] != result['archiveSha256'] or
@@ -89,8 +89,12 @@ def qualify(distribution, installation, syscalls, storage, revision):
         raise ValueError('Candidate qualification must preserve injected host errors')
     if calls['runtimeSha256'] != nexus['runtimeSha256']:
         raise ValueError('Syscall and Nexus suites must exercise the same executable')
+    if (not runtime.get('success') or runtime['manifestSha256'] != result['manifestSha256'] or
+            runtime['installation']['archiveSha256'] != result['archiveSha256'] or
+            runtime['runtimeSha256'] != calls['runtimeSha256']):
+        raise ValueError('The distributed shim must pass private containerd qualification')
     proof = {'sourceRevision': revision, 'release': result, 'installation': installed,
-             'syscalls': calls, 'nexus': nexus, 'success': True,
+             'syscalls': calls, 'nexus': nexus, 'shim': runtime, 'success': True,
              'hardwarePersistenceQualified': False}
     (distribution / 'qualification.json').write_text(json.dumps(proof, indent=2), encoding='utf-8')
     return result
@@ -108,10 +112,11 @@ def main():
     qualification.add_argument('--installation', required=True, type=Path)
     qualification.add_argument('--syscalls', required=True, type=Path)
     qualification.add_argument('--storage', required=True, type=Path)
+    qualification.add_argument('--shim', required=True, type=Path)
     qualification.add_argument('--revision', required=True)
     args = parser.parse_args()
     result = (package(args.build, args.source, args.output) if args.command == 'build' else
-              qualify(args.distribution, args.installation, args.syscalls, args.storage, args.revision))
+              qualify(args.distribution, args.installation, args.syscalls, args.storage, args.shim, args.revision))
     print(json.dumps(result))
 
 

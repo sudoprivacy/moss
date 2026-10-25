@@ -12,6 +12,7 @@ import threading
 import unittest
 from unittest.mock import patch
 import install
+import package as packaging
 import publish as publication
 from release import acquire, digest, relative_file, verify_release
 
@@ -105,6 +106,38 @@ class PublicationGateTests(unittest.TestCase):
         runs = self.runs()
         runs.append({'path': publication.SELF_WORKFLOW, 'status': 'in_progress'})
         self.assertEqual(len(publication.validate_source_runs(runs)), 3)
+
+
+class QualificationGateTests(unittest.TestCase):
+    def test_failed_or_different_shim_cannot_qualify_an_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / 'gvisor-fixture-linux-amd64.tar.gz'
+            archive.write_bytes(b'fixture archive')
+            release = {'version': 'fixture', 'architecture': 'linux-amd64', 'filename': archive.name,
+                       'archiveSha256': digest(archive), 'manifestSha256': 'a' * 64,
+                       'archiveBytes': archive.stat().st_size}
+            (root / 'release.json').write_text(json.dumps(release))
+            installed = {'runsc': '/qualified/bin/runsc', **{key: release[key] for key in ['archiveSha256', 'manifestSha256']}}
+            common = {'success': True, 'manifestSha256': release['manifestSha256'],
+                      'runtimeSha256': 'b' * 64, 'releaseLibrarySha256': digest(Path(__file__).with_name('release.py')),
+                      'platforms': ['ptrace', 'systrap'], 'directfsModes': [True, False]}
+            calls = {**common, 'runtime': installed['runsc'], 'expect': 'propagated',
+                     'hostSyncErrorPropagationQualified': True, 'cases': [{'case': str(i)} for i in range(20)]}
+            storage = {**common, 'cases': [{'case': str(i)} for i in range(10)]}
+            shim = {**common, 'installation': installed}
+            inputs = [root / name for name in ['installed.json', 'syscalls.json', 'storage.json', 'shim.json']]
+            for path, value in zip(inputs, [installed, calls, storage, shim]):
+                path.write_text(json.dumps(value))
+            for changed in [{'success': False}, {'installation': {**installed, 'archiveSha256': 'c' * 64}},
+                            {'runtimeSha256': 'd' * 64}]:
+                inputs[-1].write_text(json.dumps({**shim, **changed}))
+                with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, 'shim'):
+                    packaging.qualify(root, *inputs, 'f' * 40)
+                self.assertFalse((root / 'qualification.json').exists())
+            inputs[-1].write_text(json.dumps(shim))
+            packaging.qualify(root, *inputs, 'f' * 40)
+            self.assertTrue(json.loads((root / 'qualification.json').read_text())['success'])
 
 
 @unittest.skipUnless(os.name == 'posix' and os.uname().sysname == 'Linux', 'Linux host installation')
@@ -240,6 +273,25 @@ class InstallationTests(unittest.TestCase):
             template.write_text(template.read_text().replace(result['shim'], '/another/shim'))
             with self.assertRaisesRegex(ValueError, 'configuration differs'):
                 install.register_template(Path(result['installed']), self.manifest_sha, template, version)
+
+    def test_idempotent_registration_reestablishes_durability_under_the_template_lock(self):
+        import fcntl
+        result = install.stage(self.archive, self.archive_sha, self.manifest_sha, self.prefix)
+        install.register_template(Path(result['installed']), self.manifest_sha, self.template, 3)
+        original_flock, original_sync = fcntl.flock, install.sync_directory
+        acquired = False
+        def flock(descriptor, operation):
+            nonlocal acquired
+            original_flock(descriptor, operation)
+            acquired = True
+        def fault(path):
+            if acquired and path == self.template.parent:
+                raise OSError(5, 'injected locked template barrier error')
+            original_sync(path)
+        with patch.object(fcntl, 'flock', side_effect=flock), patch.object(install, 'sync_directory', side_effect=fault):
+            with self.assertRaisesRegex(OSError, 'locked template barrier error'):
+                install.register_template(Path(result['installed']), self.manifest_sha, self.template, 3)
+        self.assertFalse(install.register_template(Path(result['installed']), self.manifest_sha, self.template, 3)['changed'])
 
     def test_concurrent_versions_preserve_both_registered_handlers(self):
         self.payload['gvisor-bin/gvisor_sentry'] = b'next sentry'

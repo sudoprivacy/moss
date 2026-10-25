@@ -86,6 +86,8 @@ def source_gate(run_id, candidate):
         raise ValueError('Candidate qualification differs from the reviewed source')
     if proof['installation']['archiveSha256'] != release['archiveSha256']:
         raise ValueError('Qualification must use the distributed archive')
+    if not proof['shim']['success'] or proof['shim']['installation']['archiveSha256'] != release['archiveSha256']:
+        raise ValueError('Publication requires the distributed shim qualification')
     if (candidate / release['filename']).stat().st_size != release['archiveBytes']:
         raise ValueError('Distributed archive size differs')
     with verified_archive(candidate / release['filename'], release['archiveSha256']) as archive:
