@@ -3382,12 +3382,16 @@ export function startServer(
           writeJson(res, 200, await authService.mossAgents.getAgent(auth.orgId, auth.userId))
           return
         }
-        const memberId = pathname.slice('/api/v1/moss/member-access/'.length)
+        const memberMatch = pathname.match(/^\/api\/v1\/moss\/member-access\/([^/]+)$/)
+        const memberId = memberMatch ? decodeURIComponent(memberMatch[1]!) : null
+        if (req.method === 'GET' && memberId) {
+          writeJson(res, 200, await authService.mossAgents.getAccess(auth, memberId))
+          return
+        }
         if (req.method === 'PUT' && memberId) {
           const body = await readJsonBody(req)
           if (typeof body.enabled !== 'boolean') throw new HttpError(400, 'enabled must be a boolean')
-          await authService.mossAgents.setAccess(auth, decodeURIComponent(memberId), body.enabled)
-          writeJson(res, 200, { success: true })
+          writeJson(res, 200, await authService.mossAgents.setAccess(auth, memberId, body.enabled))
           return
         }
         throw new HttpError(405, 'Method not allowed')

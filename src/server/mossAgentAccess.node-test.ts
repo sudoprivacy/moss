@@ -28,7 +28,11 @@ void test('each authorized member has one stable Moss identity, isolated from pe
     await f.service.initialize()
     assert.equal(await f.service.canUse('a', 'alice'), false)
     assert.equal(await f.service.canUse('a', 'admin'), true)
+    assert.deepEqual(await f.service.getAccess(f.auth, 'alice'), {
+      orgId: 'a', userId: 'alice', isEnabled: false, isGranted: false, source: 'role', memberStatus: 'active',
+    })
     await f.service.setAccess(f.auth, 'alice', true)
+    assert.equal((await f.service.getAccess(f.auth, 'alice')).source, 'explicit')
     const identities = await Promise.all(Array.from({ length: 20 }, () => f.service.getAgent('a', 'alice')))
     assert.equal(new Set(identities.map(agent => agent.ref)).size, 1)
     const identity = identities[0]!
@@ -58,6 +62,9 @@ void test('revocation, disabled membership and moving organizations deny use wit
     assert.deepEqual(await f.service.getAgent('a', 'alice'), first)
     f.members.get('alice')!.status = 'disabled'
     assert.equal(await f.service.canUse('a', 'alice'), false)
+    const disabled = await f.service.getAccess(f.auth, 'alice')
+    assert.equal(disabled.isGranted, true)
+    assert.equal(disabled.isEnabled, false)
     f.members.get('alice')!.status = 'active'
     f.members.get('alice')!.orgId = 'b'
     assert.equal(await f.service.canUse('a', 'alice'), false)
@@ -75,8 +82,16 @@ void test('ordinary members, forged roles, stale admin JWTs and foreign-organiza
     await assert.rejects(f.service.setAccess(f.auth, 'other', true), error => error instanceof ResourceAccessError && error.statusCode === 404)
     await assert.rejects(f.service.setAccess({ ...f.auth, orgId: 'b' }, 'other', true), ResourceAccessError)
     await assert.rejects(f.service.setAccess({ ...f.auth, scopes: [] }, 'alice', true), ResourceAccessError)
+    for (const actor of [{ ...f.auth, userId: 'alice', role: 'super_admin' }, { ...f.auth, scopes: [] }]) {
+      await assert.rejects(f.service.getAccess(actor, 'alice'), ResourceAccessError)
+    }
+    await assert.rejects(f.service.getAccess(f.auth, 'other'), error => error instanceof ResourceAccessError && error.statusCode === 404)
+    f.members.get('admin')!.role = 'super_admin'
+    assert.equal((await f.service.getAccess({ ...f.auth, orgId: 'b' }, 'other')).orgId, 'b',
+      'a current super-admin may manage the explicitly selected organization')
     f.members.get('admin')!.role = 'user'
     await assert.rejects(f.service.setAccess(f.auth, 'alice', true), ResourceAccessError)
+    await assert.rejects(f.service.getAccess(f.auth, 'alice'), ResourceAccessError)
     assert.equal(await f.service.canUse('a', 'admin'), false)
     assert.equal(await f.service.canUse('a', 'bob'), false)
   } finally { f.raw.close() }
@@ -99,11 +114,20 @@ void test('the runtime guard also rejects revoked or foreign Moss identities add
     await f.service.setAccess(f.auth, 'alice', true)
     const agent = await f.service.getAgent('a', 'alice')
     const runtime = { authService: { mossAgents: f.service } } as unknown as InstanceType<typeof RuntimeService>
-    const check = (ref: string, orgId = 'a', userId = 'alice') =>
-      RuntimeService.prototype.requireSessionAgentAccess.call(runtime, { orgId, userId, assistantName: ref })
+    const check = (ref: string, orgId = 'a', userId = 'alice', role = 'user') =>
+      RuntimeService.prototype.requireSessionAgentAccess.call(runtime, { orgId, userId, role, assistantName: ref })
     const native = nexusAgentReference(agent.agentName)
     await check(agent.ref)
     await check(native)
+    f.members.get('alice')!.role = 'admin'
+    for (const reference of [agent.ref, native]) {
+      await assert.rejects(check(reference), error => error instanceof ResourceAccessError && error.statusCode === 403)
+      await check(reference, 'a', 'alice', 'admin')
+    }
+    f.members.get('alice')!.role = 'user'
+    for (const reference of [agent.ref, native]) {
+      await assert.rejects(check(reference, 'a', 'alice', 'admin'), error => error instanceof ResourceAccessError && error.statusCode === 403)
+    }
     for (const reference of [agent.ref, native]) {
       await assert.rejects(check(reference, 'b'), error => error instanceof ResourceAccessError && error.statusCode === 404)
       await assert.rejects(check(reference, 'a', 'bob'), error => error instanceof ResourceAccessError && error.statusCode === 404)

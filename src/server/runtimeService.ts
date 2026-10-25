@@ -614,14 +614,17 @@ export class RuntimeService {
   }
 
   /** Recheck the actual owner's Moss entitlement before starting or accepting input. */
-  async requireSessionAgentAccess(session: { orgId: string; userId: string; assistantName: string | null }): Promise<void> {
+  async requireSessionAgentAccess(session: { orgId: string; userId: string; role: string; assistantName: string | null }): Promise<void> {
     const native = nexusAgentName(session.assistantName)
     if (!isMossAgentName(session.assistantName) && !isMossRuntimeAgentName(native)) return
     const expected = mossAgentName(session.orgId, session.userId)
     if (native ? native !== sessionAgentName(session.userId, expected) : session.assistantName !== expected) {
       throw new ResourceAccessError(404, 'Agent not available')
     }
-    await this.authService.mossAgents.requireUser(session.orgId, session.userId)
+    const member = await this.authService.mossAgents.requireUser(session.orgId, session.userId)
+    if (member.role !== session.role) {
+      throw new ResourceAccessError(403, 'Moss session permissions changed; start a new conversation')
+    }
   }
 
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
