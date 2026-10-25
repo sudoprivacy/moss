@@ -2,12 +2,15 @@
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
+import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
+import WebSocket, { WebSocketServer } from 'ws'
 import { runDocker } from '../runtime/dockerCommand.js'
 import { BrowserWorkerRegistry } from './browserWorkerRegistry.js'
 import { browserController, type BrowserBinding } from './browserGateway.js'
+import { bridgeBrowserWindowStream } from './browserWindowStream.js'
 
-interface State { browserSessionId: string; profileId: string; state: string; controlEpoch: number; targetEpoch: number }
+interface State { browserSessionId: string; profileId: string; state: string; controlEpoch: number; targetEpoch: number; capabilities?: { windowStream?: boolean } }
 interface Reply { session: State }
 
 if (!process.env.MOSS_BROWSER_IMAGE || !process.env.MOSS_BROWSER_SECRET) throw new Error('Set MOSS_BROWSER_IMAGE and MOSS_BROWSER_SECRET for owned Docker acceptance')
@@ -51,6 +54,84 @@ async function waitCookie(binding: BrowserBinding, expected: string): Promise<st
     await delay(250)
   }
   throw new Error(`Browser did not load the isolated fixture: ${last}`)
+}
+
+/** Exercise the real registry, public worker and Node relay through viewer refresh. */
+async function verifyWindowStream(binding: BrowserBinding): Promise<void> {
+  const prior = (await invoke(binding, { kind: 'state' })).session
+  const restarted = await tool(binding, 'browser_restart', { isHeadless: false, transport: 'extension',
+    acknowledgeStateLoss: true, controlEpoch: prior.controlEpoch, targetEpoch: prior.targetEpoch })
+  assert.notEqual(restarted.isError, true, JSON.stringify(restarted))
+  assert.deepEqual(await registry.conversationControl(binding, browserController(binding), 'interrupt'), { changed: true })
+  const viewerId = randomUUID()
+  const attached = (await invoke(binding, { kind: 'attach', viewerId, surface: 'window' })).session
+  assert.equal(attached.state, 'human')
+  assert.equal(attached.capabilities?.windowStream, true)
+  assert.equal(attached.profileId, prior.profileId)
+  const operation = { viewerId, controlEpoch: attached.controlEpoch, targetEpoch: attached.targetEpoch }
+  await invoke(binding, { kind: 'window-stream', ...operation })
+  const gateway = createServer()
+  const wss = new WebSocketServer({ noServer: true })
+  const upstreams = new Set<WebSocket>()
+  const viewers = new Set<WebSocket>()
+  const latencies: number[] = []
+  let upstreamFailure: unknown
+  gateway.on('upgrade', (request, socket, head) => {
+    void registry.openWindowStream(binding, browserController(binding), operation).then(upstream => {
+      upstreams.add(upstream)
+      upstream.once('close', () => upstreams.delete(upstream))
+      wss.handleUpgrade(request, socket, head, downstream => {
+        bridgeBrowserWindowStream(downstream, upstream, async () => {
+          const current = (await invoke(binding, { kind: 'state' })).session
+          return current.browserSessionId === attached.browserSessionId && current.profileId === attached.profileId &&
+            current.controlEpoch === attached.controlEpoch && current.targetEpoch === attached.targetEpoch
+        })
+      })
+    }).catch(error => { upstreamFailure = error; socket.destroy() })
+  })
+  await new Promise<void>(resolve => gateway.listen(0, '127.0.0.1', resolve))
+  const open = async (): Promise<WebSocket> => {
+    const started = performance.now()
+    const viewer = new WebSocket(`ws://127.0.0.1:${(gateway.address() as { port: number }).port}`, ['binary'])
+    viewers.add(viewer)
+    const [data, isBinary] = await once(viewer, 'message', { signal: AbortSignal.timeout(15_000) })
+      .catch(error => { throw new Error('Real worker RFB banner did not reach the viewer', { cause: upstreamFailure ?? error }) })
+    assert.equal(isBinary, true)
+    assert.equal(Buffer.from(data).toString(), 'RFB 003.008\n')
+    latencies.push(Math.round(performance.now() - started))
+    return viewer
+  }
+  try {
+    const first = await open()
+    const refreshed = once(first, 'close')
+    first.close()
+    await refreshed
+    const afterRefresh = (await invoke(binding, { kind: 'state' })).session
+    assert.equal(afterRefresh.browserSessionId, attached.browserSessionId)
+    assert.equal(afterRefresh.controlEpoch, attached.controlEpoch)
+    assert.equal(afterRefresh.state, 'human')
+    const second = await open()
+    const revoked = once(second, 'close', { signal: AbortSignal.timeout(8000) })
+    await invoke(binding, { kind: 'detach', viewerId })
+    await revoked
+    await assert.rejects(registry.openWindowStream(binding, browserController(binding), operation), /browser_window_stream_unavailable/)
+    const detached = (await invoke(binding, { kind: 'state' })).session
+    assert.equal(detached.browserSessionId, attached.browserSessionId)
+    assert.equal(detached.state, 'human')
+    assert.equal(detached.controlEpoch, attached.controlEpoch)
+    assert.deepEqual(await registry.conversationControl(binding, browserController(binding), 'continue'), { changed: true })
+    const current = (await invoke(binding, { kind: 'state' })).session
+    const navigation = await tool(binding, 'browser_action', { kind: 'navigate', controlEpoch: current.controlEpoch,
+      targetEpoch: current.targetEpoch, url: `http://${fixtureHost}:${port}/owner-a?window-stream=1` })
+    assert.notEqual(navigation.isError, true)
+    await waitCookie(binding, 'profile_login=owner-a')
+    receipts.push({ realWorkerWindowStream: true, refreshPreservesHumanLease: true, detachedViewerRevoked: true,
+      sameProfileCookie: true, firstBannerLatencyMs: latencies, publicWebUiRouteAccepted: false })
+  } finally {
+    for (const socket of [...viewers, ...upstreams, ...wss.clients]) socket.terminate()
+    wss.close()
+    await new Promise<void>(resolve => gateway.close(() => resolve()))
+  }
 }
 try {
   const savedOwners = process.env.MOSS_BROWSER_ALLOWED_OWNERS
@@ -124,6 +205,7 @@ try {
   const navigation = await tool(next, 'browser_action', { kind: 'navigate', controlEpoch: current.controlEpoch, targetEpoch: current.targetEpoch, url: `http://${fixtureHost}:${port}/owner-a?restore=1` })
   assert.notEqual(navigation.isError, true)
   await waitCookie(next, 'profile_login=owner-a')
+  await verifyWindowStream(next)
   receipts.push({ restrictedRolloutVerified: true, ownersIsolated: true, concurrentConversationRejected: true, sameProfileAcrossConversations: true, humanLeasePreserved: true, staleSessionRejected: true, restartRequiresExplicitReturn: true })
   console.log(JSON.stringify({ status: 'passed', receipts }))
 } finally {
