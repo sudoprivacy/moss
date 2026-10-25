@@ -8,7 +8,7 @@ import type { SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
 import { createAcpBridgeHandle } from './acpBridge.js'
 import type { AcpMessageTransport, AcpTransportEvents } from './acpTransport.js'
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, resolveRuntimeModel?: (model: string) => string) {
   const root = await mkdtemp(join(tmpdir(), 'moss-model-activity-'))
   const requests: SessionRpcMessage[] = []
   const output: Array<Record<string, unknown>> = []
@@ -33,7 +33,7 @@ async function fixture(t: TestContext) {
     },
   }
   const handle = createAcpBridgeHandle({ transport, cwd: root, sessionId: 'model-activity', model: 'original',
-    modelProviderId: 'provider', enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
+    modelProviderId: 'provider', resolveRuntimeModel, enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
   handle.onStdoutLine(line => { output.push(JSON.parse(line) as Record<string, unknown>) })
   t.after(async () => {
     await handle.destroy(true)
@@ -92,6 +92,19 @@ void test('an immediate model response is correlated before transport dispatch',
   await f.settle()
   assert.equal(f.output.filter(event => event.subtype === 'model_changed').length, 1)
   assert.equal(f.handle.isBusy?.(), false)
+})
+
+void test('a native alias survives same-provider model changes without changing the displayed model', async t => {
+  const f = await fixture(t, model => `provider:${model}`)
+  f.switchModel('provider:qwen:8b')
+  const message = f.modelRequests()[0]!
+  assert.equal((message.params as { modelId: string }).modelId, 'provider:qwen:8b')
+  f.respond({ jsonrpc: '2.0', id: message.id, result: {} })
+  await f.settle()
+  assert.equal(f.output.find(event => event.subtype === 'model_changed')?.model, 'qwen:8b')
+  f.switchModel('cloud:qwen:8b')
+  assert.equal(f.modelRequests().length, 1)
+  assert.equal(f.output.filter(event => event.reason === 'provider_switch_requires_new_session').length, 1)
 })
 
 void test('concurrent model changes keep distinct requests and remain busy until both settle', async t => {

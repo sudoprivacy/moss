@@ -27,6 +27,8 @@ type AcpBridgeOptions = {
   model: string
   /** Provider identity bound to this running scode process. */
   modelProviderId?: string
+  /** Translate a displayed model into a deployment's native model alias. */
+  resolveRuntimeModel?: (model: string) => string
   transcriptPath?: string
   runtime: SessionRuntimeInfo
   resumeSessionId?: string
@@ -1336,7 +1338,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           }
           sendRpcWithReply('session/set_model', {
             sessionId: acpSessionId,
-            modelId: scodeModelName,
+            modelId: options.resolveRuntimeModel?.(scodeModelName) ?? scodeModelName,
           }, {
             onReply(result) {
               process.stderr.write(`[AcpBridge] Model switch completed: ${JSON.stringify(result)}\n`)

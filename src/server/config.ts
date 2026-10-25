@@ -286,6 +286,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         ? process.env.MOSS_DEFAULT_RUNTIME
         : raw.runtimeDefaults.type,
     engine: raw.runtimeDefaults.engine,
+    cohostModelRouting: raw.runtimeDefaults.cohostModelRouting,
     scodePath: raw.runtimeDefaults.scodePath
       ? normalizePath(raw.runtimeDefaults.scodePath)
       : undefined,

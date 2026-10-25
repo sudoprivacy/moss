@@ -86,7 +86,7 @@ import { readRuntimeRelease } from '@sudo/user-runtime/release'
 import { resolveCohostNexusConfig } from './nexus/nexusEnvConfig.js'
 import { resolveCohostConnection as externalCohostConnection, encodeCohostConnection } from './nexus/cohostConnection.js'
 import { connectSessionRuntime, waitForSessionRuntime, type SessionConnectionConfig } from './nexus/sessionConnection.js'
-import { buildCohostProxyConfig } from './backends/scodeProxyConfig.js'
+import { buildCohostProxyConfig, cohostModelName } from './backends/scodeProxyConfig.js'
 import {
   openInternalSessionChannel,
   revokeInternalSessionToken,
@@ -831,7 +831,8 @@ export class RuntimeService {
         // execute the user's selected model. Model admission stays at session start.
         const environment = this.buildModelEnvironment(context)
         return buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
-          environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!)
+          environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!,
+          cohostModelName(environment.MOSS_DEFAULT_MODEL!, environment.MOSS_MODEL_PROVIDER_ID, environment.MOSS_COHOST_MODEL_ROUTING))
       })
       configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(await this.egressPolicies.policy(orgId)) }
       const sessions = (await this.store.listUserSessions(orgId, ownerId))
@@ -2112,6 +2113,11 @@ export class RuntimeService {
       process.stderr.write(`  - model unverified: discovery failed, passing through '${defaultModel}' (MOSS_ALLOW_UNVERIFIED_MODEL)\n`)
     }
     for (const key of ['MOSS_BROWSER_GATEWAY_URL', 'MOSS_BROWSER_GATEWAY_TOKEN', 'MOSS_BROWSER_GATEWAY_AI_TOKEN', 'MOSS_BROWSER_SECRET', 'MOSS_BROWSER_ALLOWED_OWNERS']) delete runnerEnv[key]
+    delete runnerEnv.MOSS_COHOST_MODEL_ROUTING
+    if (session.runtime.type === 'cohost' && this.options.config.cohostModelRouting) {
+      cohostModelName(defaultModel, selection?.provider.id, this.options.config.cohostModelRouting)
+      runnerEnv.MOSS_COHOST_MODEL_ROUTING = this.options.config.cohostModelRouting
+    }
     if (selection) {
       runnerEnv.MOSS_MODEL_PROVIDER_ID = selection.provider.id
       runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
@@ -2817,7 +2823,8 @@ export class RuntimeService {
       runnerEnv.MOSS_COHOST_CONNECTION = encodeCohostConnection(await this.resolveCohostConnection(
         session.userId,
         sessionAgentName(session.userId, session.assistantName),
-        buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || '', runnerEnv.MOSS_DEFAULT_MODEL!),
+        buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || '', runnerEnv.MOSS_DEFAULT_MODEL!,
+          cohostModelName(runnerEnv.MOSS_DEFAULT_MODEL!, runnerEnv.MOSS_MODEL_PROVIDER_ID, runnerEnv.MOSS_COHOST_MODEL_ROUTING)),
       ))
     }
 

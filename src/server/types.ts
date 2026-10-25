@@ -116,6 +116,7 @@ export const serverFileConfigSchema = lazySchema(() =>
     runtimeDefaults: z.object({
       type: z.enum(['host', 'docker', 'k8s', 'cohost']).default('host'),
       engine: z.enum(['scode']).default('scode'),
+      cohostModelRouting: z.literal('provider-qualified').optional(),
       scodePath: z.string().optional(),
       hostScodePath: z.string().optional(),
       dockerScodePath: z.string().optional(),
@@ -654,6 +655,8 @@ export type ServerConfig = {
   workspace?: string
   defaultRuntime: SessionRuntimeType
   engine: 'scode'
+  /** Match preconfigured provider-qualified aliases on a shared cohost. */
+  cohostModelRouting?: 'provider-qualified'
   scodePath?: string
   hostScodePath?: string
   dockerScodePath?: string

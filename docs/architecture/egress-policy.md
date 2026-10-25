@@ -59,6 +59,16 @@ the policy file. New owner Pods receive the effective organization policy.
 Local and external model routes must keep their separate provider credentials
 so local inference cannot fall back into an external account outside the gate.
 
+For a shared external cohost with several preconfigured model mounts, set
+`runtimeDefaults.cohostModelRouting` to `provider-qualified`. The deployment
+must build its native aliases as `providerId:modelId` with the shared
+`buildCohostModelConfiguration` function. Moss sends that alias when starting
+the native execution and when changing models within the same provider, while
+retaining the upstream model ID in the UI. Identical local and cloud model
+names therefore select different mounts. Unknown aliases fail at the runtime;
+they must never fall back to a different account. Switching providers still
+requires a new session. Existing single-provider deployments omit this setting.
+
 ## Evidence
 
 `egressPolicyService.node-test.ts` covers desired-versus-applied state and
