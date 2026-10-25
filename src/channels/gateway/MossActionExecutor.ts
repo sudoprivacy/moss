@@ -293,7 +293,13 @@ export class MossActionExecutor {
       }
     } catch (error) {
       await identity.delivery(connection, event.messageId, isDispatching ? 'unknown' : 'failed', route ?? undefined, sessionId);
-      throw error;
+      console.error('[MossActionExecutor] Member message not completed', {
+        messageId: event.messageId, isDispatching,
+        status: error instanceof ResourceAccessError ? error.statusCode : 'unavailable',
+      });
+      await sendFn({ type: 'text', parseMode: 'HTML', text: isDispatching
+        ? '本条消息可能已执行，结果尚未确认。请先在 Moss 会话历史中核对，不要重复发送操作指令。'
+        : '身份、权限或会话暂时不可用；本条消息未送入模型。请在 Moss 中核对绑定、使用权和会话后再发送。' });
     }
   }
 
@@ -440,7 +446,8 @@ export class MossActionExecutor {
     channelState.lastMsgId = thinkingMsgId;
     channelState.isProcessing = true;
 
-    if (beforeInput) await beforeInput();
+    try { if (beforeInput) await beforeInput(); }
+    catch (error) { channelState.isProcessing = false; throw error; }
 
     // Send message to runner
     const payload = JSON.stringify({ type: 'stdin', data: `${text}\n` });

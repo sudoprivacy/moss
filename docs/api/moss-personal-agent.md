@@ -108,3 +108,10 @@ conversion of existing bot pairings into human account bindings. Production
 cutover, real Feishu replies, two-member continuity and live owner billing
 remain separate acceptance steps. Previously verified bot-owner billing is
 not evidence of the new per-member path.
+
+Before rolling back to a server that predates member routing, disable the
+member-mode connection through its owner API and verify that it is stopped.
+Keep its credentials, bindings, Session pointers and histories. An old binary
+does not understand the new routing mode and must not receive these messages
+as a fallback bot-owner conversation. Re-enable it only on a version that
+supports and verifies the configured member mode.

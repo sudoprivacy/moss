@@ -21,6 +21,8 @@ async function fixture() {
   const sockets: EventEmitter[] = []
   let isConnectBlocked = false
   let isReceiving = true
+  let isActivityWriteFailed = false
+  let onThinking: (() => Promise<void>) | undefined
   const runtime = {
     createSession: async (input: SessionCreateInput) => {
       created.push(input)
@@ -50,10 +52,15 @@ async function fixture() {
       return socket
     },
   }
-  const store = { getSession: async (id: string) => sessions.get(id) ?? null, touchSessionActivity: async () => {} }
+  const store = { getSession: async (id: string) => sessions.get(id) ?? null,
+    touchSessionActivity: async () => { if (isActivityWriteFailed) throw new Error('Activity write result unavailable') } }
   const plugin = {
     getBotInfo: () => ({ id: 'cli_testMoss' }),
-    sendMessage: async (chat: string, msg: { text: string }) => { sends.push({ chat, text: msg.text }); return `reply-${sends.length}` },
+    sendMessage: async (chat: string, msg: { text: string }) => {
+      sends.push({ chat, text: msg.text })
+      if (msg.text.includes('Thinking') && onThinking) await onThinking()
+      return `reply-${sends.length}`
+    },
     editMessage: async (chat: string, _id: string, msg: { text: string }) => { sends.push({ chat, text: msg.text }); return true },
   } as unknown as BasePlugin
   const executor = () => new MossActionExecutor({ getInstanceKey: () => 'lark-qa:owner',
@@ -65,7 +72,8 @@ async function fixture() {
     await instance.getMessageHandler()(message, plugin)
   }
   return { ...f, sessions, created, inputs, sends, sockets, executor, deliver,
-    blockConnection: () => { isConnectBlocked = true }, stopReceiving: () => { isReceiving = false } }
+    blockConnection: () => { isConnectBlocked = true }, stopReceiving: () => { isReceiving = false },
+    failActivityWrite: () => { isActivityWriteFailed = true }, beforeInput: (hook: () => Promise<void>) => { onThinking = hook } }
 }
 
 void test('unbound group sender receives only a private proof and duplicate delivery never creates a model session', async () => {
@@ -141,4 +149,24 @@ void test('the installed promise chain serializes three queued messages and pres
     await Promise.all([first, second, third])
     assert.deepEqual(order, [1, 2, 3, 4, 5])
   } finally { f.raw.close() }
+})
+
+void test('late revocation sends no input, while unknown post-dispatch outcomes warn against repeated operations', async () => {
+  for (const outcome of ['revoked', 'unknown']) {
+    const f = await fixture()
+    try {
+      await f.service.bind(f.auth('alice'), (await f.service.issueChallenge(f.connection, 'feishu-alice'))!)
+      const executor = f.executor()
+      if (outcome === 'revoked') f.beforeInput(() => f.access.setAccess(f.auth('owner'), 'alice', false).then(() => {}))
+      else f.failActivityWrite()
+      await f.deliver(executor, 'feishu-alice', 'boundary-outcome')
+      const receipt = await f.db.driver.get('SELECT status FROM moss_im_deliveries WHERE message_id = ?', ['boundary-outcome'])
+      assert.equal(receipt!.status, outcome === 'unknown' ? 'unknown' : 'failed')
+      assert.equal(f.inputs.length, outcome === 'unknown' ? 1 : 0)
+      if (outcome === 'unknown') assert(f.sends.some(message => message.text.includes('不要重复发送操作指令')))
+      else assert([...executor['channelSessions'].values()].every(state => !state.isProcessing))
+      await f.deliver(f.executor(), 'feishu-alice', 'boundary-outcome')
+      assert.equal(f.inputs.length, outcome === 'unknown' ? 1 : 0, 'neither failure state automatically replays input')
+    } finally { f.sockets.forEach(socket => socket.emit('close')); f.raw.close() }
+  }
 })
