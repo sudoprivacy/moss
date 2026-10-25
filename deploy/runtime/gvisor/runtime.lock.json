@@ -6,7 +6,7 @@
     "url": "https://codeload.github.com/google/gvisor/tar.gz/760b80785dc53311d4c87bd2de167525a99709c1",
     "sha256": "5007c4c3082f0ee7dbb85614901ec5e0042f5466033201a730c63b1cd7d8b5f4"
   },
-  "version": "release-20261019.0-sudoprivacy-sync1",
+  "version": "gsudoprivacy-20261019.1",
   "patch": {
     "file": "sync-errors.patch",
     "sha256": "29fb50c439a7e086fb1904bdc1d9c7e62ee69e95177df4208523a0b31c3a891e",

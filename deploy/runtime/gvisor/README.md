@@ -20,6 +20,9 @@ The [CI workflow](../../../.github/workflows/gvisor-storage.yml) builds the
 baseline and candidate using the same source tree and toolchain. The upstream
 `//:release` target assembles runsc, the containerd shim and all matching sidecars.
 The release manifest identifies every executable, including the Sentry kernel.
+The vendor release label follows gVisor's release-version format, enabling its
+default sidecar version enforcement. Builds use the upstream AMD64 optimized
+release configuration.
 Compiler work uses Bazel file isolation, one job, reduced CPU priority and a
 bounded container. The Go SDK source manifest determines the compiler and
 analyzer inputs. Actual Gofer tests
