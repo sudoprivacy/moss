@@ -23,6 +23,7 @@ All requests require the normal authenticated access token. Responses use
 | Method | Path | Behavior |
 |---|---|---|
 | GET | `/api/v1/moss/agent` | Return the caller's `{ ref, agentName, displayName, ownerId, orgId }`; refuse when membership or Moss access is unavailable. |
+| GET | `/api/v1/moss/member-access/:userId` | An organization administrator reads `{ orgId, userId, isEnabled, isGranted, source, memberStatus }`. The result distinguishes the stored/default grant from current effective use for a disabled member. |
 | PUT | `/api/v1/moss/member-access/:userId` | An active administrator in the current organization, with `admin:users`, grants/revokes the named member using `{ "enabled": true/false }`. Foreign members are not addressable. |
 
 Active organization administrators have access by default. Other members
@@ -30,11 +31,20 @@ require an explicit grant. An explicit revocation overrides the default.
 SudoWork login, IM pairing, a cached role, and knowledge of an Agent reference
 do not grant Moss use or additional data-source privileges.
 
+Moss Web exposes this same API at **Users → member actions → Moss 使用权**.
+The dialog reads current access, grants or revokes it, and requires a fresh
+read after an ambiguous write failure. Switching organizations closes the
+dialog and cancels its pending requests. A current super administrator can
+manage members only within the explicitly selected organization context.
+
 Membership and grants are checked at creation, runtime recovery and before
 each established WebSocket input frame, including server-internal channels.
 Native Nexus references retain the same checks. Revocation preserves the
 Agent identity and existing history, prevents automatic revival on history
 reads, and refuses new execution/input. Restoring access retains the identity.
+When the owner's role changes, an existing Session cannot retain its old
+runtime privileges. New input/recovery requires a fresh conversation under
+the current role; the old history remains readable.
 
 ## Validation and rollout
 

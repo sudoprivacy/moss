@@ -106,6 +106,7 @@ jobs:
           bun run check
           bun run test:settings
           bun run test:organizations
+          bun run test:moss-access
 
   runtime-live:
     name: Installed Nexus runtime (${{ matrix.os }})
