@@ -44,6 +44,7 @@ const BUN = [
   'orgZoneBindingContract.test.ts',
   // src/channels/__tests__
   'connectionScope.test.ts',
+  'channelDefaultAgent.test.ts',
   'crashSeedRecovery.test.ts',
   'untrustedText.test.ts',
   // src/server/__tests__
