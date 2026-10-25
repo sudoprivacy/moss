@@ -20,6 +20,8 @@ import { getChannelEventEmitter } from '../core/ChannelEventEmitter.js';
 import { classifyMossSession } from '../../server/sessionRecovery.js';
 import { buildTranscriptSeed } from './transcriptSeed.js';
 import { getSystemSettings } from '../../server/systemSettings.js';
+import { verifyMossLarkMessage, type MossImConnection, type MossImIdentity, type MossImRoute } from '../../server/mossImIdentity.js';
+import { ResourceAccessError } from '../../server/catalog/resourceError.js';
 
 type Platform = 'telegram' | 'lark' | 'dingtalk' | 'wechat' | 'wecom';
 
@@ -76,6 +78,7 @@ export class MossActionExecutor {
     runtime: RuntimeService,
     db: DirectConnectStore,
     agentResolver?: ChannelAgentResolver,
+    private readonly mossIm?: MossImIdentity,
   ) {
     this.pluginManager = pluginManager;
     this.sessionManager = sessionManager;
@@ -112,6 +115,14 @@ export class MossActionExecutor {
     const editFn = async (msgId: string, msg: any) => sourcePlugin.editMessage(chatId, msgId, msg);
 
     try {
+      if (this.mossIm && platform === 'lark') {
+        if (!mossUserId) throw new ResourceAccessError(403, 'Channel connection identity required');
+        const connection = await this.mossIm.connection(pluginId, mossUserId, sourcePlugin.getBotInfo()?.id ?? '');
+        if (connection) {
+          await this.handleMossMemberMessage(message, sourcePlugin, connection, sendFn, editFn);
+          return;
+        }
+      }
       // 1. Check authorization
       const isAuthorized = await this.pairingService.isUserAuthorized(user.id, pluginScope(pluginId, platform), mossUserId);
 
@@ -180,23 +191,11 @@ export class MossActionExecutor {
 
       // 3. Per-conversation mutex
       const lockKey = `${pluginScope(pluginId, platform)}:${user.id}:${chatId}`;
-      const existingLock = this.conversationLocks.get(lockKey);
-      if (existingLock) {
-        console.log(`[MossActionExecutor] Message already being processed for ${lockKey}, queuing`);
-        await existingLock;
-      }
 
       // Defanged at the boundary: channel text is written by whoever holds the
       // far-side IM account, and it reaches the agent as a plain user turn.
       const safeText = neutralizeUntrustedMarkup(content.text);
-      const lockPromise = this.processMessage(platform, pluginId, chatId, user, safeText, sendFn, editFn, mossUserId);
-      this.conversationLocks.set(lockKey, lockPromise);
-
-      try {
-        await lockPromise;
-      } finally {
-        this.conversationLocks.delete(lockKey);
-      }
+      await this.withConversationLock(lockKey, () => this.processMessage(platform, pluginId, chatId, user, safeText, sendFn, editFn, mossUserId));
     } catch (error) {
       console.error(`[MossActionExecutor] Error handling message:`, error);
       try {
@@ -206,6 +205,115 @@ export class MossActionExecutor {
           parseMode: 'HTML',
         });
       } catch {}
+    }
+  }
+
+  private async withConversationLock(key: string, action: () => Promise<void>): Promise<void> {
+    const previous = this.conversationLocks.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(action);
+    this.conversationLocks.set(key, next);
+    try { await next; }
+    finally { if (this.conversationLocks.get(key) === next) this.conversationLocks.delete(key); }
+  }
+
+  private async handleMossMemberMessage(
+    message: IUnifiedIncomingMessage, plugin: BasePlugin, connection: MossImConnection,
+    sendFn: (msg: any) => Promise<string | null>, editFn: (id: string, msg: any) => Promise<void>,
+  ): Promise<void> {
+    const identity = this.mossIm!;
+    await this.pluginManager.requireCurrentReceiver(plugin);
+    const event = verifyMossLarkMessage(message, connection);
+    if (!await identity.claim(connection, event)) return;
+    let route: MossImRoute | null = null;
+    let sessionId: string | undefined;
+    let isDispatching = false;
+    try {
+      route = await identity.resolve(connection, event.senderId);
+      if (!route) {
+        const code = await identity.issueChallenge(connection, event.senderId);
+        if (code) {
+          const delivered = await plugin.sendMessage(event.senderId, { type: 'text', parseMode: 'HTML',
+            text: `请本人登录 Moss，在“我的 Moss Agent → 飞书绑定”输入以下一次性验证码（10 分钟有效）：\n${code}\n请勿转发验证码。` });
+          if (!delivered) throw new Error('Private binding code delivery was not confirmed');
+        }
+        await sendFn({ type: 'text', text: '请在 Moss 私聊中查看绑定说明；绑定并获得 Moss 使用权后，再发送新消息。', parseMode: 'HTML' });
+        await identity.delivery(connection, event.messageId, 'completed');
+        return;
+      }
+      const verifiedRoute = route;
+      const key = identity.conversationKey(route, event.chatId);
+      await this.withConversationLock(key, async () => {
+        await this.pluginManager.requireCurrentReceiver(plugin);
+        await identity.assertRoute(verifiedRoute);
+        const text = message.content.text?.trim() || '';
+        if (!['text', 'command'].includes(message.content.type) || !text) return;
+        const previous = await identity.pointer(verifiedRoute, event.chatId);
+        if (/^\/new\s*$/i.test(text)) {
+          sessionId = await this.newMossSession(verifiedRoute, key);
+          await identity.setPointer(verifiedRoute, event.chatId, sessionId, previous);
+          this.channelSessions.get(key)?.socket?.destroy();
+          this.channelSessions.delete(key);
+          await sendFn({ type: 'text', text: `已切换到新会话 ${sessionId}。之前的会话和历史已保留。`, parseMode: 'HTML' });
+          return;
+        }
+        const resume = text.match(/^\/resume\s+(\S+)\s*$/i);
+        if (resume) {
+          sessionId = resume[1]!;
+          await this.requireMossSession(verifiedRoute, sessionId);
+          await identity.setPointer(verifiedRoute, event.chatId, sessionId, previous);
+          this.channelSessions.get(key)?.socket?.destroy();
+          this.channelSessions.delete(key);
+          await sendFn({ type: 'text', text: `已接续会话 ${sessionId}；历史不会自动发送到群里。`, parseMode: 'HTML' });
+          return;
+        }
+        if (text.startsWith('/')) {
+          await sendFn({ type: 'text', text: '每人有一个专属 Moss Agent。发送文字开始对话；/new 新建会话；/resume <会话 ID> 接续自己的会话。', parseMode: 'HTML' });
+          return;
+        }
+        sessionId = previous ?? await this.newMossSession(verifiedRoute, key);
+        if (!previous) await identity.setPointer(verifiedRoute, event.chatId, sessionId, null);
+        await this.requireMossSession(verifiedRoute, sessionId);
+        let state = this.channelSessions.get(key);
+        if (!state || state.sessionId !== sessionId || !state.socket || state.socket.destroyed) {
+          state?.socket?.destroy();
+          state = await this.reconnectRuntimeSession(key, sessionId);
+        }
+        const isKnown = await this.sendRuntimeMessage('lark', key, state, neutralizeUntrustedMarkup(text), sendFn, editFn, async () => {
+          await this.pluginManager.requireCurrentReceiver(plugin);
+          await identity.assertRoute(verifiedRoute);
+          await this.requireMossSession(verifiedRoute, sessionId!);
+          await identity.delivery(connection, event.messageId, 'dispatching', verifiedRoute, sessionId);
+          isDispatching = true;
+        });
+        await identity.delivery(connection, event.messageId, isKnown ? 'completed' : 'unknown', verifiedRoute, sessionId);
+      });
+      // Commands have no model input; normal input already has a final receipt.
+      if (message.content.text?.trim().startsWith('/') || !sessionId) {
+        await identity.delivery(connection, event.messageId, 'completed', route, sessionId);
+      }
+    } catch (error) {
+      await identity.delivery(connection, event.messageId, isDispatching ? 'unknown' : 'failed', route ?? undefined, sessionId);
+      throw error;
+    }
+  }
+
+  private async newMossSession(route: MossImRoute, key: string): Promise<string> {
+    await this.mossIm!.assertRoute(route);
+    const created = await this.runtime.createSession({ cwd: process.cwd(), dangerouslySkipPermissions: false,
+      userId: route.userId, orgId: route.connection.orgId, role: route.role, scopes: route.scopes,
+      assistantName: route.agentRef, assistantDisplayName: 'Moss', runtime: { type: 'cohost', engine: 'scode' },
+      source: 'lark', channelChatId: key });
+    return created.sessionId;
+  }
+
+  private async requireMossSession(route: MossImRoute, sessionId: string): Promise<void> {
+    const session = await this.db.getSession(sessionId);
+    if (!session || session.orgId !== route.connection.orgId || session.userId !== route.userId || session.assistantName !== route.agentRef) {
+      throw new ResourceAccessError(404, 'Own Moss conversation required');
+    }
+    await this.runtime.requireSessionAgentAccess(session);
+    if (classifyMossSession(await this.runtime.getSessionSnapshot(sessionId)) === 'replace') {
+      throw new ResourceAccessError(409, 'Conversation cannot be resumed; use /new. Its history is retained.');
     }
   }
 
@@ -219,7 +327,7 @@ export class MossActionExecutor {
     user: { id: string; displayName?: string },
     text: string,
     sendFn: (msg: any) => Promise<string | null>,
-    editFn: (msgId: string, msg: any) => Promise<boolean>,
+    editFn: (msgId: string, msg: any) => Promise<void>,
     mossUserId: string | undefined,
   ): Promise<void> {
     // Wait for the session cache to finish loading before any getSession read.
@@ -297,6 +405,16 @@ export class MossActionExecutor {
       }
     }
 
+    await this.sendRuntimeMessage(platform, channelUserKey, channelState, text, sendFn, editFn);
+  }
+
+  /** Shared runner transport and reply streaming for owner and member routing. */
+  private async sendRuntimeMessage(
+    platform: string, channelUserKey: string, initialState: ChannelSessionState, text: string,
+    sendFn: (msg: any) => Promise<string | null>, editFn: (msgId: string, msg: any) => Promise<void>,
+    beforeInput?: () => Promise<void>,
+  ): Promise<boolean> {
+    let channelState = initialState;
     // Send "thinking" indicator
     const thinkingMsgId = await sendFn({
       type: 'text',
@@ -313,7 +431,7 @@ export class MossActionExecutor {
       } catch (error) {
         console.error(`[MossActionExecutor] Failed to reconnect runtime session:`, error);
         await sendFn({ type: 'text', text: '❌ Session disconnected. Please try again.', parseMode: 'HTML' });
-        return;
+        return false;
       }
     }
 
@@ -321,6 +439,8 @@ export class MossActionExecutor {
     channelState.responseText = '';
     channelState.lastMsgId = thinkingMsgId;
     channelState.isProcessing = true;
+
+    if (beforeInput) await beforeInput();
 
     // Send message to runner
     const payload = JSON.stringify({ type: 'stdin', data: `${text}\n` });
@@ -332,8 +452,10 @@ export class MossActionExecutor {
     console.log(`[MossActionExecutor] Sent message to runner for ${channelUserKey}`);
 
     // Wait for response with timeout (5 min)
+    let isTimedOut = false;
     const responsePromise = new Promise<string>((resolve) => {
       const timeout = setTimeout(() => {
+        isTimedOut = true;
         channelState!.isProcessing = false;
         resolve(channelState!.responseText || 'Response timed out. Please try again.');
       }, 5 * 60 * 1000);
@@ -399,6 +521,7 @@ export class MossActionExecutor {
     }
 
     console.log(`[MossActionExecutor] Response sent for ${channelUserKey} (${finalText.length} chars)`);
+    return !isTimedOut;
   }
 
   /**

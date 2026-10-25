@@ -246,6 +246,30 @@ function manager() {
 }
 
 describe('per-connection lifecycle coordination', () => {
+  it('fences queued member work after lease expiry, peer takeover, disable or local stop', async () => {
+    manager();
+    const row = { enabled: 1, lease_owner: 'instance', lease_until: Date.now() + 60_000 };
+    const db = { getChannelPlugin: async () => row, updateChannelPluginStatus: async () => {},
+      releaseAllChannelPluginLeases: async () => {} } as unknown as DirectConnectStore;
+    const plugins = new PluginManager({} as SessionManager, db, null, 'instance');
+    try {
+      await plugins.startPlugin(config('test-lifecycle'), 'test:user');
+      const plugin = plugins.getPlugin('test:user')!;
+      await plugins.requireCurrentReceiver(plugin);
+      row.lease_until = 1;
+      await expect(plugins.requireCurrentReceiver(plugin)).rejects.toThrow('lease');
+      row.lease_until = Date.now() + 60_000;
+      row.lease_owner = 'peer';
+      await expect(plugins.requireCurrentReceiver(plugin)).rejects.toThrow('lease');
+      row.lease_owner = 'instance';
+      row.enabled = 0;
+      await expect(plugins.requireCurrentReceiver(plugin)).rejects.toThrow('lease');
+      row.enabled = 1;
+      await plugins.stopPlugin('test:user');
+      await expect(plugins.requireCurrentReceiver(plugin)).rejects.toThrow('active');
+    } finally { await plugins.stopAll(); }
+  });
+
   it('starts the same connection only once while initialization is pending', async () => {
     const { manager: plugins } = manager();
     const gate = deferred();
