@@ -21,6 +21,40 @@ def digest(path):
         return hashlib.file_digest(file, 'sha256').hexdigest()
 
 
+def verify_release(runtime, manifest, expected):
+    """Verify the complete executable fileset before launching a runtime."""
+    assert manifest.parent == runtime.parent
+    assert digest(manifest) == expected, 'Release manifest differs from the reviewed candidate'
+    files = json.loads(manifest.read_text())['files']
+    assert files and 'runsc' in files
+    observed = {}
+    for path in sorted(runtime.parent.rglob('*')):
+        assert not path.is_symlink(), 'Qualify materialized release files'
+        if path.is_file() and path != manifest:
+            observed[path.relative_to(runtime.parent).as_posix()] = digest(path)
+    assert observed == files, 'Release files differ from the reviewed manifest'
+    assert not os.environ.get('GVISOR_SIDECAR_BINARIES_DIR'), 'Qualify the reviewed release sidecars'
+    return files
+
+
+def run_logged(results, label, command, timeout=90, env=None):
+    """Keep stdout, stderr and the actual exit status for one owned case."""
+    with (results / (label + '.stdout.log')).open('wb') as out, \
+         (results / (label + '.stderr.log')).open('wb') as err:
+        process = subprocess.run(command, stdout=out, stderr=err, timeout=timeout, env=env)
+    (results / (label + '.exit')).write_text(str(process.returncode))
+    assert process.returncode == 0, f'{label}: exit {process.returncode}; logs retained'
+    return (results / (label + '.stdout.log')).read_text()
+
+
+def runtime_command(runtime, state, bundle, debug_log, label, platform, is_directfs):
+    """Use the same runtime configuration for syscall and Nexus qualification."""
+    return [str(runtime), '--root=' + str(state), '--network=none',
+            '--platform=' + platform, '--ignore-cgroups=true', '--overlay2=none',
+            '--file-access=shared', '--directfs=' + str(is_directfs).lower(),
+            '--debug-log=' + str(debug_log), 'run', '--bundle=' + str(bundle), label]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime', required=True, type=Path)
@@ -37,17 +71,7 @@ def main():
         parser.error('The host fault fixture qualifies the Linux AMD64 syscall ABI.')
     runtime = args.runtime.resolve(strict=True)
     manifest = args.manifest.resolve(strict=True)
-    assert manifest.parent == runtime.parent
-    assert digest(manifest) == args.sha256, 'Release manifest differs from the reviewed candidate'
-    files = json.loads(manifest.read_text())['files']
-    assert files and 'runsc' in files
-    observed = {}
-    for path in sorted(runtime.parent.rglob('*')):
-        assert not path.is_symlink(), 'Qualify materialized release files'
-        if path.is_file() and path != manifest:
-            observed[path.relative_to(runtime.parent).as_posix()] = digest(path)
-    assert observed == files, 'Release files differ from the reviewed manifest'
-    assert not os.environ.get('GVISOR_SIDECAR_BINARIES_DIR'), 'Qualify the reviewed release sidecars'
+    files = verify_release(runtime, manifest, args.sha256)
     results = args.results.resolve()
     results.mkdir(parents=True, exist_ok=False)
     platforms = args.platform or ['ptrace', 'systrap']
@@ -71,12 +95,7 @@ def main():
     }
 
     def run(label, command):
-        with (results / (label + '.stdout.log')).open('wb') as out, \
-             (results / (label + '.stderr.log')).open('wb') as err:
-            process = subprocess.run(command, stdout=out, stderr=err, timeout=90)
-        (results / (label + '.exit')).write_text(str(process.returncode))
-        assert process.returncode == 0, f'{label}: exit {process.returncode}; logs retained'
-        return (results / (label + '.stdout.log')).read_text()
+        return run_logged(results, label, command)
 
     def inspect(label, output, host_errno, is_sandbox):
         rows = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
@@ -125,11 +144,8 @@ def main():
                                                  ['pid', 'ipc', 'uts', 'mount', 'network']]},
                     }
                     (bundle / 'config.json').write_text(json.dumps(config))
-                    command = [str(runtime), '--root=' + str(work / 'state'), '--network=none',
-                               '--platform=' + platform, '--ignore-cgroups=true', '--overlay2=none',
-                               '--file-access=shared', '--directfs=' + str(is_directfs).lower(),
-                               '--debug-log=' + str(results / (label + '.debug.log')),
-                               'run', '--bundle=' + str(bundle), label]
+                    command = runtime_command(runtime, work / 'state', bundle,
+                                              results / (label + '.debug.log'), label, platform, is_directfs)
                     if error:
                         command = [str(work / 'fault'), str(error), *command]
                     try:

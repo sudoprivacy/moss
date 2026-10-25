@@ -14,6 +14,10 @@ flowchart LR
   B --> E[Host fault qualification]
   D --> E
   E --> F[Binary hash and qualification receipt]
+  G[Pinned Nexus source] --> H[Storage test binaries]
+  H --> I[Native and sandboxed recovery]
+  D --> I
+  I --> F
 ```
 
 The [CI workflow](../../../.github/workflows/gvisor-storage.yml) builds the
@@ -35,6 +39,19 @@ controls establish the injected errors. Both ptrace and systrap exercise
 directfs and LISAFS with writable files, existing read-only files and
 directories. Normal calls succeed; the candidate returns the original host
 error. The baseline records the error-loss counterexample.
+
+[The Nexus storage fixture](../../../scripts/e2e/gvisor-sync/nexus_storage.py)
+runs the existing database and content-store suites first natively, then in all
+four runtime/filesystem combinations. It covers concurrent creators, database
+reopen, SIGKILL during initialization and publication, complete-content
+publication, and file/directory barrier failures. The database suite invokes its
+subprocess entry point for each crash phase.
+
+`scripts/e2e/gvisor-sync/nexus-source.lock.json` pins the Nexus source. Its own
+Rust toolchain and protobuf setup remain authoritative. Test executables are
+built separately at reduced compiler priority and identified by a payload
+manifest. Runtime execution uses the same release verifier, configuration and
+log writer as syscall qualification.
 
 Run the fixture on an isolated Linux machine with the namespace capabilities
 needed by runsc. Its release manifest hash is an explicit input:

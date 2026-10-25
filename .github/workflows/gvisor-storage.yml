@@ -21,9 +21,47 @@ jobs:
   sync-errors:
     name: Host sync error propagation
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve the pinned Nexus storage suite
+        id: nexus
+        shell: python
+        run: |
+          import json, os, re
+          from pathlib import Path
+          lock = json.loads(Path('scripts/e2e/gvisor-sync/nexus-source.lock.json').read_text())
+          assert lock['repository'] == 'nexi-lab/nexus-vfs'
+          assert re.fullmatch('[0-9a-f]{40}', lock['revision'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('repository=' + lock['repository'] + '\nrevision=' + lock['revision'] + '\n')
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.nexus.outputs.repository }}
+          ref: ${{ steps.nexus.outputs.revision }}
+          path: nexus-storage-source
+      - name: Install the Nexus-pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("nexus-storage-source/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal
+      - uses: ./nexus-storage-source/.github/actions/setup-protoc
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/nexus-storage-target
+          key: gvisor-nexus-${{ runner.os }}-${{ hashFiles('scripts/e2e/gvisor-sync/nexus-source.lock.json') }}
+          restore-keys: gvisor-nexus-${{ runner.os }}-
+      - name: Build the real Nexus database and CAS suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/e2e/gvisor-sync/build_storage.py \
+            --source="$PWD/nexus-storage-source" --target="$RUNNER_TEMP/nexus-storage-target" \
+            --output="$RUNNER_TEMP/gvisor-qualification/output/nexus-payload"
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/gvisor-cache
@@ -57,6 +95,14 @@ jobs:
             sudo python3 scripts/e2e/gvisor-sync/qualify.py \
               --runtime="$runtime" --manifest="$manifest" --sha256="$sha256" \
               --results="$task_root/output/$mode-qualification" --expect="$expected"
+            if [ "$mode" = candidate ]; then
+              payload="$task_root/output/nexus-payload/manifest.json"
+              payload_sha256="$(sha256sum "$payload" | cut -d' ' -f1)"
+              sudo python3 scripts/e2e/gvisor-sync/nexus_storage.py \
+                --runtime="$runtime" --manifest="$manifest" --sha256="$sha256" \
+                --payload="$payload" --payload-sha256="$payload_sha256" \
+                --results="$task_root/output/nexus-qualification"
+            fi
           done
       - name: Make the owned cache readable for artifact upload
         if: always()
