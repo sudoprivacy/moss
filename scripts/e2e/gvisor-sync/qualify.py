@@ -16,6 +16,18 @@ OPERATIONS = {
 ERRORS = [0, 5, 28, 122]
 
 
+def add_runtime_selection(parser):
+    """Select deployment modes; omitted axes exercise the full CI matrix."""
+    parser.add_argument('--platform', action='append', choices=['ptrace', 'systrap'])
+    parser.add_argument('--filesystem', action='append', choices=['directfs', 'lisafs'])
+
+
+def runtime_selection(args):
+    """Share the same default matrix and deployment selectors between suites."""
+    return (args.platform or ['ptrace', 'systrap'],
+            [name == 'directfs' for name in (args.filesystem or ['directfs', 'lisafs'])])
+
+
 def digest(path):
     with path.open('rb') as file:
         return hashlib.file_digest(file, 'sha256').hexdigest()
@@ -67,7 +79,7 @@ def main():
     parser.add_argument('--results', required=True, type=Path)
     parser.add_argument('--work-dir', type=Path)
     parser.add_argument('--expect', choices=['propagated', 'lost'], default='propagated')
-    parser.add_argument('--platform', action='append', choices=['ptrace', 'systrap'])
+    add_runtime_selection(parser)
     args = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         parser.error('Run on an isolated Linux host or container with runtime namespace capabilities.')
@@ -78,7 +90,7 @@ def main():
     files = verify_release(runtime, manifest, args.sha256)
     results = args.results.resolve()
     results.mkdir(parents=True, exist_ok=False)
-    platforms = args.platform or ['ptrace', 'systrap']
+    platforms, directfs_modes = runtime_selection(args)
     source = Path(__file__).resolve().parent
     work = (args.work_dir or results / 'workspace').resolve()
     work.mkdir(parents=True, exist_ok=False)
@@ -91,7 +103,7 @@ def main():
         'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'runtime': str(runtime), 'runtimeSha256': digest(runtime),
         'manifestSha256': args.sha256, 'releaseFiles': files,
-        'expect': args.expect, 'platforms': platforms,
+        'expect': args.expect, 'platforms': platforms, 'directfsModes': directfs_modes,
         'sources': {name: digest(source / name) for name in
                     ['qualify.py', 'gvisor-sync-probe.c', 'gvisor-sync-fault.c']},
         'method': 'An inherited host seccomp filter returns errno for fsync/fdatasync.',
@@ -128,7 +140,7 @@ def main():
                 command = [str(work / 'fault'), str(error), *command]
             inspect(label, run(label, command), error, False)
         for platform in platforms:
-            for is_directfs in [True, False]:
+            for is_directfs in directfs_modes:
                 for error in ERRORS:
                     label = platform + ('-direct-' if is_directfs else '-lisafs-') + str(error)
                     directory = work / label

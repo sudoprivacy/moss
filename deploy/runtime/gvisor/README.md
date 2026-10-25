@@ -47,6 +47,10 @@ reopen, SIGKILL during initialization and publication, complete-content
 publication, and file/directory barrier failures. The database suite invokes its
 subprocess entry point for each crash phase.
 
+Both fixtures accept `--platform` and `--filesystem` to qualify a deployment's
+configured modes. CI uses their complete default matrix. The host's ptrace
+policy governs Sentry's use of ptrace, including initialization under systrap.
+
 `scripts/e2e/gvisor-sync/nexus-source.lock.json` pins the Nexus source. Its own
 Rust toolchain and protobuf setup remain authoritative. Test executables are
 built separately at reduced compiler priority and identified by a payload

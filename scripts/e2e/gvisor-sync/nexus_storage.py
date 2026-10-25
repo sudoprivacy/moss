@@ -8,7 +8,7 @@ from pathlib import Path
 import shlex
 import shutil
 import sys
-from qualify import digest, run_logged, runtime_command, verify_release
+from qualify import add_runtime_selection, digest, run_logged, runtime_command, runtime_selection, verify_release
 
 SUITES = [
     ('database', ['lib-tests', 'file_durability::tests', 'redb_storage::tests',
@@ -28,7 +28,9 @@ def main():
     parser.add_argument('--payload-sha256', required=True)
     parser.add_argument('--results', required=True, type=Path)
     parser.add_argument('--work-dir', type=Path)
+    add_runtime_selection(parser)
     args = parser.parse_args()
+    platforms, directfs_modes = runtime_selection(args)
     if sys.platform != 'linux' or os.geteuid() != 0 or os.uname().machine != 'x86_64':
         parser.error('Run on an isolated Linux AMD64 host with runtime namespace capabilities.')
     assert os.getpriority(os.PRIO_PROCESS, 0) == 0, 'Actual tests require normal priority'
@@ -66,6 +68,7 @@ def main():
         'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'runtimeSha256': digest(runtime), 'manifestSha256': args.sha256, 'releaseFiles': files,
         'payloadSha256': args.payload_sha256, 'payload': programs, 'testNice': 0,
+        'platforms': platforms, 'directfsModes': directfs_modes,
         'sources': {name: digest(Path(__file__).with_name(name)) for name in
                     ['nexus_storage.py', 'qualify.py', 'nexus-source.lock.json']},
         'cases': [], 'hardwarePersistenceQualified': False,
@@ -84,8 +87,8 @@ def main():
             environment = {**os.environ, 'TMPDIR': str(directory),
                            'PATH': str(rootfs / 'tools') + ':/usr/bin:/bin'}
             record('native-' + label, [str(rootfs / command[0]), *command[1:]], expected, environment)
-        for platform in ['ptrace', 'systrap']:
-            for is_directfs in [True, False]:
+        for platform in platforms:
+            for is_directfs in directfs_modes:
                 for suite, command, expected in SUITES:
                     label = platform + ('-direct-' if is_directfs else '-lisafs-') + suite
                     directory = data / label
