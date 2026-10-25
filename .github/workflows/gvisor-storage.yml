@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify archive and host installation contracts
-        run: python3 -m unittest discover -s deploy/runtime/gvisor -p test_release.py -v
+        run: python3 -m unittest discover -s deploy/runtime/gvisor -p 'test_*.py' -v
       - name: Prepare isolated qualification directories
         shell: bash
         run: |
@@ -108,9 +108,14 @@ jobs:
               python3 deploy/runtime/gvisor/package.py build \
                 --build="$task_root/output/candidate" --source="$task_root/source" \
                 --output="$task_root/output/distribution"
-              read -r filename archive_sha < <(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));print(r["filename"],r["archiveSha256"])' "$task_root/output/distribution/release.json")
+              archive_sha="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["archiveSha256"])' "$task_root/output/distribution/release.json")"
+              python3 scripts/e2e/gvisor-sync/acquisition.py \
+                --distribution="$task_root/output/distribution" \
+                --cache="$RUNNER_TEMP/gvisor-workspaces/acquisition-cache" \
+                --results="$task_root/output/acquisition-qualification"
+              acquired_archive="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["archivePath"])' "$task_root/output/acquisition-qualification/receipt.json")"
               sudo python3 deploy/runtime/gvisor/install.py stage \
-                --archive="$task_root/output/distribution/$filename" --sha256="$archive_sha" \
+                --archive="$acquired_archive" --sha256="$archive_sha" \
                 --manifest-sha256="$sha256" --prefix="$GVISOR_INSTALL_ROOT" \
                 > "$task_root/output/installation.json"
               runtime="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runsc"])' "$task_root/output/installation.json")"

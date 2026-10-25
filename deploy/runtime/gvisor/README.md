@@ -104,6 +104,20 @@ Both fixtures accept `--platform` and `--filesystem` to qualify a deployment's
 configured modes. CI uses their complete default matrix. The host's ptrace
 policy governs Sentry's use of ptrace, including initialization under systrap.
 
+## Online and offline acquisition
+
+`fetch.py` authenticates release metadata using its caller's pinned SHA256.
+It downloads the complete archive through the metadata's ordered sources and
+verifies every manifest member. The cache is keyed by the archive SHA256.
+Offline acquisition reads that same cache and performs the same verification.
+Invalid cached bytes remain available for diagnosis.
+CI uses the actual candidate archive for download fallback and disconnected
+recovery, then installs the recovered archive before runtime qualification.
+
+The Moss deployment archive carries the shared fetcher, release verifier and
+installer in their source package layout. `install.sh --download` and host
+installation both load tools from the authenticated deployment archive.
+
 `scripts/e2e/gvisor-sync/nexus-source.lock.json` pins the Nexus source. Its own
 Rust toolchain and protobuf setup remain authoritative. Test executables are
 built separately at reduced compiler priority and identified by a payload
