@@ -2,7 +2,6 @@
 """Build the pinned runtime and verify the backport's exact source images."""
 import argparse
 import datetime
-import hashlib
 import inspect
 import json
 import os
@@ -10,29 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tarfile
-import tempfile
-import urllib.request
-
-
-def digest(path):
-    with path.open('rb') as file:
-        return hashlib.file_digest(file, 'sha256').hexdigest()
-
-
-def acquire(url, expected, path):
-    if path.exists():
-        assert digest(path) == expected, f'Cached input checksum differs: {path}'
-        return
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
-        staged = Path(output.name)
-        try:
-            with urllib.request.urlopen(url, timeout=180) as response:
-                shutil.copyfileobj(response, output)
-            output.close()
-            assert digest(staged) == expected, f'Download checksum differs: {url}'
-            staged.replace(path)
-        finally:
-            staged.unlink(missing_ok=True)
+from release import acquire, digest
 
 
 def main():
@@ -51,7 +28,10 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     receipt = {'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                'baseline': args.baseline, 'lockSha256': digest(root / 'runtime.lock.json'),
-               'sourceCommit': lock['source']['commit'], 'sourceArchiveSha256': lock['source']['sha256']}
+               'sourceCommit': lock['source']['commit'], 'sourceArchiveSha256': lock['source']['sha256'],
+               'recipeFiles': {name: digest(root / name) for name in
+                               ['build.py', 'release.py', 'runtime.lock.json', 'sync-errors.patch',
+                                'Dockerfile', 'install-build-deps.sh']}}
 
     def run(label, command, cwd=None):
         with (output / (label + '.stdout.log')).open('wb') as out, \

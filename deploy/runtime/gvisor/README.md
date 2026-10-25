@@ -47,6 +47,51 @@ reopen, SIGKILL during initialization and publication, complete-content
 publication, and file/directory barrier failures. The database suite invokes its
 subprocess entry point for each crash phase.
 
+## Distribution and host installation
+
+`release.py` owns full-release verification and checksum-verified downloads.
+The builder, archive packager, installer and runtime fixtures share it.
+Build receipts identify the recipe bytes that produced the executables.
+`package.py` creates a reproducible archive containing the complete `bin/`
+fileset, Apache license and build provenance. CI installs this archive, then
+runs the full syscall and Nexus matrices from its installed path. The resulting
+qualification binds the archive SHA256, executable manifest and source revision.
+
+The [publication workflow](../../../.github/workflows/publish-gvisor.yml)
+consumes a successful `dev` push qualification run. All latest source workflows
+and their jobs must succeed before publication. GitHub and Tencent COS receive
+the same archive and metadata; public readback verifies complete contents.
+The gVisor release has its own tag and content-addressed COS path.
+
+```mermaid
+flowchart LR
+  A[Complete build] --> B[Reproducible archive]
+  B --> C[Immutable host installation]
+  C --> D[Full runtime and storage qualification]
+  D --> E[All source CI succeeds]
+  E --> F[GitHub and COS release]
+  C --> G[Versioned containerd handler]
+```
+
+`install.py stage` verifies the archive and publishes a complete directory under
+`/opt/moss/runtimes/gvisor/<archive-sha256>/`. Public executable ancestors allow
+Sentry traversal; protected ancestors preserve the executable names. Concurrent
+installers use the existing version-store directory's OS lock. File and
+namespace barriers precede a successful result. A post-publication barrier
+error preserves the complete version for retry.
+
+`install.py register-template` appends the versioned handler to a containerd v2
+or v3 template. Its shim configuration selects the matching immutable runsc and
+an ephemeral runtime root for that version. Existing template entries and runtime
+versions retain their identities. The node lifecycle owner reloads containerd
+and selects the RuntimeClass after Pod acceptance.
+
+```sh
+sudo python3 deploy/runtime/gvisor/install.py stage \
+  --archive=/path/to/release.tar.gz --sha256=REVIEWED_ARCHIVE_SHA256 \
+  --manifest-sha256=REVIEWED_MANIFEST_SHA256
+```
+
 Both fixtures accept `--platform` and `--filesystem` to qualify a deployment's
 configured modes. CI uses their complete default matrix. The host's ptrace
 policy governs Sentry's use of ptrace, including initialization under systrap.

@@ -2,12 +2,14 @@
 """Exercise native and sandbox sync calls against actual host errno injection."""
 import argparse
 import datetime
-import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from deploy.runtime.gvisor.release import digest, verify_release
 
 OPERATIONS = {
     'file-write-fsync', 'file-write-fdatasync', 'file-read-fsync',
@@ -26,27 +28,6 @@ def runtime_selection(args):
     """Share the same default matrix and deployment selectors between suites."""
     return (args.platform or ['ptrace', 'systrap'],
             [name == 'directfs' for name in (args.filesystem or ['directfs', 'lisafs'])])
-
-
-def digest(path):
-    with path.open('rb') as file:
-        return hashlib.file_digest(file, 'sha256').hexdigest()
-
-
-def verify_release(runtime, manifest, expected):
-    """Verify the complete executable fileset before launching a runtime."""
-    assert manifest.parent == runtime.parent
-    assert digest(manifest) == expected, 'Release manifest differs from the reviewed candidate'
-    files = json.loads(manifest.read_text())['files']
-    assert files and 'runsc' in files
-    observed = {}
-    for path in sorted(runtime.parent.rglob('*')):
-        assert not path.is_symlink(), 'Qualify materialized release files'
-        if path.is_file() and path != manifest:
-            observed[path.relative_to(runtime.parent).as_posix()] = digest(path)
-    assert observed == files, 'Release files differ from the reviewed manifest'
-    assert not os.environ.get('GVISOR_SIDECAR_BINARIES_DIR'), 'Qualify the reviewed release sidecars'
-    return files
 
 
 def run_logged(results, label, command, timeout=90, env=None):
@@ -103,6 +84,7 @@ def main():
         'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'runtime': str(runtime), 'runtimeSha256': digest(runtime),
         'manifestSha256': args.sha256, 'releaseFiles': files,
+        'releaseLibrarySha256': digest(Path(verify_release.__code__.co_filename)),
         'expect': args.expect, 'platforms': platforms, 'directfsModes': directfs_modes,
         'sources': {name: digest(source / name) for name in
                     ['qualify.py', 'gvisor-sync-probe.c', 'gvisor-sync-fault.c']},
