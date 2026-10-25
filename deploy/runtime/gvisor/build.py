@@ -122,7 +122,7 @@ def main():
                    '--host_jvm_args=-Xmx1024m', '--host_jvm_args=-XX:ActiveProcessorCount=1', 'build',
                    '--config=x86_64', '--compilation_mode=opt',
                    '--jobs=1', '--loading_phase_threads=1', '--local_resources=cpu=1',
-                   '--local_resources=memory=2048', '--spawn_strategy=processwrapper-sandbox',
+                   '--local_resources=memory=2048', '--spawn_strategy=processwrapper-sandbox,local',
                    '--repository_cache=' + str(cache / ('bazel-' + lock['bazel']['version'] + '-cache/cache/repos/v1')),
                    '--action_env=GOMAXPROCS=1', '--host_action_env=GOMAXPROCS=1',
                    '--action_env=GOFLAGS=-p=1', '--host_action_env=GOFLAGS=-p=1',

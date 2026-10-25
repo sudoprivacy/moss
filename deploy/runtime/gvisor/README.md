@@ -25,7 +25,8 @@ default sidecar version enforcement. Builds use the upstream AMD64 optimized
 release configuration.
 Compiler work uses Bazel file isolation, one job, reduced CPU priority and a
 bounded container. The Go SDK source manifest determines the compiler and
-analyzer inputs. Actual Gofer tests
+analyzer inputs; upstream actions marked `no-sandbox` retain their explicit
+local execution strategy. Actual Gofer tests
 run at normal priority.
 
 [The real runtime fixture](../../../scripts/e2e/gvisor-sync/qualify.py) injects
