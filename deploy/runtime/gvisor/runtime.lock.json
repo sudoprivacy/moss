@@ -9,7 +9,7 @@
   "version": "release-20261019.0-sudoprivacy-sync1",
   "patch": {
     "file": "sync-errors.patch",
-    "sha256": "82b5f7963226b56aee6fb08b05d08e817cf0f7429147c03bf55ba4407c4abd43",
+    "sha256": "29fb50c439a7e086fb1904bdc1d9c7e62ee69e95177df4208523a0b31c3a891e",
     "before": {
       "pkg/sentry/fsimpl/gofer/gofer.go": "64528bf55f698569caeaf7ba33ed16c71c531f4446ed652098a4927a202cc636",
       "pkg/sentry/fsimpl/gofer/gofer_test.go": "5cd01eb9dfa5512d6d6ea502997d3f5db121b8dfd26aa52a9e24411209bbc341"

@@ -2,10 +2,7 @@ diff --git a/pkg/sentry/fsimpl/gofer/gofer.go b/pkg/sentry/fsimpl/gofer/gofer.go
 index e0af1e5..85341a6 100644
 --- a/pkg/sentry/fsimpl/gofer/gofer.go
 +++ b/pkg/sentry/fsimpl/gofer/gofer.go
-@@ -2327,19 +2327,19 @@ func (d *dentry) syncRemoteFileLocked(ctx context.Context, dataOnly bool) error
- 	// Prefer syncing write handles over read handles, since some remote
- 	// filesystem implementations may not sync changes made through write
- 	// handles otherwise.
+@@ -2330,11 +2330,11 @@ func (d *dentry) syncRemoteFileLocked(ctx context.Context, dataOnly bool) error
 -	wh := d.inode.writeHandle()
 -	if dataOnly {
 -		wh.syncData(ctx)
@@ -28,30 +25,18 @@ index e0af1e5..85341a6 100644
 +		if firstErr == nil {
 +			firstErr = err
 +		}
- 	}
+@@ -2342 +2342 @@ func (d *dentry) syncRemoteFileLocked(ctx context.Context, dataOnly bool) error
 -	return nil
 +	return firstErr
- }
- 
- func (d *dentry) syncCachedFile(ctx context.Context, forFilesystemSync bool, dataOnly bool) error {
 diff --git a/pkg/sentry/fsimpl/gofer/gofer_test.go b/pkg/sentry/fsimpl/gofer/gofer_test.go
 index 284a7e7..9edfabe 100644
 --- a/pkg/sentry/fsimpl/gofer/gofer_test.go
 +++ b/pkg/sentry/fsimpl/gofer/gofer_test.go
-@@ -15,7 +15,9 @@
- package gofer
- 
- import (
+@@ -17,0 +18 @@ import (
 +	"os"
- 	"slices"
+@@ -18,0 +20 @@ import (
 +	"syscall"
- 	"testing"
- 
- 	"gvisor.dev/gvisor/pkg/abi/linux"
-@@ -25,6 +27,63 @@ import (
- 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
- )
- 
+@@ -27,0 +30,57 @@ import (
 +func TestSyncRemoteFileReportsHostErrors(t *testing.T) {
 +	ctx := contexttest.Context(t)
 +	directory, err := os.Open(t.TempDir())
@@ -109,6 +94,3 @@ index 284a7e7..9edfabe 100644
 +	}
 +}
 +
- func TestDestroyIdempotent(t *testing.T) {
- 	ctx := contexttest.Context(t)
- 	fs := filesystem{
