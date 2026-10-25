@@ -1,0 +1,61 @@
+name: Native Agent control
+
+on:
+  pull_request:
+    paths:
+      - 'src/server/agentControl/**'
+      - 'src/server/auth/**'
+      - 'src/server/agentManagementOperations.ts'
+      - 'src/server/runtimeService.ts'
+      - 'src/server/server.ts'
+      - 'src/server/testing/agentManager.fixture.ts'
+      - 'scripts/build-agent-control.mjs'
+      - 'scripts/run-node-tests.js'
+      - '.github/workflows/agent-control.yml'
+  push:
+    branches: [dev]
+    paths:
+      - 'src/server/agentControl/**'
+      - 'src/server/auth/**'
+      - '.github/workflows/agent-control.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-control:
+    name: Native control (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          lfs: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - run: bun install --frozen-lockfile
+      - name: Run authorization, actual HTTP and native process cases
+        run: >-
+          node scripts/run-node-tests.js src/server/agentControl
+          src/server/auth/agentControlAudience.node-test.ts
+          src/server/agentManager.node-test.ts src/server/agentManagerRoutes.node-test.ts
+          src/server/mossAgentAccess.node-test.ts
+      - name: Verify unchanged server typecheck boundary
+        run: node scripts/typecheck-ratchet.js
+      - name: Build source-bound standalone tool entry
+        run: node scripts/build-agent-control.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moss-native-control-${{ matrix.os }}
+          path: dist/agent-control/
+          if-no-files-found: error
