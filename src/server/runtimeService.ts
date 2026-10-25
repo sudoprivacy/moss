@@ -724,14 +724,30 @@ export class RuntimeService {
       if (!organizationId) throw new ResourceAccessError(403, 'Runtime owner organization is unavailable')
       const policy = await this.egressPolicies.policy(organizationId)
       configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(policy) }
+      const managedConnection = this.ownerRuntime ? await this.ownerRuntime.connection(ownerId, agentId, configuration) : undefined
+      if (managedConnection && policy.enabled) {
+        try {
+          const status = await this.readRuntimeEgressStatus(managedConnection, ownerId)
+          if (policyApplicationStatus(policy, status).state !== 'applied') throw new Error('Policy delivery is pending')
+        } catch {
+          throw new ResourceAccessError(503, 'Runtime egress policy is not applied; upgrade the runtime or retry delivery')
+        }
+      }
       if (!this.ownerRuntime && this.options.config.egressGate?.localOrganizationId === organizationId) {
         const receipts = await this.observeEgressRuntime({ ownerId, organizationId }, policy)
         if (!receipts.length || receipts.some(receipt => receipt.error || policyApplicationStatus(policy, receipt.status).state !== 'applied')) {
           throw new ResourceAccessError(503, 'Local runtime egress policy is not applied; upgrade the runtime or retry delivery')
         }
       }
+      if (managedConnection) return managedConnection
     }
     return this.ownerRuntime ? this.ownerRuntime.connection(ownerId, agentId, configuration) : externalCohostConnection()
+  }
+
+  private async readRuntimeEgressStatus(configuration: SessionConnectionConfig, ownerId: string) {
+    const connection = await connectSessionRuntime(configuration, ownerId)
+    try { return await readEgressPolicyStatus(connection.client, connection.authToken) }
+    finally { connection.client.close() }
   }
 
   private async observeEgressRuntime(target: EgressRuntimeTarget, policy?: EgressPolicy): Promise<EgressRuntimeReceipt[]> {
@@ -743,10 +759,8 @@ export class RuntimeService {
       }
       try {
         if (policy) await writeEgressPolicyFile(deployment.localPolicyFile, policy)
-        const connection = await connectSessionRuntime(externalCohostConnection(), target.ownerId)
-        try { return [{ ownerId: target.ownerId, allocationId: 'local', isPresent: true,
-          status: await readEgressPolicyStatus(connection.client, connection.authToken) }] }
-        finally { connection.client.close() }
+        return [{ ownerId: target.ownerId, allocationId: 'local', isPresent: true,
+          status: await this.readRuntimeEgressStatus(externalCohostConnection(), target.ownerId) }]
       } catch { return [{ ownerId: target.ownerId, allocationId: 'local', isPresent: true, error: 'Local runtime policy is unavailable; verify the runtime version and deployment configuration' }] }
     }
     return await Promise.all(placements.map(async placement => {
@@ -756,9 +770,7 @@ export class RuntimeService {
           ? await placement.service.configurePolicy?.(target.ownerId, policy)
           : await placement.service.find(target.ownerId)
         if (!configuration) return { ...identity, isPresent: false }
-        const connection = await connectSessionRuntime(configuration, target.ownerId)
-        try { return { ...identity, isPresent: true, status: await readEgressPolicyStatus(connection.client, connection.authToken) } }
-        finally { connection.client.close() }
+        return { ...identity, isPresent: true, status: await this.readRuntimeEgressStatus(configuration, target.ownerId) }
       } catch { return { ...identity, isPresent: true, error: 'Runtime policy is unavailable; upgrade the runtime or retry delivery' } }
     }))
   }

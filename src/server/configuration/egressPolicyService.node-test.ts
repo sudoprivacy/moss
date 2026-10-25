@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
-import { EgressPolicyRepository, createEgressPolicy } from '@sudo/egress-policy'
+import { EgressPolicyRepository, createEgressPolicy, type EgressPolicyStatus } from '@sudo/egress-policy'
 import { SqliteDriver } from '../db/driver.js'
 import { EgressPolicyService } from './egressPolicyService.js'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -81,6 +81,46 @@ void test('saved policy remains pending until the actual runtime reports its ver
   assert.equal(result.runtimes[0]?.state, 'pending')
   assert.equal(deliveries.length, 1)
 })
+
+for (const state of ['applied', 'stale', 'wrong-mode', 'native-error', 'unavailable', 'disabled'] as const) {
+  void test(`managed model admission checks the selected runtime receipt: ${state}`, async t => {
+    const store = new DirectConnectStore(':memory:')
+    t.after(() => store.close())
+    t.mock.method(store, 'getUserOrgId', async () => 'org-a')
+    const connection = { endpoint: 'http://127.0.0.1:1', authToken: '', tls: null }
+    const configurations: Array<Record<string, string> | undefined> = []
+    const runtime = new RuntimeService({ store, serverInstanceId: 'managed-egress-admission',
+      config: { defaultRuntime: 'cohost', heartbeatTimeoutMs: 30_000 } as ServerConfig,
+      authService: { listEgressPolicyOwners: async () => [] } as never,
+      userPodService: { forAllocation: () => ({
+        resolve: async (_owner: string, configuration?: Record<string, string>) => {
+          configurations.push(configuration)
+          return connection
+        },
+      }), close: async () => {} } as never,
+    })
+    t.after(() => runtime.closeRuntimeServices())
+    const initial = await runtime.egressPolicies.policy('org-a')
+    const { policy } = await runtime.egressPolicies.save('org-a', { ...initial,
+      enabled: state !== 'disabled', modelMounts: ['/model'] }, initial.revision, 'admin-a')
+    let observations = 0
+    t.mock.method(runtime as unknown as { readRuntimeEgressStatus: (config: unknown, ownerId: string) => Promise<EgressPolicyStatus> },
+      'readRuntimeEgressStatus', async (observed: unknown, ownerId: string) => {
+        observations++
+        assert.equal(observed, connection)
+        assert.equal(ownerId, 'owner-a')
+        assert.equal(configurations.length, 1, 'The selected owner allocation must exist before its receipt is checked')
+        if (state === 'unavailable') throw new Error('Policy RPC is unavailable')
+        return { ...policy, revision: state === 'stale' ? policy.revision - 1 : policy.revision,
+          mode: state === 'wrong-mode' ? 'deny' : policy.mode, error: state === 'native-error' ? 'Invalid native policy' : null }
+      })
+    const configure = () => runtime.resolveCohostConnection('owner-a', 'agent-a', { 'sudocode.json': '{}', 'backend-config.json': '{"mounts":[]}' })
+    if (state === 'applied' || state === 'disabled') assert.equal(await configure(), connection)
+    else await assert.rejects(configure(), error => error instanceof ResourceAccessError && error.statusCode === 503 && /policy is not applied/.test(error.message))
+    assert.equal(observations, state === 'disabled' ? 0 : 1)
+    assert.equal(configurations[0]?.['egress-policy.json'], JSON.stringify(policy))
+  })
+}
 
 void test('platform propagation respects organization overrides and runtime failures remain visible', async (t) => {
   const db = new DatabaseSync(':memory:')
