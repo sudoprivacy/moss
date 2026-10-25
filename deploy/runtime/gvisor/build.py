@@ -118,10 +118,11 @@ def main():
         status.write_text('#!/bin/sh\nprintf "STABLE_VERSION ' + version + '\\n"\n')
         status.chmod(0o755)
         command = ['nice', '-n', '10', str(bazel), '--batch',
-                   '--output_user_root=' + str(cache / ('bazel-' + lock['bazel']['version'] + '-cache')),
+                   '--output_user_root=' + str(cache / ('bazel-' + lock['bazel']['version'] + '-sandbox-cache')),
                    '--host_jvm_args=-Xmx1024m', '--host_jvm_args=-XX:ActiveProcessorCount=1', 'build',
                    '--jobs=1', '--loading_phase_threads=1', '--local_resources=cpu=1',
-                   '--local_resources=memory=2048', '--spawn_strategy=local',
+                   '--local_resources=memory=2048', '--spawn_strategy=processwrapper-sandbox',
+                   '--repository_cache=' + str(cache / ('bazel-' + lock['bazel']['version'] + '-cache/cache/repos/v1')),
                    '--action_env=GOMAXPROCS=1', '--host_action_env=GOMAXPROCS=1',
                    '--action_env=GOFLAGS=-p=1', '--host_action_env=GOFLAGS=-p=1',
                    '--workspace_status_command=' + str(status), '//:release']
