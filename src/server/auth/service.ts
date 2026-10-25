@@ -1,6 +1,9 @@
 import { assertAgentToolManager } from '../agentFederation/toolGatewayRoutes.js'
 import { MossAgentAccess } from '../mossAgentAccess.js'
 import { AgentToolGateway } from '../agentFederation/toolGateway.js'
+import { AgentControlService, type AgentControlAuthority, type AgentControlPorts } from '../agentControl/service.js'
+import { AgentControlStore } from '../agentControl/store.js'
+import { AGENT_CONTROL_AUDIENCE, AGENT_CONTROL_KEY_PREFIX, AGENT_CONTROL_SCOPE } from '../agentControl/contract.js'
 import { AgentUsageReports } from '../agentFederation/usageReport.js'
 import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
 import { AssetSuspensions } from '../agentFederation/assetSuspension.js'
@@ -1013,7 +1016,11 @@ export class AuthService {
   }
 
   async verifyAccessToken(token: string): Promise<AuthContext | null> {
-    const auth = verifyAccessToken(token, this.db.getJwtSecret(), this.db.getIssuer())
+    return this.verifyIssuedAccessToken(token)
+  }
+
+  private async verifyIssuedAccessToken(token: string, audience?: string): Promise<AuthContext | null> {
+    const auth = verifyAccessToken(token, this.db.getJwtSecret(), this.db.getIssuer(), 'access', audience)
     if (!auth) {
       return null
     }
@@ -1026,6 +1033,31 @@ export class AuthService {
     const user = await this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
     if (!user || user.status !== 'active' || user.role !== auth.role) return null
     return auth
+  }
+
+  /** Same signing/revocation authority as login, with an isolated consumer. */
+  createAgentControlAuthority(): AgentControlAuthority {
+    return {
+      parent: token => this.verifyAccessToken(token),
+      control: token => this.verifyIssuedAccessToken(token, AGENT_CONTROL_AUDIENCE),
+      parentRevoked: jti => this.db.isTokenRevoked(jti),
+      member: (userId, orgId) => this.getAgentOwner(userId, orgId),
+      issue: (parent, id, ttlSeconds) => {
+        if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 300) throw new AuthServiceError(400, 'Invalid control credential lifetime')
+        const issued = issueAccessToken({ iss: this.db.getIssuer(), sub: parent.userId, org_id: parent.orgId,
+          role: parent.role, scopes: [AGENT_CONTROL_SCOPE], key_id: `${AGENT_CONTROL_KEY_PREFIX}${id}`,
+          aud: AGENT_CONTROL_AUDIENCE }, this.db.getJwtSecret(), ttlSeconds)
+        const auth = verifyAccessToken(issued.token, this.db.getJwtSecret(), this.db.getIssuer(), 'access', AGENT_CONTROL_AUDIENCE)
+        if (!auth) throw new AuthServiceError(500, 'Control credential could not be verified')
+        return { ...issued, auth }
+      },
+    }
+  }
+
+  createAgentControlService(deploymentId: string, ports: AgentControlPorts) {
+    return new AgentControlService(new AgentControlStore(this.db.driver), {
+      ...ports, deploymentId, authority: this.createAgentControlAuthority(),
+    })
   }
 
   async logout(accessToken: string, refreshToken?: string): Promise<void> {

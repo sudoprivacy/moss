@@ -72,4 +72,9 @@ export class AgentManagementOperations {
     this.deps.record({ name: 'agent_runtime_upgraded', fields: { ownerId, orgId: auth.orgId, actorUserId: auth.userId } })
     return { runtime }
   }
+
+  async inspectRuntime(auth: AuthContext, ownerId: string) {
+    await this.deps.manager.list(auth, ownerId)
+    return this.deps.runtime.inspectUserRuntime(ownerId)
+  }
 }

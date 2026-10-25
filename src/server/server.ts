@@ -8,6 +8,7 @@ import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { AgentManager } from './agentManager.js'
 import { AgentManagementOperations } from './agentManagementOperations.js'
+import { dispatchAgentControl, isAgentControlPath } from './agentControl/routes.js'
 import { isMossRuntimeAgentName, mossAgentName, sessionAgentName } from './agentIdentity.js'
 import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
 import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
@@ -2071,6 +2072,12 @@ export function startServer(
     workspaceUrl: (sessionId, orgId) => agentWorkspaceUrl(sessionId, undefined, orgId),
     record: event => logger.info(`${event.name} ${JSON.stringify(event.fields)}`),
   })
+  const agentControl = process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID
+    ? authService.createAgentControlService(process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID, {
+      actor: (sessionId, userId, orgId) => runtime.inspectManagedControlActor(sessionId, userId, orgId),
+      actorCurrent: (actor, orgId) => runtime.assertManagedControlActorCurrent(actor, orgId),
+      operations: agentOperations,
+    }) : undefined
   const privateAgentArchives = new PrivateAgentArchives(join(config.rootDir, 'private-agent-archives'))
   const wss = new WebSocketServer({ noServer: true })
   const browserWss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, perMessageDeflate: false })
@@ -3974,6 +3981,11 @@ export function startServer(
           const code = error instanceof ExternalProviderError ? error.code : 'TOOL_GATEWAY_UNAVAILABLE'
           writeJson(res, status, { success: false, error: { code, message: code } })
         }
+        return
+      }
+
+      if (isAgentControlPath(pathname)) {
+        await dispatchAgentControl(req, res, url, agentControl)
         return
       }
 

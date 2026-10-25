@@ -1,4 +1,6 @@
 import { SessionStartupError } from './sessionStartup.js'
+import type { ManagedControlActor } from './agentControl/contract.js'
+import { inspectManagedActor, assertManagedActorCurrent, type ManagedActorSource } from './agentControl/managedActor.js'
 import { probeAttachPath, probeRunnerActivity, probeRunnerReady, waitForBackendRunnerReady } from './runtime/runnerReadiness.js'
 import { withOrganizationResources, requireOrganizationResource, resolveOrganizationSkillIds, snapshotOrganizationResources, pinSessionResourceSnapshot } from './catalog/organizationResources.js'
 import {
@@ -707,6 +709,22 @@ export class RuntimeService {
   /** Connect with a fresh owner-delegated identity at the execution endpoint. */
   async connectCohostRuntime(ownerId: string, agentId: string) {
     return connectSessionRuntime(await this.resolveCohostConnection(ownerId, agentId), ownerId)
+  }
+
+  private managedActorSource(): ManagedActorSource {
+    return { session: id => this.store.getSession(id), binding: id => this.store.cohostSessions.get(id),
+      requireAccess: session => this.requireSessionAgentAccess(session),
+      connect: (ownerId, agentId) => this.connectCohostRuntime(ownerId, agentId) }
+  }
+
+  /** Local final fence; callers must first obtain actual native execution evidence. */
+  async assertManagedControlActorCurrent(actor: ManagedControlActor, orgId: string): Promise<void> {
+    await assertManagedActorCurrent(this.managedActorSource(), actor, orgId)
+  }
+
+  /** Read actual native ownership/history; never start a runner to prove an actor. */
+  async inspectManagedControlActor(sessionId: string, ownerId: string, orgId: string): Promise<ManagedControlActor> {
+    return inspectManagedActor(this.managedActorSource(), sessionId, ownerId, orgId)
   }
 
   /** List requests inspect existing boxes and never create another user's runtime. */
