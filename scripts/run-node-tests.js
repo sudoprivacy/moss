@@ -75,6 +75,7 @@ const nodeTestFiles = [
   'src/server/agentIdentity.node-test.ts',
   'src/server/myAgents.node-test.ts',
   'src/server/personalAgentAccess.node-test.ts',
+  'src/server/mossAgentAccess.node-test.ts',
   'src/server/artifacts.node-test.ts',
   'src/server/cloudChat.node-test.ts',
   'src/server/wikiRuntimeWorkspace.node-test.ts',

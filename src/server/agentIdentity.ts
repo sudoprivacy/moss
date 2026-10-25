@@ -51,6 +51,31 @@ const DEFAULT_AGENT_PREFIX = 'moss-agent:user:'
  */
 const USER_CREATED_AGENT_PREFIX = 'moss-agent:own:'
 const NEXUS_AGENT_PREFIX = 'moss-agent:nexus:'
+const MOSS_AGENT_PREFIX = 'moss-agent:operator:'
+
+/** One durable Moss identity per human in an organization, independent of labels. */
+export function mossAgentName(orgId: string, userId: string): string {
+  if (!orgId || !userId) throw new ResourceAccessError(400, 'Invalid Moss Agent owner')
+  return MOSS_AGENT_PREFIX + Buffer.from(JSON.stringify([orgId, userId]), 'utf8').toString('base64url')
+}
+
+export function isMossAgentName(name: string | null | undefined): boolean {
+  return typeof name === 'string' && name.startsWith(MOSS_AGENT_PREFIX)
+}
+
+/** Reserved native names must retain Moss access checks through Nexus references. */
+export function isMossRuntimeAgentName(name: string | null | undefined): boolean {
+  return typeof name === 'string' && /^moss-[a-f0-9]{64}$/.test(name)
+}
+
+function mossAgentOwner(reference: string): [string, string] {
+  try {
+    const value: unknown = JSON.parse(Buffer.from(reference.slice(MOSS_AGENT_PREFIX.length), 'base64url').toString('utf8'))
+    if (Array.isArray(value) && value.length === 2 && value.every(part => typeof part === 'string') &&
+      mossAgentName(value[0], value[1]) === reference) return value as [string, string]
+  } catch { /* Invalid references never become catalog names or other identities. */ }
+  throw new ResourceAccessError(400, 'Invalid Moss Agent reference')
+}
 
 /** Reference an existing Nexus principal without assigning it a new Moss identity. */
 export function nexusAgentReference(agentName: string): string {
@@ -87,7 +112,7 @@ export function isUserCreatedAgentName(name: string | null | undefined): boolean
  * is perfectly valid.
  */
 export function isUserOwnedAgentName(name: string | null | undefined): boolean {
-  return isDefaultAgentName(name) || isUserCreatedAgentName(name) || nexusAgentName(name) !== undefined
+  return isDefaultAgentName(name) || isUserCreatedAgentName(name) || isMossAgentName(name) || nexusAgentName(name) !== undefined
 }
 
 /** The agent a session belongs to when the user did not choose an assistant. */
@@ -127,6 +152,11 @@ export function isDefaultAgentName(name: string | null | undefined): boolean {
  * original is appended so two templates that slugify alike stay apart.
  */
 export function sessionAgentName(userId: string, assistantRef?: string | null): string {
+  if (isMossAgentName(assistantRef)) {
+    const owner = mossAgentOwner(assistantRef!)
+    if (owner[1] !== userId) throw new ResourceAccessError(404, 'Agent not available')
+    return `moss-${createHash('sha256').update(JSON.stringify(owner)).digest('hex')}`
+  }
   const existing = nexusAgentName(assistantRef)
   if (existing) return existing
   // The stored reference carries a marker so a catalog assistant cannot be

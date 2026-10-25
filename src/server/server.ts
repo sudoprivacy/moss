@@ -7,6 +7,7 @@ import { ExternalProviderError } from './externalProviders/policy.js'
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { AgentManager, canUpgradeAgentRuntime, managedSessionAgentName } from './agentManager.js'
+import { isMossRuntimeAgentName, mossAgentName, sessionAgentName } from './agentIdentity.js'
 import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
 import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
 import { dispatchOrganizationRecharge, parseOrganizationPaymentCallback } from './billing/organizationRechargeRoutes.js'
@@ -2044,13 +2045,23 @@ export function startServer(
   const adminDistDir = resolveAdminDistDir()
   const agentManager = new AgentManager({
     visibleOwners: auth => authService.listAgentOwners(auth),
-    personalAgents: (owner, auth) => listMyAgents({
-      orgId: auth.orgId, userId: owner.id, defaultDisplayName: owner.displayName,
-      listSessionAssistants: ({ orgId, userId }) => runtime.store.listUserSessions(orgId, userId),
-      resolveTemplateName: resolveAssistantDisplayName,
-    }),
+    personalAgents: async (owner, auth) => {
+      const agents = await listMyAgents({
+        orgId: auth.orgId, userId: owner.id, defaultDisplayName: owner.displayName,
+        listSessionAssistants: ({ orgId, userId }) => runtime.store.listUserSessions(orgId, userId),
+        resolveTemplateName: resolveAssistantDisplayName,
+      })
+      if (await authService.mossAgents.canUse(auth.orgId, owner.id)) {
+        const moss = await authService.mossAgents.getAgent(auth.orgId, owner.id)
+        agents.push({ ref: moss.ref, agentName: moss.agentName, displayName: moss.displayName, kind: 'own' })
+      }
+      return agents
+    },
     namespace: ownerId => runtime.readAgentNamespace(ownerId),
     runtimeState: ownerId => runtime.inspectUserRuntime(ownerId),
+    canStartAgent: async (auth, ownerId, name) => !isMossRuntimeAgentName(name) ||
+      (name === sessionAgentName(ownerId, mossAgentName(auth.orgId, ownerId)) &&
+        await authService.mossAgents.canUse(auth.orgId, ownerId)),
   })
   const privateAgentArchives = new PrivateAgentArchives(join(config.rootDir, 'private-agent-archives'))
   const wss = new WebSocketServer({ noServer: true })
@@ -3353,6 +3364,25 @@ export function startServer(
         const result = await getUserProfile(auth, authService, runtime.store)
         writeJson(res, 200, result)
         return
+      }
+
+      if (pathname === '/api/v1/moss/agent' || pathname.startsWith('/api/v1/moss/member-access/')) {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method === 'GET' && pathname === '/api/v1/moss/agent') {
+          writeJson(res, 200, await authService.mossAgents.getAgent(auth.orgId, auth.userId))
+          return
+        }
+        const memberId = pathname.slice('/api/v1/moss/member-access/'.length)
+        if (req.method === 'PUT' && memberId) {
+          const body = await readJsonBody(req)
+          if (typeof body.enabled !== 'boolean') throw new HttpError(400, 'enabled must be a boolean')
+          await authService.mossAgents.setAccess(auth, decodeURIComponent(memberId), body.enabled)
+          writeJson(res, 200, { success: true })
+          return
+        }
+        throw new HttpError(405, 'Method not allowed')
       }
 
       if (pathname.startsWith('/api/v1/channels/')) {
@@ -11363,6 +11393,7 @@ export function startServer(
                 verify: async () => {
                   const current = token ? await authService.verifyAccessToken(token) : null
                   const visible = await runtime.getSession(sessionId)
+                  if (visible) await runtime.requireSessionAgentAccess(visible)
                   return Boolean(current && visible && hasExactScope(current.scopes, 'internal:channel') &&
                     canAccessSession(current, visible, 'sessions:attach:any'))
                 },
@@ -11517,6 +11548,7 @@ export function startServer(
             verify: async () => {
               const current = token ? await authService.verifyAccessToken(token) : null
               const visible = await runtime.getSession(sessionId)
+              if (visible) await runtime.requireSessionAgentAccess(visible)
               return Boolean(current && visible && canAccessSession(current, visible, 'sessions:attach:any'))
             },
             onMessage: data => {

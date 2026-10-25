@@ -4,10 +4,13 @@ import { withOrganizationResources, requireOrganizationResource, resolveOrganiza
 import {
   defaultAgentName,
   isDefaultAgentName,
+  isMossAgentName,
+  isMossRuntimeAgentName,
   isUserCreatedAgentName,
   isUserOwnedAgentName,
   nexusAgentName,
   sessionAgentName,
+  mossAgentName,
 } from './agentIdentity.js'
 import { requirePersonalAgent } from './personalAgentAccess.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
@@ -610,6 +613,17 @@ export class RuntimeService {
       visibility: await this.authService.buildVisibilityFilter({ ...session, rawToken: '', keyId: '', jti: '', exp: 0 }) }
   }
 
+  /** Recheck the actual owner's Moss entitlement before starting or accepting input. */
+  async requireSessionAgentAccess(session: { orgId: string; userId: string; assistantName: string | null }): Promise<void> {
+    const native = nexusAgentName(session.assistantName)
+    if (!isMossAgentName(session.assistantName) && !isMossRuntimeAgentName(native)) return
+    const expected = mossAgentName(session.orgId, session.userId)
+    if (native ? native !== sessionAgentName(session.userId, expected) : session.assistantName !== expected) {
+      throw new ResourceAccessError(404, 'Agent not available')
+    }
+    await this.authService.mossAgents.requireUser(session.orgId, session.userId)
+  }
+
   async createSession(input: SessionCreateInput): Promise<SessionRecord> {
     if (this.draining) throw new ServerDrainingError()
     if (this.upgradingOwners.has(input.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
@@ -622,6 +636,10 @@ export class RuntimeService {
         input = { ...input, assistantName: defaultAgentName(input.userId) }
       }
       await requirePersonalAgent(input.orgId, input.userId, input.assistantName!)
+      await this.requireSessionAgentAccess({ ...input, assistantName: input.assistantName ?? null })
+      if (isMossAgentName(input.assistantName) && (input.runtime?.type ?? this.options.config.defaultRuntime) !== 'cohost') {
+        throw new ResourceAccessError(400, 'A Moss Agent requires its native runtime')
+      }
       if (input.templateRef) {
         if (!isUserOwnedAgentName(input.assistantName)) throw new ResourceAccessError(400, 'A template requires a personal Agent')
         const template = await requireOrganizationResource('agent', input.templateRef)
@@ -631,6 +649,9 @@ export class RuntimeService {
         input = { ...input, templateRef: template.id, enabledSkills: input.enabledSkills ?? configuration.enabledSkills }
       }
       const existingAgent = nexusAgentName(input.assistantName)
+      if (isMossRuntimeAgentName(existingAgent)) {
+        input = { ...input, assistantName: mossAgentName(input.orgId, input.userId), assistantDisplayName: 'Moss' }
+      }
       if (existingAgent) {
         if ((input.runtime?.type || this.options.config.defaultRuntime) !== 'cohost') {
           throw new ResourceAccessError(400, 'A Nexus Agent requires its native runtime')
@@ -1031,6 +1052,7 @@ export class RuntimeService {
     attempt: AttemptRecord
   }> {
     const session = await this.store.getSession(sessionId)
+    if (session) await this.requireSessionAgentAccess(session)
     if (!session) {
       throw new Error('Session not found')
     }
@@ -1065,6 +1087,13 @@ export class RuntimeService {
     }
     // Detail reads can race a terminate; they must report its durable intent.
     if (session.desiredState === 'terminated') return { session }
+    try { await this.requireSessionAgentAccess(session) }
+    catch (error) {
+      // A history read must retain the durable record without reviving an
+      // execution after Moss access was revoked.
+      if (error instanceof ResourceAccessError && error.statusCode === 403) return { session }
+      throw error
+    }
 
     const existing = session.currentAttemptId
       ? await this.store.getAttempt(session.currentAttemptId)
@@ -1592,6 +1621,8 @@ export class RuntimeService {
     if (!this.options.authService) {
       throw new Error('connectInternalChannel requires authService')
     }
+    const session = await this.store.getSession(sessionId)
+    if (session) await this.requireSessionAgentAccess(session)
     return openInternalSessionChannel(
       {
         authService: this.options.authService,
@@ -2147,6 +2178,8 @@ export class RuntimeService {
       if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
     }
     const personalAgent = await requirePersonalAgent(session.orgId, session.userId, effectiveAssistantName)
+    await this.requireSessionAgentAccess({ ...session, assistantName: effectiveAssistantName })
+    if (isMossAgentName(effectiveAssistantName)) options = { ...options, assistantDisplayName: 'Moss' }
     let assistantDisplayName = personalAgent?.displayName ?? options.assistantDisplayName
     // The implicit default agent has no display name to resolve: its name is
     // derived from a user id, so resolving it would surface `user-<uuid>` as the

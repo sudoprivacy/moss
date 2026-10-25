@@ -37,6 +37,7 @@ export interface AgentManagerDependencies {
   personalAgents(owner: AgentOwner, auth: AuthContext): Promise<MyAgent[]>
   namespace(ownerId: string): Promise<RuntimeAgentNamespace | undefined>
   runtimeState?(ownerId: string): Promise<unknown>
+  canStartAgent?(auth: AuthContext, ownerId: string, agentName: string): Promise<boolean>
 }
 
 const agentNameSchema = z.string().min(1).max(512)
@@ -105,7 +106,8 @@ export class AgentManager {
             state: executions.find(record => record.state === 'busy' || record.state === 'awaiting_input')?.state ?? executions[0]?.state ?? 'stopped',
             isPresent: Boolean(namespace?.names.includes(name)),
             isOwnerActive: owner.isActive,
-            canStart: owner.isActive && canUseOwner && hasScope(auth.scopes, 'sessions:create') && Boolean(configured || isManaged),
+            canStart: owner.isActive && canUseOwner && hasScope(auth.scopes, 'sessions:create') && Boolean(configured || isManaged) &&
+              (await this.dependencies.canStartAgent?.(auth, owner.id, name) ?? true),
           })
         }
       }))

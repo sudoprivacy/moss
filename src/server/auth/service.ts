@@ -1,4 +1,5 @@
 import { assertAgentToolManager } from '../agentFederation/toolGatewayRoutes.js'
+import { MossAgentAccess } from '../mossAgentAccess.js'
 import { AgentToolGateway } from '../agentFederation/toolGateway.js'
 import { AgentUsageReports } from '../agentFederation/usageReport.js'
 import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
@@ -370,6 +371,7 @@ export async function createAuthService(
 const REVOKED_TOKENS_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 
 export class AuthService {
+  readonly mossAgents: MossAgentAccess
   private readonly cleanupTimer: ReturnType<typeof setInterval>
   private readonly oauth2Bridge: OAuth2Bridge
   private readonly identityRepository: IdentityRepository
@@ -401,6 +403,7 @@ export class AuthService {
     smsSender?: SmsSender,
   ) {
     this.identityRepository = new IdentityRepository(this.db.driver)
+    this.mossAgents = new MossAgentAccess(this.db.driver, userId => this.db.getUserById(userId))
     this.clientPolicies = new ClientPolicyRepository(this.db.driver)
     this.unifiedIdentity = new UnifiedIdentityService(this.db, this.identityRepository, {
       stageOrganization: async (orgId, input) => {
@@ -1002,6 +1005,7 @@ export class AuthService {
 
   async initializeCompatibilityRecords(): Promise<void> {
     await this.ensureCompatibilityRecords()
+    await this.mossAgents.initialize()
   }
 
   destroy(): void {

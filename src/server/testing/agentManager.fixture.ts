@@ -1,5 +1,6 @@
 /** Real HTTP/auth/storage with only runtime placement and execution replaced. */
 import { randomUUID } from 'node:crypto'
+import { mossAgentName, sessionAgentName } from '../agentIdentity.js'
 import { once } from 'node:events'
 import { createServer, createConnection } from 'node:net'
 import { readServerConfig, ensureServerDirectories } from '../config.js'
@@ -19,15 +20,22 @@ const { service: authService } = await createAuthService({ db: store.requireSqli
   dbPath: config.dbPath, tokenTtlSec: config.tokenTtlSec, bootstrapAdmin: config.bootstrapAdmin })
 const runtime = new RuntimeService({ config, store, authService, serverInstanceId: randomUUID() })
 const reservedAgentNames = ['mine', 'install', 'visible', 'create', 'tenant', 'private-archives']
-runtime.readAgentNamespace = async ownerId => ({ isOwnerConfined: true,
-  names: ['persistent-agent', 'worker-agent', ...reservedAgentNames], managedNames: ['persistent-agent', ...reservedAgentNames],
-  executions: [{ name: 'worker-agent', ownerId, state: 'ready', kind: 'worker' }] })
+runtime.readAgentNamespace = async ownerId => {
+  const orgId = await store.getUserOrgId(ownerId)
+  if (!orgId) throw new Error('Fixture owner organization is missing')
+  const moss = sessionAgentName(ownerId, mossAgentName(orgId, ownerId))
+  return { isOwnerConfined: true,
+    names: ['persistent-agent', 'worker-agent', moss, ...reservedAgentNames],
+    managedNames: ['persistent-agent', moss, ...reservedAgentNames],
+    executions: [{ name: 'worker-agent', ownerId, state: 'ready', kind: 'worker' }] }
+}
 runtime.upgradeUserRuntime = async ownerId => {
   const allocation = { ownerId, allocationId: 'primary', isPresent: true, isDrifted: false,
     phase: 'Running', expectedImage: 'fixture:verified', observedImageDigest: null, releaseId: null }
   return { ...allocation, allocations: [allocation] }
 }
 runtime.createSession = async input => {
+  await runtime.requireSessionAgentAccess({ ...input, assistantName: input.assistantName ?? null })
   if (input.source === 'agent-manager' && input.runtime?.engine !== 'scode') throw new Error('Managed Agents require the shared engine')
   const sessionId = randomUUID()
   return store.createSession({ ...input, sessionId, transcriptSessionId: sessionId,

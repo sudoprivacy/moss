@@ -1,4 +1,5 @@
 import { SESSION_SCHEMA } from '../storage/sessionSchema.js'
+import { MOSS_MEMBER_ACCESS_SCHEMA } from '../mossAgentAccess.js'
 import { ORGANIZATION_RESOURCE_PG_SCHEMA } from '../catalog/organizationResourceSchema.js'
 import { COHOST_SESSION_SCHEMA } from '../storage/cohostSessionSchema.js'
 import { COHOST_AGENT_HOME_SCHEMA } from '../storage/cohostAgentHomeSchema.js'
@@ -2030,6 +2031,7 @@ export const MIGRATIONS: PgMigration[] = [
   { version: 19, name: 'zone-binding-observed', sql: MIGRATION_0009_ZONE_BINDING_OBSERVED },
   { version: 20, name: 'session-attempt-run-end', sql: MIGRATION_0010_SESSION_ATTEMPT_RUN_END },
   { version: 21, name: 'zone-binding-origin', sql: MIGRATION_0011_ZONE_BINDING_ORIGIN },
+  { version: 22, name: 'moss-member-access', sql: MOSS_MEMBER_ACCESS_SCHEMA },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */
