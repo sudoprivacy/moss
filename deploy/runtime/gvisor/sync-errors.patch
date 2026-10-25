@@ -1,0 +1,114 @@
+diff --git a/pkg/sentry/fsimpl/gofer/gofer.go b/pkg/sentry/fsimpl/gofer/gofer.go
+index e0af1e5..85341a6 100644
+--- a/pkg/sentry/fsimpl/gofer/gofer.go
++++ b/pkg/sentry/fsimpl/gofer/gofer.go
+@@ -2327,19 +2327,19 @@ func (d *dentry) syncRemoteFileLocked(ctx context.Context, dataOnly bool) error
+ 	// Prefer syncing write handles over read handles, since some remote
+ 	// filesystem implementations may not sync changes made through write
+ 	// handles otherwise.
+-	wh := d.inode.writeHandle()
+-	if dataOnly {
+-		wh.syncData(ctx)
+-	} else {
+-		wh.sync(ctx)
+-	}
+-	rh := d.inode.readHandle()
+-	if dataOnly {
+-		rh.syncData(ctx)
+-	} else {
+-		rh.sync(ctx)
++	var firstErr error
++	for _, h := range [2]handle{d.inode.writeHandle(), d.inode.readHandle()} {
++		var err error
++		if dataOnly {
++			err = h.syncData(ctx)
++		} else {
++			err = h.sync(ctx)
++		}
++		if firstErr == nil {
++			firstErr = err
++		}
+ 	}
+-	return nil
++	return firstErr
+ }
+ 
+ func (d *dentry) syncCachedFile(ctx context.Context, forFilesystemSync bool, dataOnly bool) error {
+diff --git a/pkg/sentry/fsimpl/gofer/gofer_test.go b/pkg/sentry/fsimpl/gofer/gofer_test.go
+index 284a7e7..9edfabe 100644
+--- a/pkg/sentry/fsimpl/gofer/gofer_test.go
++++ b/pkg/sentry/fsimpl/gofer/gofer_test.go
+@@ -15,7 +15,9 @@
+ package gofer
+ 
+ import (
++	"os"
+ 	"slices"
++	"syscall"
+ 	"testing"
+ 
+ 	"gvisor.dev/gvisor/pkg/abi/linux"
+@@ -25,6 +27,63 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+ )
+ 
++func TestSyncRemoteFileReportsHostErrors(t *testing.T) {
++	ctx := contexttest.Context(t)
++	directory, err := os.Open(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer directory.Close()
++	pipe, writer, err := os.Pipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer pipe.Close()
++	defer writer.Close()
++	opath, err := syscall.Open(directory.Name(), linux.O_PATH|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer syscall.Close(opath)
++	// These real host descriptors give deterministic, distinct sync failures.
++	if err := syscall.Fsync(int(pipe.Fd())); err != syscall.EINVAL {
++		t.Fatalf("host pipe fsync = %v, want EINVAL", err)
++	}
++	if err := syscall.Fsync(opath); err != syscall.EBADF {
++		t.Fatalf("host O_PATH fsync = %v, want EBADF", err)
++	}
++	for _, tc := range []struct {
++		name        string
++		read, write int
++		want        error
++	}{
++		{"write error", -1, int(pipe.Fd()), syscall.EINVAL},
++		{"read error without writer", int(pipe.Fd()), -1, syscall.EINVAL},
++		{"directory descriptor error", opath, -1, syscall.EBADF},
++		{"first write error survives read error", opath, int(pipe.Fd()), syscall.EINVAL},
++		{"read error survives successful writer", opath, int(directory.Fd()), syscall.EBADF},
++		{"read-only directory succeeds", int(directory.Fd()), -1, nil},
++		{"synthetic object succeeds", -1, -1, nil},
++	} {
++		for _, dataOnly := range []bool{false, true} {
++			suffix := "/fsync"
++			if dataOnly {
++				suffix = "/fdatasync"
++			}
++			t.Run(tc.name+suffix, func(t *testing.T) {
++				impl := &directfsInode{}
++				impl.impl = impl
++				impl.readFD.Store(int32(tc.read))
++				impl.writeFD.Store(int32(tc.write))
++				d := dentry{inode: &impl.inode}
++				if got := d.syncRemoteFile(ctx, dataOnly); got != tc.want {
++					t.Errorf("syncRemoteFile(dataOnly=%v) = %v, want %v", dataOnly, got, tc.want)
++				}
++			})
++		}
++	}
++}
++
+ func TestDestroyIdempotent(t *testing.T) {
+ 	ctx := contexttest.Context(t)
+ 	fs := filesystem{

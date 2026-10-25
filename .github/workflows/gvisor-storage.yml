@@ -1,0 +1,76 @@
+name: gVisor storage qualification
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/runtime/gvisor/**'
+      - 'scripts/e2e/gvisor-sync/**'
+      - '.github/workflows/gvisor-storage.yml'
+  push:
+    branches: [dev]
+    paths:
+      - 'deploy/runtime/gvisor/**'
+      - 'scripts/e2e/gvisor-sync/**'
+      - '.github/workflows/gvisor-storage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync-errors:
+    name: Host sync error propagation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gvisor-cache
+          key: gvisor-bazel-${{ runner.os }}-${{ hashFiles('deploy/runtime/gvisor/runtime.lock.json') }}
+          restore-keys: gvisor-bazel-${{ runner.os }}-
+      - name: Build the pinned toolchain image
+        run: docker build -t moss-gvisor-builder deploy/runtime/gvisor
+      - name: Build and qualify upstream and the candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$RUNNER_TEMP/gvisor-qualification"
+          mkdir -p "$task_root/source" "$task_root/output" "$RUNNER_TEMP/gvisor-cache"
+          for mode in baseline candidate; do
+            build_args=()
+            expected=propagated
+            if [ "$mode" = baseline ]; then
+              build_args+=(--baseline)
+              expected=lost
+            fi
+            docker run --rm --cpus=1 --memory=3g \
+              --mount "type=bind,source=$PWD,target=/recipe,readonly" \
+              --mount "type=bind,source=$task_root/source,target=/work" \
+              --mount "type=bind,source=$task_root/output,target=/output" \
+              --mount "type=bind,source=$RUNNER_TEMP/gvisor-cache,target=/cache" \
+              moss-gvisor-builder python3 /recipe/deploy/runtime/gvisor/build.py \
+              --workspace=/work --output="/output/$mode" --cache=/cache "${build_args[@]}"
+            runtime="$task_root/output/$mode/release/runsc"
+            manifest="$task_root/output/$mode/release/manifest.json"
+            sha256="$(sha256sum "$manifest" | cut -d' ' -f1)"
+            sudo python3 scripts/e2e/gvisor-sync/qualify.py \
+              --runtime="$runtime" --manifest="$manifest" --sha256="$sha256" \
+              --results="$task_root/output/$mode-qualification" --expect="$expected"
+          done
+      - name: Make the owned cache readable for artifact upload
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in "$RUNNER_TEMP/gvisor-cache" "$RUNNER_TEMP/gvisor-qualification"; do
+            if [ -d "$path" ]; then
+              sudo chown -R "$(id -u):$(id -g)" "$path"
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gvisor-storage-qualification
+          path: ${{ runner.temp }}/gvisor-qualification/output
+          retention-days: 7
