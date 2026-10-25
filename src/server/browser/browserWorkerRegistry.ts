@@ -5,7 +5,7 @@ import { PerKeyMutex } from '../runtime/perKeyMutex.js'
 import { runDocker } from '../runtime/dockerCommand.js'
 import { HttpBrowserWorker, browserController, type BrowserBinding, type BrowserWorkerPort } from './browserGateway.js'
 import browserTools from '../../../deploy/browser/mcp-tools.json' with { type: 'json' }
-import { browserAllowedOwners, browserOwnerAllowed } from './browserDeploymentPolicy.js'
+import { browserAllowedOwners, browserOwnerAllowed, browserOwnerImages, isDigestPinnedBrowserImage } from './browserDeploymentPolicy.js'
 import { browserConversationGuidance, changeBrowserConversationControl } from './browserConversation.js'
 import type WebSocket from 'ws'
 
@@ -22,11 +22,13 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
   private readonly image = process.env.MOSS_BROWSER_IMAGE
   private readonly secret = process.env.MOSS_BROWSER_SECRET
   private readonly network = process.env.MOSS_BROWSER_NETWORK
+  private readonly ownerImages: ReturnType<typeof browserOwnerImages>
   private readonly workers = new Map<string, { worker: HttpBrowserWorker; sessionId: string; checkedAt: number }>()
 
   constructor(private readonly getSession: SessionLookup) {
     browserAllowedOwners()
-    if (this.image && (!/^(?:[a-zA-Z0-9._/:\-]+@)?sha256:[a-f0-9]{64}$/.test(this.image) || !this.secret || this.secret.length < 32)) {
+    this.ownerImages = browserOwnerImages()
+    if (this.image && (!isDigestPinnedBrowserImage(this.image) || !this.secret || this.secret.length < 32)) {
       throw new Error('Managed browser requires a digest-pinned image and a persistent secret of at least 32 characters')
     }
     if (this.network && !/^[a-zA-Z0-9_.-]+$/.test(this.network)) throw new Error('Invalid browser network')
@@ -49,7 +51,8 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
   private resolve(binding: BrowserBinding): Promise<HttpBrowserWorker>
   private resolve(binding: BrowserBinding, isExistingOnly: true): Promise<HttpBrowserWorker | null>
   private async resolve(binding: BrowserBinding, isExistingOnly = false): Promise<HttpBrowserWorker | null> {
-    if (!this.image) {
+    const image = this.ownerImages.find(owner => owner.orgId === binding.orgId && owner.userId === binding.userId)?.image ?? this.image
+    if (!image) {
       const { MOSS_BROWSER_GATEWAY_URL: endpoint, MOSS_BROWSER_GATEWAY_TOKEN: token, MOSS_BROWSER_GATEWAY_AI_TOKEN: aiToken } = process.env
       if (!endpoint || !token || !aiToken) throw new HttpError(503, 'Managed browser is not configured')
       const worker = new HttpBrowserWorker(endpoint, token, fetch, aiToken)
@@ -82,7 +85,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
       } else {
         await this.docker(['volume', 'create', '--label', `moss.browser.owner=${key}`, volume])
       }
-      await this.docker(['run', '--rm', '--network', 'none', '--user', '0:0', '--mount', `type=volume,source=${volume},target=/profile`, this.image, '/bin/chown', '10001:10001', '/profile'])
+      await this.docker(['run', '--rm', '--network', 'none', '--user', '0:0', '--mount', `type=volume,source=${volume},target=/profile`, image, '/bin/chown', '10001:10001', '/profile'])
       const args = ['create', '--name', name, '--label', 'moss.kind=managed-browser', '--label', `moss.browser.owner=${key}`,
         '--restart', 'unless-stopped', '--init', '--pids-limit', '256', '--memory', '1536m', '--cpus', '1.5',
         '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--shm-size', '256m',
@@ -90,7 +93,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
         '--env', `MOSS_BROWSER_HOST_TOKEN=${hostToken}`, '--env', `MOSS_BROWSER_AI_TOKEN=${aiToken}`]
       if (this.network) args.push('--network', this.network)
       else args.push('--publish', '127.0.0.1::8080')
-      args.push(this.image)
+      args.push(image)
       const created = await runDocker(args)
       // Docker's unique container name also fences concurrent Moss instances.
       // A losing creator inspects the winner; it never removes a contender.
@@ -102,7 +105,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
     if (info?.Config?.Labels?.['moss.kind'] !== 'managed-browser' || info?.Config?.Labels?.['moss.browser.owner'] !== key) {
       throw new HttpError(409, 'Browser container ownership mismatch')
     }
-    if (info.Config.Image !== this.image) throw new HttpError(409, 'Managed browser upgrade requires a drained profile')
+    if (info.Config.Image !== image) throw new HttpError(409, 'Managed browser upgrade requires a drained profile')
     if (!info.State.Running) {
       await this.docker(['start', name])
       info = JSON.parse(await this.docker(['inspect', name]))[0]

@@ -115,6 +115,16 @@ jobs:
             --prior-image managed-browser-worker:legacy-extension-ci \
             --output "$RUNNER_TEMP/browser-profile-upgrade.json" \
             2>&1 | tee "$RUNNER_TEMP/browser-profile-upgrade.log"
+      - name: Verify staged per-owner upgrade with human control
+        shell: bash
+        run: |
+          set -euo pipefail
+          export MOSS_BROWSER_IMAGE="$(docker image inspect managed-browser-worker:ci --format '{{.Id}}')"
+          export MOSS_BROWSER_PRIOR_IMAGE="$(docker image inspect managed-browser-worker:legacy-extension-ci --format '{{.Id}}')"
+          export MOSS_BROWSER_SECRET="$(openssl rand -hex 32)"
+          export MOSS_BROWSER_LIVE_HOST="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
+          node --import tsx src/server/browser/browserOwnerImages.live.ts \
+            2>&1 | tee "$RUNNER_TEMP/browser-owner-images.log"
       - name: Preserve acceptance result
         if: always()
         uses: actions/upload-artifact@v4
@@ -126,4 +136,5 @@ jobs:
             ${{ runner.temp }}/browser-selection-native.log
             ${{ runner.temp }}/browser-profile-upgrade.log
             ${{ runner.temp }}/browser-profile-upgrade.json
+            ${{ runner.temp }}/browser-owner-images.log
           if-no-files-found: ignore
