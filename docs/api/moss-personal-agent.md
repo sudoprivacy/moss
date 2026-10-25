@@ -14,6 +14,9 @@ The existing Agent management list includes eligible owners' Moss Agents.
 Its detail and conversation actions reuse the shared SudoWork workbench and
 cohost/scode runtime. Starting another owner's conversation retains that
 owner's role, credentials and billing identity and records the actual manager.
+Every Moss Session carries server-owned workbench presentation metadata,
+including those created by IM. Its real source, owner and initiating actor
+remain unchanged; this metadata does not grant Session access.
 
 ## Endpoints
 
@@ -22,7 +25,7 @@ All requests require the normal authenticated access token. Responses use
 
 | Method | Path | Behavior |
 |---|---|---|
-| GET | `/api/v1/moss/agent` | Return the caller's `{ ref, agentName, displayName, ownerId, orgId }`; refuse when membership or Moss access is unavailable. |
+| GET | `/api/v1/moss/agent` | Return the caller's `{ ref, agentName, displayName, ownerId, ownerName, orgId }`; refuse when membership or Moss access is unavailable. |
 | GET | `/api/v1/moss/member-access/:userId` | An organization administrator reads `{ orgId, userId, isEnabled, isGranted, source, memberStatus }`. The result distinguishes the stored/default grant from current effective use for a disabled member. |
 | PUT | `/api/v1/moss/member-access/:userId` | An active administrator in the current organization, with `admin:users`, grants/revokes the named member using `{ "enabled": true/false }`. Foreign members are not addressable. |
 
@@ -55,8 +58,11 @@ can explicitly opt a Feishu connection into `moss-member` mode through
 `PUT /api/v1/moss/im/connections/:connectionOwnerId/:pluginId` with
 `{ "appId": "cli_…", "tenantKey": "…" }`. The server pins the tenant, app,
 organization, connection owner, connection ID and a configuration revision.
-The running plugin must report the matching app ID. This operation preserves
-other configuration and credentials and invalidates previous binding proofs.
+The running plugin must report the matching app ID. The administrator's pins
+are stored in `moss_im_connections`; owner-editable channel options cannot
+downgrade member mode or replace these pins. Other configuration and
+credentials are preserved. Identical PUTs retain the revision and bindings;
+changing the identity pins invalidates previous proofs and bindings.
 
 | Method | Path | Behavior |
 |---|---|---|
@@ -71,7 +77,9 @@ is stored only as a digest, and can be claimed once. A failed private send
 never falls back to posting that proof in a group. Legacy pairing approvals
 and sender display names do not establish a human account binding.
 
-Only stable, human SDK events from the pinned tenant are accepted. The
+Only stable, human SDK events from the pinned tenant are accepted. The app's
+`open_id` is preferred so employee-ID visibility changes do not change an
+existing human binding. The
 receiving connection's current local registration and HA lease are checked
 before queued work and immediately before model input. Membership, binding,
 Moss access and Session role are rechecked independently of that lease.
@@ -88,7 +96,7 @@ an unknown dispatch after a crash, never automatically repeats model input.
 Receipts retain the actual user, Agent and Session. Binding or permission
 revocation prevents further input; neither transfers a Session to another user.
 
-`moss_im_link_challenges`, `moss_im_conversations` and `moss_im_deliveries`
+`moss_im_connections`, `moss_im_link_challenges`, `moss_im_conversations` and `moss_im_deliveries`
 share SQLite initialization and PostgreSQL migration 23. Tests exercise real
 SQLite authorization and the executor with a controlled runtime. A real
 PostgreSQL test races independent connection pools for proof redemption,

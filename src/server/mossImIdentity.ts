@@ -12,6 +12,12 @@ const PROVIDER = 'feishu-moss'
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 
 export const MOSS_IM_IDENTITY_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS moss_im_connections (
+    plugin_id TEXT NOT NULL, connection_owner_id TEXT NOT NULL, org_id TEXT NOT NULL,
+    app_id TEXT NOT NULL, tenant_key TEXT NOT NULL, revision TEXT NOT NULL,
+    updated_by TEXT NOT NULL, updated_at BIGINT NOT NULL,
+    PRIMARY KEY (plugin_id, connection_owner_id)
+  );
   CREATE TABLE IF NOT EXISTS moss_im_link_challenges (
     digest TEXT PRIMARY KEY, org_id TEXT NOT NULL, connection_scope TEXT NOT NULL,
     plugin_id TEXT NOT NULL, connection_owner_id TEXT NOT NULL, platform_user_id TEXT NOT NULL,
@@ -65,9 +71,12 @@ export function verifyMossLarkMessage(message: IUnifiedIncomingMessage, connecti
   } } | undefined
   const sender = raw?.event?.sender
   const event = raw?.event?.message
-  const senderId = sender?.sender_id?.user_id || sender?.sender_id?.open_id
+  const unifiedSenderId = sender?.sender_id?.user_id || sender?.sender_id?.open_id
+  // open_id is stable within the pinned app and remains available when
+  // employee-ID visibility changes. Preserve the legacy adapter normalization.
+  const senderId = sender?.sender_id?.open_id || unifiedSenderId
   if (message.platform !== 'lark' || sender?.sender_type !== 'user' || sender.tenant_key !== connection.tenantKey ||
-      typeof senderId !== 'string' || !senderId || senderId.length > 256 || senderId !== message.user.id ||
+      typeof senderId !== 'string' || !senderId || senderId.length > 256 || unifiedSenderId !== message.user.id ||
       typeof event?.message_id !== 'string' || !event.message_id || event.message_id.length > 256 || event.message_id !== message.id ||
       typeof event.chat_id !== 'string' || !event.chat_id || event.chat_id !== message.chatId ||
       !['group', 'p2p'].includes(String(event.chat_type))) {
@@ -86,20 +95,27 @@ export class MossImIdentity {
   async connection(pluginId: string, ownerId: string, actualAppId?: string): Promise<MossImConnection | null> {
     const row = await this.driver.get<SqlRow>('SELECT * FROM channel_plugins WHERE id = ? AND user_id = ?', [pluginId, ownerId])
     if (!row) throw new ResourceAccessError(403, 'Channel connection is not available')
-    const config = JSON.parse(String(row.config_json || '{}')) as Record<string, unknown>
-    if (!config.identityMode || config.identityMode === 'owner') return null
-    if (config.identityMode !== 'moss-member' || row.type !== 'lark' || Number(row.enabled) !== 1 ||
-        typeof config.mossTenantKey !== 'string' || !config.mossTenantKey ||
-        typeof config.mossAppId !== 'string' || !config.mossAppId.startsWith('cli_') ||
-        (actualAppId !== undefined && config.mossAppId !== actualAppId)) {
+    const pins = await this.driver.get<SqlRow>('SELECT * FROM moss_im_connections WHERE plugin_id = ? AND connection_owner_id = ?', [pluginId, ownerId])
+    if (!pins) {
+      const config = JSON.parse(String(row.config_json || '{}')) as Record<string, unknown>
+      if (config.identityMode && config.identityMode !== 'owner') throw new ResourceAccessError(403, 'Administrator Moss connection registration required')
+      return null
+    }
+    // Owner-editable channel options cannot enable, downgrade or replace the
+    // administrator's member identity configuration.
+    const appId = pins.app_id, tenantKey = pins.tenant_key, revision = pins.revision
+    if (pins.org_id !== row.org_id || row.type !== 'lark' || Number(row.enabled) !== 1 ||
+        typeof tenantKey !== 'string' || !tenantKey || typeof revision !== 'string' || !revision ||
+        typeof appId !== 'string' || !appId.startsWith('cli_') ||
+        (actualAppId !== undefined && appId !== actualAppId)) {
       throw new ResourceAccessError(403, 'Moss member connection configuration is not valid')
     }
     const orgId = String(row.org_id || '')
     if (!orgId) throw new ResourceAccessError(403, 'Channel organization is not available')
     const owner = await this.driver.get<SqlRow>('SELECT org_id, status FROM users WHERE id = ?', [ownerId])
     if (!owner || owner.org_id !== orgId || owner.status !== 'active') throw new ResourceAccessError(403, 'Channel owner membership changed')
-    const scope = JSON.stringify([orgId, ownerId, pluginId, config.mossTenantKey, config.mossAppId, config.mossIdentityRevision ?? null])
-    return { orgId, ownerId, pluginId, tenantKey: config.mossTenantKey, appId: config.mossAppId, scope }
+    const scope = JSON.stringify([orgId, ownerId, pluginId, tenantKey, appId, revision])
+    return { orgId, ownerId, pluginId, tenantKey, appId, scope }
   }
 
   private async current(connection: MossImConnection): Promise<void> {
@@ -243,9 +259,16 @@ export class MossImIdentity {
     await this.driver.transaction(async () => {
       const row = await this.driver.get<SqlRow>('SELECT * FROM channel_plugins WHERE id = ? AND user_id = ? AND org_id = ?', [pluginId, ownerId, auth.orgId])
       if (!row || row.type !== 'lark') throw new ResourceAccessError(404, 'Feishu connection not available')
-      const config = JSON.parse(String(row.config_json || '{}'))
-      await this.driver.run('UPDATE channel_plugins SET config_json = ?, updated_at = ? WHERE id = ? AND user_id = ? AND org_id = ?',
-        [JSON.stringify({ ...config, identityMode: 'moss-member', mossAppId: appId, mossTenantKey: tenantKey, mossIdentityRevision: randomUUID() }), Date.now(), pluginId, ownerId, auth.orgId])
+      await this.driver.run(`INSERT INTO moss_im_connections
+        (plugin_id, connection_owner_id, org_id, app_id, tenant_key, revision, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (plugin_id, connection_owner_id) DO UPDATE SET
+          revision = CASE WHEN moss_im_connections.org_id = excluded.org_id
+            AND moss_im_connections.app_id = excluded.app_id AND moss_im_connections.tenant_key = excluded.tenant_key
+            THEN moss_im_connections.revision ELSE excluded.revision END,
+          org_id = excluded.org_id, app_id = excluded.app_id, tenant_key = excluded.tenant_key,
+          updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+      [pluginId, ownerId, auth.orgId, appId, tenantKey, randomUUID(), auth.userId, Date.now()])
     })
   }
 }

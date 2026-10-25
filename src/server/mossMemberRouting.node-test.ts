@@ -152,21 +152,28 @@ void test('the installed promise chain serializes three queued messages and pres
 })
 
 void test('late revocation sends no input, while unknown post-dispatch outcomes warn against repeated operations', async () => {
-  for (const outcome of ['revoked', 'unknown']) {
+  for (const outcome of ['revoked', 'unknown', 'receipt-unavailable']) {
     const f = await fixture()
     try {
       await f.service.bind(f.auth('alice'), (await f.service.issueChallenge(f.connection, 'feishu-alice'))!)
       const executor = f.executor()
       if (outcome === 'revoked') f.beforeInput(() => f.access.setAccess(f.auth('owner'), 'alice', false).then(() => {}))
       else f.failActivityWrite()
+      if (outcome === 'receipt-unavailable') {
+        const original = f.service.delivery.bind(f.service)
+        f.service.delivery = async (...args) => {
+          if (args[2] !== 'dispatching') throw new Error('Final receipt write unavailable')
+          return original(...args)
+        }
+      }
       await f.deliver(executor, 'feishu-alice', 'boundary-outcome')
       const receipt = await f.db.driver.get('SELECT status FROM moss_im_deliveries WHERE message_id = ?', ['boundary-outcome'])
-      assert.equal(receipt!.status, outcome === 'unknown' ? 'unknown' : 'failed')
-      assert.equal(f.inputs.length, outcome === 'unknown' ? 1 : 0)
-      if (outcome === 'unknown') assert(f.sends.some(message => message.text.includes('不要重复发送操作指令')))
+      assert.equal(receipt!.status, outcome === 'receipt-unavailable' ? 'dispatching' : outcome === 'unknown' ? 'unknown' : 'failed')
+      assert.equal(f.inputs.length, outcome === 'revoked' ? 0 : 1)
+      if (outcome !== 'revoked') assert(f.sends.some(message => message.text.includes('不要重复发送操作指令')))
       else assert([...executor['channelSessions'].values()].every(state => !state.isProcessing))
       await f.deliver(f.executor(), 'feishu-alice', 'boundary-outcome')
-      assert.equal(f.inputs.length, outcome === 'unknown' ? 1 : 0, 'neither failure state automatically replays input')
+      assert.equal(f.inputs.length, outcome === 'revoked' ? 0 : 1, 'no failure state automatically replays input')
     } finally { f.sockets.forEach(socket => socket.emit('close')); f.raw.close() }
   }
 })

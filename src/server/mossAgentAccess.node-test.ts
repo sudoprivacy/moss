@@ -139,3 +139,32 @@ void test('the runtime guard also rejects revoked or foreign Moss identities add
     await check(defaultAgentName('alice'))
   } finally { f.raw.close() }
 })
+
+void test('Moss sessions keep their true source and owner while carrying trusted workbench presentation', async () => {
+  const { RuntimeService } = await import('./runtimeService.js')
+  const f = fixture()
+  try {
+    await f.service.initialize()
+    await f.service.setAccess(f.auth, 'alice', true)
+    f.members.get('alice')!.displayName = 'Alice'
+    const agent = await f.service.getAgent('a', 'alice')
+    const runtime = {
+      draining: false, upgradingOwners: new Set(), options: { config: { defaultRuntime: 'cohost' } },
+      authService: { mossAgents: f.service },
+      resourceScope: async () => ({ orgId: 'a', userId: 'alice', role: 'user', scopes: [] }),
+      requireSessionAgentAccess: async () => {},
+      createSessionInResourceScope: async (input: Record<string, unknown>) => input,
+    } as unknown as InstanceType<typeof RuntimeService>
+    for (const source of ['lark', 'agent-manager']) {
+      const session = await RuntimeService.prototype.createSession.call(runtime, {
+        orgId: 'a', userId: 'alice', role: 'user', scopes: [], assistantName: agent.ref,
+        dangerouslySkipPermissions: false, runtime: { type: 'cohost', engine: 'scode' }, source,
+        ...(source === 'agent-manager' ? { managementActorId: 'admin' } : {}),
+      }) as unknown as Record<string, unknown>
+      assert.equal(session.source, source)
+      assert.equal(session.userId, 'alice')
+      assert.equal(session.managementActorId, source === 'lark' ? 'alice' : 'admin')
+      assert.deepEqual(session.managementAgent, { name: agent.agentName, displayName: 'Moss', ownerName: 'Alice' })
+    }
+  } finally { f.raw.close() }
+})

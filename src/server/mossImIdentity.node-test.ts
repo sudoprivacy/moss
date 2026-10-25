@@ -39,6 +39,14 @@ void test('tenant, bot, connection and unstable message identities cannot dispat
   const f = await mossImFixture()
   try {
     assert.equal(verifyMossLarkMessage(mossImMessage(), f.connection).senderId, 'feishu-alice')
+    const scopedSender = mossImMessage()
+    const rawSender = (scopedSender.raw as { event: { sender: { sender_id: { user_id?: string; open_id?: string } } } }).event.sender.sender_id
+    rawSender.open_id = 'ou_stable_app_member'
+    assert.equal(verifyMossLarkMessage(scopedSender, f.connection).senderId, 'ou_stable_app_member')
+    delete rawSender.user_id
+    scopedSender.user.id = rawSender.open_id
+    assert.equal(verifyMossLarkMessage(scopedSender, f.connection).senderId, 'ou_stable_app_member',
+      'optional employee ID visibility does not change the human binding subject')
     for (const change of [
       (m: any) => { m.raw.event.sender.tenant_key = 'foreign' },
       (m: any) => { m.raw.event.sender.sender_type = 'app' },
@@ -53,7 +61,16 @@ void test('tenant, bot, connection and unstable message identities cannot dispat
     assert.equal(JSON.parse(String(plugin!.config_json)).otherSetting, 42)
     const code = (await f.service.issueChallenge(f.connection, 'sender'))!
     await f.service.configure(f.auth('owner'), 'lark-qa', 'owner', 'cli_testMoss', 'tenantqa123')
-    await assert.rejects(f.service.bind(f.auth('alice'), code), ResourceAccessError)
+    assert.equal((await f.service.connection('lark-qa', 'owner'))!.scope, f.connection.scope,
+      'an identical configuration retry preserves the existing namespace and proof')
+    await f.service.bind(f.auth('alice'), code)
+    await f.db.driver.run('UPDATE channel_plugins SET config_json = ?', ['{"identityMode":"owner","mossAppId":"cli_wrong"}'])
+    assert.equal((await f.service.connection('lark-qa', 'owner'))!.scope, f.connection.scope,
+      'ordinary channel settings cannot downgrade the administrator member configuration')
+    assert.equal((await f.service.resolve(f.connection, 'sender'))!.userId, 'alice')
+    const stale = (await f.service.issueChallenge(f.connection, 'changed-pins'))!
+    await f.service.configure(f.auth('owner'), 'lark-qa', 'owner', 'cli_replacement', 'tenantqa123')
+    await assert.rejects(f.service.bind(f.auth('bob'), stale), ResourceAccessError)
   } finally { f.raw.close() }
 })
 
@@ -128,6 +145,10 @@ void test('real PostgreSQL pools enforce one-use human proof, pointer CAS and du
     for (const id of ['alice', 'bob']) await a.access.setAccess(auth('owner'), id, true)
     await a.service.configure(auth('owner'), 'lark-qa', 'owner', 'cli_testMoss', 'tenantqa123')
     const connection = (await a.service.connection('lark-qa', 'owner', 'cli_testMoss'))!
+    await Promise.all([a.service.configure(auth('owner'), 'lark-qa', 'owner', 'cli_testMoss', 'tenantqa123'),
+      b.service.configure(auth('owner'), 'lark-qa', 'owner', 'cli_testMoss', 'tenantqa123')])
+    assert.equal((await b.service.connection('lark-qa', 'owner'))!.scope, connection.scope,
+      'concurrent identical PUTs retain the same authoritative revision')
     const code = (await a.service.issueChallenge(connection, 'feishu-user'))!
     const bindings = await Promise.allSettled([a.service.bind(auth('alice'), code), b.service.bind(auth('bob'), code)])
     assert.equal(bindings.filter(result => result.status === 'fulfilled').length, 1)

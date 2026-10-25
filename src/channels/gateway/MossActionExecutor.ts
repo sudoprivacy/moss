@@ -292,7 +292,13 @@ export class MossActionExecutor {
         await identity.delivery(connection, event.messageId, 'completed', route, sessionId);
       }
     } catch (error) {
-      await identity.delivery(connection, event.messageId, isDispatching ? 'unknown' : 'failed', route ?? undefined, sessionId);
+      try {
+        await identity.delivery(connection, event.messageId, isDispatching ? 'unknown' : 'failed', route ?? undefined, sessionId);
+      } catch {
+        // The earlier claim/dispatch receipt remains authoritative. Losing
+        // this final update must not turn an unknown operation into a retry.
+        console.error('[MossActionExecutor] Member delivery receipt update unavailable', { messageId: event.messageId, isDispatching });
+      }
       console.error('[MossActionExecutor] Member message not completed', {
         messageId: event.messageId, isDispatching,
         status: error instanceof ResourceAccessError ? error.statusCode : 'unavailable',
