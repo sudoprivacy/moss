@@ -85,6 +85,35 @@ scope injection, revision conflicts, overrides and inheritance over HTTP.
 policy delivery. Shared SDK tests cover Pod and credential preservation,
 relay credential isolation, file replacement and separate model accounts.
 
+`scripts/e2e/egress-control-live.ts` joins the real HTTP and native paths. Bundle
+it with the installed dependencies and run it against a compatible cohost:
+
+```sh
+bun build scripts/e2e/egress-control-live.ts --target=node --format=esm \
+  --outfile ./egress-control-live.mjs --external=better-sqlite3 \
+  --external=@sudo/contracts/common/v1/resource-ref --external=@xenova/transformers \
+  --external=onnxruntime-node --external=sharp
+MOSS_HOME=/private/new-home node ./egress-control-live.mjs \
+  /absolute/candidate/nexusd-cohost /private/new-evidence-directory
+```
+
+Run from the Moss checkout with its installed `node_modules`. The home and
+evidence directories must be dedicated to this acceptance; the evidence
+directory must not exist. It starts its own loopback HTTP model, mTLS cohost,
+SQLite store and real Moss server, then cleans up its own processes. It never
+changes installed services. Keep its private database, identities and logs off
+Git; only the bounded receipt is suitable for sharing.
+
+The seven cases change policy through authenticated HTTP, require the native
+applied receipt and exercise managed ACP turns on one daemon. They check
+disabled/redact/local/deny/analyzer-outage/malformed/disabled states, separate
+provider credentials, zero downstream calls on refusal and original local
+history. A fresh Node controller process opens the saved database, restores a
+replaced policy file and verifies policy status through HTTP again. This is a
+controlled controller replacement, not crash recovery or policy-file OS
+isolation. The model upstream is synthetic. The recorded ARM64 candidate run
+is [here](../evidence/egress-control-20261025-linux-arm64.json).
+
 Native hook acceptance, real model upstream observations, analyzer failure and
 restart recovery remain deployment acceptance. Record the actual executable
 digest, analyzer image and runtime-reported policy revision in each deployment

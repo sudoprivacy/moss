@@ -7,6 +7,7 @@ on:
       - 'src/server/server.ts'
       - 'admin/src/pages/egress-policy-page.tsx'
       - 'admin/lib/api/egress-policy.ts'
+      - 'scripts/e2e/egress-control-live.ts'
       - 'package.json'
       - 'bun.lock'
       - '.github/workflows/egress-management.yml'
@@ -25,6 +26,12 @@ jobs:
       - name: Maintenance CLI test prerequisite
         run: sudo apt-get update && sudo apt-get install -y lsof
       - run: bun run typecheck
+      - name: Bundle the HTTP and native policy acceptance entry
+        run: >-
+          bun build scripts/e2e/egress-control-live.ts --target=node --format=esm
+          --outfile "$RUNNER_TEMP/egress-control-live.mjs" --external=better-sqlite3
+          --external=@sudo/contracts/common/v1/resource-ref --external=@xenova/transformers
+          --external=onnxruntime-node --external=sharp
       - name: Full server and registered Node suites
         run: bun run test
       - run: bun install --frozen-lockfile
