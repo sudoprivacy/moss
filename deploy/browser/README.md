@@ -59,6 +59,21 @@ Set these on the Moss server:
   either the viewer gateway or MCP entry. `[]` disables every owner; leaving
   the setting unset enables every otherwise authorized owner. Malformed
   settings refuse server startup.
+- `MOSS_BROWSER_OWNER_IMAGES` (optional): a JSON array of exact
+  `{"orgId":"...","userId":"...","image":"sha256:<digest>"}` entries.
+  Each image must be immutable, and a default `MOSS_BROWSER_IMAGE` is required.
+  Duplicate owners, unknown fields and malformed entries refuse startup.
+  An image pin selects the runtime for that owner; it grants no browser access.
+
+For staged upgrades, keep existing owners pinned to their current immutable
+image while an isolated acceptance owner uses the new image. Change the default
+after acceptance, retaining old pins until those owners have explicitly drained
+their browsers. The registry checks the selected image before starting or
+connecting a container. A mismatch still returns `409` and requires a drained
+profile; it never replaces a running browser, resets a human lease or migrates
+a profile automatically. Remove an old pin only after the supported drain and
+upgrade procedure. Settings are read when the registry starts, so deploy the
+same configuration to every server instance.
 
 All server instances serving this registry must use the same Docker host and
 deployment secret. A distributed browser owner service is required before
@@ -66,6 +81,12 @@ spreading browser workers across independent Docker hosts.
 
 The existing explicit endpoint settings support isolated integration fixtures.
 Use the per-owner registry for a multi-user deployment.
+
+`browserOwnerImages.live.ts` exercises this rollout with two actual Docker
+images and fresh owners: the old browser keeps its cookie, container and human
+epochs, a new owner uses the default image, an unpinned mismatch is refused,
+and normal conversation continuation resumes the original profile. The managed
+browser workflow runs it with the current and signed legacy Chrome images.
 
 ## Lifecycle and access
 
