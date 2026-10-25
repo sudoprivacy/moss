@@ -1,0 +1,42 @@
+name: Merge history
+
+# A merge commit may only carry what Git's own merge of its parents produces,
+# plus its conflict resolutions. Edits hidden in a merge from dev have silently
+# reverted other PRs' work (#244, #275). See scripts/check_merge_history.py.
+on:
+  pull_request:
+    branches: [dev, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: merge-history-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  merge-history:
+    name: Verify merge commit contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Inspect the PR head, not GitHub's synthetic test merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the base branch
+        env:
+          BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
+        run: git fetch --no-tags origin "+refs/heads/${BASE_REF#refs/heads/}:refs/remotes/origin/${BASE_REF#refs/heads/}"
+
+      - name: Reject edits hidden in merge commits and leftover conflict markers
+        env:
+          BASE: ${{ github.event.merge_group.base_sha || format('origin/{0}', github.base_ref) }}
+        run: python3 scripts/check_merge_history.py "$BASE" HEAD
+
+      - name: Exercise real Git histories
+        run: python3 scripts/e2e/merge-history.py
