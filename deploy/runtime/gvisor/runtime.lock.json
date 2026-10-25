@@ -1,0 +1,28 @@
+{
+  "architecture": "x86_64",
+  "source": {
+    "commit": "760b80785dc53311d4c87bd2de167525a99709c1",
+    "tag": "release-20261019.0",
+    "url": "https://codeload.github.com/google/gvisor/tar.gz/760b80785dc53311d4c87bd2de167525a99709c1",
+    "sha256": "5007c4c3082f0ee7dbb85614901ec5e0042f5466033201a730c63b1cd7d8b5f4"
+  },
+  "version": "gsudoprivacy-20261019.1",
+  "patch": {
+    "file": "sync-errors.patch",
+    "sha256": "29fb50c439a7e086fb1904bdc1d9c7e62ee69e95177df4208523a0b31c3a891e",
+    "before": {
+      "pkg/sentry/fsimpl/gofer/gofer.go": "64528bf55f698569caeaf7ba33ed16c71c531f4446ed652098a4927a202cc636",
+      "pkg/sentry/fsimpl/gofer/gofer_test.go": "5cd01eb9dfa5512d6d6ea502997d3f5db121b8dfd26aa52a9e24411209bbc341"
+    },
+    "after": {
+      "pkg/sentry/fsimpl/gofer/gofer.go": "fc5ce60605c7fbb0056fa808df8b1ba6853a651f4188d8b24c2f34db212b459f",
+      "pkg/sentry/fsimpl/gofer/gofer_test.go": "4f1cf6ddd7f011318260fbffb2348f4426fc7a8f93e800422de8c9911962402e"
+    }
+  },
+  "bazel": {
+    "version": "8.8.1",
+    "url": "https://releases.bazel.build/8.8.1/release/bazel-8.8.1-linux-x86_64",
+    "sha256": "5b5bab2095065817d3416ca9a0678bd39c10c9ede432dbe8187bfe74de285160"
+  },
+  "go": "1.27.2"
+}
