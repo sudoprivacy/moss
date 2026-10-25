@@ -6,7 +6,8 @@ import { dispatchAgentInventory, isAgentInventoryRoute } from './agentFederation
 import { ExternalProviderError } from './externalProviders/policy.js'
 import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
-import { AgentManager, canUpgradeAgentRuntime, managedSessionAgentName } from './agentManager.js'
+import { AgentManager } from './agentManager.js'
+import { AgentManagementOperations } from './agentManagementOperations.js'
 import { isMossRuntimeAgentName, mossAgentName, sessionAgentName } from './agentIdentity.js'
 import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
 import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
@@ -2062,6 +2063,13 @@ export function startServer(
     canStartAgent: async (auth, ownerId, name) => !isMossRuntimeAgentName(name) ||
       (name === sessionAgentName(ownerId, mossAgentName(auth.orgId, ownerId)) &&
         await authService.mossAgents.canUse(auth.orgId, ownerId)),
+  })
+  const agentOperations = new AgentManagementOperations({
+    manager: agentManager, runtime,
+    owner: (ownerId, orgId) => authService.getAgentOwner(ownerId, orgId),
+    sessions: (orgId, ownerId) => runtime.store.listUserSessions(orgId, ownerId),
+    workspaceUrl: (sessionId, orgId) => agentWorkspaceUrl(sessionId, undefined, orgId),
+    record: event => logger.info(`${event.name} ${JSON.stringify(event.fields)}`),
   })
   const privateAgentArchives = new PrivateAgentArchives(join(config.rootDir, 'private-agent-archives'))
   const wss = new WebSocketServer({ noServer: true })
@@ -7537,18 +7545,14 @@ export function startServer(
       const runtimeUpgradeMatch = pathname.match(/^\/api\/v1\/agent-runtimes\/([^/]+)\/upgrade$/)
       if (req.method === 'POST' && runtimeUpgradeMatch) {
         const ownerId = runtimeUpgradeMatch[1]!
-        if (!canUpgradeAgentRuntime(auth, ownerId)) throw new HttpError(403, 'Runtime upgrade is not permitted')
-        await agentManager.list(auth, ownerId)
-        const state = await runtime.upgradeUserRuntime(ownerId, auth.orgId)
-        logger.info(`agent_runtime_upgraded ${JSON.stringify({ ownerId, orgId: auth.orgId, actorUserId: auth.userId })}`)
-        writeJson(res, 200, { runtime: state })
+        writeJson(res, 200, await agentOperations.upgrade(auth, ownerId))
         return
       }
 
       if (req.method === 'GET' && (pathname === '/api/v1/agent-manager/agents' || pathname === '/api/v1/agents')) {
         const rawLimit = url.searchParams.get('limit') || '25'
         if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 100) throw new HttpError(400, 'Invalid Agent page size')
-        const result = await agentManager.list(auth, url.searchParams.get('owner_id') || undefined,
+        const result = await agentOperations.list(auth, url.searchParams.get('owner_id') || undefined,
           { after: url.searchParams.get('after') || undefined, limit: Number(rawLimit) })
         writeJson(res, 200, { ...result, isWorkspaceAvailable: Boolean(agentWorkspaceUrl('probe')) })
         return
@@ -7562,35 +7566,14 @@ export function startServer(
         catch { throw new HttpError(400, 'Invalid Agent name') }
         if (req.method === 'GET' && !managedAgentMatch[2]) {
           const ownerId = url.searchParams.get('owner_id') || auth.userId
-          const agent = await agentManager.get(auth, ownerId, name)
-          const sessions = (await runtime.store.listUserSessions(auth.orgId, ownerId))
-            .filter(session => managedSessionAgentName(ownerId, session.assistantName) === name)
-            .map(session => ({ sessionId: session.sessionId, status: session.status,
-              createdAt: session.createdAt, title: session.title,
-              workspaceUrl: session.userId === auth.userId ||
-                (session.source === 'agent-manager' && session.clientMetadata?.agent_manager_actor_id === auth.userId)
-                ? agentWorkspaceUrl(session.sessionId, undefined, session.orgId) : null }))
-          writeJson(res, 200, { agent, sessions, runtime: await runtime.inspectUserRuntime(ownerId),
-            canUpgrade: agent.isOwnerActive && canUpgradeAgentRuntime(auth, ownerId), isWorkspaceAvailable: Boolean(agentWorkspaceUrl('probe')) })
+          writeJson(res, 200, await agentOperations.detail(auth, ownerId, name))
           return
         }
         if (req.method === 'POST' && managedAgentMatch[2]) {
-          if (!agentWorkspaceUrl('probe')) throw new HttpError(503, 'Agent workspace is not configured')
+          agentOperations.requireWorkspace()
           const body = await readJsonBody(req)
           const ownerId = typeof body.owner_id === 'string' ? body.owner_id : auth.userId
-          const agent = await agentManager.requireStart(auth, ownerId, name)
-          const owner = await authService.getAgentOwner(ownerId, auth.orgId)
-          if (!owner || owner.status !== 'active') throw new HttpError(409, 'Agent owner is unavailable')
-          const session = await runtime.createSession({
-            userId: ownerId, orgId: auth.orgId, role: owner.role, scopes: owner.scopes,
-            dangerouslySkipPermissions: false,
-            assistantName: agent.reference, assistantDisplayName: agent.displayName,
-            runtime: { type: 'cohost', engine: 'scode' }, source: 'agent-manager', managementActorId: auth.userId,
-            managementAgent: { name: agent.name, displayName: agent.displayName, ownerName: agent.ownerName },
-          })
-          logger.info(`agent_manager_session_created ${JSON.stringify({ actorUserId: auth.userId,
-            ownerId, orgId: auth.orgId, agentName: name, sessionId: session.sessionId })}`)
-          writeJson(res, 201, { sessionId: session.sessionId, workspaceUrl: agentWorkspaceUrl(session.sessionId, undefined, session.orgId) })
+          writeJson(res, 201, await agentOperations.start(auth, ownerId, name))
           return
         }
       }
