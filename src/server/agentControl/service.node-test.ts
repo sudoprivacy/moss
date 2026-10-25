@@ -74,6 +74,18 @@ void test('actor, target and scopes come from current authority rather than requ
   assert.equal(f.state.effects, 0)
 })
 
+void test('an attenuated control credential cannot borrow its stored delegation permissions', async t => {
+  const f = await fixture(t)
+  const verify = f.deps.authority.control
+  f.deps.authority.control = async token => {
+    const current = await verify(token)
+    return current && { ...current, scopes: [] }
+  }
+  await assert.rejects(f.service.capabilities(f.token))
+  await assert.rejects(f.service.invoke(f.token, f.invocation))
+  assert.equal(f.state.effects, 0)
+})
+
 void test('response loss keeps one effect and its real actor audit across a fresh controller', async t => {
   const f = await fixture(t); f.state.lost = true
   const first = await f.service.invoke(f.token, f.invocation)

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { AGENT_CONTROL_KEY_PREFIX, AGENT_CONTROL_PROTOCOL, agentControlCatalog, agentControlDelegationRequest,
+import { AGENT_CONTROL_KEY_PREFIX, AGENT_CONTROL_PROTOCOL, AGENT_CONTROL_SCOPE, agentControlCatalog, agentControlDelegationRequest,
   agentControlInvocationSchema, agentControlTools, type AgentControlAction, type ManagedControlActor } from './contract.js'
 import type { AgentManagementOperations } from '../agentManagementOperations.js'
 import { hasScope, type AuthContext } from '../auth/token.js'
@@ -86,7 +86,7 @@ export class AgentControlService {
 
   private async authorize(token: string, requireActor: boolean) {
     const auth = await this.deps.authority.control(token)
-    if (!auth || !auth.keyId.startsWith(AGENT_CONTROL_KEY_PREFIX)) denied()
+    if (!auth || !hasScope(auth.scopes, AGENT_CONTROL_SCOPE) || !auth.keyId.startsWith(AGENT_CONTROL_KEY_PREFIX)) denied()
     const delegation = await this.store.delegation(auth.orgId, auth.keyId.slice(AGENT_CONTROL_KEY_PREFIX.length))
     if (!delegation || delegation.userId !== auth.userId || delegation.role !== auth.role || delegation.tokenJti !== auth.jti ||
       delegation.target.deploymentId !== this.deps.deploymentId || delegation.status !== 'active' ||
