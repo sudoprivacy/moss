@@ -235,11 +235,62 @@ jobs:
             ${{ runner.temp }}/moss-cohost-evidence/**/daemon.log
             ${{ runner.temp }}/moss-cohost-evidence/binary-version.txt
 
+  user-pod-live:
+    name: User Pod ownership and durable recovery (real K3s)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/shared-images
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/moss-user-pod/cache
+          key: owner-pod-releases-v1-${{ hashFiles('scripts/e2e/user-pod/acceptance.lock.json', 'deploy/runtime/gvisor/distribution.lock.json') }}
+      - name: Prepare the installed consumer and isolated Node helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/moss-user-pod"
+          mkdir -p "$work/bin"
+          for entry in run-user-pod-live user-pod-runtime user-pod-recovery user-pod-release-upgrade; do
+            bun build --target=node "scripts/e2e/$entry.ts" --outfile "$work/bin/$entry.mjs"
+          done
+          cp scripts/e2e/mock-openai-server.mjs "$work/bin/"
+          bun scripts/fetch-nexus-runtime.js
+          cp bin/nexus/nexusd "$work/bin/nexusd-linux"
+          docker build -t moss-owner-e2e:ci -f scripts/e2e/user-pod/Dockerfile scripts/e2e/user-pod
+      - name: Verify mTLS, two cohosts, exact PVC recovery and release rollback
+        shell: bash
+        run: |
+          python3 scripts/e2e/user-pod/run.py --work-dir "$RUNNER_TEMP/moss-user-pod/cluster" \
+            --bin-dir "$RUNNER_TEMP/moss-user-pod/bin" --shared-source "$PWD/.moss-image-tools" \
+            --helper-image moss-owner-e2e:ci --cache "$RUNNER_TEMP/moss-user-pod/cache"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: moss-user-pod-ownership-and-recovery
+          path: |
+            ${{ runner.temp }}/moss-user-pod/cluster/receipt.json
+            ${{ runner.temp }}/moss-user-pod/cluster/evidence/**/acceptance.json
+            ${{ runner.temp }}/moss-user-pod/cluster/evidence/**/user-pod-result.json
+            ${{ runner.temp }}/moss-user-pod/cluster/evidence/**/user-pod-recovery.json
+            ${{ runner.temp }}/moss-user-pod/cluster/evidence/**/release-upgrade.json
+            ${{ runner.temp }}/moss-user-pod/cluster/live-runtime-processes.json
+
   build:
     # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: build-${{ matrix.arch }}
-    needs: [test, runtime-live, cohost-live]
+    needs: [test, runtime-live, cohost-live, user-pod-live]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -342,29 +393,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: deploy/package-server.sh "$VERSION" "$ARCH" dist
 
-      - name: Resolve pinned shared image tools
-        id: shared-images
-        run: |
-          python3 - <<'PY'
-          import json, os, re
-          from pathlib import Path
-          lock = json.loads(Path('deploy/k3s/sudostack-images.lock.json').read_text())
-          assert lock['repository'] == 'sudoprivacy/sudostack'
-          assert re.fullmatch(r'[a-f0-9]{40}', lock['revision'])
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('revision=' + lock['revision'] + '\n')
-          PY
-
-      - uses: actions/checkout@v4
-        with:
-          repository: sudoprivacy/sudostack
-          ref: ${{ steps.shared-images.outputs.revision }}
-          path: .moss-image-tools
-          sparse-checkout: |
-            tools/deploy/images.py
-            tools/deploy/artifacts.py
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
+      - uses: ./.github/actions/shared-images
 
       - name: Build separate Server and Nexus images
         run: deploy/package-control-images.sh '${{ steps.release.outputs.version }}' '${{ matrix.arch }}' dist
