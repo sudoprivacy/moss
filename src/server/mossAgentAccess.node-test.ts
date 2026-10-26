@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
+import { WorkAdmission } from '@sudo/user-runtime'
 import { defaultAgentName, isUserOwnedAgentName, mossAgentName, nexusAgentReference, sessionAgentName } from './agentIdentity.js'
 import type { AuthContext } from './auth/token.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
@@ -149,6 +150,8 @@ void test('Moss sessions keep their true source and owner while carrying trusted
     f.members.get('alice')!.displayName = 'Alice'
     const agent = await f.service.getAgent('a', 'alice')
     const runtime = {
+      workAdmission: new WorkAdmission(),
+      createAdmittedSession: RuntimeService.prototype['createAdmittedSession'],
       draining: false, upgradingOwners: new Set(), options: { config: { defaultRuntime: 'cohost' } },
       authService: { mossAgents: f.service },
       resourceScope: async () => ({ orgId: 'a', userId: 'alice', role: 'user', scopes: [] }),

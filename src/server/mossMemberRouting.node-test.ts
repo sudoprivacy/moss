@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
+import { WorkAdmission } from '@sudo/user-runtime'
 import { MossActionExecutor } from '../channels/gateway/MossActionExecutor.js'
 import { mossImFixture, mossImMessage } from './testing/mossIm.fixture.js'
 import type { RuntimeService } from './runtimeService.js'
@@ -28,6 +29,7 @@ async function fixture() {
   let isReplySuppressed = false
   let onThinking: (() => Promise<void>) | undefined
   const runtime = {
+    workAdmission: new WorkAdmission(),
     createSession: async (input: SessionCreateInput) => {
       created.push(input)
       const sessionId = `session-${created.length}`
