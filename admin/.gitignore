@@ -31,6 +31,7 @@ node_modules
 !/tests/config-scope.browser.py
 !/tests/organizations-api.test.ts
 !/tests/moss-member-access.test.ts
+!/tests/moss-im-api.test.ts
 
 !/tests/external-agents-api.test.ts
 !/tests/agent-inventory-api.test.ts

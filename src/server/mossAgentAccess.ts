@@ -20,6 +20,8 @@ export interface MossMember {
   orgId: string
   role: string
   status: string
+  name?: string
+  displayName?: string | null
 }
 
 export interface PersonalMossAgent {
@@ -28,6 +30,7 @@ export interface PersonalMossAgent {
   displayName: string
   ownerId: string
   orgId: string
+  ownerName: string
 }
 
 export interface MossMemberAccess {
@@ -78,9 +81,10 @@ export class MossAgentAccess {
   }
 
   async getAgent(orgId: string, userId: string): Promise<PersonalMossAgent> {
-    await this.requireUser(orgId, userId)
+    const member = await this.requireUser(orgId, userId)
     const ref = mossAgentName(orgId, userId)
-    return { ref, agentName: sessionAgentName(userId, ref), displayName: 'Moss', ownerId: userId, orgId }
+    return { ref, agentName: sessionAgentName(userId, ref), displayName: 'Moss', ownerId: userId, orgId,
+      ownerName: member.displayName?.trim() || member.name?.trim() || 'Moss' }
   }
 
   private async managedMember(auth: AuthContext, userId: string): Promise<MossMember> {

@@ -74,6 +74,13 @@ void test('real HTTP: Agent ownership, organization boundaries and trusted manag
       const scopedRoot = (await ok('POST', '/api/v1/auth/switch-org', boot, { org_id: a.orgId })).access_token
       assert.deepEqual(await ok('GET', access, scopedRoot), granted)
       const agent = await ok('GET', '/api/v1/moss/agent', a.user)
+      assert.deepEqual(await ok('GET', '/api/v1/moss/im/bindings', a.user), { bindings: [] })
+      assert.equal((await request('GET', '/api/v1/moss/im/bindings')).status, 401)
+      assert.equal((await request('POST', '/api/v1/moss/im/bind', a.user, { code: 1 })).status, 400)
+      assert.equal((await request('POST', '/api/v1/moss/im/bind', a.user, { code: 'invalid' })).status, 403)
+      assert.equal((await request('DELETE', '/api/v1/moss/im/bindings/foreign-binding', a.user)).status, 404)
+      assert.equal((await request('PUT', `/api/v1/moss/im/connections/${a.userId}/lark-qa`, a.user,
+        { appId: 'cli_testMoss', tenantKey: 'tenantqa123' })).status, 403)
       assert.equal(agent.ownerId, a.userId)
       assert.equal(agent.orgId, a.orgId)
       const path = `/api/v1/agent-manager/agents/${encodeURIComponent(agent.agentName)}`
