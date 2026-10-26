@@ -164,6 +164,23 @@ function replaceMentionPlaceholders(text: string, mentions?: LarkMention[]): str
   return text;
 }
 
+/** Remove structured routing mentions only before a slash command. */
+function normalizeMentionedCommand(text: string, mentions?: LarkMention[]): string {
+  if (!mentions?.length) return text;
+  let remaining = text.trimStart();
+  let isMentionRemoved = false;
+  while (true) {
+    const mention = mentions.find(({ key }) => key && remaining.startsWith(key)
+      && (remaining.length === key.length || /\s/u.test(remaining[key.length]!)));
+    if (!mention) break;
+    remaining = remaining.slice(mention.key.length).trimStart();
+    isMentionRemoved = true;
+  }
+  // Ordinary chat keeps its display-name mentions. Literal @names are never
+  // interpreted as routing metadata, and mentions inside text are untouched.
+  return isMentionRemoved && remaining.startsWith('/') ? remaining : text;
+}
+
 /**
  * Extract message content from Lark message
  */
@@ -186,7 +203,7 @@ function extractMessageContent(message: LarkMessageEvent['event']['message']): I
       const rawText = typeof content === 'object' ? (content as any).text || '' : String(content);
       return {
         type: 'text',
-        text: replaceMentionPlaceholders(rawText, message.mentions),
+        text: replaceMentionPlaceholders(normalizeMentionedCommand(rawText, message.mentions), message.mentions),
       };
     }
 
