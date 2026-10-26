@@ -2,6 +2,7 @@ name: Native Agent control
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'src/server/agentControl/**'
       - 'src/server/auth/**'
@@ -25,6 +26,8 @@ permissions:
 
 jobs:
   native-control:
+    # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: Native control (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20

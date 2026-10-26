@@ -7,6 +7,7 @@ on:
     tags:
       - 'server-v*'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - dev
   workflow_dispatch:
@@ -22,6 +23,8 @@ jobs:
   # Lives here rather than in ci.yml because ci.yml triggers only on v* tags —
   # nothing in it has ever run against a pull request.
   test:
+    # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: server-tests
     runs-on: ubuntu-24.04
     env:
@@ -108,6 +111,8 @@ jobs:
           bun run test:auth
 
   runtime-live:
+    # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: Installed Nexus runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -185,6 +190,8 @@ jobs:
           path: ${{ runner.temp }}/moss-runtime-evidence/**/acceptance.json
 
   cohost-live:
+    # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: Moss durable session recovery (real daemon)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -218,6 +225,8 @@ jobs:
             ${{ runner.temp }}/moss-cohost-evidence/binary-version.txt
 
   build:
+    # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: build-${{ matrix.arch }}
     needs: [test, runtime-live, cohost-live]
     runs-on: ${{ matrix.os }}
