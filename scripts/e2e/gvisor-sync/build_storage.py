@@ -7,7 +7,10 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-from qualify import digest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from deploy.runtime.gvisor.release import digest
 
 
 def main():

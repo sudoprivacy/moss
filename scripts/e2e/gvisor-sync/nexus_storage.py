@@ -67,6 +67,7 @@ def main():
     receipt = {
         'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'runtimeSha256': digest(runtime), 'manifestSha256': args.sha256, 'releaseFiles': files,
+        'releaseLibrarySha256': digest(Path(verify_release.__code__.co_filename)),
         'payloadSha256': args.payload_sha256, 'payload': programs, 'testNice': 0,
         'platforms': platforms, 'directfsModes': directfs_modes,
         'sources': {name: digest(Path(__file__).with_name(name)) for name in

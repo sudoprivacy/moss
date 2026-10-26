@@ -24,8 +24,11 @@ jobs:
     timeout-minutes: 90
     env:
       GVISOR_QUALIFICATION_ROOT: /tmp/moss-gvisor-${{ github.run_id }}-${{ github.run_attempt }}
+      GVISOR_INSTALL_ROOT: /tmp/moss-gvisor-installed-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify archive and host installation contracts
+        run: python3 -m unittest discover -s deploy/runtime/gvisor -p 'test_*.py' -v
       - name: Prepare isolated qualification directories
         shell: bash
         run: |
@@ -74,8 +77,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/gvisor-cache
-          key: gvisor-bazel-${{ runner.os }}-${{ hashFiles('deploy/runtime/gvisor/runtime.lock.json') }}
-          restore-keys: gvisor-bazel-${{ runner.os }}-
+          key: gvisor-content-v1-${{ runner.os }}-${{ hashFiles('deploy/runtime/gvisor/runtime.lock.json') }}
+          restore-keys: gvisor-content-v1-${{ runner.os }}-
       - name: Build the pinned toolchain image
         run: docker build -t moss-gvisor-builder deploy/runtime/gvisor
       - name: Build and qualify upstream and the candidate
@@ -90,6 +93,9 @@ jobs:
             if [ "$mode" = baseline ]; then
               build_args+=(--baseline)
               expected=lost
+            else
+              # Match actions/cache ownership before the second real build.
+              sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/gvisor-cache"
             fi
             docker run --rm --cpus=1 --memory=3g \
               --mount "type=bind,source=$PWD,target=/recipe,readonly" \
@@ -101,6 +107,23 @@ jobs:
             runtime="$task_root/output/$mode/release/runsc"
             manifest="$task_root/output/$mode/release/manifest.json"
             sha256="$(sha256sum "$manifest" | cut -d' ' -f1)"
+            if [ "$mode" = candidate ]; then
+              python3 deploy/runtime/gvisor/package.py build \
+                --build="$task_root/output/candidate" --source="$task_root/source" \
+                --output="$task_root/output/distribution"
+              archive_sha="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["archiveSha256"])' "$task_root/output/distribution/release.json")"
+              python3 scripts/e2e/gvisor-sync/acquisition.py \
+                --distribution="$task_root/output/distribution" \
+                --cache="$RUNNER_TEMP/gvisor-workspaces/acquisition-cache" \
+                --results="$task_root/output/acquisition-qualification"
+              acquired_archive="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["archivePath"])' "$task_root/output/acquisition-qualification/receipt.json")"
+              sudo python3 deploy/runtime/gvisor/install.py stage \
+                --archive="$acquired_archive" --sha256="$archive_sha" \
+                --manifest-sha256="$sha256" --prefix="$GVISOR_INSTALL_ROOT" \
+                > "$task_root/output/installation.json"
+              runtime="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runsc"])' "$task_root/output/installation.json")"
+              manifest="$(dirname "$runtime")/manifest.json"
+            fi
             sudo python3 scripts/e2e/gvisor-sync/qualify.py \
               --runtime="$runtime" --manifest="$manifest" --sha256="$sha256" \
               --results="$task_root/output/$mode-qualification" --expect="$expected" \
@@ -113,6 +136,17 @@ jobs:
                 --payload="$payload" --payload-sha256="$payload_sha256" \
                 --results="$task_root/output/nexus-qualification" \
                 --work-dir="$RUNNER_TEMP/gvisor-workspaces/nexus"
+              sudo python3 scripts/e2e/gvisor-sync/containerd.py \
+                --installed="$(dirname "$(dirname "$runtime")")" --manifest-sha256="$sha256" \
+                --results="$task_root/output/shim-qualification" \
+                --work-dir="$RUNNER_TEMP/gvisor-workspaces/shim"
+              python3 deploy/runtime/gvisor/package.py qualify \
+                --distribution="$task_root/output/distribution" \
+                --installation="$task_root/output/installation.json" \
+                --syscalls="$task_root/output/candidate-qualification/receipt.json" \
+                --storage="$task_root/output/nexus-qualification/receipt.json" \
+                --shim="$task_root/output/shim-qualification/receipt.json" \
+                --revision="$(git rev-parse HEAD)"
             fi
           done
       - name: Make the owned cache readable for artifact upload
@@ -131,3 +165,9 @@ jobs:
           name: gvisor-storage-qualification
           path: ${{ env.GVISOR_QUALIFICATION_ROOT }}/output
           retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gvisor-release-candidate
+          path: ${{ env.GVISOR_QUALIFICATION_ROOT }}/output/distribution
+          retention-days: 14
+          if-no-files-found: error

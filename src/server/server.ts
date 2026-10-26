@@ -2525,6 +2525,7 @@ export function startServer(
       runtime,
       runtime.store,
       channelAgentResolver,
+      authService.mossIm,
     )
     channelManager.setMessageHandler(mossActionExecutor.getMessageHandler())
     console.log('[Server] MossActionExecutor wired up for channel message routing')
@@ -3381,6 +3382,38 @@ export function startServer(
         const result = await getUserProfile(auth, authService, runtime.store)
         writeJson(res, 200, result)
         return
+      }
+
+      if (pathname.startsWith('/api/v1/moss/im/')) {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        res.setHeader('Cache-Control', 'no-store')
+        if (pathname === '/api/v1/moss/im/bindings' && req.method === 'GET') {
+          writeJson(res, 200, { bindings: await authService.mossIm.bindings(auth) })
+          return
+        }
+        if (pathname === '/api/v1/moss/im/bind' && req.method === 'POST') {
+          const body = await readJsonBody(req)
+          if (typeof body.code !== 'string') throw new HttpError(400, 'Private binding code required')
+          await authService.mossIm.bind(auth, body.code.trim())
+          writeJson(res, 200, { success: true })
+          return
+        }
+        const binding = pathname.match(/^\/api\/v1\/moss\/im\/bindings\/([^/]+)$/)
+        if (binding && req.method === 'DELETE') {
+          await authService.mossIm.unlink(auth, decodeURIComponent(binding[1]!))
+          writeJson(res, 200, { success: true })
+          return
+        }
+        const connection = pathname.match(/^\/api\/v1\/moss\/im\/connections\/([^/]+)\/([^/]+)$/)
+        if (connection && req.method === 'PUT') {
+          const body = await readJsonBody(req)
+          if (typeof body.appId !== 'string' || typeof body.tenantKey !== 'string') throw new HttpError(400, 'Feishu app and tenant required')
+          await authService.mossIm.configure(auth, decodeURIComponent(connection[2]!), decodeURIComponent(connection[1]!), body.appId, body.tenantKey)
+          writeJson(res, 200, { success: true })
+          return
+        }
+        throw new HttpError(405, 'Method not allowed')
       }
 
       if (pathname === '/api/v1/moss/agent' || pathname.startsWith('/api/v1/moss/member-access/')) {

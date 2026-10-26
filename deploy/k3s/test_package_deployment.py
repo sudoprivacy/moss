@@ -2,6 +2,8 @@
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -31,9 +33,15 @@ class DeploymentPackageTests(unittest.TestCase):
             members = bundle.getmembers()
             self.assertTrue(all(member.isfile() for member in members))
             self.assertEqual({m.name for m in members}, {'control.py', 'install-control.sh', 'fetch-offline-deps.sh',
-                                                       'server.json', 'images.py', 'artifacts.py', 'sudostack-images.lock.json'})
+                                                       'server.json', 'images.py', 'artifacts.py', 'sudostack-images.lock.json',
+                                                       *('deploy/runtime/gvisor/' + name for name in ['fetch.py', 'install.py', 'release.py'])})
             self.assertEqual(bundle.extractfile('images.py').read(), (self.source / 'tools/deploy/images.py').read_bytes())
             self.assertEqual(bundle.extractfile('sudostack-images.lock.json').read(), self.lock.read_bytes())
+            destination = self.root / 'unpacked'
+            bundle.extractall(destination)
+        for command in ['fetch.py', 'install.py']:
+            result = subprocess.run([sys.executable, str(destination / 'deploy/runtime/gvisor' / command), '--help'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_changed_source_is_rejected_before_any_release_is_written(self):
         (self.source / 'tools/deploy/images.py').write_bytes(b'# modified\n')

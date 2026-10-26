@@ -82,6 +82,8 @@ const nodeTestFiles = [
   'src/server/myAgents.node-test.ts',
   'src/server/personalAgentAccess.node-test.ts',
   'src/server/mossAgentAccess.node-test.ts',
+  'src/server/mossImIdentity.node-test.ts',
+  'src/server/mossMemberRouting.node-test.ts',
   'src/server/artifacts.node-test.ts',
   'src/server/cloudChat.node-test.ts',
   'src/server/wikiRuntimeWorkspace.node-test.ts',

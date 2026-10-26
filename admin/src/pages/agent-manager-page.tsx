@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { getManagedAgent, getManagedAgents, startManagedAgent, upgradeUserRuntime, type ManagedAgentDetail, type ManagedAgentList } from '@/lib/api/agent-manager'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { MossImBindingPanel } from '../components/moss-im-binding'
 
 const PAGE_SIZE = 50
 const stateLabels: Record<string, string> = {
@@ -46,7 +48,7 @@ export default function AgentManagerPage() {
   const currentPage = Math.min(page, pageCount - 1)
   return (
     <DashboardLayout title="Agent" description="当前企业内可访问的 Agent、运行状态和对话。"
-      headerActions={<Button variant="outline" disabled={isLoading} onClick={() => void onRefresh()}>刷新</Button>}>
+      headerActions={<><Button asChild variant="outline"><Link to="/moss">我的 Moss Agent</Link></Button><Button variant="outline" disabled={isLoading} onClick={() => void onRefresh()}>刷新</Button></>}>
       <div className="space-y-4">
         <Input aria-label="搜索当前列表中的 Agent 或所有者" placeholder="搜索当前列表中的 Agent 或所有者" value={search}
           onChange={event => { setSearch(event.target.value); setPage(0) }} />
@@ -84,6 +86,7 @@ export default function AgentManagerPage() {
 }
 
 export function AgentManagerDetailPage() {
+  const { user: currentUser, activeOrgId } = useAuth()
   const { ownerId = '', name = '' } = useParams<{ ownerId: string; name: string }>()
   const [detail, setDetail] = useState<ManagedAgentDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -146,6 +149,7 @@ export function AgentManagerDetailPage() {
               </TableBody>
             </Table>
           </div>
+          {currentUser?.id === ownerId && detail.agent.reference?.startsWith('moss-agent:operator:') && <MossImBindingPanel key={`${activeOrgId}:${ownerId}`} />}
         </div>
       )}
     </DashboardLayout>

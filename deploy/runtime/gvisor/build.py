@@ -2,37 +2,16 @@
 """Build the pinned runtime and verify the backport's exact source images."""
 import argparse
 import datetime
-import hashlib
 import inspect
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
-import urllib.request
-
-
-def digest(path):
-    with path.open('rb') as file:
-        return hashlib.file_digest(file, 'sha256').hexdigest()
-
-
-def acquire(url, expected, path):
-    if path.exists():
-        assert digest(path) == expected, f'Cached input checksum differs: {path}'
-        return
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
-        staged = Path(output.name)
-        try:
-            with urllib.request.urlopen(url, timeout=180) as response:
-                shutil.copyfileobj(response, output)
-            output.close()
-            assert digest(staged) == expected, f'Download checksum differs: {url}'
-            staged.replace(path)
-        finally:
-            staged.unlink(missing_ok=True)
+from release import acquire, digest
 
 
 def main():
@@ -49,18 +28,28 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=False)
+    downloads = cache / 'downloads'
+    downloads.mkdir(exist_ok=True)
+    state = tempfile.TemporaryDirectory(prefix='moss-gvisor-bazel-')
     receipt = {'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                'baseline': args.baseline, 'lockSha256': digest(root / 'runtime.lock.json'),
-               'sourceCommit': lock['source']['commit'], 'sourceArchiveSha256': lock['source']['sha256']}
+               'sourceCommit': lock['source']['commit'], 'sourceArchiveSha256': lock['source']['sha256'],
+               'recipeFiles': {name: digest(root / name) for name in
+                               ['build.py', 'release.py', 'runtime.lock.json', 'sync-errors.patch',
+                                'Dockerfile', 'install-build-deps.sh']}}
 
     def run(label, command, cwd=None):
         with (output / (label + '.stdout.log')).open('wb') as out, \
              (output / (label + '.stderr.log')).open('wb') as err:
             result = subprocess.run(command, cwd=cwd, stdout=out, stderr=err, check=False)
+        if result.returncode:
+            with (output / (label + '.stderr.log')).open('rb') as error:
+                error.seek(max(0, error.seek(0, os.SEEK_END) - 8192))
+                print(error.read().decode('utf-8', errors='replace'), file=sys.stderr, flush=True)
         assert result.returncode == 0, f'{label}: exit {result.returncode}; logs retained'
 
     try:
-        archive = cache / ('source-' + lock['source']['commit'] + '.tar.gz')
+        archive = downloads / ('source-' + lock['source']['commit'] + '.tar.gz')
         acquire(lock['source']['url'], lock['source']['sha256'], archive)
         source = work
         marker = work / '.moss-source.json'
@@ -109,7 +98,7 @@ def main():
             after = {name: digest(source / name) for name in current}
             assert after == lock['patch']['after'], {'observed': after, 'expected': lock['patch']['after']}
         receipt['sourceImages'] = {name: digest(source / name) for name in current}
-        bazel = cache / ('bazel-' + lock['bazel']['version'])
+        bazel = downloads / ('bazel-' + lock['bazel']['version'])
         acquire(lock['bazel']['url'], lock['bazel']['sha256'], bazel)
         bazel.chmod(0o755)
         version = lock['source']['tag'] if args.baseline else lock['version']
@@ -118,12 +107,15 @@ def main():
         status.write_text('#!/bin/sh\nprintf "STABLE_VERSION ' + version + '\\n"\n')
         status.chmod(0o755)
         command = ['nice', '-n', '10', str(bazel), '--batch',
-                   '--output_user_root=' + str(cache / ('bazel-' + lock['bazel']['version'] + '-sandbox-cache')),
+                   '--output_user_root=' + state.name,
                    '--host_jvm_args=-Xmx1024m', '--host_jvm_args=-XX:ActiveProcessorCount=1', 'build',
                    '--config=x86_64', '--compilation_mode=opt',
                    '--jobs=1', '--loading_phase_threads=1', '--local_resources=cpu=1',
                    '--local_resources=memory=2048', '--spawn_strategy=processwrapper-sandbox,local',
-                   '--repository_cache=' + str(cache / ('bazel-' + lock['bazel']['version'] + '-cache/cache/repos/v1')),
+                   '--repository_cache=' + str(cache / 'repositories'),
+                   '--disk_cache=' + str(cache / 'actions'),
+                   '--repo_env=GO_REPOSITORY_USE_HOST_MODCACHE=1',
+                   '--repo_env=GOMODCACHE=' + str(cache / 'go-modules'),
                    '--action_env=GOMAXPROCS=1', '--host_action_env=GOMAXPROCS=1',
                    '--action_env=GOFLAGS=-p=1', '--host_action_env=GOFLAGS=-p=1',
                    '--workspace_status_command=' + str(status), '//:release']
@@ -157,8 +149,14 @@ def main():
         assert receipt['version'].splitlines()[0] == 'runsc version ' + version
         receipt['success'] = True
     finally:
-        receipt['finishedAt'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        (output / 'build.json').write_text(json.dumps(receipt, indent=2))
+        try:
+            state.cleanup()
+        except OSError:
+            receipt['success'] = False
+            raise
+        finally:
+            receipt['finishedAt'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            (output / 'build.json').write_text(json.dumps(receipt, indent=2))
 
 
 if __name__ == '__main__':

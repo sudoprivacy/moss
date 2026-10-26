@@ -22,6 +22,7 @@ const CorpAppsPage = lazy(() => import('./pages/corp-apps-page'))
 const SkillStorePage = lazy(() => import('./pages/skill-store-page'))
 const AgentHubPage = lazy(() => import('./pages/agent-hub-page'))
 const AgentManagerPage = lazy(() => import('./pages/agent-manager-page'))
+const MyMossPage = lazy(() => import('./pages/my-moss-page'))
 const AgentManagerDetailPage = lazy(() => import('./pages/agent-manager-page').then(module => ({ default: module.AgentManagerDetailPage })))
 const EnterpriseConfigPage = lazy(() => import('./pages/enterprise-config-page'))
 const DocumentCenterPage = lazy(() => import('./pages/document-center-page'))
@@ -123,6 +124,7 @@ export default function App() {
           path="/agents"
           element={<SuspendedRoute><AgentManagerPage /></SuspendedRoute>}
         />
+        <Route path="/moss" element={<SuspendedRoute><MyMossPage /></SuspendedRoute>} />
         <Route
           path="/agents/:ownerId/:name"
           element={<SuspendedRoute><AgentManagerDetailPage /></SuspendedRoute>}

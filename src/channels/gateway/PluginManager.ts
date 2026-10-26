@@ -160,6 +160,19 @@ export class PluginManager {
     return undefined;
   }
 
+  /** Fence queued work after local stop or cross-instance lease takeover. */
+  async requireCurrentReceiver(plugin: BasePlugin): Promise<void> {
+    const key = this.getInstanceKey(plugin);
+    if (!key || this.isStopping) throw new Error('Channel receiver is no longer active');
+    const [pluginId, ownerId] = key.split(':');
+    if (!pluginId || !ownerId) throw new Error('Channel receiver identity is not available');
+    const row = await this.db.getChannelPlugin(pluginId, ownerId);
+    if (!row || Number(row.enabled) !== 1 || (this.instanceId &&
+      (row.lease_owner !== this.instanceId || Number(row.lease_until) <= Date.now()))) {
+      throw new Error('Channel receiver lease is no longer current');
+    }
+  }
+
   /**
    * Get all active plugins
    */

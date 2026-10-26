@@ -238,7 +238,7 @@ export abstract class BasePlugin {
    * Get bot information (username, etc.)
    * May return null if not connected
    */
-  abstract getBotInfo(): { username?: string; displayName?: string } | null;
+  abstract getBotInfo(): { id?: string; username?: string; displayName?: string } | null;
 
   // ==================== Static Methods ====================
 

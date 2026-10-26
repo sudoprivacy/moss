@@ -6,6 +6,7 @@ export interface ManagedAgent {
   ownerId: string
   ownerName: string
   displayName: string
+  reference?: string
   origin: 'moss' | 'nexus'
   state: string
   isPresent: boolean

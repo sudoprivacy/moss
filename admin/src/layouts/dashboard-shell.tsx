@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Loader2, TriangleAlert } from 'lucide-react'
 
 export function DashboardShell() {
-  const { authError, isAuthenticated, isLoading, retryAuth } = useAuth()
+  const { authError, isAuthenticated, isLoading, retryAuth, activeOrgId } = useAuth()
 
   if (isLoading) {
     return (
@@ -41,7 +41,7 @@ export function DashboardShell() {
     <SidebarProvider className="h-svh min-h-0 overflow-hidden bg-background">
       <AppSidebar />
       <SidebarInset className="min-h-0 overflow-hidden bg-background">
-        <Outlet />
+        <Outlet key={activeOrgId ?? 'no-organization'} />
       </SidebarInset>
     </SidebarProvider>
   )

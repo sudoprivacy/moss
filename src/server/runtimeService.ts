@@ -672,6 +672,11 @@ export class RuntimeService {
           throw new ResourceAccessError(400, 'Agent does not support native conversations')
         }
       }
+      if (isMossAgentName(input.assistantName)) {
+        const agent = await this.authService.mossAgents.getAgent(input.orgId, input.userId)
+        input = { ...input, managementActorId: input.managementActorId ?? input.userId,
+          managementAgent: { name: agent.agentName, displayName: agent.displayName, ownerName: agent.ownerName } }
+      }
       if (input.assistantName && !isUserOwnedAgentName(input.assistantName)) {
         const resource = await requireOrganizationResource('agent', input.assistantName)
         if (resource.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
