@@ -1,4 +1,4 @@
-import { defaultAgentName, isDefaultAgentName, isUserCreatedAgentName } from './agentIdentity.js'
+import { defaultAgentName, isDefaultAgentName, isMossAgentName, isUserCreatedAgentName, mossAgentName } from './agentIdentity.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import { getUserAgent, type UserAgent } from './userAgentStore.js'
 
@@ -8,6 +8,10 @@ export async function requirePersonalAgent(
   userId: string,
   reference: string,
 ): Promise<UserAgent | null> {
+  if (isMossAgentName(reference)) {
+    if (reference !== mossAgentName(orgId, userId)) throw new ResourceAccessError(404, 'Agent not available')
+    return null
+  }
   if (isDefaultAgentName(reference)) {
     if (reference !== defaultAgentName(userId)) throw new ResourceAccessError(404, 'Agent not available')
     return null

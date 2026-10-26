@@ -18,6 +18,7 @@
 import {
   defaultAgentName,
   isDefaultAgentName,
+  isMossAgentName,
   isUserCreatedAgentName,
   nexusAgentName,
   sessionAgentName,
@@ -81,7 +82,7 @@ export async function listMyAgents(input: {
   for (const session of sessions) {
     const ref = session.assistantName
     if (!ref) continue
-    if (isDefaultAgentName(ref) || isUserCreatedAgentName(ref)) continue
+    if (isDefaultAgentName(ref) || isUserCreatedAgentName(ref) || isMossAgentName(ref)) continue
     if (nexusAgentName(ref) !== undefined) continue
     if (!templateRefs.includes(ref)) templateRefs.push(ref)
   }

@@ -128,6 +128,7 @@ import { hasScope } from '@/lib/api/client'
 import { getUserSessions } from '@/lib/api/sessions'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { ModelAccountManagement } from '../components/model-account-management'
+import { MossMemberAccessDialog } from '../components/moss-member-access-dialog'
 import { UserOperationsDialogs } from '../components/user-operations-dialogs'
 import { accountStatusLabel, availableUserOperations, type UserOperation } from '../user-operations'
 import type {
@@ -565,6 +566,8 @@ export default function UsersPage() {
   const [isSubmittingTokenLimit, setIsSubmittingTokenLimit] = useState(false)
   const [localAuthTarget, setLocalAuthTarget] = useState<{ userId: string; userName: string; currentAuth: boolean } | null>(null)
   const [isSubmittingLocalAuth, setIsSubmittingLocalAuth] = useState(false)
+  const [mossAccessTarget, setMossAccessTarget] = useState<{ userId: string; userName: string; orgId: string } | null>(null)
+  useEffect(() => { setMossAccessTarget(null) }, [activeOrgId])
   const [isSubmittingUser, setIsSubmittingUser] = useState(false)
   const [isSubmittingDepartment, setIsSubmittingDepartment] = useState(false)
   const [isSubmittingPassword, setIsSubmittingPassword] = useState(false)
@@ -1448,6 +1451,10 @@ export default function UsersPage() {
                                       </>
                                     )}
                                   </DropdownMenuItem>
+                                  {isOrgAdmin && canManageUsers && activeOrgId ? <DropdownMenuItem onClick={() => setMossAccessTarget({ userId: user.id, userName: user.name, orgId: activeOrgId })}>
+                                    <UserCheck className="mr-2 size-4" />
+                                    Moss 使用权
+                                  </DropdownMenuItem> : null}
                                   {user.status === 'active' || user.status === 'disabled' ? <DropdownMenuItem onClick={() => void handleToggleUserStatus(user)}>
                                     {user.status === 'active' ? (
                                       <>
@@ -2573,6 +2580,11 @@ export default function UsersPage() {
         onClose={() => setUserOperation(null)}
         onChanged={fetchData}
       />
+      {mossAccessTarget && mossAccessTarget.orgId === activeOrgId && isOrgAdmin && canManageUsers ? <MossMemberAccessDialog
+        key={`${mossAccessTarget.orgId}:${mossAccessTarget.userId}`}
+        {...mossAccessTarget}
+        onClose={() => setMossAccessTarget(null)}
+      /> : null}
     </DashboardLayout>
   )
 }
