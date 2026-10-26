@@ -66,6 +66,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const transcriptPath = options.transcriptPath
   const artifacts = runtime.type === 'host' ? new ArtifactTracker(cwd, sessionId, artifactManifestPath(transcriptPath ?? join(runtime.configDir ?? cwd, '.moss', `${sessionId}.jsonl`))) : null
   let artifactFinalization: Promise<void> = Promise.resolve()
+  let isInputDeliverySupported = false
+  let nativeInputState: { running: boolean; paused: boolean; pending: unknown[]; activeTurnId: number | null } | null = null
+  let isNativeArtifactBatch = false
+  let isNativeTurnCancelled = false
+  const nativeUserEvents = new Map<string, Record<string, unknown>>()
 
   // A2: busy state machine
   let busy = false
@@ -81,7 +86,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   }
   const reevaluateBusy = (): void => {
     // A completed or failed prompt releases busy only when no work remains.
-    if (pendingRpcRequests.size > 0 || pendingPromptIds.size > 0 || pendingAskUserQuestions.size > 0 || pendingPermissions.size > 0) {
+    if (nativeInputState?.running || (nativeInputState && !nativeInputState.paused && nativeInputState.pending.length > 0) || pendingRpcRequests.size > 0 || pendingPromptIds.size > 0 || pendingAskUserQuestions.size > 0 || pendingPermissions.size > 0) {
       setBusy(true)
       return
     }
@@ -111,6 +116,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   let currentThoughtText = ''
   let lastPersistedUuid: string | null = null
   let isHandshakeComplete = false
+  let resolveHandshake!: (isReady: boolean) => void
+  const handshakeReady = new Promise<boolean>((resolve) => { resolveHandshake = resolve })
+  let inputPreparation: Promise<void> = Promise.resolve()
+  let inputEpoch = 0
   let currentTurnAssistantUuid: string | null = null
   let currentTurnUsedSendUserMessage = false
   let currentModel = model  // Track current model for dynamic switching
@@ -364,6 +373,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
   const completeHandshake = (): void => {
     isHandshakeComplete = true
+    resolveHandshake(true)
     process.stderr.write(`[AcpBridge] Handshake complete, flushing buffers (Stdout: ${pendingStdout.length}, Stdin: ${pendingStdin.length})\n`)
     flushStdout()
     flushPending()
@@ -413,7 +423,56 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     }
   }
 
-  const processUserMessage = async (data: string) => {
+  const emitInputReply = (requestId: string, result: Record<string, unknown>): void => {
+    emitStdout(JSON.stringify({ type: 'input_delivery_reply', session_id: sessionId, requestId, ...result }) + '\n')
+  }
+
+  class InputDeliveryError extends Error {
+    constructor(message: string, readonly isOutcomeUnknown: boolean) { super(message) }
+  }
+
+  const requestInput = (action: Record<string, unknown>): Promise<unknown> => new Promise((resolve, reject) => {
+    sendRpcWithReply('_sudocode/session/input', { ...action, sessionId: acpSessionId }, {
+      onReply: resolve,
+      onError: error => {
+        const isOutcomeUnknown = terminalExit !== undefined
+        if (!isOutcomeUnknown && action.action === 'submit' && typeof action.clientId === 'string') nativeUserEvents.delete(action.clientId)
+        reject(new InputDeliveryError(isOutcomeUnknown ? 'Connection closed; input delivery outcome is unknown' : String(error), isOutcomeUnknown))
+      },
+      onTimeout: () => reject(new InputDeliveryError('Input delivery outcome is unknown; inspect the queue before retrying', true)),
+    })
+  })
+
+  const controlInput = async (requestId: string, action: Record<string, unknown>): Promise<void> => {
+    const epoch = inputEpoch
+    if ((!isHandshakeComplete && !await handshakeReady) || !isInputDeliverySupported) {
+      emitInputReply(requestId, { isSupported: false })
+      return
+    }
+    try {
+      if (epoch !== inputEpoch) throw new Error('Input was cancelled before delivery')
+      if (!['submit', 'flush', 'flush_or_cancel', 'recall', 'snapshot'].includes(String(action.action))) throw new Error('Invalid input action')
+      if (action.action === 'submit') {
+        if (typeof action.clientId !== 'string' || !action.clientId || !Array.isArray(action.content) || !['steer', 'queue'].includes(String(action.delivery))) throw new Error('Invalid input submission')
+        const blocks = Array.isArray(action.content) ? action.content : []
+        const content = blocks.map((block: any) => block.type === 'image'
+          ? { type: 'image', source: { type: 'base64', media_type: block.mimeType, data: block.data } }
+          : block)
+        const prepare = inputPreparation.then(() => processUserMessage(JSON.stringify({ type: 'user', uuid: action.clientId, message: { content } }), { action, requestId, epoch }))
+        inputPreparation = prepare.catch(() => {})
+        await prepare
+      } else {
+        const receipt: any = await requestInput(action)
+        for (const item of receipt.recalled ?? []) nativeUserEvents.delete(item.clientId)
+        emitInputReply(requestId, { isSupported: true, receipt })
+      }
+    } catch (error) {
+      emitInputReply(requestId, { isSupported: true, error: error instanceof Error ? error.message : String(error), isOutcomeUnknown: error instanceof InputDeliveryError && error.isOutcomeUnknown })
+    }
+  }
+
+  const processUserMessage = async (data: string, nativeInput?: { action: Record<string, unknown>; requestId: string; epoch: number }) => {
+    if (nativeInput && nativeInput.epoch !== inputEpoch) throw new Error('Input was cancelled before delivery')
     let cleanText = data
     let userUuid = randomUUID()
     let structuredContent: any[] | null = null
@@ -571,10 +630,12 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       }
     }
 
-    await artifactFinalization
+    if (!nativeInput || !isNativeArtifactBatch) await artifactFinalization
     try {
-      await artifacts?.begin(userUuid)
+      if (!nativeInput || !isNativeArtifactBatch) await artifacts?.begin(userUuid)
+      if (nativeInput) isNativeArtifactBatch = true
     } catch (error) {
+      if (nativeInput) throw error
       setBusy(false)
       emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: 'error', is_error: true, errors: [`Could not inspect workspace artifacts: ${String(error)}`] }) + '\n')
       return
@@ -604,7 +665,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       } catch (err) {
         process.stderr.write(`[AcpBridge] Failed to prepare first message: ${err}\n`)
       }
-      isFirstMessage = false
+      if (!nativeInput) isFirstMessage = false
     }
     // 后续消息不再注入身份声明。身份由 configDir/.nexus/sudocode/AGENTS.md 承载
     // （可信的 runtime 配置），在用户消息里重复一份 "[Identity Override - 最高优先级]"
@@ -632,6 +693,13 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     }
     if (displayText !== trimmedText) {
       userEvent.displayText = displayText
+    }
+    if (nativeInput) {
+      if (nativeInput.epoch !== inputEpoch) throw new Error('Input was cancelled before delivery')
+      nativeUserEvents.set(userUuid, userEvent)
+      const receipt = await requestInput({ ...nativeInput.action, content: [...imageBlocks, { type: 'text', text: finalText }] })
+      emitInputReply(nativeInput.requestId, { isSupported: true, receipt })
+      return
     }
     void writeTranscript(userEvent)
     lastPersistedUuid = userUuid
@@ -675,6 +743,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       try {
         if (parsed.id === 'm-init') {
           if (parsed.error) throw new Error(`ACP initialization failed: ${parsed.error.message}`)
+          isInputDeliverySupported = parsed.result?._meta?.sudocode?.inputDelivery?.version === 1
           if (options.resumeSessionId) {
             process.stderr.write(`[AcpBridge] Initialization complete, loading session ${options.resumeSessionId}...\n`)
             sendRpc('session/load', {
@@ -715,6 +784,48 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           return
         }
 
+        if (parsed.method === '_sudocode/session/input_update' && parsed.params?.sessionId === acpSessionId) {
+          const update = parsed.params.update
+          if (update?.kind === 'committed') {
+            if (update.source === 'human') isFirstMessage = false
+            const event = nativeUserEvents.get(update.clientId)
+            if (event) {
+              event.parentUuid = lastPersistedUuid
+              void writeTranscript(event)
+              lastPersistedUuid = update.clientId
+              nativeUserEvents.delete(update.clientId)
+            }
+          }
+          emitStdout(JSON.stringify({ type: 'input_delivery_update', session_id: sessionId, update }) + '\n')
+          if (update?.kind === 'state') {
+            nativeInputState = update.state
+            reevaluateBusy()
+            if (!nativeInputState?.running && (nativeInputState?.paused || !nativeInputState?.pending.length) && isNativeArtifactBatch) {
+              isNativeArtifactBatch = false
+              const isCancelled = isNativeTurnCancelled
+              artifactFinalization = artifactFinalization.then(async () => {
+                const result = await artifacts?.finish(isCancelled, false)
+                if (result) {
+                  const event = { type: 'artifacts', session_id: sessionId, uuid: randomUUID(), v: 1, records: result.changed, workspace: cwd }
+                  emitStdout(JSON.stringify(event) + '\n')
+                  await writeTranscript({ ...event, timestamp: new Date().toISOString() })
+                }
+              }).catch(error => {
+                process.stderr.write(`[AcpBridge] Artifact indexing failed: ${String(error)}\n`)
+              })
+            }
+            return
+          }
+          if (update?.kind === 'turn_complete') {
+            isNativeTurnCancelled = update.stopReason === 'cancelled'
+            parsed = { result: { stopReason: update.stopReason, usage: update.usage }, nativeInput: true }
+          } else if (update?.kind === 'error') {
+            const id = `native-error-${rpcId++}`
+            pendingPromptIds.add(id)
+            parsed = { id, error: { message: update.message }, nativeInput: true }
+          } else return
+        }
+
         if (typeof parsed.id === 'string' && !parsed.method && (parsed.result !== undefined || parsed.error !== undefined)) {
           const pending = pendingRpcRequests.get(parsed.id)
           if (pending) {
@@ -733,6 +844,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         }
 
         if (typeof parsed.id === 'string' && pendingPromptIds.has(parsed.id) && (parsed.result || parsed.error)) {
+          inputEpoch += 1
           pendingPermissions.clear()
           pendingAskUserQuestions.clear()
           askUserQuestionUuidToRequestId.clear()
@@ -757,7 +869,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             type: 'result', session_id: sessionId, status: 'error',
             is_error: true, errors: [message],
           }
-          artifactFinalization = (artifacts?.finish(true) ?? Promise.resolve()).then(() => {
+          if (parsed.nativeInput) emitStdout(JSON.stringify(resultEvent) + '\n')
+          else artifactFinalization = (artifacts?.finish(true) ?? Promise.resolve()).then(() => {
             emitStdout(JSON.stringify(resultEvent) + '\n')
           }).catch(error => {
             process.stderr.write(`[AcpBridge] Could not retain artifact records: ${String(error)}\n`)
@@ -834,7 +947,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             lastPersistedUuid = assistantUuid
           }
 
-          artifactFinalization = (artifacts?.finish(parsed.result?.stopReason === 'cancelled') ?? Promise.resolve({ changed: [] }))
+          const isNativeTurn = parsed.nativeInput === true
+          if (isNativeTurn) {
+            emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: 'success', is_error: false, usage }) + '\n')
+          }
+          if (!isNativeTurn) artifactFinalization = (artifacts?.finish(parsed.result?.stopReason === 'cancelled') ?? Promise.resolve({ changed: [] }))
             .then(async ({ changed }) => {
               const artifactEvent = { type: 'artifacts', session_id: sessionId, uuid: randomUUID(), v: 1, records: changed, workspace: cwd }
               if (artifacts) {
@@ -1175,7 +1292,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     onClose(code, signal, error) {
       if (terminalExit) return
       terminalExit = { code, signal, error, isNotified: false }
-      const isTurnInterrupted = pendingPromptIds.size > 0 || pendingStdin.length > 0
+      inputEpoch += 1
+      resolveHandshake(false)
+      const isTurnInterrupted = nativeInputState?.running === true || pendingPromptIds.size > 0 || pendingStdin.length > 0
       interruptPendingTools()
       persistPartialAssistant()
       if (isTurnInterrupted) {
@@ -1238,6 +1357,16 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         }
       } catch { /* ordinary text input */ }
 
+      try {
+        const parsed = JSON.parse(data)
+        if (parsed?.type === 'control_request' && parsed.request?.subtype === 'input') {
+          if (typeof parsed.request_id === 'string' && parsed.request.action && typeof parsed.request.action === 'object') {
+            void controlInput(parsed.request_id, parsed.request.action)
+          }
+          return
+        }
+      } catch { /* ordinary text input */ }
+
       // Interrupt: cancel the current turn via ACP session/cancel (scode replies
       // to the pending prompt with stopReason:'cancelled', which flows through
       // the normal turn-end path). Record a durable cancelled marker so a
@@ -1248,6 +1377,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         const parsed = JSON.parse(data)
         if (parsed?.type === 'control_request' && parsed.request?.subtype === 'interrupt') {
           process.stderr.write(`[AcpBridge] Received interrupt control_request\n`)
+          inputEpoch += 1
           pendingPermissions.clear()
           pendingAskUserQuestions.clear()
           askUserQuestionUuidToRequestId.clear()
@@ -1424,6 +1554,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         // already shown to the user even when no stopReason arrives.
         interruptPendingTools()
         persistPartialAssistant()
+        await artifactFinalization
         await transcriptWrites
       }
 

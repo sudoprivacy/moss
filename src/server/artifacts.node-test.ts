@@ -63,6 +63,13 @@ void test('runtime artifacts preserve inputs, validate JSON, retain dependencies
     assert.equal(third.changed.find(r => r.relativePath === '报价 数据.json')?.intent, 'unknown')
     assert.match(await readFile(join(workspace, '.drafts/calculate.py'), 'utf8'), /^#!/)
     assert.equal((await readArtifacts(metadata)).v, 1)
+    // Automatic turns may already be using this file when host bookkeeping finishes.
+    await resumed.begin('automatic-turn')
+    await writeFile(join(workspace, 'temp_next_turn.json'), '{"next":true}')
+    resumed.declare({ files: [{ path: 'temp_next_turn.json', intent: 'draft', release: true }] })
+    const automatic = await resumed.finish(false, false)
+    assert.equal(automatic.changed.find(record => record.relativePath === 'temp_next_turn.json')?.intent, 'draft')
+    assert.equal(await readFile(join(workspace, 'temp_next_turn.json'), 'utf8'), '{"next":true}')
     await cleanupIntermediateFiles(workspace)
     assert.equal(await readFile(join(workspace, 'temp_input.json'), 'utf8'), '{"input":true}')
   } finally { await rm(root, { recursive: true, force: true }) }

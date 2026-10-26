@@ -547,3 +547,81 @@ void test('message transport carries permission ID zero, rejection, cancellation
     assert.equal(sent.length, count, 'stale answers neither approve a tool nor start a prompt')
   } finally { await handle.destroy(); await rm(cwd, {recursive: true, force: true}) }
 })
+
+void test('native input forwarding preserves admission, commit, flush and cancellation boundaries', async t => {
+  const cwd = await mkdtemp(join(tmpdir(), 'moss-input-delivery-'))
+  const transcriptPath = join(cwd, 'transcript.jsonl')
+  const sent: any[] = []
+  const output: any[] = []
+  let events!: import('./acpTransport.js').AcpTransportEvents
+  const transport: import('./acpTransport.js').AcpMessageTransport = {
+    connected: true, start(value) { events = value },
+    async send(message) { sent.push(message) }, async close() {},
+  }
+  const handle = createAcpBridgeHandle({ transport, cwd, sessionId: 'input-host', model: 'fixture',
+    transcriptPath, enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
+  t.after(async () => { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) })
+  handle.onStdoutLine(line => output.push(JSON.parse(line)))
+  const waitFor = async (predicate: () => boolean) => {
+    const deadline = Date.now() + 5000
+    while (!predicate()) { assert.ok(Date.now() < deadline, 'protocol event deadline'); await delay(5) }
+  }
+  const receive = (value: any) => events.onMessage({ jsonrpc: '2.0', ...value })
+  const state = (revision: number, pending: any[], running = true) => ({ revision, activeTurnId: running ? 1 : null, running, paused: false, pending })
+  const update = (value: any) => receive({ method: '_sudocode/session/input_update', params: { sessionId: 'input-native', update: value } })
+  const control = (requestId: string, action: any) => handle.writeStdin(JSON.stringify({ type: 'control_request', request_id: requestId, request: { subtype: 'input', action } }))
+  await waitFor(() => sent.some(item => item.method === 'initialize'))
+  control('cold-snapshot', { action: 'snapshot' })
+  receive({ id: 'm-init', result: { _meta: { sudocode: { inputDelivery: { version: 1 } } } } })
+  receive({ id: 'm-session-new', result: { sessionId: 'input-native' } })
+  await waitFor(() => sent.some(item => item.params?.action === 'snapshot'))
+  const snapshot = sent.find(item => item.params?.action === 'snapshot')
+  receive({ id: snapshot.id, result: { state: state(1, [], false) } })
+  await waitFor(() => output.some(item => item.requestId === 'cold-snapshot'))
+  assert.equal(output.find(item => item.requestId === 'cold-snapshot').isSupported, true)
+
+  const content = [{ type: 'text', text: 'REFERENCE_INPUT: continue the original task' }, { type: 'image', mimeType: 'image/png', data: 'test-png' }]
+  control('submit', { action: 'submit', clientId: 'draft-1', delivery: 'queue', display: 'original draft', draft: { text: 'original draft', files: ['/webupload/example'] }, content })
+  await waitFor(() => sent.some(item => item.params?.action === 'submit'))
+  const submit = sent.find(item => item.params?.action === 'submit')
+  assert.equal(submit.method, '_sudocode/session/input')
+  assert.equal(submit.params.delivery, 'queue')
+  assert.equal(submit.params.content[0].data, 'test-png')
+  assert.deepEqual(submit.params.draft, { text: 'original draft', files: ['/webupload/example'] })
+  const pending = [{ id: 2, clientId: 'draft-1', display: 'original draft', source: 'human', delivery: 'queue' }]
+  update({ kind: 'state', state: state(2, pending) })
+  receive({ id: submit.id, result: { id: 2, state: state(2, pending) } })
+  await waitFor(() => output.some(item => item.requestId === 'submit'))
+  assert.equal((await readFile(transcriptPath, 'utf8').catch(() => '')).includes('REFERENCE_INPUT'), false, 'admission is not durable model consumption')
+  control('flush', { action: 'flush_or_cancel' })
+  await waitFor(() => sent.some(item => item.params?.action === 'flush_or_cancel'))
+  const flush = sent.find(item => item.params?.action === 'flush_or_cancel')
+  receive({ id: flush.id, result: { cancelled: false, state: state(3, pending) } })
+  assert.equal(sent.some(item => item.method === 'session/cancel'), false, 'flush must not synthesize cancellation')
+  update({ kind: 'committed', clientId: 'draft-1', source: 'human', display: 'original draft' })
+  update({ kind: 'state', state: state(4, []) })
+  await waitFor(() => output.some(item => item.update?.kind === 'committed'))
+  handle.writeStdin(JSON.stringify({ type: 'control_request', request_id: 'cancel', request: { subtype: 'interrupt' } }))
+  assert.equal(sent.filter(item => item.method === 'session/cancel').length, 1)
+  control('held', { action: 'submit', clientId: 'held', delivery: 'queue', content: [{ type: 'text', text: 'Already admitted' }] })
+  await waitFor(() => sent.some(item => item.params?.clientId === 'held'))
+  const held = sent.find(item => item.params?.clientId === 'held')
+  control('preparing', { action: 'submit', clientId: 'preparing', delivery: 'queue', content: [{ type: 'text', text: 'Must not arrive after cancellation' }] })
+  handle.writeStdin(JSON.stringify({ type: 'control_request', request_id: 'cancel-preparing', request: { subtype: 'interrupt' } }))
+  assert.equal(sent.filter(item => item.method === 'session/cancel').length, 2, 'cancellation bypasses a held admission reply')
+  receive({ id: held.id, result: { id: 3, state: { ...state(5, []), paused: true } } })
+  await waitFor(() => output.some(item => item.requestId === 'preparing'))
+  assert.match(output.find(item => item.requestId === 'preparing').error, /cancelled before delivery/)
+  assert.equal(sent.some(item => item.params?.clientId === 'preparing'), false, 'late preparation must not resume a cancelled session')
+  control('closing-snapshot', { action: 'snapshot' })
+  await waitFor(() => sent.filter(item => item.params?.action === 'snapshot').length === 2)
+  events.onClose(1, null)
+  assert.match(output.find(item => item.subtype === 'error_interrupted').errors[0], /outcome.*unknown/i)
+  await waitFor(() => output.some(item => item.requestId === 'closing-snapshot'))
+  assert.equal(output.find(item => item.requestId === 'closing-snapshot').isOutcomeUnknown, true, 'stream close does not prove that the engine rejected a request')
+  await handle.destroy(true)
+  const records = (await readFile(transcriptPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  assert.equal(records.filter(item => item.type === 'user' && item.uuid === 'draft-1').length, 1)
+  assert.equal(records.filter(item => item.subtype === 'error_interrupted').length, 1, 'native turns retain the interrupted outcome even without a prompt RPC')
+  assert.equal(sent.some(item => item.method === 'session/prompt'), false, 'native delivery must not fall back to a second turn scheduler')
+})

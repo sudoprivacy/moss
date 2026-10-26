@@ -92,7 +92,7 @@ export class ArtifactTracker {
     }
   }
 
-  async finish(isCancelled = false): Promise<{ manifest: ArtifactManifest; changed: ArtifactRecord[] }> {
+  async finish(isCancelled = false, isRelocationAllowed = true): Promise<{ manifest: ArtifactManifest; changed: ArtifactRecord[] }> {
     const after = await snapshotWorkspace(this.workspace)
     const changed: ArtifactRecord[] = []
     for (const [relativePath, fingerprint] of after) {
@@ -126,7 +126,7 @@ export class ArtifactTracker {
       }
       if (isCancelled && record.intent === 'final' && origin === 'generated') record.intent = 'unknown'
       // The declaration releases a dependency explicitly; end-of-turn alone never does.
-      if (!isCancelled && origin === 'generated' && record.intent === 'draft' && declaration?.release && !relativePath.startsWith('.drafts/')) {
+      if (isRelocationAllowed && !isCancelled && origin === 'generated' && record.intent === 'draft' && declaration?.release && !relativePath.startsWith('.drafts/')) {
         let destination = `.drafts/${relativePath}`
         if (after.has(destination)) {
           const ext = path.extname(relativePath)
