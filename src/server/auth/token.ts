@@ -8,6 +8,8 @@ export type AccessTokenClaims = {
   scopes: string[]
   key_id: string
   auth_app?: 'moss' | 'sudowork'
+  /** Purpose-bound credentials are accepted only by their explicit consumer. */
+  aud?: string
   jti: string
   type: 'access' | 'refresh'
   iat: number
@@ -137,6 +139,7 @@ export function verifyAccessToken(
   secret: string,
   expectedIssuer?: string,
   expectedType: 'access' | 'refresh' = 'access',
+  expectedAudience?: string,
 ): AuthContext | null {
   const parts = token.split('.')
   if (parts.length !== 3) {
@@ -202,6 +205,10 @@ export function verifyAccessToken(
   if (expectedIssuer && payload.iss !== expectedIssuer) {
     return null
   }
+
+  // A control capability must never become an ordinary browser/login token.
+  // Missing, unexpected and malformed audiences all fail at this shared seam.
+  if (payload.aud !== expectedAudience) return null
 
   return {
     rawToken: token,

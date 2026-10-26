@@ -41,6 +41,21 @@ runtime.createSession = async input => {
   return store.createSession({ ...input, sessionId, transcriptSessionId: sessionId,
     transcriptPath: '', cwd: '/', runtime: { type: 'cohost', engine: 'scode' }, status: 'detached', desiredState: 'active' })
 }
+if (process.env.MOSS_AGENT_CONTROL_FIXTURE === '1') {
+  runtime.inspectManagedControlActor = async (sessionId, ownerId, orgId) => {
+    const session = await store.getSession(sessionId)
+    if (!session || session.userId !== ownerId || session.orgId !== orgId || session.desiredState !== 'active')
+      throw new Error('Fixture actor is not owned')
+    await runtime.requireSessionAgentAccess(session)
+    return { plane: 'managed-cohost', ownerId, agentId: sessionAgentName(ownerId, session.assistantName),
+      sessionId, taskId: session.taskId, attemptId: 'fixture-attempt', durableSessionId: `fixture-${sessionId}`,
+      repositoryPath: `/fixture/cohost/${sessionId}`, executionId: `fixture-native-${sessionId}` }
+  }
+  runtime.assertManagedControlActorCurrent = async (actor, orgId) => {
+    const current = await runtime.inspectManagedControlActor(actor.sessionId, actor.ownerId, orgId)
+    if (JSON.stringify(current) !== JSON.stringify(actor)) throw new Error('Fixture actor changed')
+  }
+}
 const runner = createServer(socket => {
   socket.on('data', bytes => {
     socket.write(`${JSON.stringify({ type: 'stdout', line: bytes.toString().trim() })}\n`)
