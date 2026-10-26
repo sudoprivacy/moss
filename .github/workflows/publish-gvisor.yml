@@ -1,0 +1,67 @@
+name: Publish qualified gVisor
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_run_id:
+        description: Successful dev push run of gVisor storage qualification
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: gvisor-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+    steps:
+      - name: Resolve the qualified source
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$QUALIFICATION_RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID" > "$RUNNER_TEMP/source.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'source.json').read_text())
+          assert run['event'] == 'push' and run['head_branch'] == 'dev'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          assert run['path'] == '.github/workflows/gvisor-storage.yml'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('revision=' + run['head_sha'] + '\n')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.revision }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: gvisor-release-candidate
+          run-id: ${{ inputs.qualification_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/gvisor-release-candidate
+      - name: Verify source, qualification and publication plan
+        run: python3 deploy/runtime/gvisor/publish.py --run-id="$QUALIFICATION_RUN_ID" --candidate="$RUNNER_TEMP/gvisor-release-candidate" --dry-run
+      - name: Configure the existing COS publisher
+        env:
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$TENCENT_SECRET_ID" && test -n "$TENCENT_SECRET_KEY"
+          pip install coscmd==1.9.0.6
+          coscmd config -a "$TENCENT_SECRET_ID" -s "$TENCENT_SECRET_KEY" \
+            -b sudowork-release-1309794936 -e cos.accelerate.myqcloud.com
+      - name: Publish and read back both public copies
+        run: python3 deploy/runtime/gvisor/publish.py --run-id="$QUALIFICATION_RUN_ID" --candidate="$RUNNER_TEMP/gvisor-release-candidate"

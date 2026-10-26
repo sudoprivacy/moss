@@ -167,6 +167,33 @@ verify_installer() {
   grep -Fxq "$expected" "$SOURCE_DIR/install.sh" || die 'installer version mismatch'
 }
 
+extract_deployment_bundle() {
+  mkdir -p "$WORK_DIR/bundle"
+  python3 - "$SOURCE_DIR/$DEPLOY_ARCHIVE" "$WORK_DIR/bundle" <<'PY'
+import pathlib, shutil, sys, tarfile
+root = pathlib.Path(sys.argv[2])
+with tarfile.open(sys.argv[1]) as bundle:
+    members = bundle.getmembers()
+    names = set()
+    for member in members:
+        name = pathlib.PurePosixPath(member.name)
+        if (not member.isfile() or not name.parts or name.is_absolute() or name.as_posix() != member.name
+                or '..' in name.parts or '\\' in member.name or ':' in member.name or '\0' in member.name
+                or member.name in names):
+            sys.exit('Unsafe deployment bundle')
+        names.add(member.name)
+    required = {'control.py', 'install-control.sh', 'fetch-offline-deps.sh', 'server.json',
+                'images.py', 'artifacts.py', 'sudostack-images.lock.json'}
+    if not required <= names:
+        sys.exit('Missing deployment entrypoint')
+    for member in members:
+        destination = root / member.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with bundle.extractfile(member) as source, destination.open('xb') as target:
+            shutil.copyfileobj(source, target)
+PY
+}
+
 if [ "$DOWNLOAD_ONLY" = 1 ]; then
   SOURCE_DIR="$DOWNLOAD_DIR"
   mkdir -p "$SOURCE_DIR"
@@ -177,9 +204,9 @@ if [ "$DOWNLOAD_ONLY" = 1 ]; then
   for archive in "$DEPLOY_ARCHIVE" "$SERVER_IMAGE_ARCHIVE" "$NEXUS_IMAGE_ARCHIVE" "$RUNTIME_ARCHIVE"; do
     acquire_asset "$archive"
   done
-  download_file fetch-offline-deps.sh
+  extract_deployment_bundle
   FETCH_MOSS=0 ARCH="$ARCH" K3S_VERSION="$INSTALL_K3S_VERSION" OFFLINE_DIR="$SOURCE_DIR/offline" \
-    bash "$SOURCE_DIR/fetch-offline-deps.sh"
+    bash "$WORK_DIR/bundle/fetch-offline-deps.sh"
   chmod 755 "$SOURCE_DIR/install.sh"
   log "Offline files are ready: $SOURCE_DIR"
   log 'Copy the directory to the target and run sudo ./install.sh --offline'
@@ -240,17 +267,7 @@ else
 fi
 verify_installer
 acquire_asset "$DEPLOY_ARCHIVE"
-mkdir -p "$WORK_DIR/bundle"
-python3 - "$SOURCE_DIR/$DEPLOY_ARCHIVE" "$WORK_DIR/bundle" <<'PY'
-import sys, tarfile
-with tarfile.open(sys.argv[1]) as bundle:
-    members = bundle.getmembers()
-    expected = {'control.py', 'install-control.sh', 'fetch-offline-deps.sh', 'server.json',
-                'images.py', 'artifacts.py', 'sudostack-images.lock.json'}
-    if len(members) != len(expected) or {m.name for m in members} != expected or any(not m.isfile() for m in members):
-        sys.exit('Unsafe deployment bundle')
-    bundle.extractall(sys.argv[2], members=members)
-PY
+extract_deployment_bundle
 
 retain_release_image() {
   local expected
