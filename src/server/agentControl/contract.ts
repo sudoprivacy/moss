@@ -8,6 +8,7 @@ export const AGENT_CONTROL_KEY_PREFIX = 'agent-control:'
 
 const identifier = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/)
 const agentName = z.string().min(1).max(256).regex(/^[^/\\\0]+$/)
+export const deploymentPlanSchema = z.object({ planId: identifier, sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 
 // One catalog supplies server argument validation and native tool discovery.
 // Transport annotations never grant permission.
@@ -20,6 +21,8 @@ export const agentControlCatalog = {
     arguments: z.object({ agent: agentName }).strict() },
   'runtime.inspect': { name: 'moss_runtime_inspect', description: 'Inspect the delegated owner runtime without installing or starting it.', mutating: false,
     arguments: z.object({}).strict() },
+  'runtime.deploy': { name: 'moss_runtime_deploy', description: 'Submit one operator-approved device deployment plan. Recover the original operation to observe completion.', mutating: true,
+    arguments: z.object({ planId: identifier }).strict() },
 } as const
 
 export type AgentControlAction = keyof typeof agentControlCatalog
@@ -29,7 +32,8 @@ export type AgentControlTarget = z.infer<typeof agentControlTargetSchema>
 export const agentControlDelegationRequest = z.object({
   actorSessionId: identifier,
   target: agentControlTargetSchema,
-  actions: z.array(agentControlActionSchema).min(1).max(4).refine(actions => new Set(actions).size === actions.length),
+  actions: z.array(agentControlActionSchema).min(1).max(5).refine(actions => new Set(actions).size === actions.length),
+  deploymentPlans: z.array(deploymentPlanSchema).min(1).max(20).optional(),
   ttlSeconds: z.number().int().min(1).max(300).default(120),
 }).strict()
 
@@ -51,10 +55,12 @@ export interface ManagedControlActor {
   executionId: string
 }
 
-export function agentControlTools(actions: readonly AgentControlAction[]) {
+export function agentControlTools(actions: readonly AgentControlAction[], plans?: readonly z.infer<typeof deploymentPlanSchema>[]) {
   return actions.map(action => {
     const descriptor = agentControlCatalog[action]
+    const argumentsSchema = action === 'runtime.deploy' && plans?.length
+      ? z.object({ planId: z.enum(plans.map(plan => plan.planId) as [string, ...string[]]) }).strict() : descriptor.arguments
     return { action, name: descriptor.name, description: descriptor.description, mutating: descriptor.mutating,
-      inputSchema: z.toJSONSchema(descriptor.arguments, { io: 'input' }) }
+      inputSchema: z.toJSONSchema(argumentsSchema, { io: 'input' }) }
   })
 }

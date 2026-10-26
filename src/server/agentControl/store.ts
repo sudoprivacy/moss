@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto'
 import type { AgentControlAction, AgentControlTarget, ManagedControlActor } from './contract.js'
 import type { DbDriver } from '../db/driver.js'
 import { ResourceAccessError } from '../catalog/resourceError.js'
+import type { DeviceDeployEffect } from './deviceDeploy.js'
 
 export interface ControlDelegation {
   id: string; orgId: string; userId: string; role: string; scopes: string[]
   parentJti: string; tokenJti: string; actor: ManagedControlActor
   target: AgentControlTarget; actions: AgentControlAction[]
+  deploymentPlans?: { planId: string; sha256: string }[]
   createdAt: number; expiresAt: number; status: 'active' | 'revoked'; revokedAt?: number
 }
 
@@ -17,6 +19,7 @@ export interface ControlOperation {
   status: 'prepared' | 'executing' | 'completed' | 'rejected' | 'unknown'
   createdAt: number; expiresAt: number; admittedAt?: number; completedAt?: number
   result?: unknown; errorCode?: string
+  deviceEffect?: DeviceDeployEffect
 }
 
 /** One receipt ledger for every native control adapter; it never replays an effect. */

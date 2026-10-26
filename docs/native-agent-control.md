@@ -49,6 +49,43 @@ Deploy the bearer only into the intended Agent's private tool environment.
 
 ## Native tools
 
+### Device deployment
+
+An explicitly configured Linux device can expose `moss_runtime_deploy`. Cloud
+keeps its existing Kubernetes lifecycle adapter; merely running Moss on Linux
+does not enable a device executor. The device operator installs the fixed
+SudoEdge `stack-action.py` entry, its exact sudostack source bundle and a private
+approved-plan registry. `MOSS_DEVICE_DEPLOY_CONFIG` names a private owner file:
+
+```json
+{"schemaVersion":1,"python":"/absolute/real/python3","entry":"/installed/sudoedge/scripts/stack-action.py","entrySha256":"FULL_SHA256","registry":"/private/approved-plans.json","sudostackRoot":"/installed/sudostack"}
+```
+
+Paths and ancestors must be operator controlled without symlinks. The registry
+is private to the actual service account. The Edge entry verifies the shared
+action bytes against its source lock; Moss passes only fixed verbs, a plan ID
+and an operation ID. It supplies no caller shell, download URL, bearer or human
+login environment. This trusts the operator's OS account and approved installed
+code; it does not claim that the plan checker confines that OS account.
+
+The human delegation must explicitly include `runtime.deploy` and
+`deploymentPlans:[{"planId":"APPROVED_ID","sha256":"FULL_SHA256"}]`. Only the
+current owner's administrator settings permission can grant this action. Issuance
+and invocation inspect the actual operator approval; changed plan hashes refuse
+new work. Discovery lists the delegated plan IDs in the tool's parameter schema.
+The original managed actor, delegating human, deployment and current membership
+are checked through the same control service as the other tools.
+
+Moss records a deployment effect reference before submission. Sudostack runs
+the approved selection and original-product qualification outside the controller
+unit, so deployment may restart Moss. A submission response or active unit does
+not mean completion. An uncertain result remains Unknown and is never resubmitted.
+After restart, the original operation's authenticated query reconciles only its
+existing device receipt. Human recovery remains available after the assigned
+actor exits or the delegation is revoked. Completion requires the original
+product's three-turn/native-binding proof; it still reports `domainJoinAccepted:false`.
+Real device/systemd and DGX qualification are separate from process fixtures.
+
 Build the standalone Node 22 entry with `node scripts/build-agent-control.mjs`.
 Pass the just-issued response over private stdin to:
 
@@ -102,8 +139,10 @@ of an already-started session. No cross-system atomic quiescence is claimed.
 ## Current boundary and validation
 
 Implemented tools list/inspect existing Agents, start an authorized Agent
-session, inspect the owner runtime and query receipts. Deploy and join are not
-advertised: they need the approved Stack/Edge plan and native join executor.
+session, inspect the owner runtime and query receipts. Explicitly configured
+device deployments additionally expose approved `runtime.deploy` plans through
+the pinned Stack/Edge executor above. Join is not advertised: its native
+cross-domain executor and acceptance remain pending.
 The native plugin is not an alternative SSH executor or a generic remote shell.
 
 Qualification covers real Moss HTTP/SQLite and a separately bundled native
