@@ -1,7 +1,7 @@
 'use client'
 
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import { getMe, login as apiLogin, loginWithApiKey, logout as apiLogout, isAuthenticated as hasStoredSession, switchOrg } from '@/lib/api/auth'
+import { getMe, login as apiLogin, loginWithApiKey, loginWithPhone as apiLoginWithPhone, logout as apiLogout, isAuthenticated as hasStoredSession, switchOrg } from '@/lib/api/auth'
 import { AUTH_REFRESHED_EVENT, UNAUTHORIZED_EVENT, getPreferredOrgId } from '@/lib/api/client'
 import type { AuthUser, LoginResponse } from '@/lib/api/types'
 
@@ -18,6 +18,7 @@ interface AuthContextType {
   retryAuth: () => Promise<void>
   login: (username: string, password: string) => Promise<void>
   loginWithKey: (apiKey: string) => Promise<void>
+  loginWithPhone: (phone: string, code: string) => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -117,6 +118,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await checkAuth()
   }
 
+  const loginWithPhone = async (phone: string, code: string) => {
+    await apiLoginWithPhone(phone, code)
+    await checkAuth()
+  }
+
   const logout = async () => {
     await apiLogout()
     setUser(null)
@@ -136,6 +142,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         retryAuth: checkAuth,
         login,
         loginWithKey,
+        loginWithPhone,
         logout,
       }}
     >
