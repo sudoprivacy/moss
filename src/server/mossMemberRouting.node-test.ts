@@ -21,10 +21,11 @@ async function fixture() {
   const created: SessionCreateInput[] = []
   const inputs: Array<{ sessionId: string; text: string }> = []
   const sends: Array<{ chat: string; text: string }> = []
-  const sockets: EventEmitter[] = []
+  const sockets: Array<EventEmitter & { isInputExpired?: boolean }> = []
   let isConnectBlocked = false
   let isReceiving = true
   let isActivityWriteFailed = false
+  let isReplySuppressed = false
   let onThinking: (() => Promise<void>) | undefined
   const runtime = {
     createSession: async (input: SessionCreateInput) => {
@@ -40,10 +41,12 @@ async function fixture() {
     },
     connectInternalChannel: async (sessionId: string) => {
       if (isConnectBlocked) throw new Error('Temporary connection failure')
-      const socket = Object.assign(new EventEmitter(), { destroyed: false,
+      const socket = Object.assign(new EventEmitter(), { destroyed: false, isInputExpired: false,
         destroy() { socket.destroyed = true; socket.emit('close') },
         write(value: string) {
+          if (socket.isInputExpired) { socket.destroy(); throw new Error('Internal channel credential expired') }
           inputs.push({ sessionId, text: JSON.parse(value).data })
+          if (isReplySuppressed) return true
           setTimeout(() => {
             for (const frame of [{ type: 'assistant', content: 'Member reply' }, { type: 'result' }]) {
               socket.emit('data', Buffer.from(JSON.stringify({ type: 'stdout', line: JSON.stringify(frame) }) + '\n'))
@@ -84,7 +87,9 @@ async function fixture() {
   }
   return { ...f, sessions, created, inputs, sends, sockets, executor, deliver, deliverMentioned,
     blockConnection: () => { isConnectBlocked = true }, stopReceiving: () => { isReceiving = false },
-    failActivityWrite: () => { isActivityWriteFailed = true }, beforeInput: (hook: () => Promise<void>) => { onThinking = hook } }
+    failActivityWrite: () => { isActivityWriteFailed = true }, suppressReply: () => { isReplySuppressed = true },
+    expireChannels: () => { sockets.forEach(socket => { socket.isInputExpired = true }) },
+    beforeInput: (hook: () => Promise<void>) => { onThinking = hook } }
 }
 
 void test('unbound group sender receives only a private proof and duplicate delivery never creates a model session', async () => {
@@ -192,6 +197,43 @@ void test('same-group members retain separate owner sessions through restart, ne
     f.stopReceiving()
     await f.deliver(restarted, 'feishu-bob', 'after-receiver-stop')
     assert.equal(f.inputs.length, inputCount, 'retired receiver cannot dispatch another member input')
+  } finally { f.sockets.forEach(socket => socket.emit('close')); f.raw.close() }
+})
+
+void test('a timed-out member reply remains unknown and never tells the human to repeat an operation', async (t) => {
+  const f = await fixture()
+  try {
+    await f.service.bind(f.auth('alice'), (await f.service.issueChallenge(f.connection, 'feishu-alice'))!)
+    f.suppressReply()
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+    const delivery = f.deliver(f.executor(), 'feishu-alice', 'unknown-timeout')
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(f.inputs.length, 1)
+    t.mock.timers.tick(5 * 60 * 1000)
+    await delivery
+    const receipt = await f.db.driver.get('SELECT status FROM moss_im_deliveries WHERE message_id = ?', ['unknown-timeout'])
+    assert.equal(receipt!.status, 'unknown')
+    assert.match(f.sends.at(-1)!.text, /结果尚未确认/)
+    assert.match(f.sends.at(-1)!.text, /不要重复发送操作指令/)
+    assert(!f.sends.at(-1)!.text.includes('Please try again'))
+    assert.equal(f.inputs.length, 1, 'a timeout never replays the input')
+  } finally { t.mock.timers.reset(); f.sockets.forEach(socket => socket.emit('close')); f.raw.close() }
+})
+
+void test('an idle member conversation obtains fresh internal credentials before its next input without replacing history', async () => {
+  const f = await fixture()
+  try {
+    await f.service.bind(f.auth('alice'), (await f.service.issueChallenge(f.connection, 'feishu-alice'))!)
+    const executor = f.executor()
+    await f.deliver(executor, 'feishu-alice', 'before-idle')
+    const originalSession = f.inputs[0]!.sessionId
+    f.expireChannels()
+    await f.deliver(executor, 'feishu-alice', 'after-idle')
+    assert.equal(f.sockets.length, 2, 'each new turn has a newly authenticated internal channel')
+    assert.equal(f.created.length, 1, 'renewing transport cannot replace the durable conversation')
+    assert.equal(f.inputs.length, 2)
+    assert.equal(f.inputs[1]!.sessionId, originalSession)
+    assert(f.sends.at(-1)!.text.includes('Member reply'))
   } finally { f.sockets.forEach(socket => socket.emit('close')); f.raw.close() }
 })
 

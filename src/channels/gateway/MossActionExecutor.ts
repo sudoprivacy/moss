@@ -25,6 +25,8 @@ import { ResourceAccessError } from '../../server/catalog/resourceError.js';
 
 type Platform = 'telegram' | 'lark' | 'dingtalk' | 'wechat' | 'wecom';
 
+const MEMBER_DELIVERY_UNCONFIRMED = '本条消息可能已执行，结果尚未确认。请先在 Moss 会话历史中核对，不要重复发送操作指令。';
+
 interface ChannelSessionState {
   sessionId: string;
   socket: InternalSessionChannel | null;
@@ -273,11 +275,12 @@ export class MossActionExecutor {
         sessionId = previous ?? await this.newMossSession(verifiedRoute, key);
         if (!previous) await identity.setPointer(verifiedRoute, event.chatId, sessionId, null);
         await this.requireMossSession(verifiedRoute, sessionId);
-        let state = this.channelSessions.get(key);
-        if (!state || state.sessionId !== sessionId || !state.socket || state.socket.destroyed) {
-          state?.socket?.destroy();
-          state = await this.reconnectRuntimeSession(key, sessionId);
-        }
+        // Internal channel credentials expire after two minutes and are checked
+        // before each input frame. A cached open socket cannot prove that its
+        // credentials are still usable. Reconnect before this new turn, retaining
+        // the same durable Session; never retry an input after dispatch.
+        this.channelSessions.get(key)?.socket?.destroy();
+        const state = await this.reconnectRuntimeSession(key, sessionId);
         const isKnown = await this.sendRuntimeMessage('lark', key, state, neutralizeUntrustedMarkup(text), sendFn, editFn, async () => {
           await this.pluginManager.requireCurrentReceiver(plugin);
           await identity.assertRoute(verifiedRoute);
@@ -304,7 +307,7 @@ export class MossActionExecutor {
         status: error instanceof ResourceAccessError ? error.statusCode : 'unavailable',
       });
       await sendFn({ type: 'text', parseMode: 'HTML', text: isDispatching
-        ? '本条消息可能已执行，结果尚未确认。请先在 Moss 会话历史中核对，不要重复发送操作指令。'
+        ? MEMBER_DELIVERY_UNCONFIRMED
         : '身份、权限或会话暂时不可用；本条消息未送入模型。请在 Moss 中核对绑定、使用权和会话后再发送。' });
     }
   }
@@ -470,7 +473,9 @@ export class MossActionExecutor {
       const timeout = setTimeout(() => {
         isTimedOut = true;
         channelState!.isProcessing = false;
-        resolve(channelState!.responseText || 'Response timed out. Please try again.');
+        resolve(beforeInput
+          ? [channelState!.responseText, MEMBER_DELIVERY_UNCONFIRMED].filter(Boolean).join('\n\n')
+          : channelState!.responseText || 'Response timed out. Please try again.');
       }, 5 * 60 * 1000);
 
       const checkInterval = setInterval(() => {
