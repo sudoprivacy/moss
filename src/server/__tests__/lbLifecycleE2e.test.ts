@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 // Every case passes 60_000 as bun:test's per-case timeout (third argument):
 // each spawns a real server process (DB migrations + service init take 3-8s on
 // Windows), far beyond the 5s default.
-import { mkdtemp, rm, writeFile, symlink } from 'fs/promises'
+import { mkdtemp, readFile, rm, writeFile, symlink } from 'fs/promises'
 import { createServer } from 'net'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'
@@ -337,13 +337,17 @@ it('legacy external task schema rejects real server startup before readiness', a
 }, 30_000)
 
 it('egress management uses real HTTP authentication, scoped revisions and durable organization inheritance', async () => {
-  const fixture = await startFixture()
+  const fixture = await startFixture({ MOSS_TEST_EGRESS_CONTROL_CREDENTIAL: '1' })
   const request = (path: string, token = fixture.token, method = 'GET', body?: unknown) => fetch(`${fixture.baseUrl}${path}`, {
     method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
   const path = '/api/v1/settings/egress'
   expect((await fetch(`${fixture.baseUrl}${path}`)).status).toBe(401)
+  const delegated = JSON.parse(await readFile(join(fixture.rootDir, 'egress-control-token.json'), 'utf8')) as { token: string }
+  // A valid delegated credential retains its narrow audience even for an admin parent.
+  expect((await request(`${path}?scope=platform`, delegated.token)).status).toBe(401)
+  expect((await request(`${path}/apply?scope=platform`, delegated.token, 'POST', {})).status).toBe(401)
   const initial = await request(`${path}?scope=platform`)
   expect(initial.status).toBe(200)
   expect(initial.headers.get('cache-control')).toBe('no-store')
@@ -351,6 +355,9 @@ it('egress management uses real HTTP authentication, scoped revisions and durabl
   expect(baseline.policy.enabled).toBe(false)
   expect(baseline.runtimes.every(item => !(item as { isPresent: boolean }).isPresent)).toBe(true)
   const protectedPolicy = { ...baseline.policy, enabled: true, modelMounts: ['/model'] }
+  expect((await request(`${path}?scope=platform`, delegated.token, 'PUT', {
+    policy: protectedPolicy, expectedRevision: baseline.policy.revision,
+  })).status).toBe(401)
   const saved = await request(`${path}?scope=platform`, fixture.token, 'PUT', { policy: protectedPolicy, expectedRevision: baseline.policy.revision })
   expect(saved.status, await saved.clone().text()).toBe(200)
   const platform = await saved.json() as typeof baseline
