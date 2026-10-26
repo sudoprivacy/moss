@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: sudoprivacy/ai-dev-browser
-          ref: d461f887985ed03373dd33799469338a00a2ed25 # ai-dev-browser v0.58.6.
+          ref: a264d91196de1c74bf59c0caa117f23796d7310c # ai-dev-browser v0.58.9.
           path: adb-core
       - uses: actions/checkout@v4
         with:
@@ -89,7 +89,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm --init --network none --pids-limit 384 --memory 1536m --cpus 1 \
+          docker run --rm --init --network none --pids-limit 384 --memory 1536m --cpus 1 --cpuset-cpus 0 \
             --cap-drop ALL --security-opt no-new-privileges --shm-size 256m \
             --mount "type=bind,source=$PWD/adb-core/tests,target=/opt/sdk-acceptance/tests,readonly" \
             --mount "type=bind,source=$PWD/adb-core/pyproject.toml,target=/opt/sdk-acceptance/pyproject.toml,readonly" \
