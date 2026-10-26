@@ -66,16 +66,13 @@ jobs:
       - name: Verify external provider concurrency on real PostgreSQL
         run: node --import tsx --test src/server/externalProviders/externalProviders.pg-test.ts src/server/agentFederation/*.pg-test.ts src/server/agentFederation/provider/*.pg-test.ts
 
-      # `scripts/e2e/session-owner-live.ts` needs a live auth-on daemon and an
-      # operator's node certificate, so CI cannot run it. Keeping it compiling
-      # is what stops it rotting into something nobody can run — and it lives
-      # here rather than beside the `node --check` lines because, unlike those,
-      # it needs node_modules.
+      # Runtime acceptance entrypoints share the installed SDK and production types.
       - name: Keep the live e2e scripts compiling
         run: |
           node node_modules/typescript/bin/tsc --noEmit --module nodenext --resolveJsonModule \
             --moduleResolution nodenext --target es2022 --skipLibCheck \
-            scripts/e2e/session-owner-live.ts scripts/e2e/cohost-two-sessions.ts \
+            scripts/e2e/session-owner-live.ts scripts/e2e/run-session-owner-live.ts \
+            scripts/e2e/cohost-two-sessions.ts \
             scripts/e2e/cohost-session-recovery.ts \
             scripts/e2e/cohost-real-model-workflow.ts scripts/e2e/cohost-model-bootstrap.ts \
             scripts/e2e/cohost-owner-keys.ts scripts/e2e/user-pod-runtime.ts \
@@ -134,6 +131,17 @@ jobs:
         run: bun build --target=node scripts/e2e/embedded-nexus-live.ts --outfile bin/embedded-nexus-live.mjs
       - name: Verify real startup and vault persistence across restart
         run: node bin/embedded-nexus-live.mjs
+        env:
+          MOSS_NEXUS_LIVE_ARTIFACTS: ${{ runner.temp }}/moss-runtime-evidence
+      - name: Verify authenticated session ownership on a real isolated daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun build --target=node scripts/e2e/session-owner-live.ts --outfile bin/session-owner-live.mjs
+          bun build --target=node scripts/e2e/run-session-owner-live.ts --outfile bin/run-session-owner-live.mjs
+          binary="$PWD/bin/nexus/nexusd"
+          if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          node bin/run-session-owner-live.mjs "$binary" "$PWD/bin/session-owner-live.mjs"
         env:
           MOSS_NEXUS_LIVE_ARTIFACTS: ${{ runner.temp }}/moss-runtime-evidence
       - name: Verify upgrade and rollback from the cloud broker version

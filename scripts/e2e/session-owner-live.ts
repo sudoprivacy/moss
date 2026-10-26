@@ -1,31 +1,9 @@
-/**
- * Live end-to-end for moss's session-credential half, against a real daemon.
- *
- * What was previously only unit-tested is the composition: mint a credential,
- * dial as it, and send NO owner_id. A unit test can show `ownerField` returns
- * `{}`; only a daemon can show that nexus then records the right person. This
- * drives moss's own exported functions — not a hand-written probe — and reads
- * the answer back with `get_session_v1`, which is the only party that can say
- * what was actually stored.
- *
- * Needs a real auth-on daemon, so CI cannot run it; CI only checks that it
- * still parses, which keeps it from rotting into something nobody can run.
- *
- * Boot one and run it:
- *
- *   nexusd-cluster --cluster-init citest --hostname e2e --advertise-addr 127.0.0.1:22131
- *     --data-dir <d> --identity-dir <i>
- *   npx tsx scripts/e2e/session-owner-live.ts <d>/tls 127.0.0.1:22131
- *
- * The assertion that matters is the pair: moss sends an EMPTY body, and the
- * daemon still records the right person. Verified to discriminate — dialling
- * with moss's own certificate instead (no owner SAN, same empty body) records
- * `system`, so the owner demonstrably comes from the certificate and not from
- * somewhere that would have agreed by accident.
- */
+/** Verify certificate-bound session ownership through Moss and a real mTLS daemon. */
+import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 import grpc from '@grpc/grpc-js'
 import protoLoader from '@grpc/proto-loader'
@@ -34,91 +12,116 @@ import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 import { mintSessionIdentity, ownerField } from '../../src/server/nexus/sessionIdentity.js'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
 
-const TLS = process.argv[2]
-const ENDPOINT = process.argv[3]
-const SN = 'nexus-node'
-const USER = `e2e-user-${process.pid}`
-const AGENT = `moss-e2e-${process.pid}`
-
-let failures = 0
-const expect = (label: string, ok: boolean, detail?: unknown) => {
-  // Detail only on failure: printing it on a pass made `alice != alice` read like one.
-  console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}${ok || detail === undefined ? '' : ` — ${String(detail)}`}`)
-  if (!ok) failures += 1
-}
-
-// --- operator side: the allow-list is node-gated, so raw gRPC as the node ---
-// The protos ship inside the client package, so this reads the same bytes the
-// daemon was built from rather than a second copy that could drift.
-const PROTO_DIR = join(process.cwd(), 'node_modules', '@nexus-ai-fs', 'vfs-client', 'proto')
+const [tlsDirectory, endpoint] = process.argv.slice(2)
+assert(tlsDirectory && endpoint, 'Node TLS directory and endpoint are required')
+const user = `e2e-user-${process.pid}`
+const agentId = `moss-e2e-${process.pid}`
+const protoDirectory = join(process.cwd(), 'node_modules', '@nexus-ai-fs', 'vfs-client', 'proto')
 const ZoneApi = (
-  grpc.loadPackageDefinition(
-    protoLoader.loadSync(join(PROTO_DIR, 'nexus', 'raft', 'transport.proto'), {
-      keepCase: true,
-      longs: String,
-      defaults: true,
-      includeDirs: [PROTO_DIR],
-    }),
-  ) as any
+  grpc.loadPackageDefinition(protoLoader.loadSync(join(protoDirectory, 'nexus', 'raft', 'transport.proto'), {
+    keepCase: true, longs: String, defaults: true, includeDirs: [protoDirectory],
+  })) as any
 ).nexus.raft.ZoneApiService
-const opts = { 'grpc.ssl_target_name_override': SN, 'grpc.default_authority': SN }
-const node = new ZoneApi(
-  ENDPOINT,
-  grpc.credentials.createSsl(
-    readFileSync(join(TLS, 'ca.pem')),
-    readFileSync(join(TLS, 'node-key.pem')),
-    readFileSync(join(TLS, 'node.pem')),
-  ),
-  opts,
-)
-const admin = (m: string, r: unknown): Promise<any> =>
-  new Promise(res =>
-    node[m](r, new grpc.Metadata({ waitForReady: true }), { deadline: Date.now() + 20000 }, (e: any, x: any) =>
-      res(e ? { rpcError: `${grpc.status[e.code]}: ${e.details}` } : x),
-    ),
-  )
-
-const minted = await admin('MintAgent', { subject_id: AGENT, display_name: AGENT })
-expect('operator mints the agent moss will act as', minted.success === true, minted.error ?? minted.rpcError)
-await admin('AllowSessionMinter', { agent_id: AGENT })
-
-// moss reads its own identity from disk, so put it there the way a deployment does.
-const dir = mkdtempSync(join(tmpdir(), 'moss-e2e-'))
-writeFileSync(join(dir, 'ca.pem'), minted.ca_pem)
-writeFileSync(join(dir, 'agent.pem'), minted.agent_cert_pem)
-writeFileSync(join(dir, 'agent-key.pem'), minted.agent_key_pem)
-const mossTls = { ca: join(dir, 'ca.pem'), cert: join(dir, 'agent.pem'), key: join(dir, 'agent-key.pem') }
-
-// --- moss's own code path, composed exactly as k8sBackend composes it ---
-const identity = await mintSessionIdentity(ENDPOINT, mossTls, USER)
-expect('moss mints a session credential', identity !== null, identity?.subjectId)
-if (!identity) process.exit(1)
-
-const body = ownerField(identity, USER)
-expect('moss sends NO owner_id once it holds a credential', Object.keys(body).length === 0, JSON.stringify(body))
-
-const starter = NexusVfsClient.withMtls(ENDPOINT, identity.tls)
-const agent = new ManagedAgentClient(starter, '')
-// A harmless spawn spec: k8sBackend always supplies one (kubectl), so leaving
-// it out would exercise a shape moss never sends.
-const started = await agent.startSession({
-  agentId: 'scode-standard',
-  ...body,
-  spawnSpec: { cmd: 'cmd', args: ['/c', 'exit', '0'], env: {}, cwd: process.cwd() },
+const node = new ZoneApi(endpoint, grpc.credentials.createSsl(
+  readFileSync(join(tlsDirectory, 'ca.pem')),
+  readFileSync(join(tlsDirectory, 'node-key.pem')),
+  readFileSync(join(tlsDirectory, 'node.pem')),
+), { 'grpc.ssl_target_name_override': 'nexus-node', 'grpc.default_authority': 'nexus-node' })
+const admin = (method: string, request: unknown): Promise<any> => new Promise((resolve, reject) => {
+  node[method](request, new grpc.Metadata({ waitForReady: true }), { deadline: Date.now() + 20_000 },
+    (error: grpc.ServiceError | null, value: unknown) => error ? reject(error) : resolve(value))
 })
-expect('start_session succeeds', typeof started.sessionId === 'string' && started.sessionId.length > 0, started.sessionId)
 
-// --- the assertion that only a daemon can answer ---
-const recorded = await (agent as any).call('managed_agent.get_session_v1', { session_id: started.sessionId })
-expect(
-  'nexus recorded the user moss never named',
-  recorded?.owner_id === USER,
-  `owner_id=${recorded?.owner_id} expected=${USER}`,
-)
-expect('and it is not the "system" default', recorded?.owner_id !== 'system', recorded?.owner_id)
+const clients: ManagedAgentClient[] = []
+const sessions: Array<{ client: ManagedAgentClient; id: string }> = []
+function refusal(error: unknown, code: number | undefined, fragments: string[]): boolean {
+  if (!(error instanceof Error)) return false
+  try {
+    const response: { code: number; message: string } = JSON.parse(error.message)
+    return typeof response.code === 'number' && response.code < 0
+      && (code === undefined || response.code === code) && typeof response.message === 'string'
+      && fragments.every(fragment => response.message.includes(fragment))
+  } catch { return false }
+}
+async function start(client: ManagedAgentClient, input: Parameters<ManagedAgentClient['startSession']>[0]) {
+  const session = await client.startSession(input)
+  sessions.push({ client, id: session.sessionId })
+  return session
+}
+let failure: unknown
+try {
+  // The transport starts before the replicated issuer store is bound.
+  const readyDeadline = Date.now() + 20_000
+  let isIssuerReady = false
+  while (Date.now() < readyDeadline) {
+    const state = await admin('ListSessionMinters', {})
+    if (state.success) {
+      isIssuerReady = true
+      break
+    }
+    assert.equal(state.error, 'this node has no session-mint plane (auth-off)',
+      'unexpected issuer readiness failure')
+    await delay(100)
+  }
+  assert(isIssuerReady, 'the authenticated issuer store must become ready')
+  const minted = await admin('MintAgent', { subject_id: agentId, display_name: agentId })
+  assert.equal(minted.success, true, `the Node operator must mint the Moss Agent: ${minted.error ?? 'missing result'}`)
+  const allowed = await admin('AllowSessionMinter', { agent_id: agentId })
+  assert.equal(allowed.success, true, 'the Node operator must authorize the session issuer')
 
-await agent.cancel(started.sessionId).catch(() => {})
-starter.close()
-node.close()
-console.log(`\n${failures === 0 ? 'ALL ASSERTIONS PASSED' : `${failures} FAILED`}`)
-process.exit(failures === 0 ? 0 : 1)
+  const directory = mkdtempSync(join(tmpdir(), 'moss-session-owner-'))
+  for (const [name, value] of Object.entries({
+    'ca.pem': minted.ca_pem, 'agent.pem': minted.agent_cert_pem, 'agent-key.pem': minted.agent_key_pem,
+  })) writeFileSync(join(directory, name), value as string, { mode: 0o600 })
+  const mossTls = { ca: join(directory, 'ca.pem'), cert: join(directory, 'agent.pem'),
+    key: join(directory, 'agent-key.pem'), serverName: 'nexus-node' }
+  const identity = await mintSessionIdentity(endpoint, mossTls, user)
+  assert(identity, 'Moss must mint a user-bound session credential')
+  const body = ownerField(identity, user)
+  assert.deepEqual(body, {}, 'the proven owner is supplied by the certificate')
+
+  // Keep each child alive until its ownership is inspected and explicitly cancelled.
+  const childEnvironment: Record<string, string> = {}
+  if (process.platform === 'win32') {
+    assert(process.env.SystemRoot, 'Windows Node requires its system directory for cryptographic initialization')
+    childEnvironment.SystemRoot = process.env.SystemRoot
+  }
+  const spawnSpec = { cmd: process.execPath,
+    args: ['-e', 'setTimeout(() => process.exit(0), 90000); setInterval(() => {}, 1000)'],
+    env: childEnvironment, cwd: process.cwd() }
+  const delegated = new ManagedAgentClient(NexusVfsClient.withMtls(endpoint, identity.tls), '')
+  clients.push(delegated)
+  const started = await start(delegated, { agentId: 'scode-standard', ...body, spawnSpec })
+  const recorded = await delegated.getSession(started.sessionId)
+  assert.equal(recorded.owner_id, user, 'Nexus must derive the owner from the credential')
+
+  await assert.rejects(start(delegated, { agentId: 'scode-standard', ownerId: `${user}-foreign`, spawnSpec }),
+    error => refusal(error, undefined, ['owner_id', 'credential', user, `${user}-foreign`]),
+    'a caller must not replace its authenticated owner through the body')
+
+  const otherIdentity = await mintSessionIdentity(endpoint, mossTls, `${user}-other`)
+  assert(otherIdentity)
+  const other = new ManagedAgentClient(NexusVfsClient.withMtls(endpoint, otherIdentity.tls), '')
+  clients.push(other)
+  await assert.rejects(other.getSession(started.sessionId),
+    error => refusal(error, undefined, ['session owner does not match the caller\'s credential']),
+    'a different authenticated owner must be refused session inspection')
+
+  const control = new ManagedAgentClient(NexusVfsClient.withMtls(endpoint, mossTls), '')
+  clients.push(control)
+  await assert.rejects(start(control, { agentId: 'scode-standard', spawnSpec }),
+    error => refusal(error, -32003, ['zone_id', 'explicitly granted']),
+    'a bare issuer certificate cannot impersonate a delegated session')
+  process.stdout.write('PASS: certificate owns its session; forged body, foreign certificate and bare issuer are refused\n')
+} catch (error) {
+  failure = error
+  throw error
+} finally {
+  const stopped = await Promise.allSettled(sessions.map(session => session.client.cancel(session.id)))
+  clients.forEach(client => client.close())
+  node.close()
+  const rejected = stopped.filter(result => result.status === 'rejected')
+  if (rejected.length) throw new AggregateError([
+    ...(failure ? [failure] : []), ...rejected.map(result => result.reason),
+  ], 'every owned child must be cancelled')
+}

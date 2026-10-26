@@ -6,6 +6,8 @@ import multiprocessing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -80,6 +82,27 @@ class DownloadTests(unittest.TestCase):
 
 
 class PublicationGateTests(unittest.TestCase):
+    def utf8_cli(self, output, exit_code=0):
+        """Decode actual child output using the caller's encoding or a Windows GBK default."""
+        run = subprocess.run
+        payload = output.encode('utf-8').hex()
+        script = 'import os;os.write(' + str(2 if exit_code else 1) + ',bytes.fromhex(' + repr(payload) + '));raise SystemExit(' + str(exit_code) + ')'
+        def command(_arguments, **kwargs):
+            kwargs.setdefault('encoding', 'gbk')
+            return run([sys.executable, '-c', script], **kwargs)
+        return patch.object(subprocess, 'run', side_effect=command)
+
+    def test_github_json_uses_utf8_with_a_windows_console_default(self):
+        expected = {'title': '\u6743\u9650\u2713', 'source': 'reviewed'}
+        with self.utf8_cli(json.dumps(expected, ensure_ascii=False)):
+            self.assertEqual(publication.api('actions/runs'), expected)
+
+    def test_github_failure_retains_utf8_diagnostics(self):
+        message = '\u6743\u9650\u2713: HTTP 403'
+        with self.utf8_cli(message, exit_code=1):
+            with self.assertRaisesRegex(RuntimeError, message):
+                publication.api('actions/runs')
+
     def runs(self):
         return [{'workflow_id': index, 'id': index, 'run_attempt': 1, 'path': name + '.yml',
                  'name': name, 'status': 'completed', 'conclusion': 'success'}

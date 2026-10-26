@@ -19,7 +19,7 @@ SELF_WORKFLOW = '.github/workflows/publish-gvisor.yml'
 
 def gh(arguments, optional=False):
     """Use the workflow's GitHub identity without moving tokens into command arguments."""
-    result = subprocess.run(['gh', *arguments], capture_output=True, text=True, check=False)
+    result = subprocess.run(['gh', *arguments], capture_output=True, text=True, encoding='utf-8', check=False)
     if result.returncode:
         if optional and 'HTTP 404' in result.stderr:
             return None
