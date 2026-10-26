@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { AGENT_CONTROL_PROTOCOL, agentControlCatalog, agentControlActionSchema,
+import { AGENT_CONTROL_PROTOCOL, agentControlCatalog, agentControlActionSchema, deploymentPlanSchema,
   type AgentControlAction } from './contract.js'
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/)
 export const nativeControlConfigSchema = z.object({
   protocol: z.literal(AGENT_CONTROL_PROTOCOL), origin: z.string(), accessToken: z.string().min(1).max(8192).regex(/^[A-Za-z0-9_.-]+$/),
   delegationId: id, deploymentId: id, expiresAt: z.number().int().positive(),
-  actions: z.array(agentControlActionSchema).min(1).max(4),
+  actions: z.array(agentControlActionSchema).min(1).max(5),
+  deploymentPlans: z.array(deploymentPlanSchema).min(1).max(20).optional(),
 }).strict()
 export type NativeControlConfig = z.infer<typeof nativeControlConfigSchema>
 type ControlFetch = (url: string, init: RequestInit) => Promise<Response>

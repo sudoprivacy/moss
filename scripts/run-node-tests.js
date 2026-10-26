@@ -25,6 +25,7 @@ const nodeTestFiles = [
   'src/server/auth/agentControlAudience.node-test.ts',
   'src/server/agentControl/managedActor.node-test.ts',
   'src/server/agentControl/service.node-test.ts',
+  'src/server/agentControl/deviceDeploy.node-test.ts',
   'src/server/agentControl/routes.node-test.ts',
   'src/server/agentControl/nativeClient.node-test.ts',
   'src/server/nexus/agentNamespace.node-test.ts',

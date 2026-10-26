@@ -18,7 +18,7 @@ export async function installNativeControlPlugin(directory: string, origin: stri
   const config = nativeControlConfigSchema.parse({ protocol: AGENT_CONTROL_PROTOCOL, origin,
     accessToken: issued?.credential?.accessToken, delegationId: issued?.delegation?.id,
     deploymentId: issued?.delegation?.target?.deploymentId, expiresAt: issued?.delegation?.expiresAt,
-    actions: issued?.delegation?.actions })
+    actions: issued?.delegation?.actions, deploymentPlans: issued?.delegation?.deploymentPlans })
   const client = new NativeControlClient(config)
   const actions = await client.capabilities()
   if (actions.length === 0) throw new Error('No currently authorized control tools')
@@ -36,7 +36,7 @@ export async function installNativeControlPlugin(directory: string, origin: stri
   await mkdir(join(root, '.sudocode-plugin'), { mode: 0o700 })
   await copyFile(runtimeFile, join(root, 'control.mjs'), constants.COPYFILE_EXCL)
   await writeFile(join(root, 'control.json'), JSON.stringify(config) + '\n', { flag: 'wx', mode: 0o600 })
-  const tools = agentControlTools(actions).map<NativePluginTool>(tool => ({ name: tool.name, description: tool.description,
+  const tools = agentControlTools(actions, config.deploymentPlans).map<NativePluginTool>(tool => ({ name: tool.name, description: tool.description,
     inputSchema: tool.inputSchema, command: 'node', args: ['./control.mjs', 'tool'],
     required_permission: tool.mutating ? 'workspace-write' : 'read-only' }))
   // Querying a receipt never repeats the effect; this is the recovery path

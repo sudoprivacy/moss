@@ -8,6 +8,7 @@ import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { AgentManager } from './agentManager.js'
 import { AgentManagementOperations } from './agentManagementOperations.js'
+import { DeviceDeployClient } from './agentControl/deviceDeploy.js'
 import { dispatchAgentControl, isAgentControlPath } from './agentControl/routes.js'
 import { isMossRuntimeAgentName, mossAgentName, sessionAgentName } from './agentIdentity.js'
 import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
@@ -2077,6 +2078,7 @@ export function startServer(
       actor: (sessionId, userId, orgId) => runtime.inspectManagedControlActor(sessionId, userId, orgId),
       actorCurrent: (actor, orgId) => runtime.assertManagedControlActorCurrent(actor, orgId),
       operations: agentOperations,
+      deviceDeploy: DeviceDeployClient.configured(),
     }) : undefined
   const privateAgentArchives = new PrivateAgentArchives(join(config.rootDir, 'private-agent-archives'))
   const wss = new WebSocketServer({ noServer: true })

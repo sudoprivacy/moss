@@ -8,6 +8,7 @@ import { createIdentityTestRepository } from '../testing/compatibilityRepositori
 import { AGENT_CONTROL_PROTOCOL, type ManagedControlActor } from './contract.js'
 import { AgentControlService } from './service.js'
 import { AgentControlStore } from './store.js'
+import type { DeviceDeployEffect, DeviceDeployPort } from './deviceDeploy.js'
 
 async function fixture(t: TestContext) {
   const raw = new DatabaseSync(':memory:'), db = new AuthCenterDb(raw)
@@ -49,6 +50,91 @@ async function fixture(t: TestContext) {
   const invocation = { protocol: AGENT_CONTROL_PROTOCOL, operationId: 'native-command-original', action: 'agents.spawn', arguments: { agent: 'existing-agent' } }
   return { raw, db, auth, user, login, actor, state, store, deps, service, request, issued, token, invocation }
 }
+
+async function deviceFixture(t: TestContext) {
+  const f = await fixture(t)
+  const state = { sha256: 'a'.repeat(64), submits: 0, queries: 0, lost: false, completed: false,
+    effect: undefined as DeviceDeployEffect | undefined }
+  const receipt = (effect: DeviceDeployEffect) => ({ ...effect, schemaVersion: 1, action: 'runtime.deploy',
+    status: state.completed ? 'completed' : 'unknown', outcome: state.completed ? 'completed' : 'unknown',
+    domainJoinAccepted: false, selectionAccepted: state.completed, productQualificationAccepted: state.completed,
+    runnerSha256: 'c'.repeat(64), implementationSha256: 'd'.repeat(64), osUid: 1000,
+    unit: 'sudo-deploy-' + 'e'.repeat(40) + '.service',
+    ...(state.completed ? { originalSessionId: 'original-product-session', modelTurnsCompleted: 3,
+      nativeBindingPreserved: { ownerId: f.user.id, agentId: 'original-product-agent', durableSessionId: 'original-product-sid', repositoryPath: '/original/workspace' } } : {}) })
+  const deviceDeploy: DeviceDeployPort = {
+    inspect: async planId => {
+      if (planId !== 'product-upgrade') throw new Error('Unknown operator plan')
+      return { deploymentId: 'dgx-fixture', ownerId: f.user.id, planId, planSha256: state.sha256, description: 'Original product update' }
+    },
+    submit: async effect => { state.submits++; state.effect = effect; if (state.lost) throw new Error('Lost systemd submission response'); return receipt(effect) },
+    query: async effect => { state.queries++; assert.deepEqual(effect, state.effect); return receipt(effect) },
+  }
+  const deps = { ...f.deps, deviceDeploy }
+  const service = new AgentControlService(f.store, deps)
+  const request = { ...f.request, actions: ['runtime.deploy'], deploymentPlans: [{ planId: 'product-upgrade', sha256: state.sha256 }] }
+  const issued = await service.issue(f.login.access_token, request)
+  const invocation = { ...f.invocation, action: 'runtime.deploy', arguments: { planId: 'product-upgrade' } }
+  return { ...f, state, deps, service, request, issued, invocation, token: issued.credential.accessToken, receipt }
+}
+
+void test('device deploy needs current administrator scope and an explicit matching operator plan', async t => {
+  const f = await deviceFixture(t)
+  await assert.rejects(f.service.issue(f.login.access_token, { ...f.request, deploymentPlans: undefined }))
+  await assert.rejects(f.service.issue(f.login.access_token, { ...f.request, deploymentPlans: [{ planId: 'product-upgrade', sha256: 'b'.repeat(64) }] }))
+  await assert.rejects(f.service.invoke(f.token, { ...f.invocation, arguments: { planId: 'unapproved' } }))
+  await assert.rejects(f.service.invoke(f.token, { ...f.invocation, arguments: { planId: 'product-upgrade', command: 'shell' } }))
+  const capabilities = await f.service.capabilities(f.token)
+  assert.deepEqual((capabilities.tools[0].inputSchema as any).properties.planId.enum, ['product-upgrade'])
+  f.deps.authority.member = async () => ({ status: 'active', role: 'admin', scopes: ['sessions:list', 'sessions:attach'] })
+  await assert.rejects(f.service.invoke(f.token, f.invocation))
+  assert.equal(f.state.submits, 0)
+})
+
+void test('a device job survives controller replacement and human receipt recovery after grant revocation', async t => {
+  const f = await deviceFixture(t)
+  f.state.lost = true
+  const initial = await f.service.invoke(f.token, f.invocation)
+  assert.equal(initial.outcome, 'unknown'); assert.equal(f.state.submits, 1)
+  assert.deepEqual(initial.audit.deviceEffect, f.state.effect)
+  assert.match(f.state.effect!.operationId, /^moss-[a-f0-9]{64}$/)
+  const restarted = new AgentControlService(new AgentControlStore(f.db.driver), f.deps)
+  await restarted.revoke(f.login.access_token, f.issued.delegation.id)
+  f.deps.actorCurrent = async () => { throw new Error('Original actor exited during deploy') }
+  f.state.completed = true
+  const recovered = await restarted.operation(f.login.access_token, f.invocation.operationId)
+  assert.equal(recovered.outcome, 'completed')
+  assert.equal(recovered.errorCode, undefined)
+  assert.equal((recovered.result as any).originalSessionId, 'original-product-session')
+  assert.equal((recovered.result as any).domainJoinAccepted, false)
+  assert.equal(f.state.submits, 1); assert.equal(f.state.queries, 1)
+  await assert.rejects(restarted.invoke(f.token, f.invocation))
+})
+
+void test('approval changes refuse a new deploy and a mismatched queried receipt cannot complete an existing job', async t => {
+  const f = await deviceFixture(t)
+  f.state.sha256 = 'b'.repeat(64)
+  await assert.rejects(f.service.invoke(f.token, f.invocation))
+  assert.equal(f.state.submits, 0)
+  assert.equal(await f.store.operation('org-a', f.invocation.operationId), null)
+  f.state.sha256 = 'a'.repeat(64)
+  const pending = await f.service.invoke(f.token, f.invocation)
+  assert.equal(pending.outcome, 'unknown')
+  f.state.completed = true
+  f.deps.deviceDeploy.query = async effect => ({ ...f.receipt(effect), planSha256: 'f'.repeat(64) })
+  const recovered = await f.service.operation(f.login.access_token, f.invocation.operationId)
+  assert.equal(recovered.outcome, 'unknown')
+  assert.equal(f.state.submits, 1)
+})
+
+void test('concurrent original device commands reserve one external job and never replay it', async t => {
+  const f = await deviceFixture(t)
+  const results = await Promise.all([f.service.invoke(f.token, f.invocation), f.service.invoke(f.token, f.invocation)])
+  assert.equal(f.state.submits, 1)
+  assert.ok(results.every(value => value.outcome === 'unknown'))
+  await f.service.invoke(f.token, f.invocation)
+  assert.equal(f.state.submits, 1)
+})
 
 void test('purpose-bound real Moss credentials cannot log in or acquire undelegated tools', async t => {
   const f = await fixture(t)
