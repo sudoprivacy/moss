@@ -2,6 +2,7 @@ name: gVisor storage qualification
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'deploy/runtime/gvisor/**'
       - 'scripts/e2e/gvisor-sync/**'
@@ -19,6 +20,8 @@ permissions:
 
 jobs:
   sync-errors:
+    # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: Host sync error propagation
     runs-on: ubuntu-24.04
     timeout-minutes: 90
