@@ -83,6 +83,7 @@
 
     "broadcastApiKey": "对方提供的 hardware api key",
     "broadcastEnabled": true,
+    "conversationSeatAudioEnabled": false,
     "broadcastTtsVersion": "flight-phase-v1",
 
     "healthReportEnabled": true,

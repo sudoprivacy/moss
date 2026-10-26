@@ -210,6 +210,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       broadcastApiKey: z.string().optional(),
       broadcastAuth: z.string().optional(),
       broadcastEnabled: z.boolean().default(true),
+      conversationSeatAudioEnabled: z.boolean().default(false),
       broadcastTtsCacheDir: z.string().optional(),
       broadcastTtsVersion: z.string().default('flight-phase-v1'),
       automationLogFile: z.string().optional(),
@@ -244,6 +245,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       controlTimeoutMs: 10_000,
       automationEnabled: false,
       broadcastEnabled: true,
+      conversationSeatAudioEnabled: false,
       broadcastTtsVersion: 'flight-phase-v1',
       healthReportEnabled: false,
       healthReportCollectSeconds: 30,
@@ -385,6 +387,7 @@ export type ServerConfig = {
     broadcastApiKey?: string
     broadcastAuth?: string
     broadcastEnabled?: boolean
+    conversationSeatAudioEnabled?: boolean
     broadcastTtsCacheDir?: string
     broadcastTtsVersion?: string
     automationLogFile?: string

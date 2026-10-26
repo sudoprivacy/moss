@@ -4,6 +4,8 @@ import { readFile } from 'fs/promises'
 import type { CabinConfig } from './types.js'
 import { fetchWithTimeout } from './http.js'
 
+type FetchLike = typeof fetch
+
 export type CabinBroadcastResult = {
   ok: boolean
   skipped?: boolean
@@ -15,7 +17,10 @@ export type CabinBroadcastResult = {
 }
 
 export class CabinBroadcastClient {
-  constructor(private readonly config: CabinConfig) {}
+  constructor(
+    private readonly config: CabinConfig,
+    private readonly fetchImpl: FetchLike = fetch,
+  ) {}
 
   isConfigured(): boolean {
     return this.config.broadcastEnabled !== false &&
@@ -40,11 +45,54 @@ export class CabinBroadcastClient {
       form.set('file', new Blob([new Uint8Array(audio)], { type: 'audio/wav' }), basename(input.filePath))
       form.set('title', input.title)
       form.set('aircraftNo', input.aircraftNo)
-      const response = await fetchWithTimeout(fetch, url, {
+      const response = await fetchWithTimeout(this.fetchImpl, url, {
         method: 'POST',
         headers: this.headers(),
         body: form,
       }, this.config.controlTimeoutMs ?? 10_000, 'broadcast audio-all')
+      const payload = await parseResponse(response)
+      return {
+        ok: response.ok && isOkEnvelope(payload),
+        status: response.status,
+        payload,
+        elapsedMs: Date.now() - start,
+        url,
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        elapsedMs: Date.now() - start,
+        error: stringifyError(error),
+        url,
+      }
+    }
+  }
+
+  async sendAudioSeat(input: {
+    audio: Buffer
+    filename: string
+    contentType: string
+    title: string
+    aircraftNo: string
+    seatNo: string
+  }): Promise<CabinBroadcastResult> {
+    const baseUrl = this.baseUrl()
+    if (!this.isConfigured() || !baseUrl) {
+      return { ok: false, skipped: true, elapsedMs: 0, error: 'broadcast API is not configured' }
+    }
+    const url = `${baseUrl}/admin-api/cabin/broadcast/audio-seat`
+    const start = Date.now()
+    try {
+      const form = new FormData()
+      form.set('file', new Blob([new Uint8Array(input.audio)], { type: input.contentType }), input.filename)
+      form.set('title', input.title)
+      form.set('aircraftNo', input.aircraftNo)
+      form.set('seatNo', input.seatNo)
+      const response = await fetchWithTimeout(this.fetchImpl, url, {
+        method: 'POST',
+        headers: this.headers(),
+        body: form,
+      }, this.config.controlTimeoutMs ?? 10_000, 'broadcast audio-seat')
       const payload = await parseResponse(response)
       return {
         ok: response.ok && isOkEnvelope(payload),
@@ -77,7 +125,7 @@ export class CabinBroadcastClient {
     const url = `${baseUrl}/admin-api/cabin/broadcast/error-seat`
     const start = Date.now()
     try {
-      const response = await fetchWithTimeout(fetch, url, {
+      const response = await fetchWithTimeout(this.fetchImpl, url, {
         method: 'POST',
         headers: {
           ...this.headers(),

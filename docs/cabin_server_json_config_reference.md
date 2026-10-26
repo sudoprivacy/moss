@@ -36,6 +36,7 @@
     "broadcastApiKey": "对方提供的 hardware api key",
     "broadcastAuth": "如对方要求则配置",
     "broadcastEnabled": true,
+    "conversationSeatAudioEnabled": false,
     "broadcastTtsCacheDir": "/app/data/cabin-broadcasts",
     "broadcastTtsVersion": "flight-phase-v1",
 
@@ -73,7 +74,7 @@ MOSS_HOST_PATH_MAP={"/data/yin/moss-cabin-gateway/moss/data":"/app/data","/data/
 | `asrUrl` | `http://127.0.0.1:8002/v1/audio/transcriptions` | 使用语音输入时必须可用 | 本地 ASR 地址 | 语音转文字接口，兼容 OpenAI transcription 风格。 | `CABIN_ASR_URL` |
 | `asrModel` | `Qwen/Qwen3-ASR-1.7B` | 否 | 现场 ASR 模型名 | ASR 请求中的模型名。 | `CABIN_ASR_MODEL` |
 | `asrApiKey` | 无 | 本地模型通常不需要 | 不配置 | ASR 服务需要 Bearer Key 时配置。 | `CABIN_ASR_API_KEY` |
-| `ttsUrl` | `http://127.0.0.1:8004/v1/audio/speech` | 飞行阶段广播必须可用 | 本地 TTS 地址 | 阶段广播生成音频使用的 TTS 接口。 | `CABIN_TTS_URL` |
+| `ttsUrl` | `http://127.0.0.1:8004/v1/audio/speech` | 飞行阶段广播或服务端对话座位播报开启时必须可用 | 本地 TTS 地址 | 阶段广播和服务端对话座位播报生成音频使用的 TTS 接口。 | `CABIN_TTS_URL` |
 | `ttsModel` | `qwen3-tts` | 否 | 现场 TTS 模型名 | TTS 请求中的模型名。 | `CABIN_TTS_MODEL` |
 | `ttsVoice` | `vivian` | 否 | 客户确认的音色 | TTS 音色。改变音色会生成新的广播缓存。 | `CABIN_TTS_VOICE` |
 | `ttsLanguage` | `chinese` | 否 | `chinese` 或现场要求值 | TTS 语言参数。 | `CABIN_TTS_LANGUAGE` |
@@ -93,10 +94,11 @@ MOSS_HOST_PATH_MAP={"/data/yin/moss-cabin-gateway/moss/data":"/app/data","/data/
 | `flightStateWsReconnectMaxMs` | `30000` | 否 | `30000` | WS 指数退避的最大重连间隔。 | `CABIN_FLIGHT_STATE_WS_RECONNECT_MAX_MS` |
 | `managedSeats` | 无 | 建议配置 | `01A,01B` 或现场完整座位号列表 | 自动化托管座位列表，逗号分隔。值会原样用作硬件 target，不会自动补排号；Pad 获取 token 时也会自动写入托管座位。 | `CABIN_MANAGED_SEATS` |
 | `broadcastBaseUrl` | 无 | 通常不必配置 | 不配置或公网/内网可访问音频 URL 前缀 | Moss 对外提供已缓存 TTS 音频时使用的 URL 前缀；未配置时返回 `/v1/cabin/broadcasts/<file>`。 | `CABIN_BROADCAST_BASE_URL` |
-| `broadcastApiBaseUrl` | 无 | 使用对方广播接口时建议配置 | 对方硬件/广播服务基础地址 | 调用 `/admin-api/cabin/broadcast/audio-all` 和 `/admin-api/cabin/broadcast/error-seat` 的基础地址。不配置时回退 `controlBaseUrl`。 | `CABIN_BROADCAST_API_BASE_URL` |
+| `broadcastApiBaseUrl` | 无 | 使用对方广播接口时建议配置 | 对方硬件/广播服务基础地址 | 调用 `/admin-api/cabin/broadcast/audio-all`、`/admin-api/cabin/broadcast/audio-seat` 和 `/admin-api/cabin/broadcast/error-seat` 的基础地址。不配置时回退 `controlBaseUrl`。 | `CABIN_BROADCAST_API_BASE_URL` |
 | `broadcastApiKey` | 无 | `broadcastEnabled=true` 且要推送对方广播时必须 | 对方提供的 hardware api key | 广播接口请求头 `x-hardware-api-key`。缺失时广播请求会跳过。 | `CABIN_BROADCAST_API_KEY` |
 | `broadcastAuth` | 无 | 视对方接口而定 | 对方要求鉴权时配置 | 广播接口独立 `Authorization`。不配置时回退 `controlAuth`。 | `CABIN_BROADCAST_AUTH` |
 | `broadcastEnabled` | `true` | 否 | `true` | 是否启用对方广播接口调用。关闭后仍可生成内部告警和硬件控制。 | `CABIN_BROADCAST_ENABLED` |
+| `conversationSeatAudioEnabled` | `false` | 服务端自动向当前座位播报对话时必须为 `true` | 与 UE 播放方案二选一 | 对话回复完成后调用 `/admin-api/cabin/broadcast/audio-seat`，先由 TTS 生成音频，再按当前 `aircraftNo`、`seatNo` 定向发送。默认关闭，避免 UE 仍调用 `/v1/tts/speech` 时重复播放。 | `CABIN_CONVERSATION_SEAT_AUDIO_ENABLED` |
 | `broadcastTtsCacheDir` | 无 | 否 | `/app/data/cabin-broadcasts` | 阶段广播 TTS 音频缓存目录。不配置时默认 `<rootDir>/cabin-broadcasts`。已生成的相同文案/模型/音色/版本会复用。 | `CABIN_BROADCAST_TTS_CACHE_DIR` |
 | `broadcastTtsVersion` | `flight-phase-v1` | 否 | 客户文案版本，例如 `flight-phase-v1` | TTS 缓存版本。客户广播文案变更后建议递增，避免复用旧音频。 | `CABIN_BROADCAST_TTS_VERSION` |
 | `automationLogFile` | 无 | 否 | `/app/data/logs/cabin-automation.jsonl` | 飞行状态 WS、阶段任务、广播、告警、硬件控制、生理 WS 采样处理等自动化日志。不配置时默认 `<rootDir>/logs/cabin-automation.jsonl`。 | `CABIN_AUTOMATION_LOG_FILE` |

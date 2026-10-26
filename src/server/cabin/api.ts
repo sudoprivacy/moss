@@ -13,6 +13,7 @@ import {
   isAffirmationReply,
   looksLikeHardwareOffer,
   buildCabinComfortOffer,
+  type CabinSeatAudioPlayback,
 } from './service.js'
 import { CabinHealthReportService } from './healthReports.js'
 import { CabinStore } from './store.js'
@@ -83,6 +84,18 @@ function writeJson(res: http.ServerResponse, status: number, body: unknown): voi
 function writeSse(res: http.ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\n`)
   res.write(`data: ${JSON.stringify(data)}\n\n`)
+}
+
+function serializeAudioPlayback(playback: CabinSeatAudioPlayback): Record<string, unknown> {
+  return {
+    status: playback.status,
+    ...(playback.requestId ? { request_id: playback.requestId } : {}),
+    ...(playback.matchedCount !== undefined ? { matched_count: playback.matchedCount } : {}),
+    ...(playback.sentCount !== undefined ? { sent_count: playback.sentCount } : {}),
+    ...(playback.audioUrl ? { audio_url: playback.audioUrl } : {}),
+    elapsed_ms: playback.elapsedMs,
+    ...(playback.error ? { error: playback.error } : {}),
+  }
 }
 
 function getHeader(req: http.IncomingMessage, name: string): string | undefined {
@@ -922,6 +935,68 @@ export function createCabinApi(options: {
       source,
       content: text,
     })
+    const completeReply = async (input: {
+      reply: string
+      intent?: string | null
+      slots?: Record<string, unknown> | null
+      toolCalls?: CabinToolCall[] | null
+      emitDelta?: boolean
+      routed?: string
+      ok?: boolean
+    }): Promise<void> => {
+      const assistantMessage = store.appendMessage({
+        conversationId: conversation.id,
+        role: 'assistant',
+        source: 'agent',
+        content: input.reply,
+        intent: input.intent,
+        slots: input.slots,
+        toolCalls: input.toolCalls,
+      })
+      const audioPlayback: CabinSeatAudioPlayback = await services.speakToSeat({
+        context,
+        text: input.reply,
+        title: 'AI 对话',
+        logContext,
+      })
+      if (audioPlayback.status !== 'skipped') {
+        store.insertVoiceLog({
+          conversationId: conversation.id,
+          type: 'tts',
+          text: input.reply,
+          status: audioPlayback.status === 'sent' ? 'ok' : 'error',
+          errorMessage: audioPlayback.error,
+          elapsedMs: audioPlayback.elapsedMs,
+        })
+      }
+      cabinLogger.log({
+        type: 'outbound',
+        ...logContext,
+        upstream: 'agent-reply',
+        method: 'GENERATE',
+        ok: input.ok ?? true,
+        elapsedMs: 0,
+        details: {
+          source,
+          input_chars: text.length,
+          reply_chars: input.reply.length,
+          intent: assistantMessage.intent || '',
+          routed: input.routed,
+          execution_status: input.slots?.execution_status,
+          audio_playback: audioPlayback,
+        },
+      })
+      if (input.emitDelta !== false) {
+        writeSse(res, 'delta', { content: input.reply })
+      }
+      writeSse(res, 'done', {
+        intent: assistantMessage.intent || '',
+        slots: assistantMessage.slots || {},
+        reply_text: input.reply,
+        audio_playback: serializeAudioPlayback(audioPlayback),
+      })
+      res.end()
+    }
     const orderIntent = await services.resolveOrderIntent({ context, text, logContext })
     const pendingOrderCancellation = store.getPendingOrderCancellation(conversation.id)
     if (orderIntent || (pendingOrderCancellation && isOrderSelection(text))) {
@@ -934,38 +1009,14 @@ export function createCabinApi(options: {
       })
       const reply = normalizeCabinPassengerReply({ userText: text, reply: orderResult.reply, context })
       if (orderResult.toolCall) writeSse(res, 'tool_call', orderResult.toolCall)
-      const assistantMessage = store.appendMessage({
-        conversationId: conversation.id,
-        role: 'assistant',
-        source: 'agent',
-        content: reply,
+      await completeReply({
+        reply,
         intent: orderResult.intent,
         slots: orderResult.slots,
         toolCalls: orderResult.toolCall ? [orderResult.toolCall] : null,
-      })
-      cabinLogger.log({
-        type: 'outbound',
-        ...logContext,
-        upstream: 'agent-reply',
-        method: 'GENERATE',
+        routed: 'service-order',
         ok: orderResult.ok || orderResult.slots.execution_status === 'confirmation_required',
-        elapsedMs: 0,
-        details: {
-          source,
-          input_chars: text.length,
-          reply_chars: reply.length,
-          intent: assistantMessage.intent || '',
-          routed: 'service-order',
-          execution_status: orderResult.slots.execution_status,
-        },
       })
-      writeSse(res, 'delta', { content: reply })
-      writeSse(res, 'done', {
-        intent: assistantMessage.intent || '',
-        slots: assistantMessage.slots || {},
-        reply_text: reply,
-      })
-      res.end()
       return
     }
     const hardwareRoute = services.routeHardwareControl({ context, text })
@@ -976,37 +1027,13 @@ export function createCabinApi(options: {
         logContext,
       })
       const reply = normalizeCabinPassengerReply({ userText: text, reply: result.reply, context })
-      const assistantMessage = store.appendMessage({
-        conversationId: conversation.id,
-        role: 'assistant',
-        source: 'agent',
-        content: reply,
+      await completeReply({
+        reply,
         intent: result.intent,
         slots: result.slots,
         toolCalls: [result.toolCall],
+        routed: 'hardware-control',
       })
-      cabinLogger.log({
-        type: 'outbound',
-        ...logContext,
-        upstream: 'agent-reply',
-        method: 'GENERATE',
-        ok: true,
-        elapsedMs: 0,
-        details: {
-          source,
-          input_chars: text.length,
-          reply_chars: reply.length,
-          intent: assistantMessage.intent || '',
-          routed: 'hardware-control',
-        },
-      })
-      writeSse(res, 'delta', { content: reply })
-      writeSse(res, 'done', {
-        intent: assistantMessage.intent || '',
-        slots: assistantMessage.slots || {},
-        reply_text: reply,
-      })
-      res.end()
       return
     }
 
@@ -1025,37 +1052,13 @@ export function createCabinApi(options: {
           writeSse(res, 'tool_call', confirmedRoute.toolCall)
           const result = await services.executeHardwareControl({ route: confirmedRoute, logContext })
           const reply = normalizeCabinPassengerReply({ userText: lastAssistant.content, reply: result.reply, context })
-          const assistantMessage = store.appendMessage({
-            conversationId: conversation.id,
-            role: 'assistant',
-            source: 'agent',
-            content: reply,
+          await completeReply({
+            reply,
             intent: result.intent,
             slots: result.slots,
             toolCalls: [result.toolCall],
+            routed: 'hardware-confirm',
           })
-          cabinLogger.log({
-            type: 'outbound',
-            ...logContext,
-            upstream: 'agent-reply',
-            method: 'GENERATE',
-            ok: true,
-            elapsedMs: 0,
-            details: {
-              source,
-              input_chars: text.length,
-              reply_chars: reply.length,
-              intent: assistantMessage.intent || '',
-              routed: 'hardware-confirm',
-            },
-          })
-          writeSse(res, 'delta', { content: reply })
-          writeSse(res, 'done', {
-            intent: assistantMessage.intent || '',
-            slots: assistantMessage.slots || {},
-            reply_text: reply,
-          })
-          res.end()
           return
         }
       }
@@ -1063,34 +1066,7 @@ export function createCabinApi(options: {
 
     const comfortOffer = buildCabinComfortOffer({ context, text })
     if (comfortOffer) {
-      const assistantMessage = store.appendMessage({
-        conversationId: conversation.id,
-        role: 'assistant',
-        source: 'agent',
-        content: comfortOffer,
-      })
-      cabinLogger.log({
-        type: 'outbound',
-        ...logContext,
-        upstream: 'agent-reply',
-        method: 'GENERATE',
-        ok: true,
-        elapsedMs: 0,
-        details: {
-          source,
-          input_chars: text.length,
-          reply_chars: comfortOffer.length,
-          intent: assistantMessage.intent || '',
-          routed: 'comfort-offer',
-        },
-      })
-      writeSse(res, 'delta', { content: comfortOffer })
-      writeSse(res, 'done', {
-        intent: '',
-        slots: {},
-        reply_text: comfortOffer,
-      })
-      res.end()
+      await completeReply({ reply: comfortOffer, routed: 'comfort-offer' })
       return
     }
 
@@ -1153,42 +1129,17 @@ export function createCabinApi(options: {
       return
     }
     reply = normalizeCabinPassengerReply({ userText: text, reply, context })
-    const assistantMessage = store.appendMessage({
-      conversationId: conversation.id,
-      role: 'assistant',
-      source: 'agent',
-      content: reply,
-      intent: inferredTool?.intent ?? mossIntent,
-      slots: inferredTool?.slots ?? mossSlots,
-      toolCalls: inferredTool ? [inferredTool.toolCall] : mossToolCall ? [mossToolCall] : null,
-    })
-    cabinLogger.log({
-      type: 'outbound',
-      ...logContext,
-      upstream: 'agent-reply',
-      method: 'GENERATE',
-      ok: true,
-      elapsedMs: 0,
-      details: {
-        source,
-        input_chars: text.length,
-        reply_chars: reply.length,
-        intent: assistantMessage.intent || '',
-        routed: mossToolCall ? 'hardware-control' : undefined,
-      },
-    })
     // Deltas are streamed live only for free-chat moss turns. Control turns (mossToolCall)
     // and buffered turns emit the full reply once, after the tool_call.
     const streamedIncrementally = cabinConfig.createMossSession && !shouldBufferReply && !mossToolCall
-    if (!streamedIncrementally) {
-      writeSse(res, 'delta', { content: reply })
-    }
-    writeSse(res, 'done', {
-      intent: assistantMessage.intent || '',
-      slots: assistantMessage.slots || {},
-      reply_text: reply,
+    await completeReply({
+      reply,
+      intent: inferredTool?.intent ?? mossIntent,
+      slots: inferredTool?.slots ?? mossSlots,
+      toolCalls: inferredTool ? [inferredTool.toolCall] : mossToolCall ? [mossToolCall] : null,
+      emitDelta: !streamedIncrementally,
+      routed: mossToolCall ? 'hardware-control' : undefined,
     })
-    res.end()
   }
 
   async function handleChatSend(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {

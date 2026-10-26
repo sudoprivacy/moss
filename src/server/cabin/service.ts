@@ -28,8 +28,19 @@ import {
   type CabinOrderResult,
 } from './orders.js'
 import { fetchWithTimeout } from './http.js'
+import { CabinBroadcastClient } from './broadcastClient.js'
 
 type FetchLike = typeof fetch
+
+export type CabinSeatAudioPlayback = {
+  status: 'sent' | 'skipped' | 'failed' | 'no_online_client'
+  requestId?: string
+  matchedCount?: number
+  sentCount?: number
+  audioUrl?: string
+  elapsedMs: number
+  error?: string
+}
 
 type CabinHardwareRoute = {
   intent: string
@@ -95,10 +106,12 @@ export type CabinServicesOptions = {
 export class CabinServices {
   private readonly fetchImpl: FetchLike
   private readonly orderClient: CabinOrderClient
+  private readonly broadcastClient: CabinBroadcastClient
 
   constructor(private readonly options: CabinServicesOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch
     this.orderClient = new CabinOrderClient(options.config, this.fetchImpl, options.logger)
+    this.broadcastClient = new CabinBroadcastClient(options.config, this.fetchImpl)
   }
 
   async ensureConversation(context: CabinPassengerContext) {
@@ -844,6 +857,111 @@ export class CabinServices {
       audio: Buffer.from(arrayBuffer),
       contentType: response.headers.get('content-type') || 'audio/wav',
       elapsedMs,
+    }
+  }
+
+  async speakToSeat(input: {
+    context: CabinPassengerContext
+    text: string
+    title?: string
+    logContext?: CabinLogContext
+  }): Promise<CabinSeatAudioPlayback> {
+    const startedAt = Date.now()
+    if (this.options.config.conversationSeatAudioEnabled !== true) {
+      return { status: 'skipped', elapsedMs: 0, error: 'conversation seat audio is disabled' }
+    }
+    if (!this.broadcastClient.isConfigured()) {
+      return { status: 'skipped', elapsedMs: 0, error: 'broadcast API is not configured' }
+    }
+
+    const aircraftNo = input.context.aircraftNo || this.options.config.aircraftNo || input.context.aircraftId || ''
+    const seatNo = input.context.seatId || ''
+    if (!aircraftNo || !seatNo) {
+      const error = 'aircraft number and seat number are required for seat audio'
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'conversation-audio-seat',
+        method: 'POST',
+        ok: false,
+        elapsedMs: Date.now() - startedAt,
+        errorMessage: error,
+        details: { aircraft_no: aircraftNo, seat_no: seatNo },
+      })
+      return { status: 'failed', elapsedMs: Date.now() - startedAt, error }
+    }
+
+    try {
+      const speech = await this.speech(input.text, input.logContext)
+      const filename = `conversation_${input.logContext?.requestId || randomUUID()}.${audioExtension(speech.contentType)}`
+      const result = await this.broadcastClient.sendAudioSeat({
+        audio: speech.audio,
+        filename,
+        contentType: speech.contentType,
+        title: input.title || 'AI 对话',
+        aircraftNo,
+        seatNo,
+      })
+      const data = extractBroadcastData(result.payload)
+      const matchedCount = numberField(data, 'matchedCount')
+      const sentCount = numberField(data, 'sentCount')
+      const requestId = stringField(data, 'requestId')
+      const audioUrl = stringField(data, 'audioUrl')
+      const elapsedMs = Date.now() - startedAt
+      const status: CabinSeatAudioPlayback['status'] = result.skipped
+        ? 'skipped'
+        : !result.ok
+          ? 'failed'
+          : sentCount === undefined
+            ? 'failed'
+            : sentCount <= 0
+              ? 'no_online_client'
+              : 'sent'
+      const responseError = status === 'failed' && !result.error
+        ? 'broadcast response missing a positive sentCount'
+        : result.error
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'conversation-audio-seat',
+        method: 'POST',
+        url: result.url,
+        status: result.status,
+        ok: status === 'sent',
+        elapsedMs,
+        errorMessage: responseError,
+        details: {
+          aircraft_no: aircraftNo,
+          seat_no: seatNo,
+          title: input.title || 'AI 对话',
+          audio_bytes: speech.audio.length,
+          playback_status: status,
+          matched_count: matchedCount,
+          sent_count: sentCount,
+          request_id: requestId,
+          audio_url: audioUrl,
+          response: result.payload,
+        },
+      })
+      return {
+        status,
+        requestId,
+        matchedCount,
+        sentCount,
+        audioUrl,
+        elapsedMs,
+        error: responseError,
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'conversation-audio-seat',
+        method: 'POST',
+        ok: false,
+        elapsedMs: Date.now() - startedAt,
+        errorMessage: message,
+        details: { aircraft_no: aircraftNo, seat_no: seatNo },
+      })
+      return { status: 'failed', elapsedMs: Date.now() - startedAt, error: message }
     }
   }
 
@@ -2292,6 +2410,30 @@ function parseJsonPayload(text: string): unknown {
   } catch {
     return { raw: text.slice(0, 1000) }
   }
+}
+
+function extractBroadcastData(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return {}
+  const data = (payload as Record<string, unknown>).data
+  return data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : payload as Record<string, unknown>
+}
+
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
+  const field = value[key]
+  return typeof field === 'string' && field.trim() ? field.trim() : undefined
+}
+
+function numberField(value: Record<string, unknown>, key: string): number | undefined {
+  const field = value[key]
+  if (typeof field === 'number' && Number.isFinite(field)) return field
+  if (typeof field === 'string' && field.trim() && Number.isFinite(Number(field))) return Number(field)
+  return undefined
+}
+
+function audioExtension(contentType: string): 'wav' | 'mp3' {
+  return /(?:mpeg|mp3)/i.test(contentType) ? 'mp3' : 'wav'
 }
 
 function extractHardwareStatusData(payload: unknown): Record<string, unknown> {

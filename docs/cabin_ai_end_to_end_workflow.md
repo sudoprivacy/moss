@@ -37,9 +37,9 @@ UE 登录并取得平板原始 token
     │     Moss → 乘客信息后台 → AI/工具 → 可选硬件后台
     │     通过 SSE 返回最终 reply_text
     │
-    └─ 4. 可选 POST /v1/tts/speech
-          Moss → 乘客信息后台 → TTS
-          返回 WAV 音频，由 UE 播放
+    └─ 4. 播放回答（二选一）
+          服务端自动模式：Moss → TTS → audio-seat → 当前座位平板
+          UE 兼容模式：UE → POST /v1/tts/speech → TTS → UE 播放
 ```
 
 代码还实现了 `/v1/voice-chat/send` 一体化接口，但现场没有使用，不属于上述主流程。
@@ -56,9 +56,9 @@ UE 登录并取得平板原始 token
 | 3.2 | Moss → 乘客后台 | 同上 | 再次传平板原始 token | 重新取得本次请求的乘客上下文 |
 | 3.3 | Moss → AI/Runner | `llmBaseUrl` 或 Moss session | 用户文本、乘客上下文、会话历史 | AI 回答或结构化硬件意图 |
 | 3.4 | Moss → 硬件后台 | 状态/控制/广播接口，按意图可选 | seatNo、aircraftNo、控制参数、后台鉴权 | 接口接收/状态结果，用于组织最终回答 |
-| 3.5 | Moss → UE | `/v1/ai-chat/send` 原 SSE | start/delta/tool_call/done 或 error | UE 使用 `done.reply_text` 展示结果 |
-| 4.1 | UE → Moss | 可选 `POST /v1/tts/speech` | reply_text 和三项身份头 | Moss 开始语音合成 |
-| 4.2 | Moss → 乘客后台 → TTS | passengerInfoUrl、ttsUrl | 平板原始 token、回答文本 | WAV 音频返回 UE 播放 |
+| 3.5 | Moss → UE | `/v1/ai-chat/send` 原 SSE | start/delta/tool_call/done 或 error | UE 使用 `done.reply_text` 展示结果；自动模式同时读取 `done.audio_playback` |
+| 4.1 | Moss → TTS → 对方广播服务 | 开启 `conversationSeatAudioEnabled` 后调用 `POST /admin-api/cabin/broadcast/audio-seat` | TTS 音频、title、aircraftNo、seatNo、广播鉴权 | 对方返回 `code=0` 且 `data.sentCount>0` 才表示已发送到目标座位 |
+| 4.2 | UE → Moss | 兼容模式下调用 `POST /v1/tts/speech` | reply_text 和三项身份头 | Moss 返回 WAV 音频，由 UE 播放；不能与服务端自动模式同时开启 |
 
 ### 2.2 UE 健康监测快速流程
 
@@ -279,14 +279,20 @@ event: delta
 data: {"content":"已为您下发打开阅读灯的指令，请稍候。"}
 
 event: done
-data: {"intent":"reading_light_switch","slots":{},"reply_text":"已为您下发打开阅读灯的指令，请稍候。"}
+data: {"intent":"reading_light_switch","slots":{},"reply_text":"已为您下发打开阅读灯的指令，请稍候。","audio_playback":{"status":"sent","request_id":"BC-...","matched_count":1,"sent_count":1}}
 ```
 
 UE 必须持续读取到 `done` 或 `error`。HTTP 200、start 或 tool_call 都不代表整次回答成功；最终展示和 TTS 应使用 `done.reply_text`。
 
 当前分步流程有一个已知行为：voice/query 会保存一次识别文本，ai-chat/send 又会保存 UE 传来的同一文本，因此历史中可能出现两条相同用户消息。这不一定是 UE 重复提交。
 
-## 7. 第四步：可选 TTS 播报
+## 7. 第四步：对话语音播报
+
+服务端自动座位播报由 `cabin.conversationSeatAudioEnabled=true` 开启，并要求 `broadcastEnabled=true`、`broadcastApiBaseUrl`（或 `controlBaseUrl`）、`broadcastApiKey` 和可用 `ttsUrl`。Moss 在生成最终回答后先调用 TTS，再以当前上下文中的 `aircraftNo`、`seatNo` 调用对方 `POST /admin-api/cabin/broadcast/audio-seat`。SSE `done.audio_playback.status` 可能为 `sent`、`no_online_client`、`failed` 或 `skipped`。该接口没有播放完成回调，`sent` 只表示对方已向目标客户端发送/分发音频。
+
+服务端自动模式开启后，UE 不应再对同一条 `done.reply_text` 调用 `/v1/tts/speech`，否则同一回答会播放两次。
+
+### 7.1 UE 兼容模式
 
 UE 将 `done.reply_text` 传给 Moss：
 

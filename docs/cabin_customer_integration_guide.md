@@ -13,7 +13,7 @@
 | 领取 Moss token | 平板 → Moss `/v1/auth/token` | 返回 `access_token` | 没有调用乘客信息接口，不能证明原始平板 token 有效或上游正常 |
 | 识别用户语音 | 平板 → Moss `/v1/voice/query` → 乘客服务 → ASR | JSON 返回非空 `text` | 还没有生成 AI 回答 |
 | 获取 AI 回答 | 平板 → Moss `/v1/ai-chat/send` → 乘客服务 → 对话/工具处理 | SSE 收到 `done` | HTTP 200 或 `start` 不等于生成成功；`tool_call` 不等于硬件执行完成 |
-| 播放回答 | 平板 → Moss `/v1/tts/speech` → 乘客服务 → TTS | 收到音频，平板播放 | 对话接口自身不自动返回音频 |
+| 播放回答 | 服务端自动模式：Moss → TTS → 对方 `audio-seat`；兼容模式：平板 → Moss `/v1/tts/speech` → TTS | 自动模式看 SSE `done.audio_playback.status=sent`；兼容模式收到音频 | 两种模式只能选一种，否则会重复播放 |
 | 飞行阶段自动化 | Moss 连接对方 WS，收到飞行阶段变化后调用硬件/广播接口 | 阶段日志、逐座位检查和下发结果 | `ws.open` 只证明连接建立，不证明消息格式正确 |
 | 健康报告 | 平板启动报告；对方 WS 推送采样；平板轮询报告 | `report_status=completed` | start 成功不证明硬件已启动或已采到样本 |
 
@@ -80,7 +80,7 @@ Cabin `/v1/` 处理链会生成响应头 `x-request-id`，用于关联本次 Mos
 3. 上游成功并返回有效航班信息后，Moss 获取/创建会话，再调用 ASR；返回识别文本。乘客信息失败会在 ASR 之前结束。
 4. 平板将识别文本传到 `/v1/ai-chat/send`，建议 `source=voice`。Moss 再次查询乘客信息，再生成回答或执行匹配的工具流程。
 5. 平板读取 SSE，直到 `done` 或 `error`；`done.reply_text` 是完整最终回答。
-6. 需要播报时，平板将最终回答发到 `/v1/tts/speech`。Moss 再次查询乘客信息并调用 TTS，返回音频，由平板负责播放。
+6. 若 `conversationSeatAudioEnabled=false`，平板将最终回答发到 `/v1/tts/speech`，Moss 调用 TTS 返回音频，由平板负责播放；若开启服务端自动座位播报，Moss 在生成回答后直接调用对方 `audio-seat`，平板不再重复调用 `/v1/tts/speech`。
 
 单次完整分步语音交互会触发最多上述三次正常乘客信息查询（识别、回答、合成各一次；不含异常重试）。服务端当前没有为这条链路缓存乘客上下文。
 
@@ -190,7 +190,7 @@ Cabin `/v1/` 处理链会生成响应头 `x-request-id`，用于关联本次 Mos
 | `start` | `status: "ok"` | 流已开始，不代表回答完成 |
 | `tool_call` | `id:string`、`name:string`、`arguments:object` | 可选；记录意图/工具上下文，不单独判定执行成功 |
 | `delta` | `content:string` | 追加文本；某些路径仅发送一次完整文本，不保证逐 token |
-| `done` | `intent:string`、`slots:object`、`reply_text:string` | 正常结束；以 reply_text 作为最终回答 |
+| `done` | `intent:string`、`slots:object`、`reply_text:string`、`audio_playback:object` | 正常结束；以 reply_text 作为最终回答；自动座位播报结果见 audio_playback |
 | `error` | `code:string`、`message:string`、可选 `retriable:boolean` | 失败结束；不得继续等待 done |
 
 ```text
@@ -201,7 +201,7 @@ event: delta
 data: {"content":"已为您下发打开阅读灯的指令，请稍候。"}
 
 event: done
-data: {"intent":"reading_light_switch","slots":{"execution_status":"dispatched"},"reply_text":"已为您下发打开阅读灯的指令，请稍候。"}
+data: {"intent":"reading_light_switch","slots":{"execution_status":"dispatched"},"reply_text":"已为您下发打开阅读灯的指令，请稍候。","audio_playback":{"status":"sent","request_id":"BC-...","matched_count":1,"sent_count":1}}
 ```
 
 以上为事件形态示意，实际 intent/slots 取决于命中的规则/工具。`slots.execution_status` 可能为 dispatched、succeeded、failed、blocked；并非每条路径都提供该字段。失败也可能体现为正常 done 中的失败提示，需结合工具结果与日志。
@@ -239,7 +239,7 @@ data: {"intent":"reading_light_switch","slots":{"execution_status":"dispatched"}
 
 当前实现将会话标记为 reset 并插入系统标记，未物理删除消息；下一次建立上下文会复用该会话记录并更新运行器会话 ID。历史读取也没有按 reset 标记截断。因此不能将 `cleared=true` 理解成历史消息已从数据库清空。
 
-### 4.7 POST /v1/tts/speech
+### 4.7 POST /v1/tts/speech（UE 兼容播放模式）
 
 | JSON 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -510,6 +510,7 @@ scene preset 与 mode 是两套能力，不可混用。阶段广播要求 broadc
 | 硬件控制 | controlBaseUrl；可选controlAuth、controlTimeoutMs | controlTimeoutMs也用于健康文案模型、自动化TTS/广播 |
 | 飞行WS/自动化 | automationEnabled、flightStateWsUrl、controlBaseUrl | aircraftNo建议配置；managedSeats为预置/兜底 |
 | 广播 | broadcastEnabled、broadcastApiKey、广播基础地址 | broadcastAuth可选；基础地址可回退controlBaseUrl |
+| 对话座位播报 | conversationSeatAudioEnabled、broadcastEnabled、broadcastApiKey、广播基础地址、ttsUrl | 开启后 Moss 自动调用 `audio-seat`；UE 不要再调用 `/v1/tts/speech` |
 | 健康报告 | healthReportEnabled、自动化WS连接、有效health消息 | collect默认30秒、minSamples默认1；LLM失败有文案兜底 |
 | Moss 会话模式 | createMossSession、assistantName、replyTimeoutMs | 默认关闭；关闭时走普通chat completions |
 
