@@ -1,10 +1,9 @@
 import { queryOnlyDefinition } from './externalProviderDefinitionFixture.js'
-import { DatabaseSync } from 'node:sqlite'
 import { readFile, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
-import { SqliteDriver } from '../db/driver.js'
+import { DirectConnectStore } from '../db.js'
 import { AuthCenterDb } from '../authCenter/db.js'
 import { createCatalogTestRepository, createIdentityTestRepository } from './compatibilityRepositories.js'
 import { ExternalTaskStore } from '../externalProviders/store.js'
@@ -12,9 +11,17 @@ import { ExternalProviderService } from '../externalProviders/service.js'
 import { DifyPilotTransport } from '../externalProviders/difyTransport.js'
 
 export async function crashFixture(directory: string) {
-  const db = new DatabaseSync(join(directory, 'state.sqlite')), driver = new SqliteDriver(db)
+  const connection = new DirectConnectStore(join(directory, 'state.sqlite'))
+  const db = connection.requireSqliteDb(), driver = connection.driver
   const actor = { orgId: 'crash-org', userId: 'reviewer' }
-  const auth = new AuthCenterDb(db)
+  const { auth, catalog, identities, store } = await driver.transaction(async () => {
+    const auth = new AuthCenterDb(connection)
+    const catalog = createCatalogTestRepository(db, driver)
+    const identities = createIdentityTestRepository(db, {}, driver)
+    const store = new ExternalTaskStore(driver)
+    await store.ready
+    return { auth, catalog, identities, store }
+  })
   if (!await auth.getOrganization(actor.orgId)) await auth.createOrganization(actor.orgId, 'Crash test', Date.now())
   const file = (namespace: string, key: string) => join(directory, `${encodeURIComponent(namespace)}-${key}.json`)
   const control = { crash: '' }
@@ -35,14 +42,14 @@ export async function crashFixture(directory: string) {
     },
     async deleteSecret(namespace: string, key: string) { await rm(file(namespace, key), { force: true }) },
   }
-  const store = new ExternalTaskStore(driver)
   const service = new ExternalProviderService(store, {
-    catalog: createCatalogTestRepository(db, driver), identities: createIdentityTestRepository(db, {}, driver), secrets,
+    catalog, identities, secrets,
     isActorActive: async () => true, isMemberActive: async () => true, policy: { orgIds: [actor.orgId], endpoints: ['http://127.0.0.1:8089/v1'], timeoutMs: 1000 },
     transport: new DifyPilotTransport((async (url: string | URL | Request) => Response.json(String(url).endsWith('/info') ? { name: 'Synthetic' } : { user_input_form: [], file_upload: { enabled: false } })) as typeof fetch),
   })
   const body = { request_id: randomUUID(), name: 'Crash fixture', endpoint: 'http://127.0.0.1:8089/v1', api_key: 'synthetic-secret', app_id: 'app', workspace_id: 'workspace', source_definition: JSON.stringify(queryOnlyDefinition()), decoder: 'text', allowed_user_ids: [actor.userId], review_days: 1, review_note: 'Synthetic crash fixture' }
-  return { actor, driver, store, service, control, body }
+  return { actor, driver, store, service, control, body,
+    async close() { try { await service.close() } finally { await connection.close() } } }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

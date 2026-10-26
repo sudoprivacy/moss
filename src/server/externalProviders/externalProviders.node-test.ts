@@ -587,6 +587,8 @@ void test('SIGKILL before and after vault writes leaves recoverable onboarding a
       } else assert.equal(crashed.signal, 'SIGKILL')
       const f = await crashFixture(directory)
       try {
+        assert.equal((await f.driver.get('PRAGMA synchronous'))?.synchronous, 2)
+        assert.equal((await f.driver.get('PRAGMA foreign_keys'))?.foreign_keys, 1)
         await f.service.maintain()
         await f.driver.run("UPDATE external_pilot_operations SET lease_until = 0 WHERE status = 'pending'")
         await f.service.administration.operations.reconcile()
@@ -599,7 +601,7 @@ void test('SIGKILL before and after vault writes leaves recoverable onboarding a
           assert.equal(Boolean(bindings[0].credentialRecoveryRequired), kind === 'rotate' && stage === 'before-write')
         }
         assert.equal((await f.driver.all("SELECT id FROM external_pilot_operations WHERE status = 'pending'")).length, 0)
-      } finally { await f.service.close(); await f.driver.close() }
+      } finally { await f.close() }
     } finally { await rm(directory, { recursive: true, force: true }) }
   }
 })
