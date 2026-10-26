@@ -59,6 +59,30 @@ export async function loginWithApiKey(apiKey: string): Promise<LoginResponse> {
   return response
 }
 
+/** Request a code through the same human login service used by SudoWork. */
+export async function requestPhoneCode(phone: string): Promise<{ nextSendIn: number }> {
+  const response = await authClient.post<{ success: boolean; next_send_in?: number; msg?: string }>(
+    '/api/v1/auth/send-code', { phone: phone.trim() },
+  )
+  if (!response.success) throw new Error(response.msg || '发送验证码失败')
+  return { nextSendIn: typeof response.next_send_in === 'number' && Number.isFinite(response.next_send_in)
+    && response.next_send_in >= 0 ? Math.ceil(response.next_send_in) : 60 }
+}
+
+/** Redeem a human SMS code; persist the normal access and refresh token pair. */
+export async function loginWithPhone(phone: string, code: string): Promise<LoginResponse> {
+  const response = await authClient.post<{ success: boolean; data?: LoginResponse; msg?: string }>(
+    '/api/v1/auth/login', { phone: phone.trim(), code: code.trim() },
+  )
+  const session = response.data
+  if (!response.success || typeof session?.access_token !== 'string' || !session.access_token
+    || typeof session.refresh_token !== 'string' || !session.refresh_token) {
+    throw new Error(response.msg || '手机登录未完成，请重新登录')
+  }
+  storeLoginResponse(session)
+  return session
+}
+
 export async function logout(): Promise<void> {
   const accessToken = getToken()
   const refreshToken = getRefreshToken()

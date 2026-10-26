@@ -27,6 +27,7 @@ export class ApiRequestError extends Error {
     readonly code?: string,
     /** 结构化错误负载（如 ZONE_DELETE_BLOCKED 的 blocker 清单），有则透传。 */
     readonly details?: unknown,
+    readonly retryAfterSeconds?: number,
   ) {
     super(message)
     this.name = 'ApiRequestError'
@@ -117,14 +118,20 @@ async function responseError(response: Response, fallback: string): Promise<ApiR
   const raw = (error as { error?: unknown }).error
   const message = typeof raw === 'string'
     ? raw
-    : ((raw as { message?: unknown } | null)?.message || (error as { message?: unknown }).message || fallback)
+    : ((raw as { message?: unknown } | null)?.message || (error as { message?: unknown }).message || (error as { msg?: unknown }).msg || fallback)
   const code = typeof (raw as { code?: unknown } | null)?.code === 'string'
     ? (raw as { code: string }).code
     : undefined
   const details = typeof raw === 'object' && raw !== null
     ? (raw as { details?: unknown }).details
     : undefined
-  return new ApiRequestError(response.status, String(message), code, details)
+  const retryAfter = typeof error.next_send_in === 'number'
+    ? error.next_send_in
+    : Number(response.headers.get('Retry-After'))
+  const retryAfterSeconds = Number.isFinite(retryAfter) && retryAfter > 0
+    ? Math.ceil(retryAfter)
+    : undefined
+  return new ApiRequestError(response.status, String(message), code, details, retryAfterSeconds)
 }
 
 async function refreshSession(baseUrl: string, rejectedAccessToken?: string): Promise<string | null> {
@@ -236,7 +243,13 @@ export class ApiClient {
       credentials: 'include',
     })
 
-    const originalToken = getToken()
+    // Credential requests must not inherit a previous identity or replay an OTP
+    // after attempting recovery of an unrelated session.
+    const isAuthenticationRequest = options.method === 'POST' && [
+      '/api/v1/moss/auth/login', '/api/v1/auth/login',
+      '/api/v1/auth/token', '/api/v1/auth/send-code',
+    ].includes(path)
+    const originalToken = isAuthenticationRequest ? null : getToken()
     let response = await execute(originalToken)
     if (response.status !== 401 || !originalToken) return response
 

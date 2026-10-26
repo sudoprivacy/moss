@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { loginWithPhone, requestPhoneCode } from '../lib/api/auth'
 import {
   ApiClient,
   ApiRequestError,
@@ -194,4 +195,73 @@ test('403 responses neither refresh nor clear the session', async () => {
   assert.equal(calls, 1)
   assert.equal(getToken(), 'access-old')
   assert.equal(session.unauthorized(), 0)
+})
+
+for (const path of ['/api/v1/auth/login', '/api/v1/moss/auth/login', '/api/v1/auth/token', '/api/v1/auth/send-code']) {
+  test(`${path} does not inherit another identity or replay credentials after a 401`, async () => {
+    const session = installSession()
+    const calls: string[] = []
+    globalThis.fetch = (async (input, init) => {
+      calls.push(String(input))
+      assert.equal(new Headers(init?.headers).get('Authorization'), null)
+      return Response.json({ success: false, msg: 'Verification code is incorrect or expired' }, { status: 401 })
+    }) as typeof fetch
+    await assert.rejects(new ApiClient('http://moss.test').post(path, { phone: '13800138000', code: '123456' }),
+      (error) => error instanceof ApiRequestError && error.status === 401 && error.message === 'Verification code is incorrect or expired')
+    assert.deepEqual(calls, ['http://moss.test' + path])
+    assert.equal(getToken(), 'access-old')
+    assert.equal(getRefreshToken(), 'refresh-old')
+    assert.equal(session.unauthorized(), 0)
+  })
+}
+
+test('SMS cooldown retains the server delay and message without refreshing a previous session', async () => {
+  installSession()
+  let calls = 0
+  globalThis.fetch = (async () => {
+    calls++
+    return Response.json({ success: false, msg: 'Please wait before sending again', next_send_in: 17 }, { status: 429 })
+  }) as typeof fetch
+  await assert.rejects(requestPhoneCode('13800138000'), (error) => error instanceof ApiRequestError
+    && error.status === 429 && error.retryAfterSeconds === 17 && error.message === 'Please wait before sending again')
+  assert.equal(calls, 1)
+})
+
+test('SMS success exposes its cooldown without creating a login session', async () => {
+  const session = installSession()
+  globalThis.fetch = (async (input, init) => {
+    assert.equal(String(input), '/api/v1/auth/send-code')
+    assert.deepEqual(JSON.parse(String(init?.body)), { phone: '13800138000' })
+    return Response.json({ success: true, next_send_in: 29 })
+  }) as typeof fetch
+  assert.deepEqual(await requestPhoneCode(' 13800138000 '), { nextSendIn: 29 })
+  assert.equal(getToken(), 'access-old')
+  assert.equal(session.unauthorized(), 0)
+})
+
+test('phone login unwraps the human token pair and retains its real organization and role', async () => {
+  installSession()
+  const tokens = { ...refreshedSession(), user: { id: 'human-alice', orgId: 'org-a', role: 'user' },
+    organization: { id: 'org-a' }, scopes: ['sessions:read'] }
+  globalThis.fetch = (async (input, init) => {
+    assert.equal(String(input), '/api/v1/auth/login')
+    assert.deepEqual(JSON.parse(String(init?.body)), { phone: '13800138000', code: '123456' })
+    assert.equal(new Headers(init?.headers).get('Authorization'), null)
+    return Response.json({ success: true, data: tokens })
+  }) as typeof fetch
+  assert.deepEqual(await loginWithPhone(' 13800138000 ', ' 123456 '), tokens)
+  assert.equal(getToken(), 'access-new')
+  assert.equal(getRefreshToken(), 'refresh-new')
+})
+
+test('a refused or incomplete phone response cannot replace the saved identity', async () => {
+  for (const body of [{ success: false, msg: 'Phone login unavailable' },
+    { success: true, data: { access_token: 'partial' } },
+    { success: true, data: { access_token: true, refresh_token: 'invalid' } }]) {
+    installSession()
+    globalThis.fetch = (async () => Response.json(body)) as typeof fetch
+    await assert.rejects(loginWithPhone('13800138000', '123456'))
+    assert.equal(getToken(), 'access-old')
+    assert.equal(getRefreshToken(), 'refresh-old')
+  }
 })

@@ -77,6 +77,13 @@ is stored only as a digest, and can be claimed once. A failed private send
 never falls back to posting that proof in a group. Legacy pairing approvals
 and sender display names do not establish a human account binding.
 
+The admin login page also offers **手机验证码登录** for existing phone accounts.
+It uses the same `/api/v1/auth/send-code` and human `/api/v1/auth/login`
+endpoints as SudoWork, then the existing refresh and `/me` flow. It preserves
+the member's actual organization, role and Moss access. A phone login does
+not create an account or grant Moss use. Credential submissions do not
+inherit an older account's token and are never replayed after a 401.
+
 Only stable, human SDK events from the pinned tenant are accepted. The app's
 `open_id` is preferred so employee-ID visibility changes do not change an
 existing human binding. The
