@@ -285,6 +285,8 @@ jobs:
             ${{ runner.temp }}/moss-user-pod/cluster/evidence/**/user-pod-recovery.json
             ${{ runner.temp }}/moss-user-pod/cluster/evidence/**/release-upgrade.json
             ${{ runner.temp }}/moss-user-pod/cluster/live-runtime-processes.json
+            ${{ runner.temp }}/moss-user-pod/cluster/retain-worker.stderr.log
+            ${{ runner.temp }}/moss-user-pod/cluster/unpack-worker.stderr.log
 
   build:
     # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
