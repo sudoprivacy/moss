@@ -81,7 +81,7 @@ try {
     await controller.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
     const opened = await controller.rpc('session/new', { cwd: '/', mcpServers: [] })
     assert.equal(opened.sessionId, sessions[index]!.durableSessionId)
-    const expected = `LANE_${index}_${randomUUID().replaceAll('-', '')}`
+    const expected = `MOSS_E2E_TOKEN_LANE_${index}_${randomUUID().replaceAll('-', '')}`
     const result = await controller.rpc('session/prompt', { sessionId: opened.sessionId,
       prompt: [{ type: 'text', text: `Reply with exactly ${expected}. Use no tools.` }] }, 180_000)
     assert.equal(result.stopReason, 'end_turn')

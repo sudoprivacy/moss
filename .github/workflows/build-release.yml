@@ -75,6 +75,7 @@ jobs:
           node node_modules/typescript/bin/tsc --noEmit --module nodenext --resolveJsonModule \
             --moduleResolution nodenext --target es2022 --skipLibCheck \
             scripts/e2e/session-owner-live.ts scripts/e2e/run-session-owner-live.ts \
+            scripts/e2e/node-issuer-live.ts scripts/e2e/run-user-pod-live.ts \
             scripts/e2e/cohost-two-sessions.ts \
             scripts/e2e/cohost-session-recovery.ts \
             scripts/e2e/cohost-real-model-workflow.ts scripts/e2e/cohost-model-bootstrap.ts \
@@ -148,6 +149,16 @@ jobs:
           binary="$PWD/bin/nexus/nexusd"
           if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
           node bin/run-session-owner-live.mjs "$binary" "$PWD/bin/session-owner-live.mjs"
+        env:
+          MOSS_NEXUS_LIVE_ARTIFACTS: ${{ runner.temp }}/moss-runtime-evidence
+      - name: Verify production issuer bootstrap and signed owner credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun build --target=node scripts/e2e/node-issuer-live.ts --outfile bin/node-issuer-live.mjs
+          binary="$PWD/bin/nexus/nexusd"
+          if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          node bin/node-issuer-live.mjs "$binary"
         env:
           MOSS_NEXUS_LIVE_ARTIFACTS: ${{ runner.temp }}/moss-runtime-evidence
       - name: Verify upgrade and rollback from the cloud broker version

@@ -84,7 +84,7 @@ try {
     const sid = previous.durableSessionIds[index]!
     await controller.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
     await controller.rpc('session/load', { sessionId: sid, cwd: '/', mcpServers: [] })
-    const marker = `UPGRADED_${index}_${randomUUID().replaceAll('-', '')}`
+    const marker = `MOSS_E2E_TOKEN_UPGRADED_${index}_${randomUUID().replaceAll('-', '')}`
     const reply = await controller.rpc('session/prompt', { sessionId: sid,
       prompt: [{ type: 'text', text: `Reply exactly ${marker}. Use no tools.` }] }, 180_000)
     assert.equal(reply.stopReason, 'end_turn')

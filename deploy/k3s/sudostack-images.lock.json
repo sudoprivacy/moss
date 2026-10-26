@@ -1,8 +1,8 @@
 {
   "repository": "sudoprivacy/sudostack",
-  "revision": "ddc34aa5f4c9b9402cd79c304420a3b5754b6ff4",
+  "revision": "9731d12c9c263d9f3008cf380d2fd3448ff9b646",
   "files": {
-    "tools/deploy/images.py": "d9db17b6c9d287969950796e3092499260393ef52c63efef48825894381be3ab",
+    "tools/deploy/images.py": "e037c8507a00db0833feced51b6a92a467f0927e764a07c46c9c467db0324996",
     "tools/deploy/artifacts.py": "183266c38fabdcd8613c8f9518b915a48db8a785c94f376a62e78cfff90f4f59"
   }
 }
