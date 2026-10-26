@@ -179,12 +179,20 @@ describe('CabinFlightAutomation external broadcasts', () => {
             ? { presence: 'true', seatbelt: 'true' }
             : key === 'posture'
               ? { position: '0' }
-              : { tray_state: 'closed' }
+              : key === 'tray'
+                ? { tray_state: 'closed', tray_flipped: 'false' }
+                : key === 'reading_light' || key === 'ceiling_state'
+                  ? { on: 'false' }
+                  : { higherBag: 'false', lowerBag: 'false', bagLock: 'true' }
           : key === 'safety'
           ? { presence: 'true', seatbelt: 'false' }
           : key === 'posture'
             ? { position: '20' }
-            : { tray_state: 'opened' }
+            : key === 'tray'
+              ? { tray_state: 'opened', tray_flipped: 'false' }
+              : key === 'reading_light' || key === 'ceiling_state'
+                ? { on: 'true' }
+                : { higherBag: 'false', lowerBag: 'false', bagLock: 'true' }
         return Response.json({ code: 0, data: { target: 'A', key, data, aircraftNo: 'B-WITHFLIGHT-01' } })
       }
       if (url.pathname.startsWith('/admin-api/tcp-client/cmd/')) {

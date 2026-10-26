@@ -18,6 +18,7 @@ import { CabinHealthReportService } from './healthReports.js'
 import { CabinStore } from './store.js'
 import { CabinLogger, type CabinLogContext, summarizeContext } from './logger.js'
 import type { CabinPassengerContext, CabinToolCall, CabinTokenPayload } from './types.js'
+import { isOrderSelection } from './orders.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -448,6 +449,7 @@ async function fetchPassengerContext(
     flightSeatId: stringFromObject(data, 'flightSeatId', 'flight_seat_id'),
     seatId,
     tabletId: tablet.tabletId,
+    tabletAccessToken: stringFromObject(data, 'tabletAccessToken', 'tablet_access_token'),
     language: stringFromObject(passenger, 'language') || stringFromObject(data, 'language'),
   }
   logger?.log({
@@ -610,6 +612,7 @@ async function fetchSeatContext(
     aircraftId: stringFromObject(data, 'aircraftId', 'aircraft_id'),
     aircraftNo: seat.aircraftNo,
     tabletId: stringFromObject(data, 'tabletId', 'tablet_id') || `seat:${seat.aircraftNo}:${seat.seatNo}`,
+    tabletAccessToken: stringFromObject(data, 'tabletAccessToken', 'tablet_access_token'),
     tabletType: stringFromObject(data, 'tabletType', 'tablet_type'),
     bindingId: stringFromObject(data, 'bindingId', 'binding_id'),
     language: stringFromObject(passenger, 'language') || stringFromObject(data, 'language'),
@@ -919,6 +922,52 @@ export function createCabinApi(options: {
       source,
       content: text,
     })
+    const orderIntent = await services.resolveOrderIntent({ context, text, logContext })
+    const pendingOrderCancellation = store.getPendingOrderCancellation(conversation.id)
+    if (orderIntent || (pendingOrderCancellation && isOrderSelection(text))) {
+      const orderResult = await services.executeOrderIntent({
+        context,
+        conversationId: conversation.id,
+        text,
+        intent: orderIntent,
+        logContext,
+      })
+      const reply = normalizeCabinPassengerReply({ userText: text, reply: orderResult.reply, context })
+      if (orderResult.toolCall) writeSse(res, 'tool_call', orderResult.toolCall)
+      const assistantMessage = store.appendMessage({
+        conversationId: conversation.id,
+        role: 'assistant',
+        source: 'agent',
+        content: reply,
+        intent: orderResult.intent,
+        slots: orderResult.slots,
+        toolCalls: orderResult.toolCall ? [orderResult.toolCall] : null,
+      })
+      cabinLogger.log({
+        type: 'outbound',
+        ...logContext,
+        upstream: 'agent-reply',
+        method: 'GENERATE',
+        ok: orderResult.ok || orderResult.slots.execution_status === 'confirmation_required',
+        elapsedMs: 0,
+        details: {
+          source,
+          input_chars: text.length,
+          reply_chars: reply.length,
+          intent: assistantMessage.intent || '',
+          routed: 'service-order',
+          execution_status: orderResult.slots.execution_status,
+        },
+      })
+      writeSse(res, 'delta', { content: reply })
+      writeSse(res, 'done', {
+        intent: assistantMessage.intent || '',
+        slots: assistantMessage.slots || {},
+        reply_text: reply,
+      })
+      res.end()
+      return
+    }
     const hardwareRoute = services.routeHardwareControl({ context, text })
     if (hardwareRoute) {
       writeSse(res, 'tool_call', hardwareRoute.toolCall)

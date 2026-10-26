@@ -12,6 +12,8 @@ import type {
   CabinMessage,
   CabinMessageRole,
   CabinMessageSource,
+  CabinOrderCancellationCandidate,
+  CabinPendingOrderCancellation,
   CabinPassengerContext,
   CabinToolCall,
 } from './types.js'
@@ -211,6 +213,13 @@ export function ensureCabinTables(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_cabin_messages_conversation_created
       ON cabin_messages(conversation_id, created_at);
 
+    CREATE TABLE IF NOT EXISTS cabin_order_cancellation_confirmations (
+      conversation_id TEXT PRIMARY KEY REFERENCES cabin_conversations(id),
+      candidates_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS cabin_voice_logs (
       id TEXT PRIMARY KEY,
       conversation_id TEXT,
@@ -315,6 +324,68 @@ export class CabinStore {
       ? this.db.prepare('SELECT * FROM cabin_conversations WHERE conversation_key = ?').get(conversationKey) as Row | undefined
       : this.db.prepare('SELECT * FROM cabin_conversations WHERE conversation_key = ? AND status = ?').get(conversationKey, 'active') as Row | undefined
     return row ? mapConversation(row) : null
+  }
+
+  setPendingOrderCancellation(
+    conversationId: string,
+    candidates: CabinOrderCancellationCandidate[],
+    ttlMs = 5 * 60_000,
+  ): void {
+    const timestamp = now()
+    this.db.prepare(`
+      INSERT INTO cabin_order_cancellation_confirmations (
+        conversation_id, candidates_json, created_at, expires_at
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT(conversation_id) DO UPDATE SET
+        candidates_json = excluded.candidates_json,
+        created_at = excluded.created_at,
+        expires_at = excluded.expires_at
+    `).run(
+      conversationId,
+      JSON.stringify(candidates),
+      timestamp,
+      timestamp + ttlMs,
+    )
+  }
+
+  getPendingOrderCancellation(conversationId: string): CabinPendingOrderCancellation | null {
+    const row = this.db.prepare(`
+      SELECT candidates_json, created_at, expires_at
+      FROM cabin_order_cancellation_confirmations
+      WHERE conversation_id = ?
+    `).get(conversationId) as Row | undefined
+    if (!row) return null
+    const expiresAt = Number(row.expires_at)
+    if (!Number.isFinite(expiresAt) || expiresAt <= now()) {
+      this.clearPendingOrderCancellation(conversationId)
+      return null
+    }
+    let candidates: unknown
+    try {
+      candidates = JSON.parse(String(row.candidates_json))
+    } catch {
+      this.clearPendingOrderCancellation(conversationId)
+      return null
+    }
+    if (!Array.isArray(candidates)) {
+      this.clearPendingOrderCancellation(conversationId)
+      return null
+    }
+    return {
+      candidates: candidates.filter(candidate => (
+        candidate &&
+        typeof candidate === 'object' &&
+        typeof (candidate as { orderId?: unknown }).orderId === 'string'
+      )) as CabinOrderCancellationCandidate[],
+      createdAt: Number(row.created_at),
+      expiresAt,
+    }
+  }
+
+  clearPendingOrderCancellation(conversationId: string): void {
+    this.db.prepare(`
+      DELETE FROM cabin_order_cancellation_confirmations WHERE conversation_id = ?
+    `).run(conversationId)
   }
 
   createConversation(input: CabinPassengerContext & { mossSessionId: string }): CabinConversation {

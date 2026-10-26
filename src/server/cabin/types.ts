@@ -20,6 +20,7 @@ export type CabinPassengerContext = {
   columnNo?: string
   tabletId: string
   tabletToken?: string
+  tabletAccessToken?: string
   tabletType?: string
   bindingId?: string
   contextStatus?: string
@@ -62,6 +63,40 @@ export type CabinToolCall = {
   id: string
   name: string
   arguments: Record<string, unknown>
+}
+
+export type CabinOrder = {
+  id: string
+  orderNo?: string
+  serviceTypeId?: string
+  serviceTypeName?: string
+  serviceTypeCode?: string
+  status?: string
+  statusName?: string
+  items: Record<string, unknown>[]
+  createTime?: string
+  updateTime?: string
+  deliverTime?: string
+}
+
+export type CabinOrderCancellationCandidate = {
+  orderId: string
+  orderNo?: string
+  serviceTypeId?: string
+  serviceTypeName?: string
+  serviceTypeCode?: string
+  status?: string
+  statusName?: string
+  items: Record<string, unknown>[]
+  createTime?: string
+  updateTime?: string
+  deliverTime?: string
+}
+
+export type CabinPendingOrderCancellation = {
+  candidates: CabinOrderCancellationCandidate[]
+  createdAt: number
+  expiresAt: number
 }
 
 export type CabinManagedSeat = {

@@ -31,7 +31,7 @@ type PhaseName =
   | 'go_around'
   | 'unknown'
 
-type HardwareStatusKey = 'posture' | 'tray' | 'safety' | 'glass_state'
+type HardwareStatusKey = 'posture' | 'tray' | 'safety' | 'reading_light' | 'ceiling_state' | 'bag' | 'glass_state'
 
 type HardwareStatus = {
   aircraftNo?: string
@@ -64,6 +64,11 @@ type SeatProblem = {
   severity: 'warning' | 'critical'
   message: string
   details?: Record<string, unknown>
+}
+
+type AutomationControl = {
+  command: 'seat.cushion' | 'seat.tray.close' | 'seat.light' | 'cabin.ceiling.light'
+  params: Record<string, string>
 }
 
 type BroadcastAsset = {
@@ -133,6 +138,7 @@ export class CabinFlightAutomation {
   private readonly broadcastClient: CabinBroadcastClient
   private readonly ttsInflight = new Map<string, Promise<BroadcastAsset>>()
   private phaseTaskQueue: Promise<void> = Promise.resolve()
+  private readonly emittedAlertKeys = new Set<string>()
 
   constructor(
     private readonly config: ServerConfig,
@@ -481,10 +487,18 @@ export class CabinFlightAutomation {
       if (!sent) summary.broadcastFailures += 1
     }
 
+    const cabinControls = await this.checkCabin({ seat: seats[0], requestId, phaseCode, phaseName })
+    summary.statusFailures += cabinControls.statusFailures
+    for (const control of cabinControls.controls) {
+      const result = await this.sendCabinControl(control, requestId, phaseCode, phaseName, aircraftNo, flightId, flightDate)
+      summary.controls += 1
+      if (!result) summary.controlFailures += 1
+    }
+
     for (const seat of seats) {
       const checks = await this.checkSeat({ seat, requestId, phaseCode, phaseName })
       summary.statusFailures += checks.statusFailures
-      for (const problem of checks.problems) {
+      for (const problem of checks.problems.filter(problem => this.shouldEmitAlert(seat, phaseCode, problem.type))) {
         summary.alerts += 1
         this.store.createAlert({
           aircraftNo: seat.aircraftNo,
@@ -571,6 +585,24 @@ export class CabinFlightAutomation {
     }
   }
 
+  private async checkCabin(input: {
+    seat?: CabinManagedSeat
+    requestId: string
+    phaseCode: number
+    phaseName: PhaseName
+  }): Promise<{ controls: AutomationControl[]; statusFailures: number }> {
+    const controls: AutomationControl[] = []
+    const needsCeilingLight = ['taxiing', 'taxi_in', 'takeoff_prepare', 'takeoff', 'descent', 'landing_approach'].includes(input.phaseName)
+    if (!needsCeilingLight || !input.seat) return { controls, statusFailures: 0 }
+
+    const status = await this.getHardwareStatus(input.seat, 'ceiling_state', input.requestId, input.phaseCode, input.phaseName)
+    if (!status || !hasStatusField(status.data, 'on')) {
+      return { controls, statusFailures: 1 }
+    }
+    if (toBool(status.data.on)) controls.push({ command: 'cabin.ceiling.light', params: { on: 'false' } })
+    return { controls, statusFailures: 0 }
+  }
+
   private async checkSeat(input: {
     seat: CabinManagedSeat
     requestId: string
@@ -578,16 +610,16 @@ export class CabinFlightAutomation {
     phaseName: PhaseName
   }): Promise<{
     problems: SeatProblem[]
-    controls: Array<{ command: 'seat.cushion' | 'seat.tray.close'; params: Record<string, string> }>
+    controls: AutomationControl[]
     statusFailures: number
   }> {
     const { seat, requestId, phaseCode, phaseName } = input
     const problems: SeatProblem[] = []
-    const controls: Array<{ command: 'seat.cushion' | 'seat.tray.close'; params: Record<string, string> }> = []
+    const controls: AutomationControl[] = []
     let statusFailures = 0
 
     const needsSafety = ['taxiing', 'taxi_in', 'takeoff_prepare', 'takeoff', 'climb', 'descent', 'landing_approach'].includes(phaseName)
-    const needsPostureTray = ['taxiing', 'taxi_in', 'takeoff_prepare', 'takeoff', 'landing_approach'].includes(phaseName)
+    const needsPostureTray = ['taxiing', 'taxi_in', 'takeoff_prepare', 'takeoff', 'descent', 'landing_approach'].includes(phaseName)
 
     if (needsSafety) {
       const safety = await this.getHardwareStatus(seat, 'safety', requestId, phaseCode, phaseName)
@@ -603,6 +635,33 @@ export class CabinFlightAutomation {
       }
     }
 
+    if (phaseCode === 1 || phaseCode === 15) {
+      const bag = await this.getHardwareStatus(seat, 'bag', requestId, phaseCode, phaseName)
+      if (!bag) {
+        statusFailures += 1
+      } else if (phaseCode === 1) {
+        if (!hasStatusField(bag.data, 'bagLock')) {
+          statusFailures += 1
+        } else if (!toBool(bag.data.bagLock)) {
+          problems.push({
+            type: 'BAG_NOT_LOCKED',
+            severity: 'critical',
+            message: `${seat.seatNo} 座位行李箱未锁定`,
+            details: bag.data,
+          })
+        }
+      } else if (!hasStatusField(bag.data, 'higherBag') && !hasStatusField(bag.data, 'lowerBag')) {
+        statusFailures += 1
+      } else if (toBool(bag.data.higherBag) || toBool(bag.data.lowerBag)) {
+        problems.push({
+          type: 'BAG_LEFT_BEHIND_POSSIBLE',
+          severity: 'warning',
+          message: `${seat.seatNo} 座位行李架仍有行李，请记得带走随身行李`,
+          details: bag.data,
+        })
+      }
+    }
+
     if (needsPostureTray) {
       const posture = await this.getHardwareStatus(seat, 'posture', requestId, phaseCode, phaseName)
       if (!posture) {
@@ -614,13 +673,36 @@ export class CabinFlightAutomation {
       const tray = await this.getHardwareStatus(seat, 'tray', requestId, phaseCode, phaseName)
       if (!tray) {
         statusFailures += 1
+      } else if (!hasStatusField(tray.data, 'tray_flipped') || !hasStatusField(tray.data, 'tray_state')) {
+        statusFailures += 1
+      } else if (toBool(tray.data.tray_flipped)) {
+        problems.push({
+          type: 'TRAY_NOT_FOLDED',
+          severity: 'critical',
+          message: `${seat.seatNo} 小桌板仍处于展开状态`,
+          details: tray.data,
+        })
       } else if (!isTrayClosed(tray.data.tray_state)) {
         problems.push({ type: 'TRAY_NOT_CLOSED', severity: 'critical', message: `${seat.seatNo} 小桌板未收起`, details: tray.data })
         controls.push({ command: 'seat.tray.close', params: {} })
       }
+
+      const readingLight = await this.getHardwareStatus(seat, 'reading_light', requestId, phaseCode, phaseName)
+      if (!readingLight || !hasStatusField(readingLight.data, 'on')) {
+        statusFailures += 1
+      } else if (toBool(readingLight.data.on)) {
+        controls.push({ command: 'seat.light', params: { on: 'false' } })
+      }
     }
 
     return { problems, controls, statusFailures }
+  }
+
+  private shouldEmitAlert(seat: CabinManagedSeat, phaseCode: number, alertType: string): boolean {
+    const key = [seat.aircraftNo || this.config.cabin.aircraftNo || '', seat.flightId, seat.flightDate, seat.seatNo, phaseCode, alertType].join('|')
+    if (this.emittedAlertKeys.has(key)) return false
+    this.emittedAlertKeys.add(key)
+    return true
   }
 
   private async getHardwareStatus(
@@ -635,7 +717,7 @@ export class CabinFlightAutomation {
       this.log({ event: 'hardware.status.not_configured', requestId, phaseCode, phaseName, seatNo: seat.seatNo, ok: false })
       return null
     }
-    const target = key === 'glass_state' ? 'cabin' : seat.seatNo
+    const target = key === 'glass_state' || key === 'ceiling_state' ? 'cabin' : seat.seatNo
     const url = new URL(`${baseUrl}/admin-api/tcp/hardware/status`)
     url.searchParams.set('target', target)
     url.searchParams.set('key', key)
@@ -707,7 +789,7 @@ export class CabinFlightAutomation {
 
   private async sendControl(
     seat: CabinManagedSeat,
-    control: { command: 'seat.cushion' | 'seat.tray.close'; params: Record<string, string> },
+    control: AutomationControl,
     requestId: string,
     phaseCode: number,
     phaseName: PhaseName,
@@ -716,7 +798,9 @@ export class CabinFlightAutomation {
     if (!baseUrl) return false
     const path = control.command === 'seat.cushion'
       ? '/admin-api/tcp-client/cmd/seat/cushion'
-      : '/admin-api/tcp-client/cmd/seat/tray/close'
+      : control.command === 'seat.tray.close'
+        ? '/admin-api/tcp-client/cmd/seat/tray/close'
+        : '/admin-api/tcp-client/cmd/seat/light'
     const url = new URL(`${baseUrl}${path}`)
     url.searchParams.set('seatNo', seat.seatNo)
     for (const [key, value] of Object.entries(control.params)) {
@@ -761,35 +845,12 @@ export class CabinFlightAutomation {
         details: { command: control.command, payload },
       })
       if (!ok) {
-        this.store.createAlert({
-          aircraftNo: seat.aircraftNo,
-          flightId: seat.flightId,
-          flightDate: seat.flightDate,
-          phaseCode,
-          phaseName,
-          seatNo: seat.seatNo,
-          alertType: 'HARDWARE_CONTROL_FAILED',
-          severity: 'critical',
-          message: `${seat.seatNo} ${control.command} 指令下发失败`,
-          sourceEventId: requestId,
-          details: { payload },
-        })
+        this.recordSeatAlert(seat, phaseCode, phaseName, 'HARDWARE_CONTROL_FAILED', `${seat.seatNo} ${control.command} 指令下发失败`, requestId, { payload })
+        return false
       }
-      return ok
+      return this.verifySeatControl(seat, control, requestId, phaseCode, phaseName)
     } catch (error) {
-      this.store.createAlert({
-        aircraftNo: seat.aircraftNo,
-        flightId: seat.flightId,
-        flightDate: seat.flightDate,
-        phaseCode,
-        phaseName,
-        seatNo: seat.seatNo,
-        alertType: 'HARDWARE_CONTROL_FAILED',
-        severity: 'critical',
-        message: `${seat.seatNo} ${control.command} 指令下发异常`,
-        sourceEventId: requestId,
-        details: { error: stringifyError(error), command: control.command },
-      })
+      this.recordSeatAlert(seat, phaseCode, phaseName, 'HARDWARE_CONTROL_FAILED', `${seat.seatNo} ${control.command} 指令下发异常`, requestId, { error: stringifyError(error), command: control.command })
       this.log({
         event: 'hardware.control.error',
         requestId,
@@ -808,6 +869,215 @@ export class CabinFlightAutomation {
       })
       return false
     }
+  }
+
+  private async sendCabinControl(
+    control: AutomationControl,
+    requestId: string,
+    phaseCode: number,
+    phaseName: PhaseName,
+    aircraftNo: string | null,
+    flightId: string,
+    flightDate: string,
+  ): Promise<boolean> {
+    const baseUrl = this.config.cabin.controlBaseUrl?.replace(/\/+$/, '')
+    if (!baseUrl) return false
+    const url = new URL(`${baseUrl}/admin-api/tcp-client/cmd/cabin/ceiling/light`)
+    for (const [key, value] of Object.entries(control.params)) url.searchParams.set(key, value)
+    const start = Date.now()
+    this.log({
+      event: 'hardware.control.request',
+      requestId,
+      aircraftNo,
+      flightId,
+      flightDate,
+      phaseCode,
+      phaseName,
+      method: 'POST',
+      url: url.toString(),
+      ok: true,
+      details: { command: control.command },
+    })
+    try {
+      const response = await fetchWithTimeout(fetch, url, {
+        method: 'POST',
+        headers: this.config.cabin.controlAuth ? { Authorization: this.config.cabin.controlAuth } : {},
+      }, this.config.cabin.controlTimeoutMs ?? 10_000, 'cabin ceiling control')
+      const payload = await parseResponse(response)
+      const ok = response.ok && isOkEnvelope(payload)
+      this.log({
+        event: 'hardware.control.response',
+        requestId,
+        aircraftNo,
+        flightId,
+        flightDate,
+        phaseCode,
+        phaseName,
+        method: 'POST',
+        url: url.toString(),
+        status: response.status,
+        ok,
+        elapsedMs: Date.now() - start,
+        details: { command: control.command, payload },
+      })
+      if (!ok && this.shouldEmitAlert({ aircraftNo, flightId, flightDate, seatNo: 'cabin' } as CabinManagedSeat, phaseCode, 'HARDWARE_CONTROL_FAILED')) {
+        this.store.createAlert({
+          aircraftNo,
+          flightId,
+          flightDate,
+          phaseCode,
+          phaseName,
+          seatNo: null,
+          alertType: 'HARDWARE_CONTROL_FAILED',
+          severity: 'critical',
+          message: `客舱顶灯关闭指令下发失败`,
+          sourceEventId: requestId,
+          details: { payload, command: control.command },
+        })
+      }
+      if (!ok) return false
+      return this.verifyCabinControl(requestId, phaseCode, phaseName, aircraftNo, flightId, flightDate)
+    } catch (error) {
+      if (this.shouldEmitAlert({ aircraftNo, flightId, flightDate, seatNo: 'cabin' } as CabinManagedSeat, phaseCode, 'HARDWARE_CONTROL_FAILED')) {
+        this.store.createAlert({
+          aircraftNo,
+          flightId,
+          flightDate,
+          phaseCode,
+          phaseName,
+          seatNo: null,
+          alertType: 'HARDWARE_CONTROL_FAILED',
+          severity: 'critical',
+          message: `客舱顶灯关闭指令下发异常`,
+          sourceEventId: requestId,
+          details: { error: stringifyError(error), command: control.command },
+        })
+      }
+      this.log({
+        event: 'hardware.control.error',
+        requestId,
+        aircraftNo,
+        flightId,
+        flightDate,
+        phaseCode,
+        phaseName,
+        method: 'POST',
+        url: url.toString(),
+        ok: false,
+        elapsedMs: Date.now() - start,
+        error: stringifyError(error),
+        details: { command: control.command },
+      })
+      return false
+    }
+  }
+
+  private recordSeatAlert(
+    seat: CabinManagedSeat,
+    phaseCode: number,
+    phaseName: PhaseName,
+    alertType: string,
+    message: string,
+    requestId: string,
+    details: Record<string, unknown>,
+  ): void {
+    if (!this.shouldEmitAlert(seat, phaseCode, alertType)) return
+    this.store.createAlert({
+      aircraftNo: seat.aircraftNo,
+      flightId: seat.flightId,
+      flightDate: seat.flightDate,
+      phaseCode,
+      phaseName,
+      seatNo: seat.seatNo,
+      alertType,
+      severity: 'critical',
+      message,
+      sourceEventId: requestId,
+      details,
+    })
+  }
+
+  private async verifySeatControl(
+    seat: CabinManagedSeat,
+    control: AutomationControl,
+    requestId: string,
+    phaseCode: number,
+    phaseName: PhaseName,
+  ): Promise<boolean> {
+    const key: HardwareStatusKey = control.command === 'seat.cushion'
+      ? 'posture'
+      : control.command === 'seat.tray.close'
+        ? 'tray'
+        : 'reading_light'
+    const status = await this.getHardwareStatus(seat, key, requestId, phaseCode, phaseName)
+    const reached = key === 'posture'
+      ? status !== null && hasStatusField(status.data, 'position') && toNumber(status.data.position) === 0
+      : key === 'tray'
+        ? status !== null && hasStatusField(status.data, 'tray_state') && hasStatusField(status.data, 'tray_flipped') && isTrayClosed(status.data.tray_state) && !toBool(status.data.tray_flipped)
+        : status !== null && hasStatusField(status.data, 'on') && !toBool(status.data.on)
+    if (reached) return true
+    this.recordSeatAlert(
+      seat,
+      phaseCode,
+      phaseName,
+      'HARDWARE_STATE_NOT_REACHED',
+      `${seat.seatNo} ${control.command} 执行后状态未达到目标`,
+      requestId,
+      { command: control.command, status: status?.data ?? null },
+    )
+    this.log({
+      event: 'hardware.control.verify_failed',
+      requestId,
+      aircraftNo: seat.aircraftNo,
+      flightId: seat.flightId,
+      flightDate: seat.flightDate,
+      phaseCode,
+      phaseName,
+      seatNo: seat.seatNo,
+      ok: false,
+      details: { command: control.command, key, status: status?.data ?? null },
+    })
+    return false
+  }
+
+  private async verifyCabinControl(
+    requestId: string,
+    phaseCode: number,
+    phaseName: PhaseName,
+    aircraftNo: string | null,
+    flightId: string,
+    flightDate: string,
+  ): Promise<boolean> {
+    const seat = { aircraftNo, flightId, flightDate, seatNo: 'cabin' } as CabinManagedSeat
+    const status = await this.getHardwareStatus(seat, 'ceiling_state', requestId, phaseCode, phaseName)
+    if (status && hasStatusField(status.data, 'on') && !toBool(status.data.on)) return true
+    if (this.shouldEmitAlert(seat, phaseCode, 'HARDWARE_STATE_NOT_REACHED')) {
+      this.store.createAlert({
+        aircraftNo,
+        flightId,
+        flightDate,
+        phaseCode,
+        phaseName,
+        seatNo: null,
+        alertType: 'HARDWARE_STATE_NOT_REACHED',
+        severity: 'critical',
+        message: '客舱顶灯执行后状态未达到关闭目标',
+        sourceEventId: requestId,
+        details: { command: 'cabin.ceiling.light', status: status?.data ?? null },
+      })
+    }
+    this.log({
+      event: 'hardware.control.verify_failed',
+      requestId,
+      aircraftNo,
+      flightId,
+      flightDate,
+      phaseCode,
+      phaseName,
+      ok: false,
+      details: { command: 'cabin.ceiling.light', key: 'ceiling_state', status: status?.data ?? null },
+    })
+    return false
   }
 
   private async ensureBroadcast(phaseName: PhaseName, requestId: string): Promise<BroadcastAsset | null> {
@@ -1206,6 +1476,10 @@ function toBool(value: unknown): boolean {
   return false
 }
 
+function hasStatusField(data: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(data, key)
+}
+
 function toNumber(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value === 'string' && value.trim()) {
@@ -1230,6 +1504,12 @@ function describeSeatProblem(problem: SeatProblem): string {
       return '座椅未归位'
     case 'TRAY_NOT_CLOSED':
       return '小桌板未收起'
+    case 'TRAY_NOT_FOLDED':
+      return '小桌板仍处于展开状态'
+    case 'BAG_NOT_LOCKED':
+      return '行李箱未锁定'
+    case 'BAG_LEFT_BEHIND_POSSIBLE':
+      return '请带走随身行李'
     default:
       return problem.message
   }
@@ -1245,6 +1525,12 @@ function describeSeatProblemEN(problem: SeatProblem): string {
       return 'seat back is not upright'
     case 'TRAY_NOT_CLOSED':
       return 'tray table is not stowed'
+    case 'TRAY_NOT_FOLDED':
+      return 'tray table is still unfolded'
+    case 'BAG_NOT_LOCKED':
+      return 'baggage compartment is not locked'
+    case 'BAG_LEFT_BEHIND_POSSIBLE':
+      return 'please take your personal belongings'
     default:
       return problem.message
   }

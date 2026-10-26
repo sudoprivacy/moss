@@ -1,12 +1,33 @@
 import { randomUUID } from 'crypto'
 import { createInterface } from 'readline'
 import type net from 'net'
-import type { CabinConfig, CabinMessage, CabinPassengerContext, CabinToolCall } from './types.js'
+import type {
+  CabinConfig,
+  CabinMessage,
+  CabinOrderCancellationCandidate,
+  CabinPassengerContext,
+  CabinToolCall,
+} from './types.js'
 import { buildConversationKey } from './auth.js'
 import { CabinStore } from './store.js'
 import type { RuntimeService, SessionSnapshot } from '../runtimeService.js'
 import type { CabinLogger, CabinLogContext } from './logger.js'
 import { summarizeContext } from './logger.js'
+import {
+  CabinOrderClient,
+  formatCancellationQuestion,
+  formatCreateOrderReply,
+  formatOrderListReply,
+  isOrderSelection,
+  looksLikeCabinOrderRequest,
+  matchOrderCandidates,
+  parseModelCabinOrderIntent,
+  parseCabinOrderIntent,
+  resolveOrderSelection,
+  type CabinOrderIntent,
+  type CabinOrderResult,
+} from './orders.js'
+import { fetchWithTimeout } from './http.js'
 
 type FetchLike = typeof fetch
 
@@ -73,9 +94,11 @@ export type CabinServicesOptions = {
 
 export class CabinServices {
   private readonly fetchImpl: FetchLike
+  private readonly orderClient: CabinOrderClient
 
   constructor(private readonly options: CabinServicesOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch
+    this.orderClient = new CabinOrderClient(options.config, this.fetchImpl, options.logger)
   }
 
   async ensureConversation(context: CabinPassengerContext) {
@@ -89,6 +112,273 @@ export class CabinServices {
       ? await this.options.createMossSession(context)
       : randomUUID()
     return this.options.store.createConversation({ ...context, mossSessionId })
+  }
+
+  inferOrderIntent(text: string): CabinOrderIntent | null {
+    return parseCabinOrderIntent(text)
+  }
+
+  async resolveOrderIntent(input: {
+    context: CabinPassengerContext
+    text: string
+    logContext?: CabinLogContext
+  }): Promise<CabinOrderIntent | null> {
+    const deterministic = parseCabinOrderIntent(input.text)
+    if (deterministic || !looksLikeCabinOrderRequest(input.text)) return deterministic
+
+    const baseUrl = this.options.config.llmBaseUrl?.replace(/\/+$/, '')
+    if (!baseUrl || !this.options.config.llmApiKey) return null
+
+    const url = `${baseUrl}/chat/completions`
+    const startedAt = Date.now()
+    try {
+      const response = await fetchWithTimeout(
+        this.fetchImpl,
+        url,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${this.options.config.llmApiKey}`,
+          },
+          body: JSON.stringify({
+            model: this.options.config.llmModel,
+            temperature: 0,
+            stream: false,
+            max_tokens: 128,
+            messages: [
+              {
+                role: 'system',
+                content: [
+                  '你是客舱服务订单意图识别器。只输出一个 JSON 对象，不要输出 Markdown、解释或确认话术。',
+                  'kind 只能是 create、query、cancel、clarify、none。',
+                  '毛毯的 serviceTypeId 是 1，subItemIds 必须为空数组；饮品的 serviceTypeId 是 3。',
+                  '饮品 subItemIds 映射：可乐=1，鲜榨橙汁=2，手工茉莉拿铁=3。',
+                  'create 必须返回 serviceTypeId、subItemIds、quantities；数量缺失时按 1 返回。',
+                  '用户只表达想喝饮料但没有具体饮品时返回 clarify；普通闲聊或非服务请求返回 none。',
+                  '返回格式：{"kind":"create|query|cancel|clarify|none","serviceTypeId":1,"subItemIds":[],"quantities":[1]}',
+                ].join('\\n'),
+              },
+              { role: 'user', content: input.text },
+            ],
+          }),
+        },
+        this.options.config.replyTimeoutMs ?? this.options.config.controlTimeoutMs ?? 10_000,
+        'cabin order intent',
+      )
+      const payload = parseJsonPayload(await response.text())
+      if (!response.ok) {
+        this.logOutbound({
+          ...input.logContext,
+          upstream: 'llm-order-intent',
+          method: 'POST',
+          url,
+          status: response.status,
+          ok: false,
+          elapsedMs: Date.now() - startedAt,
+          model: this.options.config.llmModel,
+          errorMessage: `HTTP ${response.status}`,
+        })
+        return null
+      }
+      const intent = parseModelCabinOrderIntent(payload)
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'llm-order-intent',
+        method: 'POST',
+        url,
+        status: response.status,
+        ok: Boolean(intent),
+        elapsedMs: Date.now() - startedAt,
+        model: this.options.config.llmModel,
+        details: {
+          input_chars: input.text.length,
+          resolved: Boolean(intent),
+          intent_kind: intent?.kind || 'none',
+        },
+      })
+      return intent
+    } catch (error) {
+      this.logOutbound({
+        ...input.logContext,
+        upstream: 'llm-order-intent',
+        method: 'POST',
+        url,
+        ok: false,
+        elapsedMs: Date.now() - startedAt,
+        model: this.options.config.llmModel,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    }
+  }
+
+  async executeOrderIntent(input: {
+    context: CabinPassengerContext
+    conversationId: string
+    text: string
+    intent?: CabinOrderIntent | null
+    logContext?: CabinLogContext
+  }): Promise<CabinOrderResult> {
+    const pending = this.options.store.getPendingOrderCancellation(input.conversationId)
+    if (pending && isOrderSelection(input.text)) {
+      const selected = resolveOrderSelection(input.text, pending.candidates)
+      if (!selected) {
+        return {
+          intent: 'service_order_cancel_confirmation',
+          slots: { execution_status: 'confirmation_required', candidates: pending.candidates },
+          reply: formatCancellationQuestion(pending.candidates),
+          ok: false,
+          toolCall: this.orderToolCall('cancel_confirmation', { candidate_count: pending.candidates.length }),
+        }
+      }
+      return this.cancelCandidate(input, selected)
+    }
+
+    const intent = input.intent || parseCabinOrderIntent(input.text)
+    if (!intent) {
+      return {
+        intent: 'service_order_unknown',
+        slots: { execution_status: 'unsupported' },
+        reply: '请说出您需要的毛毯或饮品，以及要查询或取消哪一笔订单。',
+        ok: false,
+      }
+    }
+
+    if (intent.kind === 'create') {
+      this.options.store.clearPendingOrderCancellation(input.conversationId)
+      const response = await this.orderClient.create({
+        context: input.context,
+        serviceTypeId: intent.serviceTypeId,
+        subItemIds: intent.subItemIds,
+        quantities: intent.quantities,
+        logContext: input.logContext,
+      })
+      const orderId = extractOrderId(response.payload)
+      const ok = response.ok && Boolean(orderId)
+      return {
+        intent: 'service_order_create',
+        slots: {
+          service_type_id: intent.serviceTypeId,
+          sub_item_ids: intent.subItemIds,
+          quantities: intent.quantities,
+          order_id: orderId,
+          execution_status: ok ? 'succeeded' : 'failed',
+        },
+        reply: ok
+          ? formatCreateOrderReply(intent.serviceTypeId, intent.subItemIds, intent.quantities)
+          : '抱歉，服务订单创建失败，请稍后再试。',
+        ok,
+        toolCall: this.orderToolCall('create', {
+          service_type_id: intent.serviceTypeId,
+          sub_item_ids: intent.subItemIds,
+          quantities: intent.quantities,
+        }),
+      }
+    }
+
+    if (intent.kind === 'query') {
+      const response = await this.orderClient.listBySeat({
+        context: input.context,
+        status: intent.status || '1,2,3,4',
+        logContext: input.logContext,
+      })
+      return {
+        intent: 'service_order_query',
+        slots: {
+          status_filter: intent.status || '1,2,3,4',
+          orders: response.orders,
+          execution_status: response.ok ? 'succeeded' : 'failed',
+        },
+        reply: response.ok ? formatOrderListReply(response.orders) : '抱歉，暂时无法查询服务订单，请稍后再试。',
+        ok: response.ok,
+        toolCall: this.orderToolCall('query', { status: intent.status || '1,2,3,4' }),
+      }
+    }
+
+    if (intent.kind === 'clarify') {
+      return {
+        intent: 'service_order_clarify',
+        slots: { execution_status: 'clarification_required', reason: intent.reason },
+        reply: '请问您需要哪一种饮品？可选择可乐、鲜榨橙汁或手工茉莉拿铁。',
+        ok: false,
+        toolCall: this.orderToolCall('clarify', { reason: intent.reason }),
+      }
+    }
+
+    const response = await this.orderClient.listBySeat({
+      context: input.context,
+      status: '1,2',
+      logContext: input.logContext,
+    })
+    if (!response.ok) {
+      return {
+        intent: 'service_order_cancel',
+        slots: { execution_status: 'failed', status_filter: '1,2' },
+        reply: '抱歉，暂时无法查询可取消的服务订单，请稍后再试。',
+        ok: false,
+        toolCall: this.orderToolCall('cancel_lookup', { status: '1,2' }),
+      }
+    }
+    const candidates = matchOrderCandidates(response.orders, intent)
+    if (!candidates.length) {
+      this.options.store.clearPendingOrderCancellation(input.conversationId)
+      return {
+        intent: 'service_order_cancel',
+        slots: { execution_status: 'not_found', status_filter: '1,2' },
+        reply: '当前座位没有符合条件的可取消服务订单。',
+        ok: false,
+        toolCall: this.orderToolCall('cancel_lookup', { status: '1,2' }),
+      }
+    }
+    if (candidates.length > 1) {
+      this.options.store.setPendingOrderCancellation(input.conversationId, candidates)
+      return {
+        intent: 'service_order_cancel_confirmation',
+        slots: { execution_status: 'confirmation_required', candidates },
+        reply: formatCancellationQuestion(candidates),
+        ok: false,
+        toolCall: this.orderToolCall('cancel_confirmation', { candidate_count: candidates.length }),
+      }
+    }
+    return this.cancelCandidate(input, candidates[0])
+  }
+
+  private async cancelCandidate(
+    input: {
+      context: CabinPassengerContext
+      conversationId: string
+      logContext?: CabinLogContext
+    },
+    candidate: CabinOrderCancellationCandidate,
+  ): Promise<CabinOrderResult> {
+    const response = await this.orderClient.cancel({
+      context: input.context,
+      orderId: candidate.orderId,
+      cancelReason: '不需要了',
+      logContext: input.logContext,
+    })
+    this.options.store.clearPendingOrderCancellation(input.conversationId)
+    const ok = response.ok
+    return {
+      intent: 'service_order_cancel',
+      slots: {
+        order_id: candidate.orderId,
+        order_no: candidate.orderNo,
+        execution_status: ok ? 'succeeded' : 'failed',
+      },
+      reply: ok ? '已为您取消服务订单。' : '抱歉，服务订单取消失败，请稍后再试。',
+      ok,
+      toolCall: this.orderToolCall('cancel', { order_id: candidate.orderId }),
+    }
+  }
+
+  private orderToolCall(action: string, arguments_: Record<string, unknown>): CabinToolCall {
+    return {
+      id: `tc-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+      name: `cabin.service_order.${action}`,
+      arguments: arguments_,
+    }
   }
 
   inferToolCall(input: {
@@ -2739,6 +3029,19 @@ export function lineHasToolUse(line: string): boolean {
     }
   }
   return false
+}
+
+function extractOrderId(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined
+  const value = (payload as Record<string, unknown>).data
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const nested = (value as Record<string, unknown>).id
+    if (typeof nested === 'string' && nested.trim()) return nested.trim()
+    if (typeof nested === 'number' && Number.isFinite(nested)) return String(nested)
+  }
+  return undefined
 }
 
 function buildPassengerSalutation(context?: CabinPassengerContext): string {
