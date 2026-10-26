@@ -435,8 +435,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     sendRpcWithReply('_sudocode/session/input', { ...action, sessionId: acpSessionId }, {
       onReply: resolve,
       onError: error => {
-        if (action.action === 'submit' && typeof action.clientId === 'string') nativeUserEvents.delete(action.clientId)
-        reject(new InputDeliveryError(String(error), false))
+        const isOutcomeUnknown = terminalExit !== undefined
+        if (!isOutcomeUnknown && action.action === 'submit' && typeof action.clientId === 'string') nativeUserEvents.delete(action.clientId)
+        reject(new InputDeliveryError(isOutcomeUnknown ? 'Connection closed; input delivery outcome is unknown' : String(error), isOutcomeUnknown))
       },
       onTimeout: () => reject(new InputDeliveryError('Input delivery outcome is unknown; inspect the queue before retrying', true)),
     })
@@ -1291,8 +1292,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     onClose(code, signal, error) {
       if (terminalExit) return
       terminalExit = { code, signal, error, isNotified: false }
+      inputEpoch += 1
       resolveHandshake(false)
-      const isTurnInterrupted = pendingPromptIds.size > 0 || pendingStdin.length > 0
+      const isTurnInterrupted = nativeInputState?.running === true || pendingPromptIds.size > 0 || pendingStdin.length > 0
       interruptPendingTools()
       persistPartialAssistant()
       if (isTurnInterrupted) {
