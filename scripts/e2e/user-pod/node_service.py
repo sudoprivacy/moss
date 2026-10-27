@@ -1,4 +1,5 @@
 """Expose the isolated node's native K3s lifecycle to the production installer."""
+import datetime
 import json
 import re
 import subprocess
@@ -10,6 +11,7 @@ class NodeService:
     """Keep the helper in its own PID namespace and exchange one scoped request."""
     def __init__(self, directory, node=None, inspect=None):
         self.directory, self.node, self.inspect = directory, node, inspect
+        self.started_at = None
 
     def command(self, *arguments):
         from deploy.runtime.gvisor.node import command
@@ -76,7 +78,8 @@ class NodeService:
                     time.sleep(0.1)
                     continue
                 if after != before:
-                    result.update(success=True, before=before, after=after)
+                    self.started_at = datetime.datetime.now(datetime.timezone.utc)
+                    result.update(success=True, before=before, after=after, startedAt=self.started_at.isoformat())
                     break
                 time.sleep(0.1)
             if not result['success']:

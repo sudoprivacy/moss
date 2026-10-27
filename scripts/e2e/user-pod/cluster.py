@@ -156,7 +156,7 @@ def run_cluster(args):
         return ['docker', 'exec', node, '/bin/ctr', '--address', '/run/k3s/containerd/containerd.sock',
                 '--namespace', 'k8s.io', *arguments]
 
-    def ready(step, started=None):
+    def ready(step, started=None, selector=None):
         started = started or datetime.datetime.fromisoformat(owned(node)['State']['StartedAt'].replace('Z', '+00:00'))
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -165,7 +165,9 @@ def run_cluster(args):
             if result.returncode == 0:
                 nodes = json.loads(result.stdout)['items']
                 if nodes and all(any(c['type'] == 'Ready' and c['status'] == 'True'
-                    for c in item['status'].get('conditions', [])) for item in nodes):
+                    for c in item['status'].get('conditions', [])) and
+                    all(item['metadata']['labels'].get(key) == value for key, value in (selector or {}).items())
+                    for item in nodes):
                     lease = subprocess.run(kube('-n', 'kube-node-lease', 'get', 'lease', name,
                         '--ignore-not-found', '-o', 'json'), capture_output=True, text=True, encoding='utf-8', timeout=15)
                     if lease.returncode == 0 and lease.stdout.strip():
@@ -290,14 +292,15 @@ def run_cluster(args):
             '*) exit 64 ;;\nesac\n', newline='\n')
         (bridges / 'kubectl').write_text('#!/bin/sh\nexec ' + native + '/kubectl "$@"\n', newline='\n')
         (bridges / 'k3s').chmod(0o755)
-        activated_at = datetime.datetime.now(datetime.timezone.utc)
+        lifecycle = NodeService(root, node, owned)
         helper('prepare-runtime', ['python3', '/moss/scripts/e2e/user-pod/cluster.py', '--prepare-node',
             '/moss/deploy/runtime/gvisor/distribution.lock.json', '/inputs/gvisor.tar.gz', '/proof/installed.json'],
-            lifecycle=NodeService(root, node, owned))
+            lifecycle=lifecycle)
         installed = json.loads((root / 'installed.json').read_text())
         proof['installed'] = installed
         assert owned(node)['NetworkSettings']['Networks'][name]['IPAddress'] == address
-        nodes = ready('qualified-ready', activated_at)
+        assert lifecycle.started_at is not None, 'The fresh node must load its version through a native service restart'
+        nodes = ready('qualified-ready', lifecycle.started_at, installed['runtimeClass']['scheduling']['nodeSelector'])
         for key, value in installed['runtimeClass']['scheduling']['nodeSelector'].items():
             assert nodes[0]['metadata']['labels'].get(key) == value, 'The node must advertise its installed capability'
         retained = json.loads(run('retained-workload', kube('-n', namespace, 'get', 'pod/retained-workload', '-o', 'json')))
