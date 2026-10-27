@@ -34,12 +34,12 @@ class DeploymentPackageTests(unittest.TestCase):
             self.assertTrue(all(member.isfile() for member in members))
             self.assertEqual({m.name for m in members}, {'control.py', 'install-control.sh', 'fetch-offline-deps.sh',
                                                        'server.json', 'images.py', 'artifacts.py', 'sudostack-images.lock.json',
-                                                       *('deploy/runtime/gvisor/' + name for name in ['fetch.py', 'install.py', 'release.py'])})
+                                                       *('deploy/runtime/gvisor/' + name for name in ['fetch.py', 'install.py', 'release.py', 'node.py', 'distribution.lock.json'])})
             self.assertEqual(bundle.extractfile('images.py').read(), (self.source / 'tools/deploy/images.py').read_bytes())
             self.assertEqual(bundle.extractfile('sudostack-images.lock.json').read(), self.lock.read_bytes())
             destination = self.root / 'unpacked'
             bundle.extractall(destination)
-        for command in ['fetch.py', 'install.py']:
+        for command in ['fetch.py', 'install.py', 'node.py']:
             result = subprocess.run([sys.executable, str(destination / 'deploy/runtime/gvisor' / command), '--help'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 

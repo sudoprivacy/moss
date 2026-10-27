@@ -42,7 +42,8 @@ MOSS_ADVERTISED_HOST, MOSS_ADMIN_USERNAME, MOSS_ADMIN_PASSWORD,
 ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, MOSS_DOWNLOAD_BASE, MOSS_INSTALLER_URL,
 MOSS_CONTROL_NAMESPACE, MOSS_CONTROL_NODE, MOSS_K8S_NAMESPACE,
 MOSS_K8S_RUNTIME_CLASS, NODE_IP, INSTALL_GVISOR, INSTALL_K3S_VERSION,
-K3S_MIRROR, REGISTRY_MIRROR, OFFLINE_DIR, MOSS_ARCH (download target: amd64|arm64).
+K3S_MIRROR, REGISTRY_MIRROR, OFFLINE_DIR, MOSS_ARCH (download target: amd64|arm64),
+GVISOR_RELEASE (auto selects the bundled qualified architecture, or upstream).
 
 Existing embedded installations are migrated after a stopped-data backup.
 Custom external Nexus, ZoneId-bound data and external data paths require a
@@ -350,9 +351,60 @@ prompt_value() {
 # The release-bound caller retains business images through the shared image
 # tool after the node is ready. Configuration uses environment variables.
 # ---------------------------------------------------------------------------
+plan_gvisor_runtime() {
+  GVISOR_TOOLS="$WORK_DIR/bundle/deploy/runtime/gvisor"
+  GVISOR_PLAN="$(python3 "$GVISOR_TOOLS/fetch.py" plan --architecture "$1" --preference "${GVISOR_RELEASE:-auto}")"
+  GVISOR_PROVIDER="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["provider"])' "$GVISOR_PLAN")"
+}
+
+provision_qualified_gvisor() {
+  local service="$1" cache="$2" offline_mode="$3"
+  local metadata metadata_sha
+  local options=()
+  [ "$offline_mode" != on ] || options+=(--offline)
+  metadata="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["release"])' "$GVISOR_PLAN")"
+  metadata_sha="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["releaseSha256"])' "$GVISOR_PLAN")"
+  QUALIFIED_RUNTIME_RECEIPT="$WORK_DIR/qualified-runtime.json"
+  python3 "$GVISOR_TOOLS/node.py" --release "$metadata" --release-sha256 "$metadata_sha" \
+    --cache "$cache/gvisor" --service "$service" "${options[@]}" > "$QUALIFIED_RUNTIME_RECEIPT"
+  QUALIFIED_RUNTIME_CLASS="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runtimeClass"]["metadata"]["name"])' "$QUALIFIED_RUNTIME_RECEIPT")"
+}
+
+apply_compute_runtime_class() {
+  local class_name="$1" receipt="${2:-}"
+  [ -n "$class_name" ] || return 0
+  if [ -n "$receipt" ]; then
+    k3s kubectl get runtimeclass "$class_name" --ignore-not-found -o json > "$WORK_DIR/existing-runtime-class.json"
+    python3 - "$receipt" "$WORK_DIR/existing-runtime-class.json" "$class_name" <<'PY' > "$WORK_DIR/runtime-class.json"
+import json, pathlib, re, sys
+expected = json.load(open(sys.argv[1]))['runtimeClass']
+name = sys.argv[3]
+if len(name) > 63 or not re.fullmatch(r'[a-z0-9](?:[-a-z0-9]*[a-z0-9])?', name):
+    sys.exit('Invalid runtime class name')
+expected['metadata']['name'] = name
+existing = pathlib.Path(sys.argv[2]).read_text().strip()
+if existing:
+    previous = json.loads(existing)
+    if (previous['handler'] != expected['handler'] or previous.get('scheduling') != expected['scheduling']
+            or previous['metadata'].get('annotations', {}).get('moss.sudo.dev/runtime-archive') != expected['metadata']['annotations']['moss.sudo.dev/runtime-archive']):
+        sys.exit('Existing RuntimeClass differs; select the versioned class or use the runtime upgrade flow')
+print(json.dumps(expected))
+PY
+    k3s kubectl apply -f "$WORK_DIR/runtime-class.json"
+  else
+    k3s kubectl apply -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: $class_name
+handler: runsc
+EOF
+  fi
+}
+
 provision_compute_node() {
   local NAMESPACE="${MOSS_K8S_NAMESPACE:-moss-sessions}"
-  local RUNTIME_CLASS="${MOSS_K8S_RUNTIME_CLASS:-gvisor}"
+  local RUNTIME_CLASS="${MOSS_K8S_RUNTIME_CLASS-gvisor}"
   local SA_NAME="${MOSS_K8S_SA_NAME:-moss-runner}"
   local INSTALL_GVISOR="${INSTALL_GVISOR:-1}"
   local K3S_MIRROR="${K3S_MIRROR:-auto}"
@@ -448,11 +500,28 @@ provision_compute_node() {
     && [ "$OFFLINE_MODE" != off ]; then
     K3S_USE_OFFLINE=1
   fi
-  if [ "$OFFLINE_MODE" = on ] && ! { command -v k3s >/dev/null 2>&1 && systemctl is-active --quiet "$K3S_SERVICE"; }; then
+  local K3S_IS_ACTIVE=0
+  if command -v k3s >/dev/null 2>&1 && systemctl is-active --quiet "$K3S_SERVICE"; then
+    K3S_IS_ACTIVE=1
+  fi
+  if [ "$OFFLINE_MODE" = on ] && [ "$K3S_IS_ACTIVE" = 0 ]; then
     [ "$K3S_USE_OFFLINE" = 1 ] \
       || die "OFFLINE_MODE=on but $OFFLINE_DIR lacks k3s-$KARCH, k3s-install.sh and k3s-airgap-images-$KARCH.tar.zst (or .tar.gz); run fetch-offline-deps.sh first"
-    [ "$INSTALL_GVISOR" != 1 ] || [ -s "$OFF_RUNSC" ] \
-      || die "OFFLINE_MODE=on but $OFF_RUNSC is missing (or set INSTALL_GVISOR=0)"
+  fi
+  if [ "$INSTALL_GVISOR" = 1 ]; then
+    plan_gvisor_runtime "$KARCH"
+    if [ "$OFFLINE_MODE" = on ] && [ "$K3S_IS_ACTIVE" = 0 ]; then
+      if [ "$GVISOR_PROVIDER" = qualified ]; then
+        local metadata metadata_sha
+        metadata="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["release"])' "$GVISOR_PLAN")"
+        metadata_sha="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["releaseSha256"])' "$GVISOR_PLAN")"
+        python3 "$GVISOR_TOOLS/fetch.py" --release "$metadata" --release-sha256 "$metadata_sha" \
+          --cache "$OFFLINE_DIR/gvisor" --offline >/dev/null
+      else
+        [ -s "$OFF_RUNSC" ] && [ -s "$OFF_SHIM" ] \
+          || die "OFFLINE_MODE=on but the upstream gvisor binaries are missing from $OFFLINE_DIR"
+      fi
+    fi
   fi
 
   if [ -z "$NODE_IP" ]; then
@@ -629,33 +698,38 @@ EOF
   }
 
   if [ "$INSTALL_GVISOR" = 1 ]; then
-    if command -v runsc >/dev/null 2>&1; then
-      log "runsc is already installed: $(runsc --version 2>/dev/null | head -1)"
-    elif [ -s "$OFF_RUNSC" ] && [ -s "$OFF_SHIM" ] && [ "$OFFLINE_MODE" != off ]; then
-      log "Installing gvisor from $OFFLINE_DIR"
-      install_staged_gvisor "$OFFLINE_DIR"
+    if [ "$GVISOR_PROVIDER" = qualified ]; then
+      provision_qualified_gvisor "$K3S_SERVICE" "$OFFLINE_DIR" "$OFFLINE_MODE"
+      RUNTIME_CLASS="${MOSS_K8S_RUNTIME_CLASS-$QUALIFIED_RUNTIME_CLASS}"
     else
-      [ "$OFFLINE_MODE" = on ] && die "OFFLINE_MODE=on but $OFF_RUNSC is missing"
-      log "Downloading gvisor (runsc and its containerd shim)"
-      local tmp f
-      tmp="$(mktemp -d)"
-      FETCH_K3S=0 FETCH_MOSS=0 ARCH="$KARCH" OFFLINE_DIR="$tmp" \
-        bash "$WORK_DIR/bundle/fetch-offline-deps.sh" || die 'could not stage verified gvisor release'
-      install_staged_gvisor "$tmp"
-      rm -rf "$tmp"
-    fi
+      if command -v runsc >/dev/null 2>&1; then
+        log "runsc is already installed: $(runsc --version 2>/dev/null | head -1)"
+      elif [ -s "$OFF_RUNSC" ] && [ -s "$OFF_SHIM" ] && [ "$OFFLINE_MODE" != off ]; then
+        log "Installing gvisor from $OFFLINE_DIR"
+        install_staged_gvisor "$OFFLINE_DIR"
+      else
+        [ "$OFFLINE_MODE" = on ] && die "OFFLINE_MODE=on but $OFF_RUNSC is missing"
+        log "Downloading gvisor (runsc and its containerd shim)"
+        local tmp
+        tmp="$(mktemp -d)"
+        FETCH_K3S=0 FETCH_MOSS=0 ARCH="$KARCH" OFFLINE_DIR="$tmp" \
+          bash "$WORK_DIR/bundle/fetch-offline-deps.sh" || die 'could not stage verified gvisor release'
+        install_staged_gvisor "$tmp"
+        rm -rf "$tmp"
+      fi
 
-    # k3s merges *.toml.tmpl into its containerd config.
-    mkdir -p "$(dirname "$CONTAINERD_TMPL")"
-    if ! grep -q 'runtimes.runsc' "$CONTAINERD_TMPL" 2>/dev/null; then
-      log "Registering runsc with the k3s containerd"
-      cat > "$CONTAINERD_TMPL" <<'EOF'
+      # k3s merges *.toml.tmpl into its containerd config.
+      mkdir -p "$(dirname "$CONTAINERD_TMPL")"
+      if ! grep -q 'runtimes.runsc' "$CONTAINERD_TMPL" 2>/dev/null; then
+        log "Registering runsc with the k3s containerd"
+        cat > "$CONTAINERD_TMPL" <<'EOF'
 {{ template "base" . }}
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
 EOF
-      systemctl restart "$K3S_SERVICE"
-      wait_node_ready
+        systemctl restart "$K3S_SERVICE"
+        wait_node_ready
+      fi
     fi
   else
     warn "INSTALL_GVISOR=0; RuntimeClass '$RUNTIME_CLASS' will have no handler"
@@ -677,13 +751,8 @@ EOF
   fi
 
   log "Applying RuntimeClass/$RUNTIME_CLASS, namespace/$NAMESPACE, ServiceAccount/$SA_NAME and RBAC"
+  apply_compute_runtime_class "$RUNTIME_CLASS" "${QUALIFIED_RUNTIME_RECEIPT:-}"
   kc apply -f - <<EOF
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: $RUNTIME_CLASS
-handler: runsc
----
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -98,6 +98,43 @@ an ephemeral runtime root for that version. Existing template entries and runtim
 versions retain their identities. The node lifecycle owner reloads containerd
 and selects the RuntimeClass after Pod acceptance.
 
+`node.py` owns the K3s node lifecycle. It uses the same immutable installer and
+template renderer, appends a version capability to the node's K3s configuration,
+and reloads the native service with its existing containers retained. Acceptance
+checks the actual CRI registration and the identities of previously running
+containers. A failed reload restores the exact configuration published by the
+operation and reloads the previous configuration. Concurrent configuration
+changes remain available for operator review.
+
+Each archive has a versioned RuntimeClass whose selector requires its exact node
+capability, Linux and the release architecture. The release can coexist with
+other installed versions. A K3s server creates the cluster resource; joined
+compute agents install and advertise the same capability.
+
+```mermaid
+flowchart LR
+  A[Bundled release metadata] --> B[Shared archive verifier]
+  B --> C[Immutable version and handler]
+  C --> D[K3s reload and CRI verification]
+  D --> E[Node version capability]
+  E --> F[Versioned RuntimeClass]
+  F --> G[User Pod controlled upgrade]
+```
+
+The authenticated deployment bundle selects its matching qualified architecture
+with `GVISOR_RELEASE=auto`. Explicit upstream release channels use the upstream
+distribution path. A fresh Moss installation selects the provisioned class;
+an existing installation retains its configured class while registering the
+new version. User Pod replacement uses the existing runtime upgrade flow, with
+drain and durable recovery.
+
+The [real K3s acceptance](../../../scripts/e2e/user-pod/cluster.py) invokes this
+same node installer before its owner isolation, two-cohost and durable recovery
+journeys. Its scoped service supervisor restarts the native K3s process while
+container shims keep running. The helper has its own PID namespace and uses the
+native CRI socket to verify the loaded runtime. Node API labels and the live
+shim and Sentry executables establish the selected release.
+
 ```sh
 sudo python3 deploy/runtime/gvisor/install.py stage \
   --archive=/path/to/release.tar.gz --sha256=REVIEWED_ARCHIVE_SHA256 \

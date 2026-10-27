@@ -11,7 +11,7 @@
 | --- | --- | --- |
 | Server、管理后台、API | `moss-server:<版本>-<架构>` | Kubernetes Deployment |
 | Nexus、vault 插件、会话 exec 进程 | `moss-nexus:<版本>-<架构>` | 同一 Deployment 的独立容器 |
-| scode 会话 | `my-moss-runtime:<版本>-<架构>` | 每个会话一个 Pod |
+| 用户 Nexus 与 scode cohost | `my-moss-runtime:<版本>-<架构>` | 按用户与 Agent 执行归属隔离的 Pod，承载多个会话 |
 
 Server 镜像不含 Nexus；Nexus 镜像不含 Server、后台或模型文件。两个镜像均包含
 `kubectl`：Server 创建会话 Pod，Nexus 负责执行 `kubectl exec` 并管理会话通道。
@@ -58,7 +58,10 @@ Secret、PVC/PV、Service 和 Deployment。默认端口 `43127`，访问
 | `MOSS_CONTROL_NAMESPACE` | 控制命名空间，默认 `moss-control` |
 | `MOSS_K8S_NAMESPACE` | 会话命名空间，默认 `moss-sessions`，须与控制命名空间不同 |
 | `MOSS_CONTROL_NODE` | 控制节点的 `kubernetes.io/hostname` 标签；默认按本机 IP 识别 |
-| `MOSS_K8S_RUNTIME_CLASS` | 默认 `gvisor`；已有集群可显式留空以使用默认运行时 |
+| `MOSS_K8S_RUNTIME_CLASS` | 选择计算节点已注册的 RuntimeClass；显式留空使用集群默认运行时 |
+
+计算节点的版本选择、完整发行包、节点能力标签及受控升级契约见
+[gVisor 安装说明](runtime/gvisor/README.md#distribution-and-host-installation)。
 
 首次运行 `--role control-plane` 时，计算节点的 runtime 镜像和 gVisor 须已准备好。
 控制服务使用节点本地存储，固定在安装节点上。其他计算节点可运行会话；每次升级前须在各计算节点

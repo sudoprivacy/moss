@@ -3,7 +3,10 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -38,6 +41,47 @@ class FetchTests(unittest.TestCase):
 
     def acquire(self, offline=False):
         return fetch.fetch(self.metadata, digest(self.metadata), self.cache, offline)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX offline staging entry')
+    def test_deployment_stager_and_offline_install_share_one_complete_verified_cache(self):
+        bundle = self.root / 'bundle'
+        tools = bundle / 'deploy/runtime/gvisor'
+        tools.mkdir(parents=True)
+        for name in ['fetch.py', 'release.py']:
+            shutil.copyfile(Path(__file__).with_name(name), tools / name)
+        shutil.copyfile(self.metadata, tools / 'distribution.lock.json')
+        script = Path(__file__).resolve().parents[2] / 'k3s/fetch-offline-deps.sh'
+        shutil.copyfile(script, bundle / script.name)
+        result = subprocess.run(['bash', str(bundle / script.name)], capture_output=True, text=True,
+            env={**os.environ, 'FETCH_K3S': '0', 'FETCH_MOSS': '0', 'ARCH': 'amd64',
+                 'GVISOR_RELEASE': 'auto', 'OFFLINE_DIR': str(self.root / 'offline')}, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads((self.root / 'offline/gvisor-amd64.json').read_text())
+        installed = fetch.fetch(tools / 'distribution.lock.json', digest(tools / 'distribution.lock.json'),
+                                self.root / 'offline/gvisor', offline=True)
+        self.assertEqual(receipt, installed)
+        self.assertEqual(Path(installed['archivePath']).read_bytes(), self.archive.read_bytes())
+        self.assertFalse((self.root / 'offline/runsc-amd64').exists())
+
+    def test_bundled_distribution_selects_its_architecture_and_binds_metadata_bytes(self):
+        selected = fetch.distribution('amd64', metadata=self.metadata)
+        self.assertEqual(selected, {'provider': 'qualified', 'release': str(self.metadata.resolve()),
+                                    'releaseSha256': digest(self.metadata)})
+        self.metadata.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'metadata checksum'):
+            fetch.fetch(Path(selected['release']), selected['releaseSha256'], self.cache)
+
+    def test_upstream_architecture_and_explicit_channel_remain_available(self):
+        self.assertEqual(fetch.distribution('arm64', metadata=self.metadata), {'provider': 'upstream', 'version': 'latest'})
+        self.assertEqual(fetch.distribution('amd64', '20261012.0', self.metadata), {'provider': 'upstream', 'version': '20261012.0'})
+        with self.assertRaisesRegex(ValueError, 'does not support arm64'):
+            fetch.distribution('arm64', 'qualified', self.metadata)
+
+    def test_release_selection_refuses_path_fragments_before_staging(self):
+        for preference in ['../escape', '/absolute', 'release name', 'x\nnext']:
+            with self.subTest(preference=preference), self.assertRaisesRegex(ValueError, 'Invalid upstream'):
+                fetch.distribution('amd64', preference, self.metadata)
+        self.assertFalse(self.cache.exists())
 
     def test_real_http_fallback_then_offline_restore_uses_the_same_complete_archive(self):
         requests = []
@@ -96,6 +140,7 @@ class FetchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'manifest differs'):
             self.acquire()
 
+    @unittest.skipUnless(os.name == 'posix', 'POSIX rename of an open inode')
     def test_metadata_rename_after_open_cannot_change_the_authenticated_identity(self):
         expected = digest(self.metadata)
         replacement = self.root / 'next.json'

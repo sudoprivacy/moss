@@ -72,6 +72,36 @@ retain_release_image() { printf 'retained %s\\n' "$1"; }
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'Compute node ready\n')
 
+    def test_versioned_runtime_class_accepts_its_identity_and_refuses_an_existing_conflict(self):
+        functions = self.source[self.source.index('apply_compute_runtime_class() {'):self.source.index('\nprovision_compute_node() {')]
+        resource = {'apiVersion': 'node.k8s.io/v1', 'kind': 'RuntimeClass',
+            'metadata': {'name': 'gvisor-qualified', 'annotations': {'moss.sudo.dev/runtime-archive': 'a' * 64}},
+            'handler': 'verified-handler', 'scheduling': {'nodeSelector': {'version': 'verified'}}}
+        receipt = self.root / 'receipt.json'
+        receipt.write_text(json.dumps({'runtimeClass': resource}))
+        existing = self.root / 'cluster.json'
+        applied = self.root / 'applied.json'
+        script = '''k3s() {
+  if [ "$2" = get ]; then cat "$FIXTURE_EXISTING";
+  elif [ "$2" = apply ]; then cp "$4" "$FIXTURE_APPLIED";
+  else exit 99; fi
+}
+''' + functions + '\napply_compute_runtime_class gvisor-qualified "$FIXTURE_RECEIPT"\n'
+        environment = {'WORK_DIR': str(self.root), 'FIXTURE_EXISTING': str(existing),
+                       'FIXTURE_APPLIED': str(applied), 'FIXTURE_RECEIPT': str(receipt)}
+        for previous in ['', json.dumps(resource)]:
+            existing.write_text(previous)
+            result = self.shell(script, **environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(applied.read_text()), resource)
+        applied.unlink()
+        resource['handler'] = 'different-handler'
+        existing.write_text(json.dumps(resource))
+        result = self.shell(script, **environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Existing RuntimeClass differs', result.stderr)
+        self.assertFalse(applied.exists())
+
 
 if __name__ == '__main__':
     unittest.main()

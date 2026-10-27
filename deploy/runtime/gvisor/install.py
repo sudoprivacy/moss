@@ -48,13 +48,13 @@ def prepare_prefix(prefix):
     sync_ancestors(prefix)
 
 
-def verify_ancestors(directory):
+def verify_ancestors(directory, searchable=True):
     """Protect executable names from replacement by another OS user."""
     for path in [directory, *directory.parents]:
         if path.is_symlink() or not stat.S_ISDIR(path.stat().st_mode):
             raise ValueError('Runtime ancestors must be materialized directories: ' + str(path))
         info = path.stat()
-        if not info.st_mode & stat.S_IXOTH:
+        if searchable and not info.st_mode & stat.S_IXOTH:
             raise ValueError('Runtime ancestor must allow Sentry search: ' + str(path))
         if info.st_uid not in (0, os.geteuid()) or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
             raise ValueError('Runtime ancestor permits another writer: ' + str(path))
@@ -193,36 +193,49 @@ def register_template(installed, manifest_sha, template, config_version):
         os.close(descriptor)
 
 
-def write_template(paths, template, config_version):
-    """Publish a complete template while holding its containing directory's lock."""
+def template_contents(paths, previous, config_version):
+    """Render one exact handler while preserving other runtime registrations."""
     stanza = runtime_stanza(paths, config_version)
-    if template.is_symlink():
-        raise ValueError('Containerd template must be a materialized file')
-    previous = template.read_text() if template.exists() else '{{ template "base" . }}\n'
     if stanza in previous and previous.count(paths['handler']) == 2:
-        with template.open('rb') as file:
-            os.fsync(file.fileno())
-        sync_directory(template.parent)
-        return {**paths, 'changed': False}
+        return previous
     if paths['handler'] in previous:
         raise ValueError('Existing runtime handler configuration differs')
-    previous_info = template.stat() if template.exists() else None
+    return previous.rstrip('\n') + '\n\n' + stanza
+
+
+def publish_file(path, raw, previous_info=None):
+    """Atomically publish a protected host file under the caller's directory lock."""
     mode = stat.S_IMODE(previous_info.st_mode) if previous_info else 0o600
-    with tempfile.NamedTemporaryFile(mode='w', dir=template.parent, delete=False) as file:
+    with tempfile.NamedTemporaryFile(mode='wb', dir=path.parent, delete=False) as file:
         temporary = Path(file.name)
         try:
-            file.write(previous.rstrip('\n') + '\n\n' + stanza)
+            file.write(raw)
             if previous_info:
                 os.fchown(file.fileno(), previous_info.st_uid, previous_info.st_gid)
             os.fchmod(file.fileno(), mode)
             file.flush()
             os.fsync(file.fileno())
             file.close()
-            temporary.replace(template)
-            sync_directory(template.parent)
+            temporary.replace(path)
+            sync_directory(path.parent)
         finally:
             file.close()
             temporary.unlink(missing_ok=True)
+
+
+def write_template(paths, template, config_version):
+    """Publish a complete template while holding its containing directory's lock."""
+    if template.is_symlink():
+        raise ValueError('Containerd template must be a materialized file')
+    previous = template.read_bytes().decode('utf-8') if template.exists() else '{{ template "base" . }}\n'
+    content = template_contents(paths, previous, config_version)
+    if content == previous and template.exists():
+        with template.open('rb') as file:
+            os.fsync(file.fileno())
+        sync_directory(template.parent)
+        return {**paths, 'changed': False}
+    previous_info = template.stat() if template.exists() else None
+    publish_file(template, content.encode('utf-8'), previous_info)
     return {**paths, 'changed': True}
 
 

@@ -21,7 +21,7 @@ class InstallerDownloadTests(unittest.TestCase):
             script = (HERE.parent / 'install.sh').read_bytes().replace(b'@@MOSS_RELEASE_TAG@@', b'server-vfixture')
             bundle = io.BytesIO()
             modules = {}
-            for name in ['fetch.py', 'install.py', 'release.py']:
+            for name in ['fetch.py', 'install.py', 'release.py', 'node.py', 'distribution.lock.json']:
                 modules['deploy/runtime/gvisor/' + name] = (HERE.parent / 'runtime/gvisor' / name).read_bytes()
             modules['fetch-offline-deps.sh'] = b'''set -eu
 mkdir -p "$OFFLINE_DIR"

@@ -33,11 +33,12 @@ def package(output, shared_source, lock_path=LOCK):
     for name in ['control.py', 'install-control.sh', 'fetch-offline-deps.sh']:
         files[name] = (HERE / name).read_bytes()
     files['server.json'] = (HERE.parent / 'server.json').read_bytes()
-    for name in ['fetch.py', 'install.py', 'release.py']:
+    for name in ['fetch.py', 'install.py', 'release.py', 'node.py']:
         relative = 'deploy/runtime/gvisor/' + name
         content = (HERE.parent / 'runtime/gvisor' / name).read_bytes()
         compile(content.decode('utf-8'), relative, 'exec')
         files[relative] = content
+    files['deploy/runtime/gvisor/distribution.lock.json'] = (HERE.parent / 'runtime/gvisor/distribution.lock.json').read_bytes()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=output.parent, prefix='.', suffix='.part', delete=False) as stream:
         temporary = Path(stream.name)

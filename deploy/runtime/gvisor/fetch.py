@@ -4,10 +4,28 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from deploy.runtime.gvisor.release import acquire, release_metadata, sha256, verified_archive, verify_archive
+
+
+def distribution(architecture, preference='auto', metadata=None):
+    """Select the bundled qualified release or the requested upstream channel."""
+    if architecture not in ('amd64', 'arm64'):
+        raise ValueError('A supported compute architecture is required')
+    metadata = metadata or Path(__file__).with_name('distribution.lock.json')
+    raw = metadata.read_bytes()
+    release = release_metadata(json.loads(raw))
+    if preference in ('auto', 'qualified') and release['architecture'] == 'linux-' + architecture:
+        return {'provider': 'qualified', 'release': str(metadata.resolve()),
+                'releaseSha256': hashlib.sha256(raw).hexdigest()}
+    if preference == 'qualified':
+        raise ValueError('The bundled qualified runtime does not support ' + architecture)
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]*', preference):
+        raise ValueError('Invalid upstream runtime release')
+    return {'provider': 'upstream', 'version': 'latest' if preference == 'auto' else preference}
 
 
 def fetch(metadata, metadata_sha, cache, offline=False):
@@ -37,6 +55,13 @@ def fetch(metadata, metadata_sha, cache, offline=False):
 
 
 def main():
+    if sys.argv[1:2] == ['plan']:
+        parser = argparse.ArgumentParser(description='Select the authenticated bundled runtime for a compute architecture.')
+        parser.add_argument('--architecture', required=True, choices=['amd64', 'arm64'])
+        parser.add_argument('--preference', default='auto')
+        args = parser.parse_args(sys.argv[2:])
+        print(json.dumps(distribution(args.architecture, args.preference)))
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--release', required=True, type=Path)
     parser.add_argument('--release-sha256', required=True)
