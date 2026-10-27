@@ -287,6 +287,11 @@ jobs:
             ${{ runner.temp }}/moss-user-pod/cluster/evidence/**/user-pod-recovery.json
             ${{ runner.temp }}/moss-user-pod/cluster/evidence/**/release-upgrade.json
             ${{ runner.temp }}/moss-user-pod/cluster/live-runtime-processes.json
+            ${{ runner.temp }}/moss-user-pod/cluster/installed.json
+            ${{ runner.temp }}/moss-user-pod/cluster/node-service-*.json
+            ${{ runner.temp }}/moss-user-pod/cluster/preceding-workload.stdout.log
+            ${{ runner.temp }}/moss-user-pod/cluster/retained-workload.stdout.log
+            ${{ runner.temp }}/moss-user-pod/cluster/prepare-runtime.stderr.log
             ${{ runner.temp }}/moss-user-pod/cluster/retain-worker.stderr.log
             ${{ runner.temp }}/moss-user-pod/cluster/unpack-worker.stderr.log
 
