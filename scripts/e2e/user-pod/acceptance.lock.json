@@ -13,5 +13,9 @@
       "https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/server-v0.1.78/",
       "https://github.com/sudoprivacy/moss/releases/download/server-v0.1.78/"
     ]
+  },
+  "networkHelper": {
+    "path": "tools/deploy/e2e_docker_network.py",
+    "sha256": "4364b91115c609ad2411ef074fc7d038e7f3b916797d13f7e61d9c297664d453"
   }
 }

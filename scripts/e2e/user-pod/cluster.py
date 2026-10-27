@@ -2,7 +2,6 @@
 import argparse
 import datetime
 import json
-import ipaddress
 from pathlib import Path
 import re
 import subprocess
@@ -85,6 +84,14 @@ def run_cluster(args):
     lock = json.loads((REPO / 'deploy/k3s/sudostack-images.lock.json').read_text())
     for relative, expected in lock['files'].items():
         assert digest(shared / relative) == expected, 'The shared deployment tools must match their source pin'
+    network_pin = PINS['networkHelper']
+    assert network_pin['path'] == 'tools/deploy/e2e_docker_network.py'
+    network_source = shared / network_pin['path']
+    assert network_source.is_file() and not network_source.is_symlink()
+    assert digest(network_source) == network_pin['sha256'], 'The shared network helper must match its acceptance pin'
+    sys.path.insert(0, str(network_source.parent))
+    import e2e_docker_network as network_tools
+    assert Path(network_tools.__file__).resolve() == network_source.resolve()
     worker = json.loads(args.worker_release.read_text())
     assert digest(args.worker_release) == PINS['worker']['metadataSha256'], 'Worker release metadata checksum mismatch'
     assert worker['archive']['digest'].startswith('sha256:')
@@ -197,21 +204,18 @@ def run_cluster(args):
                 subprocess.run(['docker', 'container', 'rm', info['Id']], capture_output=True, check=True, timeout=30)
 
     try:
-        network = run('create-network', ['docker', 'network', 'create', '--label',
-            'com.sudoprivacy.acceptance=' + label, name]).strip()
-        network_info = json.loads(run('inspect-network', ['docker', 'network', 'inspect', network]))[0]
-        assert network_info['Labels']['com.sudoprivacy.acceptance'] == label
-        address = str(ipaddress.ip_network(network_info['IPAM']['Config'][0]['Subnet'])[2])
-        proof['network'] = {'id': network, 'address': address}
+        network = network_tools.create_owned_network(name, label)
+        address = network['address']
+        proof['network'] = network
         for index, volume in enumerate(volumes):
             options = ['--driver', 'local', '--opt', 'type=tmpfs', '--opt', 'device=tmpfs',
                 '--opt', 'o=size=64m,mode=0755'] if index == 2 else []
             run('create-volume-' + str(index), ['docker', 'volume', 'create', '--label',
                 'com.sudoprivacy.acceptance=' + label, *options, volume])
         proof['runtimeSocketStorage'] = 'shared tmpfs, 64 MiB'
-        node = run('start-node', ['docker', 'run', '-d', '--name', name, '--hostname', name,
+        node = run('create-node', ['docker', 'create', '--name', name, '--hostname', name,
             '--label', 'com.sudoprivacy.acceptance=' + label, '--privileged', '--cpus', '2', '--memory', '2g',
-            '--network', network, '--ip', address,
+            '--network', network['id'], '--ip', address,
             '--memory-swap', '2g', '--tmpfs', '/run', '--tmpfs', '/var/run', '--stop-timeout', '30',
             '--mount', 'type=volume,source=' + volumes[0] + ',target=/var/lib/rancher/k3s',
             '--mount', 'type=volume,source=' + volumes[1] + ',target=/opt/moss/runtimes',
@@ -221,6 +225,7 @@ def run_cluster(args):
             PINS['k3s']['image'], 'server', '--disable', 'traefik', '--disable', 'servicelb', '--disable', 'metrics-server']).strip()
         assert re.fullmatch('[a-f0-9]{64}', node)
         (root / 'node.json').write_text(json.dumps({'id': node, 'name': name, 'label': label}))
+        run('start-node', ['docker', 'start', node])
         ready('initial-ready')
         run('create-namespace', kube('create', 'namespace', namespace))
         config = system_resource('configmap', 'local-path-config')
@@ -303,9 +308,7 @@ def run_cluster(args):
                 subprocess.run(['docker', 'rm', node], capture_output=True, check=True, timeout=30)
                 proof['ownedNodeRemoved'] = True
             if network is not None:
-                current = json.loads(subprocess.check_output(['docker', 'network', 'inspect', network], text=True))[0]
-                assert current['Id'] == network and current['Labels']['com.sudoprivacy.acceptance'] == label
-                subprocess.run(['docker', 'network', 'rm', network], capture_output=True, check=True, timeout=30)
+                network_tools.remove_owned_network(network, label)
                 proof['ownedNetworkRemoved'] = True
         finally:
             proof['finishedAt'] = datetime.datetime.now(datetime.timezone.utc).isoformat()

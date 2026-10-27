@@ -23,6 +23,7 @@ runs:
         sparse-checkout: |
           tools/deploy/images.py
           tools/deploy/artifacts.py
+          tools/deploy/e2e_docker_network.py
         sparse-checkout-cone-mode: false
         persist-credentials: false
     - name: Verify the same bytes used by the production deployment bundle
