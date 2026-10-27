@@ -9,6 +9,7 @@ import {
 } from '../authCenter/db.js'
 import { IdentityRepository } from './identityRepository.js'
 import type { CreateOrganizationModelInput } from '../billing/organizationBillingService.js'
+import { AccountMemberships } from './accountMemberships.js'
 
 export interface CreateUnifiedUserInput {
   id?: string
@@ -19,6 +20,8 @@ export interface CreateUnifiedUserInput {
   password?: string
   passwordHash?: string
   phone?: string
+  /** Internal, authorized membership creation; credentials stay with their existing identity. */
+  accountId?: string
   role: 'super_admin' | 'admin' | 'dept_admin' | 'user'
   status?: AuthCenterUser['status']
   departmentId?: string | null
@@ -142,7 +145,13 @@ export class UnifiedIdentityService {
       if ((await this.authDb.listUsersByName(username)).length > 0) throw new Error('Username already exists')
       const hasLocalPassword = Boolean(input.password || input.passwordHash)
       const hasPhoneIdentity = Boolean(input.phone?.trim())
-      if (!hasLocalPassword && !input.authIdentity && !hasPhoneIdentity) {
+      const accounts = new AccountMemberships(this.authDb.driver)
+      if (input.accountId) {
+        const account = await accounts.getAccount(input.accountId)
+        if (!account || account.status !== 'active') throw new Error('Human account is unavailable')
+        if (hasLocalPassword || input.authIdentity || hasPhoneIdentity) throw new Error('Membership creation must not copy login credentials')
+      }
+      if (!hasLocalPassword && !input.authIdentity && !hasPhoneIdentity && !input.accountId) {
         throw new Error('Password, phone, password hash, or provider identity is required')
       }
 
@@ -177,6 +186,8 @@ export class UnifiedIdentityService {
         phone: input.phone?.trim() || null,
       }
       await this.authDb.createUser(user)
+      if (input.accountId) await accounts.attach(input.accountId, user)
+      else await accounts.ensureExisting(user)
 
       if (hasLocalPassword) {
         await this.repository.createAuthIdentity({

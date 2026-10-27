@@ -7,12 +7,17 @@ import {
   deleteOrganization,
   ORGANIZATIONS_CHANGED_EVENT,
   updateOrganization,
+  addOrganizationMember,
+  getAccountOrganizations,
+  switchOrg,
 } from '../lib/api/auth'
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
 const originalPost = authClient.post
 const originalPatch = authClient.patch
 const originalDelete = authClient.delete
+const originalGet = authClient.get
+const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
 let changes = 0
 
 beforeEach(() => {
@@ -26,6 +31,9 @@ afterEach(() => {
   authClient.post = originalPost
   authClient.patch = originalPatch
   authClient.delete = originalDelete
+  authClient.get = originalGet
+  if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage)
+  else Reflect.deleteProperty(globalThis, 'localStorage')
   if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
   else Reflect.deleteProperty(globalThis, 'window')
 })
@@ -70,4 +78,41 @@ test('organization creation preserves the idempotency key and refresh notificati
   }) as typeof authClient.post
   await createOrganization(payload, 'create-shared-org')
   assert.equal(changes, 1)
+})
+
+test('available enterprises come from the human account endpoint rather than global organization administration', async () => {
+  const result = { organizations: [{ id: 'company', name: 'Company', userId: 'company-member', role: 'user' }] }
+  authClient.get = (async path => { assert.equal(path, '/api/v1/auth/organizations'); return result }) as typeof authClient.get
+  assert.deepEqual(await getAccountOrganizations(), result)
+})
+
+test('adding an existing account sends only the phone and leaves role and Moss access to the administrator', async () => {
+  authClient.post = (async (path, body) => {
+    assert.equal(path, '/api/v1/users/memberships')
+    assert.deepEqual(body, { phone: '13900000001' })
+    return { user: { id: 'company-member', role: 'user' }, created: true }
+  }) as typeof authClient.post
+  const result = await addOrganizationMember(' 13900000001 ')
+  assert.equal(result.created, true)
+  assert.equal(result.user.role, 'user')
+})
+
+test('successful enterprise selection replaces both tokens; rejected selection preserves the original session', async () => {
+  const storage = new Map([['moss_access_token', 'original-access'], ['moss_refresh_token', 'original-refresh']])
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    setItem: (key: string, value: string) => storage.set(key, String(value)),
+    getItem: (key: string) => storage.get(key) ?? null,
+  } })
+  authClient.post = (async () => { throw new Error('Membership is unavailable') }) as typeof authClient.post
+  await assert.rejects(switchOrg('foreign'), /Membership is unavailable/)
+  assert.equal(storage.get('moss_access_token'), 'original-access')
+  assert.equal(storage.get('moss_refresh_token'), 'original-refresh')
+  authClient.post = (async (path, body) => {
+    assert.equal(path, '/api/v1/auth/switch-org')
+    assert.deepEqual(body, { org_id: 'company' })
+    return { access_token: 'company-access', refresh_token: 'company-refresh', expires_in: 3600 }
+  }) as typeof authClient.post
+  await switchOrg('company')
+  assert.equal(storage.get('moss_access_token'), 'company-access')
+  assert.equal(storage.get('moss_refresh_token'), 'company-refresh')
 })

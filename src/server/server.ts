@@ -3359,6 +3359,26 @@ export function startServer(
         return
       }
 
+      if (req.method === 'GET' && pathname === '/api/v1/auth/organizations') {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        res.setHeader('Cache-Control', 'no-store')
+        writeJson(res, 200, await authService.listAccountOrganizations(auth))
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/api/v1/users/memberships') {
+        const auth = await authenticateRequest(req, authService)
+        if (!auth) throw new HttpError(401, 'Unauthorized')
+        const body = await readJsonBody(req)
+        if (typeof body.phone !== 'string' || Object.keys(body).some(key => key !== 'phone')) {
+          throw new HttpError(400, 'Expected only the existing account phone number')
+        }
+        res.setHeader('Cache-Control', 'no-store')
+        writeJson(res, 200, await authService.addOrganizationMember(auth, body.phone))
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/auth/switch-org') {
         const auth = await authenticateRequest(req, authService)
         if (!auth) {
@@ -3370,8 +3390,14 @@ export function startServer(
         if (!targetOrgId) {
           throw new HttpError(400, 'Missing org_id')
         }
-        // switchOrg self-gates on super_admin and validates the target org.
-        writeJson(res, 200, await authService.switchOrg(auth, targetOrgId))
+        // Account authentication and the target membership are checked together.
+        const selected = await authService.switchOrg(auth, targetOrgId)
+        if (auth.role === 'super_admin') {
+          writeJson(res, 200, selected)
+        } else {
+          await ensureGatewayAccount(authService, config, { userId: selected.user.id, username: selected.user.name })
+          writeJson(res, 200, await attachSudocodeFields(selected, authService))
+        }
         return
       }
 

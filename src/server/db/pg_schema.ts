@@ -1,6 +1,7 @@
 import { SESSION_SCHEMA } from '../storage/sessionSchema.js'
 import { MOSS_MEMBER_ACCESS_SCHEMA } from '../mossAgentAccess.js'
 import { MOSS_IM_IDENTITY_SCHEMA } from '../mossImIdentity.js'
+import { ACCOUNT_MEMBERSHIP_SCHEMA, ACCOUNT_MEMBERSHIP_BACKFILL } from '../identity/accountMemberships.js'
 import { ORGANIZATION_RESOURCE_PG_SCHEMA } from '../catalog/organizationResourceSchema.js'
 import { COHOST_SESSION_SCHEMA } from '../storage/cohostSessionSchema.js'
 import { COHOST_AGENT_HOME_SCHEMA } from '../storage/cohostAgentHomeSchema.js'
@@ -2034,6 +2035,7 @@ export const MIGRATIONS: PgMigration[] = [
   { version: 21, name: 'zone-binding-origin', sql: MIGRATION_0011_ZONE_BINDING_ORIGIN },
   { version: 22, name: 'moss-member-access', sql: MOSS_MEMBER_ACCESS_SCHEMA },
   { version: 23, name: 'moss-im-human-identity', sql: MOSS_IM_IDENTITY_SCHEMA },
+  { version: 24, name: 'human-account-memberships', sql: ACCOUNT_MEMBERSHIP_SCHEMA + ACCOUNT_MEMBERSHIP_BACKFILL },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

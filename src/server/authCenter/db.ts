@@ -12,6 +12,7 @@ import { ZONE_BINDING_TABLES_DDL } from '../zones/binding/schema.js'
 import { resolveZoneBindingConfig, type ZoneBindingConfig } from '../zones/binding/config.js'
 import { insertDefaultBindingIntent, isZoneIdOccupiedByOtherOrg } from '../zones/binding/bindingRepository.js'
 import { tryDefaultZoneIdCandidate } from '../zones/binding/zoneIdPolicy.js'
+import { ACCOUNT_MEMBERSHIP_SCHEMA, ACCOUNT_MEMBERSHIP_BACKFILL } from '../identity/accountMemberships.js'
 
 export type AuthCenterOrganization = {
   id: string
@@ -776,6 +777,7 @@ export class AuthCenterDb {
     ] as const) {
       this.ensureColumn('org_zone_bindings', column, ddl)
     }
+    this.db.exec(ACCOUNT_MEMBERSHIP_SCHEMA + ACCOUNT_MEMBERSHIP_BACKFILL)
   }
 
   async getUserAvatar(userId: string): Promise<string | null> {

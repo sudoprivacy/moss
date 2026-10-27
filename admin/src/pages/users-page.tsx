@@ -129,6 +129,7 @@ import { getUserSessions } from '@/lib/api/sessions'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { ModelAccountManagement } from '../components/model-account-management'
 import { MossMemberAccessDialog } from '../components/moss-member-access-dialog'
+import { AccountMembershipDialog } from '../components/account-membership-dialog'
 import { UserOperationsDialogs } from '../components/user-operations-dialogs'
 import { accountStatusLabel, availableUserOperations, type UserOperation } from '../user-operations'
 import type {
@@ -510,6 +511,7 @@ export default function UsersPage() {
   const isOrgAdmin = currentUser?.role === 'admin' || isSuperAdmin
 
   const [users, setUsers] = useState<AuthUser[]>([])
+  const [isMembershipDialogOpen, setIsMembershipDialogOpen] = useState(false)
   const [departments, setDepartments] = useState<AuthDepartment[]>([])
   const [organizations, setOrganizations] = useState<AuthOrgWithCounts[]>([])
   const [roles, setRoles] = useState<RoleDefinition[]>([])
@@ -1213,6 +1215,11 @@ export default function UsersPage() {
                 >
                   <UserRoundPlus className="mr-2 size-4" />
                   新建用户
+                </Button>
+              ) : null}
+              {activeTab === 'users' && isOrgAdmin ? (
+                <Button size="sm" variant="outline" onClick={() => setIsMembershipDialogOpen(true)}>
+                  <UserRoundPlus className="mr-2 size-4" />添加已有账号
                 </Button>
               ) : null}
               {activeTab === 'departments' && isOrgAdmin ? (
@@ -2580,6 +2587,11 @@ export default function UsersPage() {
         onClose={() => setUserOperation(null)}
         onChanged={fetchData}
       />
+      {isMembershipDialogOpen && isOrgAdmin && activeOrgId ? <AccountMembershipDialog
+        key={activeOrgId}
+        onClose={() => setIsMembershipDialogOpen(false)}
+        onAdded={() => void fetchData()}
+      /> : null}
       {mossAccessTarget && mossAccessTarget.orgId === activeOrgId && isOrgAdmin && canManageUsers ? <MossMemberAccessDialog
         key={`${mossAccessTarget.orgId}:${mossAccessTarget.userId}`}
         {...mossAccessTarget}

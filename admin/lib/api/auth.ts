@@ -112,8 +112,8 @@ export async function getMe(): Promise<MeResponse> {
 }
 
 /**
- * Super-admin only: re-issue this actor's tokens scoped to a different org and
- * persist them, so subsequent requests serve the selected org's resources.
+ * Select a verified account membership (or a super-admin's managed org) and
+ * persist its tokens, so requests use that enterprise's identity and role.
  * Caller is expected to reload the page afterwards.
  */
 export async function switchOrg(orgId: string): Promise<LoginResponse> {
@@ -122,6 +122,23 @@ export async function switchOrg(orgId: string): Promise<LoginResponse> {
   })
   storeLoginResponse(response)
   return response
+}
+
+export interface AccountOrganization {
+  id: string
+  name: string
+  userId: string
+  role: string
+}
+
+/** List only the enterprises available to this authenticated human account. */
+export async function getAccountOrganizations(): Promise<{ organizations: AccountOrganization[] }> {
+  return authClient.get('/api/v1/auth/organizations')
+}
+
+/** Add an existing human account as an ordinary member of the current enterprise. */
+export async function addOrganizationMember(phone: string): Promise<CreateUserResponse & { created: boolean }> {
+  return authClient.post('/api/v1/users/memberships', { phone: phone.trim() })
 }
 
 export async function getUsers(): Promise<UsersListResponse> {
