@@ -26,27 +26,39 @@ def wait_for_file(path, process):
         raise TimeoutError('Producer did not publish readiness: ' + str(path))
 
 
-def live_release_processes(installed, files, namespace):
+def live_release_processes(installed, files, namespace, reader=None):
     """Hash each actual executable inode once while both guest containers are alive."""
+    def local_processes():
+        for process in Path('/proc').iterdir():
+            if not process.name.isdecimal():
+                continue
+            try:
+                executable = (process / 'exe').resolve(strict=True)
+                if not executable.is_relative_to(installed / 'bin'):
+                    continue
+                arguments = (process / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+                info = (process / 'exe').stat()
+                yield {'pid': int(process.name), 'executable': str(executable), 'args': arguments,
+                       'identity': (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)}
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+
     observed, hashed = [], {}
-    for process in Path('/proc').iterdir():
-        if not process.name.isdecimal():
-            continue
+    for process in local_processes() if reader is None else reader.processes():
         try:
-            executable = (process / 'exe').resolve(strict=True)
+            executable = Path(process['executable'])
             if not executable.is_relative_to(installed / 'bin'):
                 continue
-            arguments = (process / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+            arguments = process['args']
             if namespace not in arguments:
                 continue
             relative = executable.relative_to(installed / 'bin').as_posix()
-            info = (process / 'exe').stat()
-            identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            identity = process['identity']
             if identity not in hashed:
-                hashed[identity] = digest(process / 'exe')
+                hashed[identity] = digest(Path('/proc') / str(process['pid']) / 'exe') if reader is None else reader.digest(process['pid'])
             if hashed[identity] != files[relative]:
                 raise ValueError('Running executable differs from the installed manifest')
-            observed.append({'pid': int(process.name), 'executable': relative, 'sha256': hashed[identity],
+            observed.append({'pid': process['pid'], 'executable': relative, 'sha256': hashed[identity],
                              'args': arguments})
         except (FileNotFoundError, ProcessLookupError):
             continue

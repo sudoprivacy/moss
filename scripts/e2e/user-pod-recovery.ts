@@ -6,7 +6,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
-import { buildKubectlBaseArgs, readK8sResource } from '@sudo/user-runtime/kubernetes'
+import { buildKubectlBaseArgs, deleteK8sResource, readK8sResource } from '@sudo/user-runtime/kubernetes'
 import { UserPodService, userPodName, type UserPodOptions } from '@sudo/user-runtime'
 import { connectSessionRuntime, waitForSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
@@ -28,6 +28,9 @@ const kubectl = buildKubectlBaseArgs(options.namespace, options.kubeconfig)
 const beforePod = await readK8sResource(kubectl, 'pod', podName)
 assert.equal(beforePod?.metadata.annotations?.['moss.sudo.dev/runtime-owner'], fixture.owner)
 assert(beforePod?.metadata.uid)
+const beforeClaim = await readK8sResource(kubectl, 'pvc', podName)
+assert.equal(beforeClaim?.metadata.annotations?.['moss.sudo.dev/runtime-owner'], fixture.owner)
+assert(beforeClaim?.metadata.uid, 'the recovery fixture must retain an identified PVC')
 const paths = [`/agents/${fixture.agentId}/memory/MEMORY.md`,
   ...result.durableSessionIds.map(sid => `/sessions/${sid}/transcript.jsonl`)]
 const originalService = new UserPodService(options, undefined, waitForSessionRuntime)
@@ -36,7 +39,8 @@ let snapshots: Buffer[]
 try { snapshots = await Promise.all(paths.map(path => original.client.read(path, ''))) }
 finally { original.client.close(); await originalService.close() }
 assert(snapshots.every(content => content.length > 0))
-await promisify(execFile)('kubectl', [...kubectl, 'delete', 'pod', podName, '--wait=true', '--timeout=90s'],
+await deleteK8sResource(kubectl, options.namespace, 'pods', podName, beforePod.metadata.uid)
+await promisify(execFile)('kubectl', [...kubectl, 'wait', '--for=delete', `pod/${podName}`, '--timeout=90s'],
   { timeout: 100_000, windowsHide: true })
 const service = new UserPodService(options, undefined, waitForSessionRuntime)
 let agent: ManagedAgentClient | undefined
@@ -47,6 +51,8 @@ try {
   agent = new ManagedAgentClient(connection.client, connection.authToken)
   const afterPod = await readK8sResource(kubectl, 'pod', podName)
   assert.notEqual(afterPod?.metadata.uid, beforePod.metadata.uid)
+  const afterClaim = await readK8sResource(kubectl, 'pvc', podName)
+  assert.equal(afterClaim?.metadata.uid, beforeClaim.metadata.uid, 'recovery preserves the original PVC')
   for (const [index, path] of paths.entries()) {
     assert.deepEqual(await connection.client.read(path, ''), snapshots[index], 'Pod replacement preserves exact durable bytes')
   }
@@ -61,7 +67,7 @@ try {
     const sid = result.durableSessionIds[index]!
     await controller.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} })
     await controller.rpc('session/load', { sessionId: sid, cwd: '/', mcpServers: [] })
-    const marker = `RECOVERED_${index}_${randomUUID().replaceAll('-', '')}`
+    const marker = `MOSS_E2E_TOKEN_RECOVERED_${index}_${randomUUID().replaceAll('-', '')}`
     const reply = await controller.rpc('session/prompt', { sessionId: sid,
       prompt: [{ type: 'text', text: `Reply exactly ${marker}. Use no tools.` }] }, 180_000)
     assert.equal(reply.stopReason, 'end_turn')
@@ -73,7 +79,8 @@ try {
   }))
   await mkdir(evidence, { recursive: true })
   await writeFile(join(evidence, 'user-pod-recovery.json'), JSON.stringify({ success: true,
-    pod: podName, podReplaced: true, durableSessionIds: result.durableSessionIds, resumedReplies: sessions.length,
+    pod: podName, podReplaced: true, pvcUid: beforeClaim.metadata.uid, pvcPreserved: true,
+    durableSessionIds: result.durableSessionIds, resumedReplies: sessions.length,
     preserved: paths.map((path, index) => ({ path, sha256: createHash('sha256').update(snapshots[index]!).digest('hex') })),
   }, null, 2))
   process.stdout.write('User Pod replacement preserves exact memory and two histories; both resumed model replies passed\n')

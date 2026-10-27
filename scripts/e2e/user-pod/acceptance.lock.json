@@ -1,0 +1,21 @@
+{
+  "k3s": {
+    "image": "rancher/k3s@sha256:5e0707cfd1239b358ef73f3254bc3eadc027dd30cd5ec6ca41e29e47652a1b8c",
+    "pauseImage": "rancher/mirrored-pause:3.6"
+  },
+  "worker": {
+    "metadataSha256": "1ee75037093b0f49155da0729e28b55925deeb11f7be9f8178904b64efb77ec2",
+    "metadataUrls": [
+      "https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/server-v0.1.78/runtime-release-amd64.json",
+      "https://github.com/sudoprivacy/moss/releases/download/server-v0.1.78/runtime-release-amd64.json"
+    ],
+    "archiveBases": [
+      "https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/server/releases/server-v0.1.78/",
+      "https://github.com/sudoprivacy/moss/releases/download/server-v0.1.78/"
+    ]
+  },
+  "networkHelper": {
+    "path": "tools/deploy/e2e_docker_network.py",
+    "sha256": "4364b91115c609ad2411ef074fc7d038e7f3b916797d13f7e61d9c297664d453"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "version": "gsudoprivacy-20261019.1",
+  "architecture": "linux-amd64",
+  "filename": "gvisor-gsudoprivacy-20261019.1-linux-amd64.tar.gz",
+  "archiveSha256": "1080aea8a92a85e633538b96d5eee8173006fee5e7a8a5ccaf7302b09eb0e657",
+  "manifestSha256": "c77d5678ef970baae0303daa48138f6facd072f20d4aedaccefa5525421b8ca0",
+  "archiveBytes": 80798849,
+  "urls": [
+    "https://sudowork-release-1309794936.cos.accelerate.myqcloud.com/moss/gvisor/releases/gsudoprivacy-20261019.1/1080aea8a92a85e633538b96d5eee8173006fee5e7a8a5ccaf7302b09eb0e657/gvisor-gsudoprivacy-20261019.1-linux-amd64.tar.gz",
+    "https://github.com/sudoprivacy/moss/releases/download/gvisor-gsudoprivacy-20261019.1/gvisor-gsudoprivacy-20261019.1-linux-amd64.tar.gz"
+  ]
+}
