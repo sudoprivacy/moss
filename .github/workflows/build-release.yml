@@ -236,6 +236,7 @@ jobs:
             ${{ runner.temp }}/moss-cohost-evidence/binary-version.txt
 
   user-pod-live:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: User Pod ownership and durable recovery (real K3s)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
