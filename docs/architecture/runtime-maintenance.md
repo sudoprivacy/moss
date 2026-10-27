@@ -32,6 +32,9 @@ then checks backend readiness and activity. This also covers a browser that
 has already disconnected. The controller retains the daemon's control channel
 until release. An unsupported protocol, changed runner set, missing activity
 or timeout refuses preparation. A busy refusal leaves the existing task running.
+Native input remains busy during artifact preparation and while awaiting engine
+admission. A preparation failure releases that activity; an accepted handoff
+continues to follow the engine's activity.
 The consuming runner's recorded creator must match this controller, including
 an automatically assigned instance ID. A missing or unreadable manifest refuses
 maintenance preparation. Readiness returns 503 while a hold remains. An
