@@ -175,7 +175,9 @@ try {
   assert.deepEqual(await registry.conversationControl(a, browserController(a), 'interrupt'), { changed: true })
   const human = (await invoke(a, { kind: 'state' })).session
   sessions.get(a.sessionId)!.desiredState = 'terminated'
-  const moved = (await invoke(next, { kind: 'state' })).session
+  // Passive state polls never move the profile; only an explicit start claims it.
+  await assert.rejects(invoke(next, { kind: 'state' }), /browser_profile_in_use/)
+  const moved = (await invoke(next, { kind: 'start', isHeadless: true, transport: 'extension' })).session
   assert.equal(moved.profileId, original.profileId)
   assert.equal(moved.browserSessionId, original.browserSessionId)
   assert.equal(moved.state, 'human')
@@ -206,6 +208,30 @@ try {
   assert.notEqual(navigation.isError, true)
   await waitCookie(next, 'profile_login=owner-a')
   await verifyWindowStream(next)
+  // A stopped browser is free for an explicit start from another conversation;
+  // passive state polls never move the profile.
+  const held = (await invoke(next, { kind: 'state' })).session
+  await invoke(next, { kind: 'stop', controlEpoch: held.controlEpoch, targetEpoch: held.targetEpoch })
+  const halted = (await invoke(next, { kind: 'state' })).session
+  assert.equal(halted.state, 'stopped')
+  const owned = await registry.ownerInfo(next)
+  assert.equal(owned.owner?.sessionId, next.sessionId)
+  assert.equal(owned.browserRunning, false)
+  sessions.get(a.sessionId)!.desiredState = 'active'
+  await assert.rejects(invoke(a, { kind: 'state' }), /browser_profile_in_use/)
+  assert.equal((await invoke(next, { kind: 'state' })).session.state, 'stopped')
+  assert.equal((await registry.ownerInfo(a)).owner?.sessionId, next.sessionId)
+  const reclaimed = (await invoke(a, { kind: 'start', isHeadless: true, transport: 'extension' })).session
+  assert.equal(reclaimed.state, 'human')
+  assert.equal(reclaimed.profileId, halted.profileId)
+  const running = (await invoke(a, { kind: 'state' })).session
+  await invoke(a, { kind: 'stop', controlEpoch: running.controlEpoch, targetEpoch: running.targetEpoch })
+  const launched = await tool(next, 'browser_launch', { isHeadless: true, transport: 'extension' })
+  assert.notEqual(launched.isError, true, JSON.stringify(launched))
+  const fresh = { orgId, userId: randomUUID(), sessionId: randomUUID() }
+  sessions.set(fresh.sessionId, { ...fresh, desiredState: 'active' })
+  assert.deepEqual(await registry.ownerInfo(fresh), { owner: null, browserRunning: false })
+  receipts.push({ stoppedBrowserReclaimedByStart: true, statePollNeverClaims: true, mcpLaunchTakesOver: true, ownerInfoNoWorker: true })
   receipts.push({ restrictedRolloutVerified: true, ownersIsolated: true, concurrentConversationRejected: true, sameProfileAcrossConversations: true, humanLeasePreserved: true, staleSessionRejected: true, restartRequiresExplicitReturn: true })
   console.log(JSON.stringify({ status: 'passed', receipts }))
 } finally {

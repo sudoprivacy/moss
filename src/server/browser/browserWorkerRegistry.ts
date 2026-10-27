@@ -44,25 +44,27 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
 
   private async docker(args: string[]): Promise<string> {
     const result = await runDocker(args)
-    if (result.code !== 0) throw new HttpError(503, 'Managed browser container unavailable')
+    if (result.code !== 0) throw new HttpError(503, 'managed_browser_container_unavailable')
     return result.stdout.trim()
   }
 
   private resolve(binding: BrowserBinding): Promise<HttpBrowserWorker>
   private resolve(binding: BrowserBinding, isExistingOnly: true): Promise<HttpBrowserWorker | null>
-  private async resolve(binding: BrowserBinding, isExistingOnly = false): Promise<HttpBrowserWorker | null> {
+  private resolve(binding: BrowserBinding, isExistingOnly: false, allowTakeover: boolean): Promise<HttpBrowserWorker>
+  private async resolve(binding: BrowserBinding, isExistingOnly = false, allowTakeover = true): Promise<HttpBrowserWorker | null> {
     const image = this.ownerImages.find(owner => owner.orgId === binding.orgId && owner.userId === binding.userId)?.image ?? this.image
     if (!image) {
       const { MOSS_BROWSER_GATEWAY_URL: endpoint, MOSS_BROWSER_GATEWAY_TOKEN: token, MOSS_BROWSER_GATEWAY_AI_TOKEN: aiToken } = process.env
-      if (!endpoint || !token || !aiToken) throw new HttpError(503, 'Managed browser is not configured')
+      if (!endpoint || !token || !aiToken) throw new HttpError(503, 'managed_browser_not_configured')
       const worker = new HttpBrowserWorker(endpoint, token, fetch, aiToken)
       const response = await fetch(new URL('binding', endpoint.endsWith('/') ? endpoint : endpoint + '/'), {
         headers: { Authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(2_000),
       })
-      if (!response.ok) throw new HttpError(503, 'Managed browser identity unavailable')
-      const owner = (await response.json() as { binding: BrowserBinding | null }).binding
+      if (!response.ok) throw new HttpError(503, 'managed_browser_identity_unavailable')
+      const identity = await response.json() as { binding: BrowserBinding | null; browserRunning?: boolean }
+      const owner = identity.binding
       if (isExistingOnly && (!owner || owner.sessionId !== binding.sessionId || owner.orgId !== binding.orgId || owner.userId !== binding.userId)) return null
-      await this.claim(worker, binding, owner)
+      await this.claim(worker, binding, owner, identity.browserRunning !== false, allowTakeover)
       return worker
     }
     const key = this.ownerKey(binding)
@@ -76,12 +78,12 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
     if (inspected.code !== 0) {
       if (isExistingOnly) {
         if (/No such (?:object|container):/i.test(inspected.stderr)) return null
-        throw new HttpError(503, 'Managed browser container inspection failed')
+        throw new HttpError(503, 'managed_browser_inspection_failed')
       }
       const existingVolume = await runDocker(['volume', 'inspect', volume])
       if (existingVolume.code === 0) {
         const value = JSON.parse(existingVolume.stdout)[0]
-        if (value?.Labels?.['moss.browser.owner'] !== key) throw new HttpError(409, 'Browser profile volume ownership mismatch')
+        if (value?.Labels?.['moss.browser.owner'] !== key) throw new HttpError(409, 'browser_profile_volume_mismatch')
       } else {
         await this.docker(['volume', 'create', '--label', `moss.browser.owner=${key}`, volume])
       }
@@ -98,46 +100,51 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
       // Docker's unique container name also fences concurrent Moss instances.
       // A losing creator inspects the winner; it never removes a contender.
       inspected = await runDocker(['inspect', name])
-      if (created.code !== 0 && inspected.code !== 0) throw new HttpError(503, 'Managed browser could not start')
+      if (created.code !== 0 && inspected.code !== 0) throw new HttpError(503, 'managed_browser_start_failed')
     }
-    if (inspected.code !== 0) throw new HttpError(503, 'Managed browser container unavailable')
+    if (inspected.code !== 0) throw new HttpError(503, 'managed_browser_container_unavailable')
     let info = JSON.parse(inspected.stdout)[0]
     if (info?.Config?.Labels?.['moss.kind'] !== 'managed-browser' || info?.Config?.Labels?.['moss.browser.owner'] !== key) {
-      throw new HttpError(409, 'Browser container ownership mismatch')
+      throw new HttpError(409, 'browser_container_ownership_mismatch')
     }
-    if (info.Config.Image !== image) throw new HttpError(409, 'Managed browser upgrade requires a drained profile')
+    if (info.Config.Image !== image) throw new HttpError(409, 'managed_browser_upgrade_requires_drain')
     if (!info.State.Running) {
       await this.docker(['start', name])
       info = JSON.parse(await this.docker(['inspect', name]))[0]
     }
     const port = info.NetworkSettings?.Ports?.['8080/tcp']?.[0]?.HostPort
     const endpoint = this.network ? `http://${name}:8080/` : `http://127.0.0.1:${port}/`
-    if (!this.network && !/^\d+$/.test(String(port))) throw new HttpError(503, 'Managed browser port unavailable')
+    if (!this.network && !/^\d+$/.test(String(port))) throw new HttpError(503, 'managed_browser_port_unavailable')
     const worker = new HttpBrowserWorker(endpoint, hostToken, fetch, aiToken)
     let owner: BrowserBinding | null | undefined
+    let ownerBrowserRunning = true
     for (let attempt = 0; attempt < 40; attempt++) {
       try {
         const response = await fetch(new URL('binding', endpoint), { headers: { Authorization: `Bearer ${hostToken}` }, redirect: 'error', signal: AbortSignal.timeout(1000) })
-        if (!response.ok) throw new HttpError(503, 'Managed browser identity unavailable')
-        owner = (await response.json() as { binding: BrowserBinding | null }).binding
+        if (!response.ok) throw new HttpError(503, 'managed_browser_identity_unavailable')
+        const identity = await response.json() as { binding: BrowserBinding | null; browserRunning?: boolean }
+        owner = identity.binding
+        ownerBrowserRunning = identity.browserRunning !== false
         break
       } catch (error) {
         if (error instanceof HttpError) throw error
         await delay(100)
       }
     }
-    if (owner === undefined) throw new HttpError(503, 'Managed browser worker unavailable')
+    if (owner === undefined) throw new HttpError(503, 'managed_browser_worker_unavailable')
     if (isExistingOnly && (!owner || owner.sessionId !== binding.sessionId || owner.orgId !== binding.orgId || owner.userId !== binding.userId)) return null
-    await this.claim(worker, binding, owner)
+    await this.claim(worker, binding, owner, ownerBrowserRunning, allowTakeover)
     this.workers.set(key, { worker, sessionId: binding.sessionId, checkedAt: Date.now() })
     return worker
   }
 
-  private async claim(worker: HttpBrowserWorker, binding: BrowserBinding, owner: BrowserBinding | null): Promise<void> {
+  private async claim(worker: HttpBrowserWorker, binding: BrowserBinding, owner: BrowserBinding | null, ownerBrowserRunning: boolean, allowTakeover: boolean): Promise<void> {
     if (owner && owner.sessionId !== binding.sessionId) {
-      if (owner.orgId !== binding.orgId || owner.userId !== binding.userId) throw new HttpError(403, 'Browser profile ownership mismatch')
+      if (owner.orgId !== binding.orgId || owner.userId !== binding.userId) throw new HttpError(403, 'browser_profile_owner_mismatch')
       const previous = await this.getSession(owner.sessionId)
-      if (previous?.desiredState === 'active') throw new HttpError(409, 'browser_profile_in_use')
+      // A stopped browser is free for any conversation to claim on an explicit
+      // start; a running one stays with the active session that holds it.
+      if (!allowTakeover || (previous?.desiredState === 'active' && ownerBrowserRunning)) throw new HttpError(409, 'browser_profile_in_use')
       await worker.invoke(binding, browserController(binding), { kind: 'bind-session', previousSessionId: owner.sessionId })
     }
   }
@@ -145,7 +152,8 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
   async invoke(binding: BrowserBinding, controller: string, action: Record<string, unknown>): Promise<unknown> {
     if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
     const key = this.ownerKey(binding)
-    const worker = await this.mutex.run(key, () => this.resolve(binding))
+    // Passive state polls never move a profile; only an explicit start claims it.
+    const worker = await this.mutex.run(key, () => this.resolve(binding, false, action.kind !== 'state'))
     try {
       return await worker.invoke(binding, controller, action)
     } catch (error) {
@@ -154,12 +162,47 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
         // Refresh only the exact state read after a worker stopped. An input,
         // navigation or handoff with an uncertain outcome is never replayed.
         if (action.kind === 'state') {
-          const refreshed = await this.mutex.run(key, () => this.resolve(binding))
+          const refreshed = await this.mutex.run(key, () => this.resolve(binding, false, false))
           return refreshed.invoke(binding, controller, action)
         }
       }
       throw error
     }
+  }
+
+  /** Read who holds the profile without creating a worker or claiming it. */
+  async ownerInfo(binding: BrowserBinding): Promise<{ owner: { sessionId: string; desiredState: string | null } | null; browserRunning: boolean }> {
+    if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
+    const key = this.ownerKey(binding)
+    return this.mutex.run(key, async () => {
+      let endpoint: string
+      let token: string
+      if (!this.image) {
+        const { MOSS_BROWSER_GATEWAY_URL: url, MOSS_BROWSER_GATEWAY_TOKEN: gatewayToken } = process.env
+        if (!url || !gatewayToken) throw new HttpError(503, 'managed_browser_not_configured')
+        endpoint = url.endsWith('/') ? url : url + '/'
+        token = gatewayToken
+      } else {
+        const inspected = await runDocker(['inspect', `moss-browser-${key}`])
+        if (inspected.code !== 0) return { owner: null, browserRunning: false }
+        const info = JSON.parse(inspected.stdout)[0]
+        if (!info?.State?.Running) return { owner: null, browserRunning: false }
+        const port = info.NetworkSettings?.Ports?.['8080/tcp']?.[0]?.HostPort
+        if (!this.network && !/^\d+$/.test(String(port))) throw new HttpError(503, 'managed_browser_port_unavailable')
+        endpoint = this.network ? `http://moss-browser-${key}:8080/` : `http://127.0.0.1:${port}/`
+        token = this.credential(key, 'host')
+      }
+      const response = await fetch(new URL('binding', endpoint), { headers: { Authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(2_000) })
+      if (!response.ok) throw new HttpError(503, 'managed_browser_identity_unavailable')
+      const identity = await response.json() as { binding: BrowserBinding | null; browserRunning?: boolean }
+      const owner = identity.binding && identity.binding.orgId === binding.orgId && identity.binding.userId === binding.userId
+        ? {
+            sessionId: identity.binding.sessionId,
+            desiredState: (await this.getSession(identity.binding.sessionId))?.desiredState ?? null,
+          }
+        : null
+      return { owner, browserRunning: identity.browserRunning !== false }
+    })
   }
 
   /** Normal chat never allocates a browser or claims another conversation's profile. */
