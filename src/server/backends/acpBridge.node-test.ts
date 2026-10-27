@@ -11,6 +11,7 @@ import { readSharedAgentMemory } from '../sharedAgentMemory.js'
 import { defaultAgentName } from '../agentIdentity.js'
 import { readAcpExecutionWorkspace } from './executionWorkspace.js'
 import { parseSessionTranscriptMessages } from '../transcriptMessages.js'
+import { ArtifactTracker } from '../artifacts.js'
 
 void test('context projection retains durable terminal facts and excludes live observations', () => {
   const failure = { type: 'result', uuid: 'failure', timestamp: '2026-10-19T00:00:02Z',
@@ -547,6 +548,69 @@ void test('message transport carries permission ID zero, rejection, cancellation
     assert.equal(sent.length, count, 'stale answers neither approve a tool nor start a prompt')
   } finally { await handle.destroy(); await rm(cwd, {recursive: true, force: true}) }
 })
+
+for (const isPreparationRejected of [false, true]) {
+  void test(`native input remains busy through artifact preparation and ${isPreparationRejected ? 'rejection' : 'engine handoff'}`, async t => {
+    const cwd = await mkdtemp(join(tmpdir(), 'moss-input-preparation-'))
+    const sent: any[] = []
+    const output: any[] = []
+    let events!: import('./acpTransport.js').AcpTransportEvents
+    let release!: () => void
+    let onPreparing!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    const preparing = new Promise<void>(resolve => { onPreparing = resolve })
+    t.mock.method(ArtifactTracker.prototype, 'begin', async () => {
+      onPreparing()
+      await held
+      if (isPreparationRejected) throw new Error('Artifact preparation refused')
+    })
+    const transport: import('./acpTransport.js').AcpMessageTransport = {
+      connected: true, start(value) { events = value },
+      async send(message) { sent.push(message) }, async close() { events.onClose(null, null) },
+    }
+    const handle = createAcpBridgeHandle({ transport, cwd, sessionId: 'preparing-input', model: 'fixture',
+      enabledSkillNames: [], runtime: { type: 'host', engine: 'scode' } })
+    t.after(async () => {
+      release()
+      await handle.destroy(true)
+      await rm(cwd, { recursive: true, force: true })
+    })
+    handle.onStdoutLine(line => output.push(JSON.parse(line)))
+    const waitFor = async (predicate: () => boolean) => {
+      const deadline = Date.now() + 5000
+      while (!predicate()) { assert.ok(Date.now() < deadline, 'protocol event deadline'); await delay(5) }
+    }
+    const receive = (value: any) => events.onMessage({ jsonrpc: '2.0', ...value })
+    await waitFor(() => sent.some(item => item.method === 'initialize'))
+    receive({ id: 'm-init', result: { _meta: { sudocode: { inputDelivery: { version: 1 } } } } })
+    receive({ id: 'm-session-new', result: { sessionId: 'native-preparation' } })
+    assert.equal(handle.isBusy?.(), false)
+    handle.writeStdin(JSON.stringify({ type: 'control_request', request_id: 'original', request: { subtype: 'input',
+      action: { action: 'submit', clientId: 'original', delivery: 'queue', content: [{ type: 'text', text: 'Accepted input' }] } } }))
+    await preparing
+    assert.equal(sent.some(item => item.params?.action === 'submit'), false)
+    assert.equal(handle.isBusy?.(), true, 'maintenance must not observe idle while accepted input can still reach the engine')
+    release()
+    if (isPreparationRejected) {
+      await waitFor(() => output.some(item => item.requestId === 'original'))
+      assert.match(output.find(item => item.requestId === 'original').error, /Artifact preparation refused/)
+      assert.equal(sent.some(item => item.params?.action === 'submit'), false)
+    } else {
+      await waitFor(() => sent.some(item => item.params?.action === 'submit'))
+      const submit = sent.find(item => item.params?.action === 'submit')
+      assert.equal(handle.isBusy?.(), true, 'native acknowledgement is still pending')
+      receive({ method: '_sudocode/session/input_update', params: { sessionId: 'native-preparation',
+        update: { kind: 'state', state: { revision: 1, activeTurnId: 1, running: true, paused: false, pending: [] } } } })
+      receive({ id: submit.id, result: { id: 1 } })
+      await waitFor(() => output.some(item => item.requestId === 'original'))
+      assert.equal(handle.isBusy?.(), true, 'the engine is still running after handoff')
+      receive({ method: '_sudocode/session/input_update', params: { sessionId: 'native-preparation',
+        update: { kind: 'state', state: { revision: 2, activeTurnId: null, running: false, paused: false, pending: [] } } } })
+      assert.equal(sent.filter(item => item.params?.action === 'submit').length, 1, 'maintenance observation must not replay input')
+    }
+    assert.equal(handle.isBusy?.(), false)
+  })
+}
 
 void test('native input forwarding preserves admission, commit, flush and cancellation boundaries', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'moss-input-delivery-'))

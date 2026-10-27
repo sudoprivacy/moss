@@ -73,6 +73,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   let isNativeArtifactBatch = false
   let isNativeTurnCancelled = false
   const nativeUserEvents = new Map<string, Record<string, unknown>>()
+  let pendingInputPreparations = 0
 
   // A2: busy state machine
   let busy = false
@@ -88,7 +89,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   }
   const reevaluateBusy = (): void => {
     // A completed or failed prompt releases busy only when no work remains.
-    if (nativeInputState?.running || (nativeInputState && !nativeInputState.paused && nativeInputState.pending.length > 0) || pendingRpcRequests.size > 0 || pendingPromptIds.size > 0 || pendingAskUserQuestions.size > 0 || pendingPermissions.size > 0) {
+    if (pendingInputPreparations > 0 || nativeInputState?.running || (nativeInputState && !nativeInputState.paused && nativeInputState.pending.length > 0) || pendingRpcRequests.size > 0 || pendingPromptIds.size > 0 || pendingAskUserQuestions.size > 0 || pendingPermissions.size > 0) {
       setBusy(true)
       return
     }
@@ -462,7 +463,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           : block)
         const prepare = inputPreparation.then(() => processUserMessage(JSON.stringify({ type: 'user', uuid: action.clientId, message: { content } }), { action, requestId, epoch }))
         inputPreparation = prepare.catch(() => {})
-        await prepare
+        pendingInputPreparations += 1
+        reevaluateBusy()
+        try { await prepare }
+        finally { pendingInputPreparations -= 1; reevaluateBusy() }
       } else {
         const receipt: any = await requestInput(action)
         for (const item of receipt.recalled ?? []) nativeUserEvents.delete(item.clientId)
