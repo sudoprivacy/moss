@@ -15,8 +15,11 @@ class NodeService:
 
     def command(self, *arguments):
         from deploy.runtime.gvisor.node import command
-        if arguments == ('systemctl', 'show', 'k3s', '--property=KillMode,ExecStop,ActiveState,ExecStart,Environment'):
-            return 'KillMode=process\nExecStop=\nActiveState=active\nExecStart=/bin/k3s server\nEnvironment=\n'
+        if arguments == ('systemctl', 'show', 'k3s', '--property=KillMode,ActiveState,ExecStart,Environment', '--all'):
+            return 'KillMode=process\nActiveState=active\nExecStart=/bin/k3s server\nEnvironment=\n'
+        if arguments[:3] == ('systemctl', 'show', 'k3s') and arguments[3:] in (
+                ('--property=ExecStop', '--value'), ('--property=ExecStopPost', '--value')):
+            return ''
         if arguments == ('systemctl', 'is-active', 'k3s'):
             command('k3s', 'crictl', 'info')
             return 'active\n'

@@ -110,8 +110,10 @@ def activate(release, prefix, containerd, node_config, service, run=command):
         raise ValueError('The existing containerd configuration directory is required')
     install.verify_ancestors(containerd, searchable=False)
     properties = dict(row.split('=', 1) for row in run('systemctl', 'show', service,
-        '--property=KillMode,ExecStop,ActiveState,ExecStart,Environment').splitlines() if '=' in row)
-    if {key: properties.get(key) for key in ('KillMode', 'ExecStop', 'ActiveState')} != {'KillMode': 'process', 'ExecStop': '', 'ActiveState': 'active'}:
+        '--property=KillMode,ActiveState,ExecStart,Environment', '--all').splitlines() if '=' in row)
+    stops = [run('systemctl', 'show', service, '--property=' + name, '--value').strip()
+             for name in ('ExecStop', 'ExecStopPost')]
+    if properties.get('KillMode') != 'process' or properties.get('ActiveState') != 'active' or any(stops):
         raise ValueError('K3s must retain its container processes during a service restart')
     overrides = properties.get('ExecStart', '') + ' ' + properties.get('Environment', '')
     if re.search(r'--node-label(?:=|\s)|\bK3S_NODE_LABEL=', overrides):

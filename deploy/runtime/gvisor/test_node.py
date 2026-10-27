@@ -30,8 +30,12 @@ class NodeTests(unittest.TestCase):
         self.lose_container = False
 
     def native(self, *args):
+        if args[:3] == ('systemctl', 'show', 'k3s') and args[3:] in (
+                ('--property=ExecStop', '--value'), ('--property=ExecStopPost', '--value')):
+            return dict(row.split('=', 1) for row in self.properties.splitlines() if '=' in row).get(args[3].split('=', 1)[1], '')
         if args[:2] == ('systemctl', 'show'):
-            return self.properties
+            return '\n'.join(row for row in self.properties.splitlines() if not row.startswith('ExecStop=') and
+                             ('--all' in args or not row.endswith('='))) + '\n'
         if args[:2] == ('systemctl', 'restart'):
             self.restarts += 1
             if self.fail_restart and self.restarts == 1:
@@ -112,7 +116,8 @@ class NodeTests(unittest.TestCase):
 
     def test_service_that_would_kill_sandboxes_is_refused_before_staging(self):
         for properties in ['KillMode=control-group\nExecStop=\nActiveState=active\n',
-                           'KillMode=process\nExecStop=/bin/kill-all\nActiveState=active\n']:
+                           'KillMode=process\nExecStop=/bin/kill-all\nActiveState=active\n',
+                           'KillMode=process\nExecStop=\nExecStopPost=/bin/kill-all\nActiveState=active\n']:
             self.properties = properties
             with self.assertRaisesRegex(ValueError, 'retain its container processes'):
                 self.activate()
