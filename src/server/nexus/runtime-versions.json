@@ -1,23 +1,23 @@
 {
-  "nexusd-cluster": "0.8.23",
-  "nexusd-cohost": "0.2.36",
+  "nexusd-cluster": "0.8.24",
+  "nexusd-cohost": "0.2.37",
   "nexus-vault": "0.5.71",
-  "scode": "v0.2.36",
-  "scode-linux-x64-bundle-sha256": "94e2e6143f1e447af69f47fd9a9d8c3390cd3d2c3f06139d8de8cb686219481d",
-  "scode-linux-arm64-sha256": "0f795c84b0d05742e440211689130137b2124e5d8fa7c1156596ccbfde20775a",
+  "scode": "v0.2.37",
+  "scode-linux-x64-bundle-sha256": "3e27f428cb0bb735e992b936f558f592cc6352077df307860f9ebc0a60a1bad7",
+  "scode-linux-arm64-sha256": "9f6088c05a39c07e5ed9213b89480e99118ba08418deda45c1e38f17b8dcddc2",
   "artifact-sha256": {
-    "nexusd-cohost-linux-arm64.tar.gz": "cc69283de002644e7f6fd6294e7ef359f074042c4a7a9fcd0f299b8686672fb0",
-    "nexusd-cohost-linux-x64.tar.gz": "00969708695727594b37911e2fc20433f3b168c6a927d58676d43efa7e4de876",
+    "nexusd-cohost-linux-arm64.tar.gz": "fd88a3ed080f6f74c898c2a385d6cb9570845b891821f53a7bdc27b8cac6de79",
+    "nexusd-cohost-linux-x64.tar.gz": "3c791a926b27ddc75bf1059a89aabb03f76c406e47a5543d1b196eb5f7ee24a7",
     "nexus-vault-linux-x86_64.tar.gz": "2f7f32d3b2dde51fa5947cb635d4c0072a98cb0d7256287f8d8c8a42a556de16",
     "nexus-vault-linux-aarch64.tar.gz": "b322d142abcffcb210af961dde0dfc5817f752fd27c1c07f2ea4a305e1fca6f3",
     "nexus-vault-macos-arm64.tar.gz": "815c52881295f4577eddfce7cf707270938edce9ee64181f0df615f69b9717cb",
     "nexus-vault-macos-x86_64.tar.gz": "4fecb251ef787e3fc6a1408cedd72ab2001f8901d6ef8f8071cfdaec28b79450",
     "nexus-vault-windows-x86_64.zip": "dbfb23bc2722ebf1f24c53225ea90ff7942ea92111c6e0cfcdf99503837050f3",
-    "nexusd-cluster-linux-aarch64.tar.gz": "92fbaa748b51339eabfb25345649e318def050f6ca48f5e60884d4a06cb411b4",
-    "nexusd-cluster-linux-x86_64.tar.gz": "2d2102e50a15c8a2e79c5c8df1281fbbb4451fe81db79211bd80471e631f73d2",
-    "nexusd-cluster-macos-aarch64.tar.gz": "4fc5049abad64b2f14a733d0cd90061fd259c8a02b4f1593a2f4aac17560d980",
-    "nexusd-cluster-macos-x86_64.tar.gz": "b68d8331de4d3b57b26ede723a29d732ca520befd7c417a2963707eda3e78250",
-    "nexusd-cluster-windows-aarch64.zip": "ae99baf9377f3562c111cb69d73b813acd8ce9a97c9d065c6198e885b9cba077",
-    "nexusd-cluster-windows-x86_64.zip": "85450489ea29b69cfcb6b9a8e27886e030dedede4e1d575e6e24df69bd712ea9"
+    "nexusd-cluster-linux-aarch64.tar.gz": "cdac171c137b9865a3d42f1975eba4302ef91380e59f4945fc3761795f1267e2",
+    "nexusd-cluster-linux-x86_64.tar.gz": "696e26a86862096f800bdd0464aa0a83e572bac54f47e92ef0113216ebfb1eed",
+    "nexusd-cluster-macos-aarch64.tar.gz": "32ab6094e115257200e3a26d9df4072b6e8d36a07dfd1e45154bbda98f21cedf",
+    "nexusd-cluster-macos-x86_64.tar.gz": "8ec82ce13f0ff95c39a8764c394be8b388f542e4e122efea86fe0908bfb31ab4",
+    "nexusd-cluster-windows-aarch64.zip": "a654d38d758433b288e2c9a44c2120faccfa27f8104725b1f5f45f11da2f20de",
+    "nexusd-cluster-windows-x86_64.zip": "1ca81d3ee9902be259ff163953dcdcb79fcb2ab7ee8d4ca272c53fd7ebf40eb6"
   }
 }
