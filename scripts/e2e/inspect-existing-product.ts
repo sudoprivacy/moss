@@ -13,6 +13,7 @@ import { CohostSessionRepository, parseCohostSessionBinding } from '../../src/se
 import { SqliteDriver } from '../../src/server/db/driver.js'
 import { DatabaseSync } from 'node:sqlite'
 import { productConversation } from './productConversation.js'
+import { assertProductConversationUrl } from './productConversationUrl.js'
 
 const [configPath, evidence, action, requestedSessionId, expectedFlag, expectedPath, ...extra] = process.argv.slice(2)
 assert(configPath && evidence && isAbsolute(configPath) && isAbsolute(evidence), 'Use absolute existing-config and new-evidence paths')
@@ -139,10 +140,7 @@ try {
           const first = 17 * 29 + 47
           const parseReply = (text: string) => JSON.parse(text.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '').trim())
           const connect = async (url: string, name: string) => {
-            const target = new URL(url)
-            assert.equal(target.protocol,'ws:','Use the original local Moss WebSocket')
-            assert.equal(target.hostname,'127.0.0.1','Refuse forwarding the product token to another host')
-            assert.equal(target.port,String(config.server.port),'Refuse another product port')
+            assertProductConversationUrl(url, base, resolved.publicBaseUrl, id, resolved.routeCookieName)
             const controller = productConversation(url,token,evidence,name)
             try { await controller.ready(); return controller } catch (error) { controller.close(); throw error }
           }

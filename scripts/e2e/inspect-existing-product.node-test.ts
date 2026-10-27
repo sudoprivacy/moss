@@ -10,6 +10,30 @@ import { WebSocketServer } from 'ws'
 import { DatabaseSync } from 'node:sqlite'
 import { sessionAgentName } from '../../src/server/agentIdentity.js'
 import { productConversation } from './productConversation.js'
+import { assertProductConversationUrl } from './productConversationUrl.js'
+
+void test('product recovery binds local and TLS proxy WebSockets to the original session', () => {
+  const local = 'http://127.0.0.1:43127'
+  const publicBase = 'https://product.example.test/moss'
+  for (const url of ['ws://127.0.0.1:43127/ws/sessions/original',
+    'https://product.example.test/moss/ws/sessions/original'.replace('https:', 'wss:'),
+    'wss://product.example.test/moss/ws/sessions/original?moss_route=controller-1']) {
+    assert.doesNotThrow(() => assertProductConversationUrl(url, local, publicBase, 'original'))
+  }
+  for (const url of ['wss://untrusted.example.test/moss/ws/sessions/original',
+    'ws://product.example.test/moss/ws/sessions/original',
+    'wss://product.example.test:43127/moss/ws/sessions/original',
+    'wss://product.example.test/ws/sessions/original',
+    'wss://product.example.test/moss/ws/sessions/another',
+    'wss://product.example.test/moss/ws/sessions/original?refresh_token=untrusted',
+    'wss://product.example.test/moss/ws/sessions/original?moss_route=a&moss_route=b',
+    'wss://private@product.example.test/moss/ws/sessions/original',
+    'wss://product.example.test/moss/ws/sessions/original#untrusted']) {
+    assert.throws(() => assertProductConversationUrl(url, local, publicBase, 'original'))
+  }
+  assert.throws(() => assertProductConversationUrl('ws://product.example.test/ws/sessions/original', local,
+    'http://product.example.test', 'original'), /TLS/)
+})
 
 // Exercise the actual portable producer. Its production build resolves the
 // feature macros that plain Node/tsx cannot load from `bun:bundle` sources.
