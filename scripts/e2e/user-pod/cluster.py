@@ -229,6 +229,14 @@ def run_cluster(args):
                     subprocess.run(['docker', 'stop', info['Id']], capture_output=True, check=True, timeout=60)
                 subprocess.run(['docker', 'container', 'rm', info['Id']], capture_output=True, check=True, timeout=30)
 
+    def retained_identity(preceding, step):
+        resource = json.loads(run(step, kube('-n', namespace, 'get', 'pod/' + preceding['metadata']['name'], '-o', 'json')))
+        assert resource['metadata']['uid'] == preceding['metadata']['uid']
+        container = resource['status']['containerStatuses'][0]
+        assert container['containerID'] == preceding['status']['containerStatuses'][0]['containerID']
+        assert container['restartCount'] == 0 and container['ready']
+        return {'uid': resource['metadata']['uid'], 'containerId': container['containerID'], 'restartCount': 0}
+
     try:
         network = network_tools.create_owned_network(name, label)
         address = network['address']
@@ -303,13 +311,35 @@ def run_cluster(args):
         nodes = ready('qualified-ready', lifecycle.started_at, installed['runtimeClass']['scheduling']['nodeSelector'])
         for key, value in installed['runtimeClass']['scheduling']['nodeSelector'].items():
             assert nodes[0]['metadata']['labels'].get(key) == value, 'The node must advertise its installed capability'
-        retained = json.loads(run('retained-workload', kube('-n', namespace, 'get', 'pod/retained-workload', '-o', 'json')))
-        assert retained['metadata']['uid'] == preceding['metadata']['uid']
-        assert retained['status']['containerStatuses'][0]['containerID'] == preceding['status']['containerStatuses'][0]['containerID']
-        assert retained['status']['containerStatuses'][0]['restartCount'] == 0
         assert installed['retainedContainerCount'] >= 1
-        proof['retainedWorkload'] = {'uid': retained['metadata']['uid'],
-            'containerId': retained['status']['containerStatuses'][0]['containerID'], 'restartCount': 0}
+        proof['retainedWorkload'] = retained_identity(preceding, 'retained-workload')
+        runtime_class = installed['runtimeClass']
+        run('create-runtime-class', ['docker', 'exec', '-i', node, '/bin/kubectl', 'create', '-f', '-'], data=json.dumps(runtime_class))
+        qualified_workload = {**retained_workload,
+            'metadata': {**retained_workload['metadata'], 'name': 'qualified-workload'},
+            'spec': {**retained_workload['spec'], 'runtimeClassName': runtime_class['metadata']['name']}}
+        run('create-qualified-workload', ['docker', 'exec', '-i', node, '/bin/kubectl', 'create', '-f', '-'], data=json.dumps(qualified_workload))
+        run('qualified-workload-ready', kube('-n', namespace, 'wait', 'pod/qualified-workload', '--for=condition=Ready', '--timeout=90s'), timeout=100)
+        qualified_before = json.loads(run('preceding-qualified-workload', kube('-n', namespace, 'get', 'pod/qualified-workload', '-o', 'json')))
+        # Exercise repair of an independently lost capability file with an
+        # existing gVisor sandbox. The immutable release and handler stay loaded.
+        capability = next(key for key in runtime_class['scheduling']['nodeSelector'] if key.startswith('moss.sudo.dev/'))
+        helper('lose-node-capability', ['python3', '-c',
+            'import json,os,sys;from pathlib import Path;'
+            'p=Path("/etc/rancher/k3s/config.yaml.d/90-moss-gvisor.yaml");'
+            'assert json.loads(p.read_text())=={"node-label+":[sys.argv[1]+"=installed"]};'
+            'p.unlink();fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)', capability])
+        repair_lifecycle = NodeService(root, node, owned)
+        helper('repair-runtime', ['python3', '/moss/scripts/e2e/user-pod/cluster.py', '--prepare-node',
+            '/moss/deploy/runtime/gvisor/distribution.lock.json', '/inputs/gvisor.tar.gz', '/proof/repaired-installation.json'],
+            lifecycle=repair_lifecycle)
+        repaired = json.loads((root / 'repaired-installation.json').read_text())
+        assert repaired['changed'] and repaired['runtimeClass'] == runtime_class and repaired['retainedContainerCount'] >= 2
+        assert repair_lifecycle.started_at is not None
+        ready('qualified-repaired-ready', repair_lifecycle.started_at, runtime_class['scheduling']['nodeSelector'])
+        proof['qualifiedWorkloadRetained'] = retained_identity(qualified_before, 'retained-qualified-workload')
+        assert retained_identity(preceding, 'retained-native-after-repair') == proof['retainedWorkload']
+        proof['nodeRepair'] = repaired
         # Retain the worker after the final daemon restart. Node Ready alone
         # does not mean K3s has completed its startup archive import/unpack.
         retained = json.loads(helper('retain-worker', ['bash', '-c',
@@ -334,8 +364,6 @@ def run_cluster(args):
         assert set(before['repoDigests']).issubset(status.get('repoDigests') or [])
         proof['preparedWorker'] = {'id': status['id'], 'pinned': True,
             'repoDigests': status['repoDigests'], 'snapshotter': installed['snapshotter'], 'unpacked': True}
-        runtime_class = installed['runtimeClass']
-        run('create-runtime-class', ['docker', 'exec', '-i', node, '/bin/kubectl', 'create', '-f', '-'], data=json.dumps(runtime_class))
         host = next(row['IPAddress'] for row in owned(node)['NetworkSettings']['Networks'].values())
         (root / 'configuration.json').write_text(json.dumps({'nodeHost': host, 'namespace': namespace,
             'kubeconfig': '/var/lib/rancher/k3s/server/cred/admin.kubeconfig', 'runtimeClassName': runtime_class['metadata']['name']}))
