@@ -20,6 +20,12 @@ TEST_BINARIES = ('run-user-pod-live.mjs', 'user-pod-runtime.mjs', 'user-pod-reco
                  'user-pod-release-upgrade.mjs', 'mock-openai-server.mjs', 'nexusd-linux')
 
 
+def node_exit_state(info):
+    """Retain process-exit evidence without publishing node logs or credentials."""
+    return {key: info['State'].get(key) for key in [
+        'Status', 'Running', 'OOMKilled', 'Dead', 'ExitCode', 'StartedAt', 'FinishedAt']}
+
+
 def prepare_runtime(metadata, archive, output):
     """Install and register the complete qualified distribution through the production adapter."""
     import tomllib
@@ -154,7 +160,8 @@ def run_cluster(args):
                             (root / (step + '-generation.json')).write_text(json.dumps({
                                 'startedAt': started.isoformat(), 'renewTime': renewed}, indent=2))
                             return nodes
-            assert owned(node)['State']['Running'], 'The owned K3s process exited before readiness'
+            state = node_exit_state(owned(node))
+            assert state['Running'], 'The owned K3s process exited before readiness: ' + json.dumps(state)
             time.sleep(1)
         raise TimeoutError('The current Kubernetes node must become Ready within 120 seconds')
 
@@ -169,7 +176,8 @@ def run_cluster(args):
             if result.stdout.strip():
                 (root / ('system-' + resource_name + '.json')).write_text(result.stdout)
                 return json.loads(result.stdout)
-            assert owned(node)['State']['Running']
+            state = node_exit_state(owned(node))
+            assert state['Running'], 'The owned K3s process exited before bundled resources appeared: ' + json.dumps(state)
             time.sleep(1)
         raise TimeoutError('The bundled Kubernetes resource must appear: ' + kind + '/' + resource_name)
 
@@ -258,6 +266,7 @@ def run_cluster(args):
         helper('prepare-runtime', ['python3', '/moss/scripts/e2e/user-pod/cluster.py', '--prepare-node',
             '/moss/deploy/runtime/gvisor/distribution.lock.json', '/inputs/gvisor.tar.gz', '/proof/installed.json'])
         installed = json.loads((root / 'installed.json').read_text())
+        proof['installed'] = installed
         run('activate-runtime', ['docker', 'restart', node], timeout=90)
         assert owned(node)['NetworkSettings']['Networks'][name]['IPAddress'] == address
         nodes = ready('qualified-ready')
@@ -300,7 +309,7 @@ def run_cluster(args):
     finally:
         try:
             if node is not None:
-                owned(node)
+                proof['ownedNodeStateBeforeCleanup'] = node_exit_state(owned(node))
                 with (root / 'node.private.log').open('w') as log:
                     subprocess.run(['docker', 'logs', node], stdout=log, stderr=log, text=True, encoding='utf-8', timeout=30)
                 subprocess.run(['docker', 'stop', node], capture_output=True, check=True, timeout=60)
