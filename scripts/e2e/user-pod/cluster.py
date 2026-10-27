@@ -2,6 +2,7 @@
 import argparse
 import datetime
 import json
+import ipaddress
 from pathlib import Path
 import re
 import subprocess
@@ -36,13 +37,44 @@ def prepare_runtime(metadata, archive, output):
     output.write_text(json.dumps({**registration, 'snapshotter': snapshotter}, indent=2))
 
 
-def audit_runtime(installed, output):
-    """Hash the actual shim and Sentry in this node's process namespace."""
+def audit_runtime(node, installed, output):
+    """Read process inodes in their owning node and share the release validator."""
     sys.path.insert(0, str(REPO / 'scripts/e2e/gvisor-sync'))
     from containerd import live_release_processes
     root = Path(json.loads(installed.read_text())['installed'])
-    manifest = json.loads((root / 'bin/manifest.json').read_text())
-    processes = live_release_processes(root, manifest['files'], '')
+    def execute(*arguments):
+        result = subprocess.run(['docker', 'exec', node, *arguments], capture_output=True, timeout=60)
+        if result.returncode:
+            error = result.stderr.decode(errors='replace')
+            if 'No such file or directory' in error:
+                raise FileNotFoundError(error)
+            raise RuntimeError('Node process inspection failed: ' + error)
+        return result.stdout
+
+    class NodeProcesses:
+        def processes(self):
+            script = r'''for process in /proc/[0-9]*; do
+executable=$(readlink "$process/exe") || continue
+case "$executable" in "$1"/bin/*) ;; *) continue ;; esac
+identity=$(stat -Lc '%d %i %s %y' "$process/exe") || exit 1
+printf '%s\000%s\000%s\000' "${process##*/}" "$executable" "$identity"
+tr '\000' ' ' < "$process/cmdline" || exit 1
+printf '\000'
+done'''
+            fields = execute('/bin/sh', '-c', script, 'inspect', root.as_posix()).split(b'\0')
+            assert fields[-1] == b'' and (len(fields) - 1) % 4 == 0
+            for index in range(0, len(fields) - 1, 4):
+                yield {'pid': int(fields[index]), 'executable': fields[index + 1].decode(),
+                       'identity': fields[index + 2], 'args': fields[index + 3].decode(errors='replace')}
+
+        def digest(self, pid):
+            assert isinstance(pid, int) and pid > 0
+            value = execute('/bin/sha256sum', '/proc/' + str(pid) + '/exe').split()[0].decode()
+            assert re.fullmatch('[a-f0-9]{64}', value)
+            return value
+
+    manifest = json.loads(execute('/bin/cat', (root / 'bin/manifest.json').as_posix()))
+    processes = live_release_processes(root, manifest['files'], '', NodeProcesses())
     output.write_text(json.dumps(processes, indent=2))
 
 
@@ -64,9 +96,9 @@ def run_cluster(args):
     (root / 'runtime-release.json').write_bytes(args.worker_release.read_bytes())
     label = 'owner-e2e-' + uuid.uuid4().hex
     name = 'codex-owned-' + label
-    volumes = [name + '-data', name + '-runtime']
+    volumes = [name + '-data', name + '-runtime', name + '-sockets']
     namespace = 'moss-owner-e2e-' + uuid.uuid4().hex
-    node = None
+    node, network = None, None
     commands = []
     proof = {'success': False, 'realKubernetes': True, 'productionChanged': False, 'nodeName': name,
         'label': label, 'volumes': volumes, 'namespace': namespace, 'gvisor': runtime,
@@ -97,6 +129,7 @@ def run_cluster(args):
                 '--namespace', 'k8s.io', *arguments]
 
     def ready(step):
+        started = datetime.datetime.fromisoformat(owned(node)['State']['StartedAt'].replace('Z', '+00:00'))
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             result = subprocess.run(kube('get', 'nodes', '-o', 'json'), capture_output=True, text=True,
@@ -105,11 +138,18 @@ def run_cluster(args):
                 nodes = json.loads(result.stdout)['items']
                 if nodes and all(any(c['type'] == 'Ready' and c['status'] == 'True'
                     for c in item['status'].get('conditions', [])) for item in nodes):
-                    (root / (step + '.json')).write_text(result.stdout)
-                    return nodes
+                    lease = subprocess.run(kube('-n', 'kube-node-lease', 'get', 'lease', name,
+                        '--ignore-not-found', '-o', 'json'), capture_output=True, text=True, encoding='utf-8', timeout=15)
+                    if lease.returncode == 0 and lease.stdout.strip():
+                        renewed = json.loads(lease.stdout)['spec']['renewTime']
+                        if datetime.datetime.fromisoformat(renewed.replace('Z', '+00:00')) >= started:
+                            (root / (step + '.json')).write_text(result.stdout)
+                            (root / (step + '-generation.json')).write_text(json.dumps({
+                                'startedAt': started.isoformat(), 'renewTime': renewed}, indent=2))
+                            return nodes
             assert owned(node)['State']['Running'], 'The owned K3s process exited before readiness'
             time.sleep(1)
-        raise TimeoutError('The owned Kubernetes node must become Ready within 120 seconds')
+        raise TimeoutError('The current Kubernetes node must become Ready within 120 seconds')
 
     def system_resource(kind, resource_name):
         # Kubelet readiness precedes the asynchronous bundled-addon controller.
@@ -131,9 +171,10 @@ def run_cluster(args):
         try:
             return run(step, ['docker', 'run', '--name', helper_name,
                 '--label', 'com.sudoprivacy.acceptance=' + label, '--network', 'container:' + node,
-                '--pid', 'container:' + node, '--cap-add', 'SYS_PTRACE', '--cpus', '1', '--memory', '768m',
+                '--cpus', '1', '--memory', '768m',
                 '--mount', 'type=volume,source=' + volumes[0] + ',target=/var/lib/rancher/k3s',
                 '--mount', 'type=volume,source=' + volumes[1] + ',target=/opt/moss/runtimes',
+                '--mount', 'type=volume,source=' + volumes[2] + ',target=/run/k3s',
                 '--mount', 'type=bind,source=' + root.as_posix() + ',target=/proof',
                 '--mount', 'type=bind,source=' + REPO.as_posix() + ',target=/moss,readonly',
                 '--mount', 'type=bind,source=' + shared.as_posix() + ',target=/shared,readonly',
@@ -156,13 +197,25 @@ def run_cluster(args):
                 subprocess.run(['docker', 'container', 'rm', info['Id']], capture_output=True, check=True, timeout=30)
 
     try:
+        network = run('create-network', ['docker', 'network', 'create', '--label',
+            'com.sudoprivacy.acceptance=' + label, name]).strip()
+        network_info = json.loads(run('inspect-network', ['docker', 'network', 'inspect', network]))[0]
+        assert network_info['Labels']['com.sudoprivacy.acceptance'] == label
+        address = str(ipaddress.ip_network(network_info['IPAM']['Config'][0]['Subnet'])[2])
+        proof['network'] = {'id': network, 'address': address}
         for index, volume in enumerate(volumes):
-            run('create-volume-' + str(index), ['docker', 'volume', 'create', '--label', 'com.sudoprivacy.acceptance=' + label, volume])
+            options = ['--driver', 'local', '--opt', 'type=tmpfs', '--opt', 'device=tmpfs',
+                '--opt', 'o=size=64m,mode=0755'] if index == 2 else []
+            run('create-volume-' + str(index), ['docker', 'volume', 'create', '--label',
+                'com.sudoprivacy.acceptance=' + label, *options, volume])
+        proof['runtimeSocketStorage'] = 'shared tmpfs, 64 MiB'
         node = run('start-node', ['docker', 'run', '-d', '--name', name, '--hostname', name,
             '--label', 'com.sudoprivacy.acceptance=' + label, '--privileged', '--cpus', '2', '--memory', '2g',
+            '--network', network, '--ip', address,
             '--memory-swap', '2g', '--tmpfs', '/run', '--tmpfs', '/var/run', '--stop-timeout', '30',
             '--mount', 'type=volume,source=' + volumes[0] + ',target=/var/lib/rancher/k3s',
             '--mount', 'type=volume,source=' + volumes[1] + ',target=/opt/moss/runtimes',
+            '--mount', 'type=volume,source=' + volumes[2] + ',target=/run/k3s',
             '--mount', 'type=bind,source=' + bins.as_posix() + ',target=/tests,readonly',
             '--mount', 'type=bind,source=' + root.as_posix() + ',target=/proof',
             PINS['k3s']['image'], 'server', '--disable', 'traefik', '--disable', 'servicelb', '--disable', 'metrics-server']).strip()
@@ -193,27 +246,29 @@ def run_cluster(args):
         bridges = root / 'bridge'
         bridges.mkdir()
         (bridges / 'k3s').write_text('#!/bin/sh\nset -eu\ntool="$1"\nshift\ncase "$tool" in\n'
-            'crictl) exec ' + native + '/crictl --runtime-endpoint unix:///proc/1/root/run/k3s/containerd/containerd.sock "$@" ;;\n'
-            'ctr) exec ' + native + '/ctr --address /proc/1/root/run/k3s/containerd/containerd.sock "$@" ;;\n'
+            'crictl) exec ' + native + '/crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock "$@" ;;\n'
+            'ctr) exec ' + native + '/ctr --address /run/k3s/containerd/containerd.sock "$@" ;;\n'
             '*) exit 64 ;;\nesac\n', newline='\n')
         (bridges / 'kubectl').write_text('#!/bin/sh\nexec ' + native + '/kubectl "$@"\n', newline='\n')
         helper('prepare-runtime', ['python3', '/moss/scripts/e2e/user-pod/cluster.py', '--prepare-node',
             '/moss/deploy/runtime/gvisor/distribution.lock.json', '/inputs/gvisor.tar.gz', '/proof/installed.json'])
         installed = json.loads((root / 'installed.json').read_text())
         run('activate-runtime', ['docker', 'restart', node], timeout=90)
+        assert owned(node)['NetworkSettings']['Networks'][name]['IPAddress'] == address
         nodes = ready('qualified-ready')
         # Retain the worker after the final daemon restart. Node Ready alone
         # does not mean K3s has completed its startup archive import/unpack.
         retained = json.loads(helper('retain-worker', ['bash', '-c',
             'chmod +x /proof/bridge/*; exec python3 /shared/tools/deploy/images.py '
             '--archive /inputs/worker.tar.gz --sha256 ' + worker['archive']['digest'][7:]], timeout=360))
-        # K3s imports content and pins its references; containerd materializes
-        # the root filesystem separately. Prepare it before measuring service startup.
-        run('unpack-worker', ['docker', 'exec', node, '/bin/sh', '-c',
-            'set -eu; set -o pipefail; gzip -dc "$1" | /bin/ctr '
-            '--address /run/k3s/containerd/containerd.sock --namespace k8s.io '
-            'images import --local --snapshotter "$2" -', 'sh', retained['archive'], installed['snapshotter']], timeout=360)
         reference = worker['image']['reference']
+        # Prepare the verified local content through containerd's snapshot API.
+        mountpoint = '/run/moss-worker-' + label
+        run('prepare-worker-mountpoint', ['docker', 'exec', node, 'mkdir', '-p', mountpoint])
+        run('unpack-worker', ctr('images', 'mount', '--snapshotter', installed['snapshotter'],
+            reference, mountpoint), timeout=360)
+        run('release-unpack-mount', ctr('images', 'unmount', '--snapshotter', installed['snapshotter'],
+            '--rm', mountpoint))
         unpacked = run('verify-worker-unpacked', ctr('images', 'check', '--snapshotter', installed['snapshotter'],
             '--quiet', 'name==' + json.dumps(reference))).splitlines()
         assert unpacked == [reference], 'All worker content must be available and unpacked'
@@ -235,8 +290,7 @@ def run_cluster(args):
             '/proof/configuration.json', '/proof/runtime-release.json', '/proof/evidence'], timeout=900)
         actual = json.loads((root / 'evidence/acceptance.json').read_text())
         assert actual['success'] and actual['realKubernetes'] and actual['controlledModel']
-        helper('runtime-audit', ['python3', '/moss/scripts/e2e/user-pod/cluster.py', '--audit-node',
-            '/proof/installed.json', '/proof/live-runtime-processes.json'])
+        audit_runtime(node, root / 'installed.json', root / 'live-runtime-processes.json')
         proof.update(success=True, actual=actual, installed=installed)
     finally:
         try:
@@ -246,6 +300,13 @@ def run_cluster(args):
                     subprocess.run(['docker', 'logs', node], stdout=log, stderr=log, text=True, encoding='utf-8', timeout=30)
                 subprocess.run(['docker', 'stop', node], capture_output=True, check=True, timeout=60)
                 proof['ownedNodeStopped'] = not owned(node)['State']['Running']
+                subprocess.run(['docker', 'rm', node], capture_output=True, check=True, timeout=30)
+                proof['ownedNodeRemoved'] = True
+            if network is not None:
+                current = json.loads(subprocess.check_output(['docker', 'network', 'inspect', network], text=True))[0]
+                assert current['Id'] == network and current['Labels']['com.sudoprivacy.acceptance'] == label
+                subprocess.run(['docker', 'network', 'rm', network], capture_output=True, check=True, timeout=30)
+                proof['ownedNetworkRemoved'] = True
         finally:
             proof['finishedAt'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             (root / 'receipt.json').write_text(json.dumps(proof, indent=2))
@@ -255,7 +316,6 @@ def run_cluster(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare-node', nargs=3, type=Path, metavar=('METADATA', 'ARCHIVE', 'OUTPUT'))
-    parser.add_argument('--audit-node', nargs=2, type=Path, metavar=('INSTALLED', 'OUTPUT'))
     parser.add_argument('--work-dir', type=Path)
     parser.add_argument('--bin-dir', type=Path)
     parser.add_argument('--shared-source', type=Path)
@@ -267,8 +327,6 @@ def main():
     args = parser.parse_args()
     if args.prepare_node:
         prepare_runtime(*args.prepare_node)
-    elif args.audit_node:
-        audit_runtime(*args.audit_node)
     else:
         if any(getattr(args, name) is None for name in ['work_dir', 'bin_dir', 'shared_source', 'worker_release',
                                                       'worker_archive', 'gvisor_cache', 'helper_image']):
