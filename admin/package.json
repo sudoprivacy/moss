@@ -8,7 +8,7 @@
     "preview": "vite preview --host 0.0.0.0",
     "check": "tsc --noEmit",
     "test:secrets": "bun test __tests__/secrets.test.ts",
-    "test:settings": "bun test tests/system-settings.test.ts tests/config-scope.test.ts",
+    "test:settings": "bun test tests/system-settings.test.ts tests/config-scope.test.ts tests/sidebar-navigation.test.ts",
     "test:organizations": "bun test tests/organizations-api.test.ts",
     "test:moss-access": "bun test tests/moss-member-access.test.ts",
     "test:moss-im": "bun test tests/moss-im-api.test.ts",

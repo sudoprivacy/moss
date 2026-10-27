@@ -28,6 +28,7 @@ node_modules
 !/tests/cron-jobs.browser.js
 !/tests/credentials.browser.js
 !/tests/config-scope.test.ts
+!/tests/sidebar-navigation.test.ts
 !/tests/config-scope.browser.py
 !/tests/organizations-api.test.ts
 !/tests/moss-member-access.test.ts

@@ -99,26 +99,33 @@ const roleLabels: Record<string, string> = {
   user: '普通用户',
 }
 
-const menuItems: NavItem[] = [
+type PrimaryNavGroupId = 'workspace' | 'organization' | 'operations'
+type PrimaryNavItem = NavItem & { group: PrimaryNavGroupId }
+
+const menuItems: PrimaryNavItem[] = [
   {
     title: '数据看板',
+    group: 'workspace',
     url: '/',
     icon: LayoutDashboard,
   },
   {
     title: '预算管理',
+    group: 'workspace',
     url: '/budget',
     icon: Wallet,
     requiredAnyScopes: ['sessions:list', 'sessions:list:any'],
   },
   {
     title: '用户与组织',
+    group: 'organization',
     url: '/users',
     icon: Users,
     requiredScope: 'admin:users',
   },
   {
     title: 'Agent',
+    group: 'workspace',
     url: '/agents',
     icon: Bot,
     requiredAnyScopes: ['sessions:list', 'sessions:list:any'],
@@ -127,17 +134,20 @@ const menuItems: NavItem[] = [
     // 普通用户可见（页面对其展示"可用 Zone"列表是设计行为，后端 binding
     // 管理入口 403 兜底）——标题不带"管理"字样，避免误导。
     title: 'Zone',
+    group: 'workspace',
     url: '/zones',
     icon: Boxes,
   },
   {
     title: '会话管理',
+    group: 'workspace',
     url: '/sessions',
     icon: MessageSquare,
     requiredAnyScopes: ['sessions:list', 'sessions:list:any'],
   },
   {
     title: '客舱 AI',
+    group: 'workspace',
     url: '/cabin/conversations',
     icon: Plane,
     requiredScope: 'admin:settings',
@@ -145,41 +155,48 @@ const menuItems: NavItem[] = [
   },
   {
     title: '定时任务',
+    group: 'workspace',
     url: '/cron',
     icon: Clock,
     requiredAnyScopes: ['admin:cron', 'cron:self'],
   },
   {
     title: '事件触发器',
+    group: 'operations',
     url: '/event-triggers',
     icon: Webhook,
     requiredScope: 'admin:triggers',
   },
   {
     title: 'IM管理',
+    group: 'organization',
     url: '/channels',
     icon: Bot,
   },
   {
     title: '企业应用管理',
+    group: 'organization',
     url: '/corp-apps',
     icon: Building2,
     requiredScope: 'admin:settings',
   },
   {
     title: '智能体管理',
+    group: 'workspace',
     url: '/settings/agents',
     icon: Bot,
     requiredAnyScopes: ['admin:settings', 'store:read'],
   },
   {
     title: '技能商店',
+    group: 'workspace',
     url: '/settings/skill',
     icon: Sparkles,
     requiredAnyScopes: ['admin:settings', 'store:read'],
   },
   {
     title: '文档中心',
+    group: 'workspace',
     url: '/document-center',
     icon: BookText,
     requiredAnyScopes: ['admin:documents', 'admin:settings'],
@@ -192,6 +209,7 @@ const menuItems: NavItem[] = [
   },
   {
     title: '凭据中心',
+    group: 'organization',
     url: '/secrets',
     icon: KeyRound,
     requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'],
@@ -206,6 +224,7 @@ const menuItems: NavItem[] = [
   },
   {
     title: '运营中心',
+    group: 'operations',
     url: '/operations',
     icon: Activity,
     requiredScope: 'admin:settings',
@@ -219,6 +238,7 @@ const menuItems: NavItem[] = [
   },
   {
     title: '工具中心',
+    group: 'operations',
     url: '/mcp',
     icon: Wrench,
     requiredScope: 'admin:mcp',
@@ -275,29 +295,23 @@ const systemItems: NavItem[] = [
   },
 ]
 
-const primaryNavGroups = [
+export const primaryNavGroups = ([
   {
     title: '工作空间',
-    items: [
-      menuItems[0],
-      menuItems[1],
-      menuItems[3],
-      menuItems[4],
-      menuItems[5],
-      menuItems[9],
-      menuItems[10],
-      menuItems[11],
-    ],
+    id: 'workspace',
   },
   {
     title: '组织管理',
-    items: [menuItems[2], menuItems[7], menuItems[8], menuItems[12]],
+    id: 'organization',
   },
   {
     title: '运营与集成',
-    items: [menuItems[6], menuItems[13], menuItems[14]],
+    id: 'operations',
   },
-] as const
+] as const).map(group => ({
+  ...group,
+  items: menuItems.filter(item => item.group === group.id),
+}))
 
 export function AppSidebar() {
   const { pathname } = useLocation()
