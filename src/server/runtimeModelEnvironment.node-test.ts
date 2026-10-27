@@ -11,7 +11,7 @@ import { clearUserModelPreference, getUserModelPreference, setUserModelPreferenc
 import type { ServerConfig, SessionRecord } from './types.js'
 import type { SystemSettingsPayload } from './systemSettings.js'
 
-async function fixture(t: TestContext, catalogStatus = 200) {
+async function fixture(t: TestContext, catalogStatus = 200, cohostModelRouting?: 'provider-qualified') {
   const ownerId = randomUUID()
   let catalogRequests = 0
   const catalog = createServer((_request, response) => {
@@ -40,7 +40,7 @@ async function fixture(t: TestContext, catalogStatus = 200) {
     },
   }
   const service = new RuntimeService({ store, serverInstanceId: 'maintenance-test',
-    config: { defaultRuntime: 'cohost', heartbeatTimeoutMs: 30_000 } as ServerConfig,
+    config: { defaultRuntime: 'cohost', heartbeatTimeoutMs: 30_000, cohostModelRouting } as ServerConfig,
     userPodService: { forAllocation: () => placement } as never,
     authService: {
       getAgentOwner: async () => ({ id: ownerId, status: 'active', role: 'user', scopes: [] }),
@@ -94,6 +94,15 @@ for (const status of [200, 503]) {
   })
 }
 
+void test('a deployment-qualified model keeps its provider alias through a controlled runtime upgrade', async t => {
+  const f = await fixture(t, 503, 'provider-qualified')
+  await f.service.upgradeUserRuntime(f.ownerId, 'org')
+  const engine = JSON.parse(f.upgrades[0]!['sudocode.json'])
+  assert.deepEqual(engine.models['legacy-default:retired-model'].providers.proxy, { model: 'retired-model' })
+  assert.equal(engine.models['retired-model'], undefined)
+  assert.equal(f.requestCount(), 0)
+})
+
 void test('runtime upgrade refuses missing owner model credentials without a shared-key fallback', async t => {
   const f = await fixture(t)
   f.removeOwnerKey()
@@ -120,7 +129,8 @@ void test('an explicit runtime configuration does not resolve an unrelated prefe
   await f.service.upgradeUserRuntime(f.ownerId, 'org', config)
   assert.equal(f.requestCount(), 0)
   assert.equal(f.upgrades.length, 1)
-  assert.equal(f.upgrades[0], config)
+  assert.deepEqual(f.upgrades[0], { ...config, 'egress-policy.json': JSON.stringify(await f.service.egressPolicies.policy('org')) })
+  assert.deepEqual(config, { 'sudocode.json': '{}', 'backend-config.json': '{"mounts":[]}' }, 'Policy delivery must not mutate caller model configuration')
 })
 
 for (const isRemoved of [false, true]) {

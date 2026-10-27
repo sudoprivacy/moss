@@ -241,6 +241,7 @@ const menuItems: NavItem[] = [
 ]
 
 const systemItems: NavItem[] = [
+  { title: '数据出口保护', url: '/egress-policy', icon: ShieldCheck, requiredScope: 'admin:settings' },
   {
     title: '企业信息配置',
     url: '/settings/enterprise',

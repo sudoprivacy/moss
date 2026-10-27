@@ -20,6 +20,7 @@ import { startCohostExecution } from './cohostRecovery.js'
 import { collectSkillAssets } from './skillAssets.js'
 import { syncCohostSkills } from './cohostSkills.js'
 import { WORKSPACE_SKILLS_DIRECTORY } from '../../utils/skills/localSkillDirectories.js'
+import { cohostModelName } from './scodeProxyConfig.js'
 
 /**
  * Session backend for a co-hosted sudocode runtime.
@@ -41,6 +42,7 @@ export class CohostBackend implements SessionBackend {
 
     const env = buildSessionEnv(options)
     const model = env.MOSS_DEFAULT_MODEL || options.runtime?.model || 'gemini-3-flash-preview'
+    const resolveRuntimeModel = (value: string) => cohostModelName(value, env.MOSS_MODEL_PROVIDER_ID, env.MOSS_COHOST_MODEL_ROUTING)
     const skillSources = await resolveWorkspaceSkillSources(enabledSkills, options.visibilityFilter)
     const skillAssets = await collectSkillAssets(skillSources, { includeInstructions: true })
 
@@ -69,7 +71,7 @@ export class CohostBackend implements SessionBackend {
     try {
       const execution = await startCohostExecution(agent, {
         agentId,
-        model,
+        model: resolveRuntimeModel(model),
         ...ownerField(identity, options.userId),
         repos: [{ hostPath: repositoryPath, alias: 'workspace' }],
         resumeSessionId: saved?.durableSessionId,
@@ -119,6 +121,7 @@ export class CohostBackend implements SessionBackend {
       } : {}),
       model,
       modelProviderId: env.MOSS_MODEL_PROVIDER_ID,
+      resolveRuntimeModel,
       transcriptPath: options.transcriptPath,
       resumeSessionId: isResume ? session.durableSessionId : undefined,
       assistantName: options.assistantName,

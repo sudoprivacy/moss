@@ -75,7 +75,10 @@ import {
 import { ensureDraftsDirectory } from './draftsCleanup.js'
 import { buildAgentInstructions } from './agentInstructions.js'
 import type { NexusClient } from './nexus/nexusClient.js'
-import { UserPodService } from '@sudo/user-runtime'
+import { UserPodService, writeEgressPolicyFile, readEgressPolicyFile } from '@sudo/user-runtime'
+import { createEgressPolicy, EgressPolicyRepository, POLICY_FILENAME, readEgressPolicyStatus, policyApplicationStatus } from '@sudo/egress-policy'
+import { EgressPolicyService, type EgressRuntimeReceipt, type EgressRuntimeTarget } from './configuration/egressPolicyService.js'
+import type { EgressPolicy } from '@sudo/egress-policy'
 import { CohostOwnerRuntime } from './runtime/cohostOwnerRuntime.js'
 import type { NexusSessionEndpoint } from '@nexus-ai-fs/vfs-client'
 import { assertRuntimePlacement } from './runtime/runtimePlacementPolicy.js'
@@ -83,7 +86,7 @@ import { readRuntimeRelease } from '@sudo/user-runtime/release'
 import { resolveCohostNexusConfig } from './nexus/nexusEnvConfig.js'
 import { resolveCohostConnection as externalCohostConnection, encodeCohostConnection } from './nexus/cohostConnection.js'
 import { connectSessionRuntime, waitForSessionRuntime, type SessionConnectionConfig } from './nexus/sessionConnection.js'
-import { buildCohostProxyConfig } from './backends/scodeProxyConfig.js'
+import { buildCohostProxyConfig, cohostModelName } from './backends/scodeProxyConfig.js'
 import {
   openInternalSessionChannel,
   revokeInternalSessionToken,
@@ -368,6 +371,7 @@ interface RunnerModelContext {
 }
 
 export class RuntimeService {
+  readonly egressPolicies: EgressPolicyService
   private readonly userPods?: UserPodService
   private readonly ownerRuntime?: CohostOwnerRuntime
   private readonly upgradingOwners = new Set<string>()
@@ -423,12 +427,19 @@ export class RuntimeService {
         runtimeClassName: k8s.runtimeClassName, cpuLimit: k8s.cpuLimit, memoryLimit: k8s.memoryLimit,
         imagePullPolicy: k8s.imagePullPolicy, imagePullSecrets: k8s.imagePullSecrets,
         issuer: { endpoint: issuer.endpoint, tls: issuer.tls },
+        ...(options.config.egressGate?.analyzerImage ? { egressAnalyzer: { image: options.config.egressGate.analyzerImage } } : {}),
+        ...(options.config.egressGate?.analyzerRelay ? { egressAnalyzerRelay: options.config.egressGate.analyzerRelay } : {}),
       }, undefined, waitForSessionRuntime)
     }
     if (this.userPods) {
       this.ownerRuntime = new CohostOwnerRuntime(this.userPods, this.store.cohostAgentHomes,
         k8s?.userRuntimeAgentsPerAllocation)
     }
+    this.egressPolicies = new EgressPolicyService(new EgressPolicyRepository(this.store.driver,
+      options.config.egressGate?.defaultPolicyFile ? readEgressPolicyFile(options.config.egressGate.defaultPolicyFile) : createEgressPolicy()), {
+      targets: organizationId => this.authService.listEgressPolicyOwners(organizationId),
+      observe: (target, policy) => this.observeEgressRuntime(target, policy),
+    })
     if (options.nexusClient) {
       this.mcpStore = new McpStore(this.store.driver)
       this.mcpUserConfig = createMcpUserConfigApi({
@@ -708,7 +719,60 @@ export class RuntimeService {
 
   /** Main-process placement shared by session runners and authenticated workspace I/O. */
   async resolveCohostConnection(ownerId: string, agentId: string, configuration?: Record<string, string>): Promise<SessionConnectionConfig> {
+    if (configuration) {
+      const organizationId = await this.store.getUserOrgId(ownerId)
+      if (!organizationId) throw new ResourceAccessError(403, 'Runtime owner organization is unavailable')
+      const policy = await this.egressPolicies.policy(organizationId)
+      configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(policy) }
+      const managedConnection = this.ownerRuntime ? await this.ownerRuntime.connection(ownerId, agentId, configuration) : undefined
+      if (managedConnection && policy.enabled) {
+        try {
+          const status = await this.readRuntimeEgressStatus(managedConnection, ownerId)
+          if (policyApplicationStatus(policy, status).state !== 'applied') throw new Error('Policy delivery is pending')
+        } catch {
+          throw new ResourceAccessError(503, 'Runtime egress policy is not applied; upgrade the runtime or retry delivery')
+        }
+      }
+      if (!this.ownerRuntime && this.options.config.egressGate?.localOrganizationId === organizationId) {
+        const receipts = await this.observeEgressRuntime({ ownerId, organizationId }, policy)
+        if (!receipts.length || receipts.some(receipt => receipt.error || policyApplicationStatus(policy, receipt.status).state !== 'applied')) {
+          throw new ResourceAccessError(503, 'Local runtime egress policy is not applied; upgrade the runtime or retry delivery')
+        }
+      }
+      if (managedConnection) return managedConnection
+    }
     return this.ownerRuntime ? this.ownerRuntime.connection(ownerId, agentId, configuration) : externalCohostConnection()
+  }
+
+  private async readRuntimeEgressStatus(configuration: SessionConnectionConfig, ownerId: string) {
+    const connection = await connectSessionRuntime(configuration, ownerId)
+    try { return await readEgressPolicyStatus(connection.client, connection.authToken) }
+    finally { connection.client.close() }
+  }
+
+  private async observeEgressRuntime(target: EgressRuntimeTarget, policy?: EgressPolicy): Promise<EgressRuntimeReceipt[]> {
+    const placements = this.ownerRuntime ? await this.ownerRuntime.placements(target.ownerId) : []
+    if (!this.ownerRuntime) {
+      const deployment = this.options.config.egressGate
+      if (!deployment?.localPolicyFile || deployment.localOrganizationId !== target.organizationId) {
+        return [{ ownerId: target.ownerId, allocationId: 'local', isPresent: false }]
+      }
+      try {
+        if (policy) await writeEgressPolicyFile(deployment.localPolicyFile, policy)
+        return [{ ownerId: target.ownerId, allocationId: 'local', isPresent: true,
+          status: await this.readRuntimeEgressStatus(externalCohostConnection(), target.ownerId) }]
+      } catch { return [{ ownerId: target.ownerId, allocationId: 'local', isPresent: true, error: 'Local runtime policy is unavailable; verify the runtime version and deployment configuration' }] }
+    }
+    return await Promise.all(placements.map(async placement => {
+      const identity = { ownerId: target.ownerId, allocationId: placement.allocationId }
+      try {
+        const configuration = policy
+          ? await placement.service.configurePolicy?.(target.ownerId, policy)
+          : await placement.service.find(target.ownerId)
+        if (!configuration) return { ...identity, isPresent: false }
+        return { ...identity, isPresent: true, status: await this.readRuntimeEgressStatus(configuration, target.ownerId) }
+      } catch { return { ...identity, isPresent: true, error: 'Runtime policy is unavailable; upgrade the runtime or retry delivery' } }
+    }))
   }
 
   /** Connect with a fresh owner-delegated identity at the execution endpoint. */
@@ -779,8 +843,10 @@ export class RuntimeService {
         // execute the user's selected model. Model admission stays at session start.
         const environment = this.buildModelEnvironment(context)
         return buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
-          environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!)
+          environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!,
+          cohostModelName(environment.MOSS_DEFAULT_MODEL!, environment.MOSS_MODEL_PROVIDER_ID, environment.MOSS_COHOST_MODEL_ROUTING))
       })
+      configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(await this.egressPolicies.policy(orgId)) }
       const sessions = (await this.store.listUserSessions(orgId, ownerId))
         .filter(session => session.runtime.type === 'cohost' && session.desiredState === 'active')
       const bindings = await Promise.all(sessions.map(async session => ({ session,
@@ -1355,6 +1421,12 @@ export class RuntimeService {
   }
 
   async reconcileOnStartup(): Promise<void> {
+    const localGate = this.options.config.egressGate
+    if (!this.ownerRuntime && localGate?.localPolicyFile && localGate.localOrganizationId) {
+      // Restore desired policy before accepting work, even if the controller
+      // stopped after saving SQL but before the local file was delivered.
+      await writeEgressPolicyFile(localGate.localPolicyFile, await this.egressPolicies.policy(localGate.localOrganizationId))
+    }
     // Rebuild UserContainerRegistry from `docker ps` before touching sessions
     // so ensureAttempt() reuses existing user containers rather than spawning
     // duplicates. Silent on error — Docker may not be available in this
@@ -2053,6 +2125,11 @@ export class RuntimeService {
       process.stderr.write(`  - model unverified: discovery failed, passing through '${defaultModel}' (MOSS_ALLOW_UNVERIFIED_MODEL)\n`)
     }
     for (const key of ['MOSS_BROWSER_GATEWAY_URL', 'MOSS_BROWSER_GATEWAY_TOKEN', 'MOSS_BROWSER_GATEWAY_AI_TOKEN', 'MOSS_BROWSER_SECRET', 'MOSS_BROWSER_ALLOWED_OWNERS']) delete runnerEnv[key]
+    delete runnerEnv.MOSS_COHOST_MODEL_ROUTING
+    if (session.runtime.type === 'cohost' && this.options.config.cohostModelRouting) {
+      cohostModelName(defaultModel, selection?.provider.id, this.options.config.cohostModelRouting)
+      runnerEnv.MOSS_COHOST_MODEL_ROUTING = this.options.config.cohostModelRouting
+    }
     if (selection) {
       runnerEnv.MOSS_MODEL_PROVIDER_ID = selection.provider.id
       runnerEnv.MOSS_FORCE_ENV_MODEL_CONFIG = '1'
@@ -2758,7 +2835,8 @@ export class RuntimeService {
       runnerEnv.MOSS_COHOST_CONNECTION = encodeCohostConnection(await this.resolveCohostConnection(
         session.userId,
         sessionAgentName(session.userId, session.assistantName),
-        buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || '', runnerEnv.MOSS_DEFAULT_MODEL!),
+        buildCohostProxyConfig(runnerEnv.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1', runnerEnv.ANTHROPIC_API_KEY || '', runnerEnv.MOSS_DEFAULT_MODEL!,
+          cohostModelName(runnerEnv.MOSS_DEFAULT_MODEL!, runnerEnv.MOSS_MODEL_PROVIDER_ID, runnerEnv.MOSS_COHOST_MODEL_ROUTING)),
       ))
     }
 

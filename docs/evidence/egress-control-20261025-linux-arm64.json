@@ -1,0 +1,89 @@
+{
+  "passed": true,
+  "scope": "Moss HTTP policy API -> shared host file -> native receipt -> managed ACP -> synthetic model",
+  "binarySha256": "ba27a0d6ee0082eb4b4099be155962ba248d8486d7e2e1010a171eb3cb708401",
+  "productionServicesChanged": false,
+  "sameNativeProcess": true,
+  "controllerProcessReplacement": true,
+  "crashRecoveryTested": false,
+  "policyFileOsIsolationTested": false,
+  "rows": [
+    {
+      "scenario": "disabled-before",
+      "savedRevision": 1,
+      "nativeApplied": true,
+      "upstreamRequests": 1,
+      "callerReceivedGateError": false,
+      "localOriginalRetained": true
+    },
+    {
+      "scenario": "redact",
+      "savedRevision": 2,
+      "nativeApplied": true,
+      "upstreamRequests": 1,
+      "callerReceivedGateError": false,
+      "localOriginalRetained": true
+    },
+    {
+      "scenario": "local-control",
+      "savedRevision": 3,
+      "nativeApplied": true,
+      "upstreamRequests": 1,
+      "callerReceivedGateError": false,
+      "localOriginalRetained": true
+    },
+    {
+      "scenario": "deny",
+      "savedRevision": 4,
+      "nativeApplied": true,
+      "upstreamRequests": 0,
+      "callerReceivedGateError": true,
+      "localOriginalRetained": true
+    },
+    {
+      "scenario": "outage",
+      "savedRevision": 5,
+      "nativeApplied": true,
+      "upstreamRequests": 0,
+      "callerReceivedGateError": true,
+      "localOriginalRetained": true
+    },
+    {
+      "scenario": "malformed",
+      "savedRevision": 6,
+      "nativeApplied": true,
+      "upstreamRequests": 0,
+      "callerReceivedGateError": true,
+      "localOriginalRetained": true
+    },
+    {
+      "scenario": "disabled-after",
+      "savedRevision": 7,
+      "nativeApplied": true,
+      "upstreamRequests": 1,
+      "callerReceivedGateError": false,
+      "localOriginalRetained": true
+    }
+  ],
+  "cleanupErrors": [],
+  "dateUtc": "2026-10-25",
+  "platform": "linux-arm64",
+  "mossServiceSource": "bf06635eef40d53eea1a531a92bb2165acb2f589",
+  "acceptanceSourceSha256": "32d0b70e62d267506d7ab53a31d4bcee6de7eedccf2be8bf190b847ce466c3bf",
+  "bundleSha256": "067c890e1d3fe4eda316481343a9f4a20d3991cdf4de95a2c6492cd460dad598",
+  "nativeCandidate": {
+    "sudocodeSource": "608d3265",
+    "nexusSource": "2e6e2ceb9fade7d587ca23c4061d3fdf3d11cc9a",
+    "localDependencyOverride": true,
+    "officialRelease": false
+  },
+  "runtimeSdkCandidateSha256": "276a8d6eef2ddf497ccfdcbb53d0ac019530c6241d87093e77c4eb2522d097a8",
+  "forcedProcessGroupCleanup": false,
+  "cleanPublicReleaseInstall": false,
+  "limits": [
+    "Synthetic model upstream; no real cloud or local GPU inference",
+    "No product deployment or browser session acceptance",
+    "No OS read-only policy containment or crash recovery acceptance",
+    "Candidate native dependency override; official release and clean SDK URL install pending"
+  ]
+}

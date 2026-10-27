@@ -60,6 +60,14 @@ const issued = await authService.issueTokenFromPassword({
   username,
   password: bootstrapPassword,
 })
+if (process.env.MOSS_TEST_EGRESS_CONTROL_CREDENTIAL === '1') {
+  const parent = await authService.verifyAccessToken(issued.access_token)
+  if (!parent) throw new Error('Missing authenticated control-credential parent')
+  const authority = authService.createAgentControlAuthority()
+  const delegated = await authority.issue(parent, 'egress-http-fixture', 120)
+  if (!await authority.control(delegated.token)) throw new Error('Control credential is not valid for its own audience')
+  await writeFile(join(config.rootDir, 'egress-control-token.json'), JSON.stringify({ token: delegated.token }), { mode: 0o600 })
+}
 // ServerConfig is flat (readServerConfig unfolds the server.json nesting):
 // transcriptDir/dbPath/runtimeDir are top-level, there is no config.storage.
 const transcriptDir = join(config.transcriptDir, 'lb-e2e-transcripts')

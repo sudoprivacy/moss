@@ -286,6 +286,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
         ? process.env.MOSS_DEFAULT_RUNTIME
         : raw.runtimeDefaults.type,
     engine: raw.runtimeDefaults.engine,
+    cohostModelRouting: raw.runtimeDefaults.cohostModelRouting,
     scodePath: raw.runtimeDefaults.scodePath
       ? normalizePath(raw.runtimeDefaults.scodePath)
       : undefined,
@@ -323,6 +324,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
     authProxyUrl: process.env.MOSS_AUTH_PROXY_URL?.trim()
       || raw.server.authProxyUrl
       || null,
+    egressGate: raw.egressGate,
     dockerNetwork: raw.docker.network,
     dockerStopTimeoutSec: raw.docker.stopTimeoutSec,
     dockerLabels: raw.docker.labels,

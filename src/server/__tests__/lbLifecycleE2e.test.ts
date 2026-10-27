@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 // Every case passes 60_000 as bun:test's per-case timeout (third argument):
 // each spawns a real server process (DB migrations + service init take 3-8s on
 // Windows), far beyond the 5s default.
-import { mkdtemp, rm, writeFile, symlink } from 'fs/promises'
+import { mkdtemp, readFile, rm, writeFile, symlink } from 'fs/promises'
 import { createServer } from 'net'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'
@@ -335,3 +335,63 @@ describe('LB lifecycle E2E (real server process, node runtime)', () => {
 it('legacy external task schema rejects real server startup before readiness', async () => {
   await expect(startFixture({ MOSS_TEST_LEGACY_EXTERNAL_STORE: '1' })).rejects.toThrow('EXTERNAL_TASK_MIGRATION_REQUIRED')
 }, 30_000)
+
+it('egress management uses real HTTP authentication, scoped revisions and durable organization inheritance', async () => {
+  const fixture = await startFixture({ MOSS_TEST_EGRESS_CONTROL_CREDENTIAL: '1' })
+  const request = (path: string, token = fixture.token, method = 'GET', body?: unknown) => fetch(`${fixture.baseUrl}${path}`, {
+    method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+  const path = '/api/v1/settings/egress'
+  expect((await fetch(`${fixture.baseUrl}${path}`)).status).toBe(401)
+  const delegated = JSON.parse(await readFile(join(fixture.rootDir, 'egress-control-token.json'), 'utf8')) as { token: string }
+  // A valid delegated credential retains its narrow audience even for an admin parent.
+  expect((await request(`${path}?scope=platform`, delegated.token)).status).toBe(401)
+  expect((await request(`${path}/apply?scope=platform`, delegated.token, 'POST', {})).status).toBe(401)
+  const initial = await request(`${path}?scope=platform`)
+  expect(initial.status).toBe(200)
+  expect(initial.headers.get('cache-control')).toBe('no-store')
+  const baseline = await initial.json() as { policy: { revision: number; enabled: boolean; modelMounts: string[] }; runtimes: unknown[] }
+  expect(baseline.policy.enabled).toBe(false)
+  expect(baseline.runtimes.every(item => !(item as { isPresent: boolean }).isPresent)).toBe(true)
+  const protectedPolicy = { ...baseline.policy, enabled: true, modelMounts: ['/model'] }
+  expect((await request(`${path}?scope=platform`, delegated.token, 'PUT', {
+    policy: protectedPolicy, expectedRevision: baseline.policy.revision,
+  })).status).toBe(401)
+  const saved = await request(`${path}?scope=platform`, fixture.token, 'PUT', { policy: protectedPolicy, expectedRevision: baseline.policy.revision })
+  expect(saved.status, await saved.clone().text()).toBe(200)
+  const platform = await saved.json() as typeof baseline
+  expect(platform.policy.enabled).toBe(true)
+  expect(platform.policy.revision).toBeGreaterThan(baseline.policy.revision)
+  expect((await request(`${path}?scope=platform`, fixture.token, 'PUT', { policy: protectedPolicy, expectedRevision: baseline.policy.revision })).status).toBe(409)
+  expect((await request(`${path}?scope=platform`, fixture.token, 'PUT', { policy: { ...platform.policy, enabled: 'yes' }, expectedRevision: platform.policy.revision })).status).toBe(400)
+
+  const createActor = async (name: string, role: string) => {
+    const created = await request('/api/v1/users', fixture.token, 'POST', { name, role, password: 'egress-fixture-password' })
+    expect(created.status, await created.clone().text()).toBe(200)
+    const login = await fetch(`${fixture.baseUrl}/api/v1/auth/token`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: name, password: 'egress-fixture-password' }) })
+    expect(login.status).toBe(200)
+    return (await login.json() as { access_token: string }).access_token
+  }
+  const user = await createActor('egress-http-user', 'user')
+  const admin = await createActor('egress-http-admin', 'admin')
+  expect((await request(`${path}?scope=organization`, user)).status).toBe(403)
+  expect((await request(`${path}?scope=platform`, admin)).status).toBe(403)
+  const inherited = await (await request(`${path}?scope=organization`, admin)).json() as typeof baseline & { isInherited: boolean }
+  expect(inherited.isInherited).toBe(true)
+  expect(inherited.policy.enabled).toBe(true)
+  const override = await request(`${path}?scope=organization`, admin, 'PUT', {
+    policy: { ...inherited.policy, enabled: false }, expectedRevision: inherited.policy.revision, organizationId: 'attacker-selected-org',
+  })
+  expect(override.status, await override.clone().text()).toBe(200)
+  const organization = await override.json() as typeof inherited & { organizationId: string }
+  expect(organization.policy.enabled).toBe(false)
+  expect(organization.isInherited).toBe(false)
+  expect(organization.organizationId).not.toBe('attacker-selected-org')
+  expect((await (await request(`${path}?scope=platform`)).json() as typeof baseline).policy.enabled).toBe(true)
+  const restored = await request(`${path}/inherit?scope=organization`, admin, 'POST', { expectedRevision: organization.policy.revision })
+  expect(restored.status).toBe(200)
+  expect((await restored.json() as typeof inherited).isInherited).toBe(true)
+  expect((await request(`${path}/inherit?scope=platform`, fixture.token, 'POST', { expectedRevision: platform.policy.revision })).status).toBe(400)
+}, 60_000)
