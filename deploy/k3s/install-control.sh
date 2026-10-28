@@ -40,6 +40,16 @@ elif ! command -v k3s >/dev/null 2>&1; then
   die "--role control-plane requires a running local k3s server; use --role all-in-one to install it"
 fi
 k3s kubectl get nodes >/dev/null
+if [ "$ROLE" = all-in-one ] && [ -f "$PREVIOUS_STATE" ] && [ "${INSTALL_GVISOR:-1}" = 1 ]; then
+  plan_gvisor_runtime "$ARCH"
+  if [ "$GVISOR_PROVIDER" = qualified ]; then
+    provision_qualified_gvisor k3s "${OFFLINE_DIR:-$SOURCE_DIR/offline}" "${OFFLINE_MODE:-auto}"
+    apply_compute_runtime_class "$QUALIFIED_RUNTIME_CLASS" "$QUALIFIED_RUNTIME_RECEIPT"
+  fi
+fi
+if [ "$EXISTING_INSTALL" = 0 ] && [ -n "${COMPUTE_RUNTIME_CLASS:-}" ] && [ -z "${MOSS_K8S_RUNTIME_CLASS+x}" ]; then
+  export MOSS_K8S_RUNTIME_CLASS="$COMPUTE_RUNTIME_CLASS"
+fi
 for pair in "server:$SERVER_IMAGE_ARCHIVE" "nexus:$NEXUS_IMAGE_ARCHIVE" "runtime:$RUNTIME_ARCHIVE"; do
   log "Retaining ${pair%%:*} image"
   retain_release_image "${pair#*:}"

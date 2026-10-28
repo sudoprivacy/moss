@@ -130,6 +130,45 @@ provision_compute_node() {''' + function + '\nprovision_compute_node\n')
         self.assertIn(":2.0-amd64", config["k8s"]["image"])
         self.assertEqual(control.read_json(output / "settings.json"), {"env": {"custom": "retained"}})
 
+    @unittest.skipIf(os.name == "nt", "POSIX installer")
+    def test_runtime_registration_preserves_existing_selection_and_defaults_a_fresh_install(self):
+        prefix = (HERE / 'install-control.sh').read_text().split('\nfor pair in ', 1)[0]
+        fake_bin = self.base / 'runtime-bin'
+        fake_bin.mkdir()
+        k3s = fake_bin / 'k3s'
+        k3s.write_text('#!/bin/sh\nexit 0\n')
+        k3s.chmod(0o755)
+        work = self.base / 'runtime-work'
+        (work / 'bundle').mkdir(parents=True)
+        for source in [HERE / 'control.py', HERE.parent / 'server.json']:
+            shutil.copyfile(source, work / 'bundle' / source.name)
+        script = '''set -Eeuo pipefail
+log() { :; }; die() { echo "$*" >&2; exit 1; }; prompt_value() { :; }
+acquire_asset() { :; }
+provision_compute_node() { COMPUTE_RUNTIME_CLASS=gvisor-qualified; }
+plan_gvisor_runtime() { GVISOR_PROVIDER=qualified; }
+provision_qualified_gvisor() { QUALIFIED_RUNTIME_CLASS=gvisor-qualified; QUALIFIED_RUNTIME_RECEIPT=verified.json; }
+apply_compute_runtime_class() { printf '%s\\n' "$1" > "$WORK_DIR/registered-class"; }
+''' + prefix + '\npython3 "$CONTROL" render "$INSTALL_DIR" "$WORK_DIR/rendered" 2.0 fixture-node\n'
+        env = {**os.environ, 'PATH': str(fake_bin) + os.pathsep + os.defpath + os.pathsep + str(Path(shutil.which('python3')).parent),
+               'INSTALL_DIR': str(self.root), 'WORK_DIR': str(work), 'SOURCE_DIR': str(self.base),
+               'ROLE': 'all-in-one', 'ARCH': 'amd64', 'MOSS_PORT': '43127',
+               'SERVER_IMAGE_ARCHIVE': 'server.tar.gz', 'NEXUS_IMAGE_ARCHIVE': 'nexus.tar.gz', 'RUNTIME_ARCHIVE': 'runtime.tar.gz'}
+        env.pop('MOSS_K8S_RUNTIME_CLASS', None)
+        result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(control.read_json(work / 'rendered/server.json')['k8s']['runtimeClassName'], 'gvisor-qualified')
+        self.assertFalse((work / 'registered-class').exists())
+        self.installed_fixture()
+        config = control.read_json(self.root / 'server.json')
+        config['k8s']['runtimeClassName'] = 'gvisor'
+        control.write_json(self.root / 'server.json', config)
+        result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((work / 'registered-class').read_text().strip(), 'gvisor-qualified')
+        self.assertEqual(control.read_json(work / 'rendered/server.json')['k8s']['runtimeClassName'], 'gvisor')
+        self.assertEqual(control.read_json(self.root / 'server.json')['k8s']['runtimeClassName'], 'gvisor')
+
     def test_rejects_unknown_migration_before_touching_data(self):
         self.installed_fixture()
         lock = self.root / ".moss/nexus/data.zone-id.lock.json"

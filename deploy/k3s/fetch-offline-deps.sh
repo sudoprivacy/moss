@@ -16,7 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OFFLINE_DIR="${OFFLINE_DIR:-$SCRIPT_DIR/offline}"
 K3S_VERSION="${K3S_VERSION:-v1.34.1+k3s1}"      # must match the target's desired k3s
-GVISOR_RELEASE="${GVISOR_RELEASE:-latest}"       # gvisor release channel/date
+GVISOR_RELEASE="${GVISOR_RELEASE:-auto}"
 ARCH="${ARCH:-amd64}"
 
 # moss scode runtime image (session container). Published to Tencent COS by CI;
@@ -69,10 +69,24 @@ fetch_arch() {
     [ -n "$want" ] && [ "$want" = "$got" ] || die "k3s checksum mismatch for $published"
   done
   fi
-  # Current gVisor releases ship checksum-verified archives on GitHub; the old
-  # storage.googleapis.com per-binary download paths are no longer available.
-  local endpoint=latest release_json="$OFFLINE_DIR/gvisor-${GVISOR_RELEASE}.json"
-  [ "$GVISOR_RELEASE" = latest ] || endpoint="tags/release-${GVISOR_RELEASE#release-}"
+  local tools="$SCRIPT_DIR/deploy/runtime/gvisor"
+  [ -f "$tools/fetch.py" ] || tools="$SCRIPT_DIR/../runtime/gvisor"
+  local plan provider
+  plan="$(python3 "$tools/fetch.py" plan --architecture "$karch" --preference "$GVISOR_RELEASE")"
+  provider="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["provider"])' "$plan")"
+  if [ "$provider" = qualified ]; then
+    local metadata metadata_sha
+    metadata="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["release"])' "$plan")"
+    metadata_sha="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["releaseSha256"])' "$plan")"
+    python3 "$tools/fetch.py" --release "$metadata" --release-sha256 "$metadata_sha" \
+      --cache "$OFFLINE_DIR/gvisor" > "$OFFLINE_DIR/gvisor-$karch.json"
+    log "Verified complete qualified gVisor archive for $karch"
+    return
+  fi
+  local gvisor_release
+  gvisor_release="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["version"])' "$plan")"
+  local endpoint=latest release_json="$OFFLINE_DIR/gvisor-${gvisor_release}.json"
+  [ "$gvisor_release" = latest ] || endpoint="tags/release-${gvisor_release#release-}"
   dl "https://api.github.com/repos/google/gvisor/releases/$endpoint" "$release_json" application/vnd.github+json
   local asset url archive="gvisor-${garch}.tar.bz2"
   for asset in "$archive" SHA512SUMS; do
@@ -82,9 +96,9 @@ assets = json.load(open(sys.argv[1]))['assets']
 print(next(asset['url'] for asset in assets if asset['name'] == sys.argv[2]))
 PY
 )"
-    dl "$url" "$OFFLINE_DIR/gvisor-${GVISOR_RELEASE}-${asset}"
+    dl "$url" "$OFFLINE_DIR/gvisor-${gvisor_release}-${asset}"
   done
-  python3 - "$OFFLINE_DIR" "$GVISOR_RELEASE" "$archive" "$karch" <<'PY'
+  python3 - "$OFFLINE_DIR" "$gvisor_release" "$archive" "$karch" <<'PY'
 import hashlib, pathlib, shutil, sys, tarfile
 root, release, archive, arch = pathlib.Path(sys.argv[1]), *sys.argv[2:]
 path = root / f'gvisor-{release}-{archive}'
