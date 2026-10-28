@@ -211,7 +211,11 @@ try {
   // A stopped browser is free for an explicit start from another conversation;
   // passive state polls never move the profile.
   const held = (await invoke(next, { kind: 'state' })).session
-  await invoke(next, { kind: 'stop', controlEpoch: held.controlEpoch, targetEpoch: held.targetEpoch })
+  // Stopping is a controller action; the earlier return gave the lease to the
+  // AI, so retake it before the lifecycle call (mirrors the panel interrupt).
+  await invoke(next, { kind: 'take', controlEpoch: held.controlEpoch, targetEpoch: held.targetEpoch })
+  const taken = (await invoke(next, { kind: 'state' })).session
+  await invoke(next, { kind: 'stop', controlEpoch: taken.controlEpoch, targetEpoch: taken.targetEpoch })
   const halted = (await invoke(next, { kind: 'state' })).session
   assert.equal(halted.state, 'stopped')
   const owned = await registry.ownerInfo(next)
