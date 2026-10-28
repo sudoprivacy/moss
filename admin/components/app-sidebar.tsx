@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { toast } from 'sonner'
 import type { ComponentType } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
@@ -74,7 +75,7 @@ import {
 import { useAuth } from '@/lib/hooks/use-auth'
 import { useUnsavedChanges } from '@/lib/hooks/use-unsaved-changes'
 import { hasAnyScope, hasScope, setPreferredOrgId } from '@/lib/api/client'
-import { getOrganizations, ORGANIZATIONS_CHANGED_EVENT, switchOrg } from '@/lib/api/auth'
+import { getAccountOrganizations, getOrganizations, ORGANIZATIONS_CHANGED_EVENT, switchOrg } from '@/lib/api/auth'
 import { getEnterpriseConfig } from '@/lib/api/enterprise'
 import type { AuthOrgWithCounts, EnterpriseConfig } from '@/lib/api/types'
 import { cn } from '@/lib/utils'
@@ -325,21 +326,22 @@ export function AppSidebar() {
   const [cabinEnabled, setCabinEnabled] = useState(false)
   const [enterpriseConfig, setEnterpriseConfig] = useState<EnterpriseConfig | null>(null)
 
-  // Super-admin org switcher: lists all orgs and re-scopes the session to the
-  // selected one. Only super admins may switch across organizations.
+  // Ordinary humans see their memberships; operations administrators retain
+  // the existing cross-enterprise management view.
   const isSuperAdmin = user?.role === 'super_admin'
-  const [organizations, setOrganizations] = useState<AuthOrgWithCounts[]>([])
+  const [organizations, setOrganizations] = useState<Pick<AuthOrgWithCounts, 'id' | 'name'>[]>([])
   const [switchingOrg, setSwitchingOrg] = useState(false)
   const [orgPickerOpen, setOrgPickerOpen] = useState(false)
   const [orgSearch, setOrgSearch] = useState('')
 
   useEffect(() => {
-    if (!isSuperAdmin) return
+    setOrganizations([])
+    if (!user?.id) return
     let cancelled = false
     let latestRequest = 0
     const refreshOrganizations = () => {
       const request = ++latestRequest
-      void getOrganizations()
+      void (isSuperAdmin ? getOrganizations() : getAccountOrganizations())
         .then((res) => {
           if (!cancelled && request === latestRequest) setOrganizations(res.organizations)
         })
@@ -353,7 +355,7 @@ export function AppSidebar() {
       cancelled = true
       window.removeEventListener(ORGANIZATIONS_CHANGED_EVENT, refreshOrganizations)
     }
-  }, [isSuperAdmin])
+  }, [isSuperAdmin, user?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -385,8 +387,9 @@ export function AppSidebar() {
       setPreferredOrgId(orgId)
       // Reload so every page re-fetches against the newly selected org.
       window.location.reload()
-    } catch {
+    } catch (error) {
       setSwitchingOrg(false)
+      toast.error(error instanceof Error ? error.message : '切换企业失败，请重新登录后重试')
     }
   }
 
@@ -563,7 +566,7 @@ export function AppSidebar() {
           </span>
         </div>
 
-        {isSuperAdmin ? (
+        {organizations.length > 0 ? (
           <SidebarMenu>
             <SidebarMenuItem>
               <Popover

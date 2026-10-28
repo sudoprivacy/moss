@@ -67,7 +67,7 @@ jobs:
         run: bun run test
 
       - name: Verify external provider concurrency on real PostgreSQL
-        run: node --import tsx --test src/server/externalProviders/externalProviders.pg-test.ts src/server/agentFederation/*.pg-test.ts src/server/agentFederation/provider/*.pg-test.ts
+        run: node --import tsx --test src/server/externalProviders/externalProviders.pg-test.ts src/server/identity/*.pg-test.ts src/server/agentFederation/*.pg-test.ts src/server/agentFederation/provider/*.pg-test.ts
 
       # Runtime acceptance entrypoints share the installed SDK and production types.
       - name: Keep the live e2e scripts compiling

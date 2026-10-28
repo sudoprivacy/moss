@@ -8,6 +8,8 @@ export type AccessTokenClaims = {
   scopes: string[]
   key_id: string
   auth_app?: 'moss' | 'sudowork'
+  /** Present only after account-level authentication, never an organization password reset. */
+  account_id?: string
   /** Purpose-bound credentials are accepted only by their explicit consumer. */
   aud?: string
   jti: string
@@ -24,6 +26,7 @@ export type AuthContext = {
   scopes: string[]
   keyId: string
   authApp?: 'moss' | 'sudowork'
+  accountId?: string
   jti: string
   exp: number
   /** Document Center: set when the token was issued for an in-container scode session. */
@@ -201,6 +204,7 @@ export function verifyAccessToken(
   if (payload.auth_app !== undefined && payload.auth_app !== 'moss' && payload.auth_app !== 'sudowork') return null
   if (payload.auth_app === 'moss' && payload.key_id !== 'moss-password-login') return null
   if (payload.key_id === 'moss-password-login' && payload.auth_app !== 'moss') return null
+  if (payload.account_id !== undefined && (typeof payload.account_id !== 'string' || !payload.account_id)) return null
 
   if (expectedIssuer && payload.iss !== expectedIssuer) {
     return null
@@ -213,6 +217,7 @@ export function verifyAccessToken(
   return {
     rawToken: token,
     authApp: payload.auth_app,
+    ...(payload.account_id ? { accountId: payload.account_id } : {}),
     userId: payload.sub,
     orgId: payload.org_id,
     role: payload.role,

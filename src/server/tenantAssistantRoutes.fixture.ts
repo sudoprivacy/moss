@@ -22,7 +22,15 @@ const { service: authService } = await createAuthService({
   dbPath: config.dbPath,
   tokenTtlSec: config.tokenTtlSec,
   bootstrapAdmin: config.bootstrapAdmin,
+  phoneAuth: config.phoneAuth,
 })
+if (process.env.MOSS_TEST_MULTI_ORG_MEMBERSHIP === '1') {
+  const person = await authService.provisionPhoneUser({ phone: '13900000001', nickname: 'Membership human', autoCreateOrg: true })
+  const company = await authService.createOrganization({ name: 'Membership company' })
+  for (const orgId of [person.user.orgId, company.organization.id]) {
+    await authService.putOrganizationClientPolicy(orgId, { loginMethod: 'sms', loginMethodInherited: false }, 'local-http-fixture')
+  }
+}
 if (process.env.MOSS_TEST_SHARED_MODEL_BILLING === '1') {
   const { OrganizationRouterAdapter } = await import('./billing/organizationRouterAdapter.js')
   const { RouterMock } = await import('./billing/testing/routerMock.js')

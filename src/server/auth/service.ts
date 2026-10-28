@@ -33,6 +33,7 @@ import { onlineCommandContext } from '../application/commandContext.js'
 import { IdentityRepository, type OrganizationLoginMethod } from '../identity/identityRepository.js'
 import { UnifiedIdentityService } from '../identity/unifiedIdentityService.js'
 import { OrganizationIdentityService } from '../identity/organizationIdentityService.js'
+import { AccountMemberships, type HumanAccount } from '../identity/accountMemberships.js'
 import { buildVisibilityFilter, getUserAncestorIds, getDepartmentAncestorChain, type VisibilityFilter, type VisibleTo } from '../visibilityFilter.js'
 import {
   getOrganizationSystemSettings,
@@ -381,6 +382,7 @@ export class AuthService {
   private readonly oauth2Bridge: OAuth2Bridge
   private readonly identityRepository: IdentityRepository
   private readonly unifiedIdentity: UnifiedIdentityService
+  private readonly accounts: AccountMemberships
   private readonly clientPolicies: ClientPolicyRepository
   private readonly loginPolicyDefaults: { loginMethod: LoginPolicyMethod } = { loginMethod: 'password' }
   private sudorouterAccountReader?: Pick<SudorouterAccountService, 'getAccount'>
@@ -408,6 +410,7 @@ export class AuthService {
     smsSender?: SmsSender,
   ) {
     this.identityRepository = new IdentityRepository(this.db.driver)
+    this.accounts = new AccountMemberships(this.db.driver)
     this.mossAgents = new MossAgentAccess(this.db.driver, userId => this.db.getUserById(userId))
     this.mossIm = new MossImIdentity(this.db.driver, this.identityRepository, this.mossAgents, defaultScopesForRole)
     this.clientPolicies = new ClientPolicyRepository(this.db.driver)
@@ -1003,6 +1006,7 @@ export class AuthService {
   }
 
   private async ensureUserCompatibilityRecords(user: AuthCenterUser): Promise<void> {
+    await this.accounts.ensureExisting(user)
     if (await this.identityRepository.getNumericAlias('user', user.id) === null) {
       await this.identityRepository.allocateNumericAlias('user', user.id, user.orgId)
     }
@@ -1036,6 +1040,11 @@ export class AuthService {
     // their original limits while their owner's role remains unchanged.
     const user = await this.getUserPinnedOrSuperAdmin(auth.userId, auth.orgId)
     if (!user || user.status !== 'active' || user.role !== auth.role) return null
+    if (!(await this.accounts.isActiveForUser(user.id))) return null
+    if (auth.accountId || (auth.keyId === 'phone-login' && auth.authApp === 'sudowork')) {
+      try { await this.requireHumanAccount(auth, user) }
+      catch { return null }
+    }
     return auth
   }
 
@@ -1104,14 +1113,18 @@ export class AuthService {
     if (!user || user.status !== 'active') {
       throw new AuthServiceError(401, 'User is invalid')
     }
+    if (!(await this.accounts.isActiveForUser(user.id))) throw new AuthServiceError(401, 'Account is disabled')
+    const account = auth.accountId || (auth.keyId === 'phone-login' && auth.authApp === 'sudowork')
+      ? await this.requireHumanAccount(auth, user) : null
     await this.assertRefreshLoginMethodAllowed(user.orgId, auth.keyId)
 
     return this.issueToken({
       user,
-      scopes: auth.scopes,
+      scopes: auth.keyId === 'phone-login' ? defaultScopesForRole(user.role) : auth.scopes,
       keyId: auth.keyId,
       orgIdOverride: auth.orgId,
       loginMethod: loginMethodForTokenKey(auth.keyId) ?? undefined,
+      accountId: account?.id,
     })
   }
 
@@ -1201,7 +1214,11 @@ export class AuthService {
    * rejects a missing account; registration is handled by its own endpoint.
    */
   async findUserByPhone(phone: string): Promise<AuthCenterUser | null> {
-    return this.db.getUserByPhone(phone)
+    const legacy = await this.db.getUserByPhone(phone)
+    if (legacy) return legacy
+    const account = await this.accounts.findAccountByPhone(phone)
+    const first = account ? (await this.accounts.listActive(account.id))[0] : undefined
+    return first ? this.db.getUserById(first.userId) : null
   }
 
   /**
@@ -1218,11 +1235,17 @@ export class AuthService {
     organization: NativeOrganizationProjection | null
     scopes: string[]
   }> {
-    const user = await this.db.getUserByPhone(phone)
-    if (!user) {
+    const legacy = await this.db.getUserByPhone(phone)
+    if (legacy) await this.accounts.ensureExisting(legacy)
+    const account = await this.accounts.findAccountByPhone(phone)
+    if (!account) {
       throw new AuthServiceError(404, 'No account for this phone number')
     }
-    if (user.status !== 'active') {
+    if (account.status !== 'active') throw new AuthServiceError(403, 'Account is disabled')
+    const members = await this.accounts.listActive(account.id)
+    const selected = members.find(member => member.userId === legacy?.id) ?? members[0]
+    const user = selected ? await this.db.getUserById(selected.userId) : null
+    if (!user || user.status !== 'active') {
       throw new AuthServiceError(403, 'Account is disabled')
     }
     await this.assertOrganizationLoginMethod(user.orgId, 'sms')
@@ -1232,6 +1255,7 @@ export class AuthService {
       scopes: defaultScopesForRole(user.role),
       keyId: 'phone-login',
       loginMethod: 'sms',
+      accountId: account.id,
     })
   }
 
@@ -1898,12 +1922,7 @@ export class AuthService {
     }
   }
 
-  /**
-   * Super-admin-only: re-issue this actor's tokens scoped to a different org so
-   * every org-scoped endpoint (which reads auth.orgId) serves the selected
-   * org's resources. The actor identity (sub) and role/scopes are unchanged;
-   * only org_id moves. Returns the same shape as a login response.
-   */
+  /** Re-authenticate as this account's actual member in the selected organization. */
   async switchOrg(auth: AuthContext, targetOrgId: string): Promise<{
     access_token: string
     refresh_token: string
@@ -1914,12 +1933,17 @@ export class AuthService {
     scopes: string[]
   }> {
     const actor = await this.requireAuthUser(auth)
-    if (!isSuperAdmin(actor.role)) {
-      throw new AuthServiceError(403, 'Only a super admin can switch organization')
-    }
     const orgId = targetOrgId.trim()
     if (!orgId || !(await this.db.getOrganization(orgId))) {
       throw new AuthServiceError(400, 'Unknown target organization')
+    }
+    if (!isSuperAdmin(actor.role)) {
+      const account = await this.requireHumanAccount(auth, actor)
+      const membership = await this.accounts.inOrganization(account.id, orgId)
+      const member = membership ? await this.db.getUserByIdAndOrg(membership.userId, orgId) : null
+      if (!member || member.status !== 'active') throw new AuthServiceError(403, 'Active organization membership required')
+      return this.issueToken({ user: member, scopes: defaultScopesForRole(member.role),
+        keyId: 'phone-login', loginMethod: 'sms', accountId: account.id })
     }
     return this.issueToken({
       user: actor,
@@ -1927,6 +1951,76 @@ export class AuthService {
       keyId: auth.keyId,
       orgIdOverride: orgId,
     })
+  }
+
+  private async requireHumanAccount(auth: AuthContext, actor?: AuthCenterUser): Promise<HumanAccount> {
+    // Organization passwords can be reset by that enterprise's administrator.
+    // They must never prove ownership of the person's other memberships.
+    if (auth.keyId !== 'phone-login' || auth.authApp !== 'sudowork') {
+      throw new AuthServiceError(403, 'Verify your phone to switch organizations')
+    }
+    const user = actor ?? await this.requireAuthUser(auth)
+    const link = await this.accounts.ensureExisting(user)
+    const account = await this.accounts.getAccount(link.accountId)
+    if (!account || account.status !== 'active' || !account.phone ||
+        (auth.accountId ? auth.accountId !== account.id : !user.phone || user.phone !== account.phone)) {
+      throw new AuthServiceError(403, 'Verified human account required')
+    }
+    return account
+  }
+
+  async listAccountOrganizations(auth: AuthContext): Promise<{
+    organizations: Array<{ id: string; name: string; userId: string; role: string }>
+  }> {
+    const actor = await this.requireAuthUser(auth)
+    if (isSuperAdmin(actor.role)) return { organizations: (await this.db.listOrganizations())
+      .map(org => ({ id: org.id, name: org.name, userId: actor.id, role: actor.role })) }
+    const account = await this.requireHumanAccount(auth, actor)
+    const organizations = []
+    for (const link of await this.accounts.listActive(account.id)) {
+      const org = await this.db.getOrganization(link.orgId)
+      const user = await this.db.getUserById(link.userId)
+      if (org && user) organizations.push({ id: org.id, name: org.name, userId: user.id, role: user.role })
+    }
+    return { organizations }
+  }
+
+  /** Add access to this organization without changing the person's existing memberships. */
+  async addOrganizationMember(auth: AuthContext, phoneInput: string): Promise<{ user: NativeUserProjection; created: boolean }> {
+    const actor = await this.requireAuthUser(auth)
+    if (!['admin', 'super_admin'].includes(actor.role) || !hasScope(auth.scopes, 'admin:users')) {
+      throw new AuthServiceError(403, 'Organization administrator required')
+    }
+    const phone = normalizePhone(phoneInput)
+    if (!phone) throw new AuthServiceError(400, 'A valid registered phone number is required')
+    const legacy = await this.db.getUserByPhone(phone)
+    if (legacy) await this.accounts.ensureExisting(legacy)
+    const account = await this.accounts.findAccountByPhone(phone)
+    if (!account || account.status !== 'active') throw new AuthServiceError(404, 'Registered account is unavailable')
+    const existing = await this.accounts.inOrganization(account.id, auth.orgId)
+    if (existing) {
+      const user = await this.db.getUserByIdAndOrg(existing.userId, auth.orgId)
+      if (!user) throw new AuthServiceError(409, 'Membership changed; refresh before continuing')
+      return { user: await this.projectUser(user), created: false }
+    }
+    const profile = legacy ?? await this.db.getUserById((await this.accounts.listActive(account.id))[0]?.userId ?? '')
+    let userId: string
+    let isCreated = true
+    try {
+      userId = (await this.unifiedIdentity.createUser({ orgId: auth.orgId,
+        username: 'member-' + randomUUID(), displayName: profile?.displayName || profile?.name || phone,
+        role: 'user', status: 'active', accountId: account.id,
+      }, onlineCommandContext('account-membership:' + randomUUID()))).userId
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error
+      const concurrent = await this.accounts.inOrganization(account.id, auth.orgId)
+      if (!concurrent) throw error
+      userId = concurrent.userId
+      isCreated = false
+    }
+    const user = await this.db.getUserByIdAndOrg(userId, auth.orgId)
+    if (!user) throw new AuthServiceError(500, 'Membership creation did not complete')
+    return { user: await this.projectUser(user), created: isCreated }
   }
 
   /** List Agent owners using the same organization and department boundary as sessions. */
@@ -3113,6 +3207,7 @@ export class AuthService {
      *  to a different org while remaining themselves. */
     orgIdOverride?: string
     loginMethod?: LoginPolicyMethod
+    accountId?: string
   }): Promise<{
     access_token: string
     refresh_token: string
@@ -3138,6 +3233,7 @@ export class AuthService {
         scopes: input.scopes,
         key_id: input.keyId,
         auth_app: input.keyId === 'moss-password-login' ? 'moss' : loginMethodForTokenKey(input.keyId) ? 'sudowork' : undefined,
+        ...(input.accountId ? { account_id: input.accountId } : {}),
       },
       this.db.getJwtSecret(),
       input.accessTtlSec ?? this.tokenTtlSec,
@@ -3153,6 +3249,7 @@ export class AuthService {
         scopes: input.scopes,
         key_id: input.keyId,
         auth_app: input.keyId === 'moss-password-login' ? 'moss' : loginMethodForTokenKey(input.keyId) ? 'sudowork' : undefined,
+        ...(input.accountId ? { account_id: input.accountId } : {}),
       },
       this.db.getJwtSecret(),
       7 * 24 * 60 * 60, // 7 days

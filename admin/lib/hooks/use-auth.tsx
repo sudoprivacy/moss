@@ -43,12 +43,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     try {
       let response = await getMe()
-      // Restore a super_admin's last-selected org if the current session is
-      // scoped elsewhere. Runs once per fresh session (e.g. after login);
-      // switchOrg re-issues the token, then we re-read /me.
+      // Restore a previously selected enterprise after normal login. The
+      // server verifies this account's membership and authentication method;
+      // a stale or another account's preference cannot grant access.
       const preferred = getPreferredOrgId()
       if (
-        response.isSuperAdmin &&
         preferred &&
         response.organization &&
         preferred !== response.organization.id
