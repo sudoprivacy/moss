@@ -5975,6 +5975,33 @@ export function startServer(
         return connector
       }
 
+      // Shared guard for every per-app agent route: resolve access, verify the
+      // assistant may use this app, load the row, and refuse a disabled app.
+      // Returns null when it has already answered.
+      const resolveAgentCorpAppRow = async (
+        id: string,
+      ): Promise<Record<string, unknown> | null> => {
+        const access = await resolveAgentCorpAppAccess()
+        if (access === undefined) {
+          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
+          return null
+        }
+        if (access !== null && !access.has(id)) {
+          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
+          return null
+        }
+        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
+        if (!row) {
+          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
+          return null
+        }
+        if (!Number(row.enabled)) {
+          writeJson(res, 403, { error: { code: 'corp_app_disabled', message: 'corp app is disabled; an admin must enable it before it can be used' } })
+          return null
+        }
+        return row
+      }
+
       if (req.method === 'GET' && pathname === '/api/v1/agent/corp-apps') {
         const access = await resolveAgentCorpAppAccess()
         if (access === undefined) {
@@ -6014,27 +6041,19 @@ export function startServer(
           writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
           return
         }
+        if (!Number(row.enabled)) {
+          writeJson(res, 403, { error: { code: 'corp_app_disabled', message: 'corp app is disabled; an admin must enable it before it can be used' } })
+          return
+        }
         writeJson(res, 200, await agentCorpAppView(row))
         return
       }
 
       const agentCorpAppMsgMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/messages$/)
       if (req.method === 'POST' && agentCorpAppMsgMatch) {
-        const access = await resolveAgentCorpAppAccess()
-        if (access === undefined) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
-          return
-        }
         const id = agentCorpAppMsgMatch[1] || ''
-        if (access !== null && !access.has(id)) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
-          return
-        }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
-        if (!row) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
-          return
-        }
+        const row = await resolveAgentCorpAppRow(id)
+        if (!row) return
         const body = await readJsonBody(req)
         const to = typeof body.to === 'string' ? body.to : ''
         const text = typeof body.text === 'string' ? body.text : ''
@@ -6059,21 +6078,9 @@ export function startServer(
 
       const agentCorpAppFileMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/files$/)
       if (req.method === 'POST' && agentCorpAppFileMatch) {
-        const access = await resolveAgentCorpAppAccess()
-        if (access === undefined) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
-          return
-        }
         const id = agentCorpAppFileMatch[1] || ''
-        if (access !== null && !access.has(id)) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
-          return
-        }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
-        if (!row) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
-          return
-        }
+        const row = await resolveAgentCorpAppRow(id)
+        if (!row) return
         const to = url.searchParams.get('to') ?? ''
         const fileName = url.searchParams.get('fileName') ?? 'file'
         if (!to) {
@@ -6100,27 +6107,6 @@ export function startServer(
       }
 
       // ---- Customer groups (客户群) + group broadcast (群发) ----
-      // Shared guard: resolve access, verify the assistant may use this app,
-      // and load the row. Returns null when it has already answered.
-      const resolveAgentCorpAppRow = async (
-        id: string,
-      ): Promise<Record<string, unknown> | null> => {
-        const access = await resolveAgentCorpAppAccess()
-        if (access === undefined) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
-          return null
-        }
-        if (access !== null && !access.has(id)) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
-          return null
-        }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
-        if (!row) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
-          return null
-        }
-        return row
-      }
 
       // ---- Internal group chats (appchat) ----
       // A different product from 客户群: no daily cap, no human confirmation,
@@ -6701,21 +6687,9 @@ export function startServer(
 
       const agentCorpAppInboundMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/inbound$/)
       if (req.method === 'GET' && agentCorpAppInboundMatch) {
-        const access = await resolveAgentCorpAppAccess()
-        if (access === undefined) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
-          return
-        }
         const id = agentCorpAppInboundMatch[1] || ''
-        if (access !== null && !access.has(id)) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
-          return
-        }
-        const row = runtime.store.getCorpApp(id, auth.orgId)
-        if (!row) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
-          return
-        }
+        const row = await resolveAgentCorpAppRow(id)
+        if (!row) return
         const since = Number.parseInt(url.searchParams.get('since') ?? '0', 10) || 0
         const limit = Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50
         const rows = runtime.store.listCorpAppInbound(id, since, limit)
@@ -6740,21 +6714,9 @@ export function startServer(
 
       const agentCorpAppMediaMatch = pathname.match(/^\/api\/v1\/agent\/corp-apps\/([^/]+)\/media$/)
       if (req.method === 'GET' && agentCorpAppMediaMatch) {
-        const access = await resolveAgentCorpAppAccess()
-        if (access === undefined) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
-          return
-        }
         const id = agentCorpAppMediaMatch[1] || ''
-        if (access !== null && !access.has(id)) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
-          return
-        }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
-        if (!row) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
-          return
-        }
+        const row = await resolveAgentCorpAppRow(id)
+        if (!row) return
         const mediaId = url.searchParams.get('mediaId') ?? ''
         if (!mediaId) {
           writeJson(res, 400, { error: { code: 'invalid_payload', message: 'mediaId is required' } })
@@ -6788,21 +6750,9 @@ export function startServer(
         /^\/api\/v1\/agent\/corp-apps\/([^/]+)\/approvals$/,
       )
       if (req.method === 'GET' && agentCorpAppApprovalsMatch) {
-        const access = await resolveAgentCorpAppAccess()
-        if (access === undefined) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
-          return
-        }
         const id = agentCorpAppApprovalsMatch[1] || ''
-        if (access !== null && !access.has(id)) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
-          return
-        }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
-        if (!row) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
-          return
-        }
+        const row = await resolveAgentCorpAppRow(id)
+        if (!row) return
         const starttime = Number.parseInt(url.searchParams.get('starttime') ?? '', 10)
         const endtime = Number.parseInt(url.searchParams.get('endtime') ?? '', 10)
         if (!Number.isFinite(starttime) || !Number.isFinite(endtime)) {
@@ -6846,21 +6796,9 @@ export function startServer(
         /^\/api\/v1\/agent\/corp-apps\/([^/]+)\/approvals\/([^/]+)$/,
       )
       if (req.method === 'GET' && agentCorpAppApprovalMatch) {
-        const access = await resolveAgentCorpAppAccess()
-        if (access === undefined) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'insufficient scope' } })
-          return
-        }
         const id = agentCorpAppApprovalMatch[1] || ''
-        if (access !== null && !access.has(id)) {
-          writeJson(res, 403, { error: { code: 'forbidden', message: 'corp app not authorised for this assistant' } })
-          return
-        }
-        const row = runtime.store.getCorpApp(id, auth.orgId) as Record<string, unknown> | null
-        if (!row) {
-          writeJson(res, 404, { error: { code: 'not_found', message: 'corp app not found' } })
-          return
-        }
+        const row = await resolveAgentCorpAppRow(id)
+        if (!row) return
         const spNo = decodeURIComponent(agentCorpAppApprovalMatch[2] || '')
         if (!spNo) {
           writeJson(res, 400, { error: { code: 'invalid_payload', message: 'sp_no is required' } })
@@ -11612,6 +11550,18 @@ export function startServer(
         if (!row) {
           res.writeHead(404, { 'Content-Type': 'text/plain' })
           res.end('not found')
+          return
+        }
+        // A disabled app takes no callbacks: no URL verification, no inbound
+        // events. POST still gets an empty 200 so WeCom does not retry-storm.
+        if (!Number(row.enabled)) {
+          if (req.method === 'POST') {
+            res.writeHead(200, { 'Content-Type': 'text/plain' })
+            res.end('')
+          } else {
+            res.writeHead(403, { 'Content-Type': 'text/plain' })
+            res.end('corp app disabled')
+          }
           return
         }
 
