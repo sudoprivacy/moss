@@ -54,6 +54,7 @@ const BUN = [
   'runtimeScodePaths.test.ts',
   'smsTencent.test.ts',
   'knowledgeRoutes.test.ts',
+  'corpAppDisabledRoutes.test.ts',
   'msgauditRoomList.test.ts',
   'msgauditSnapshotWorker.test.ts',
   'msgauditPullerMedia.test.ts',
