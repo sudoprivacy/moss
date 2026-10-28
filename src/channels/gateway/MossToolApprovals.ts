@@ -76,7 +76,12 @@ export class MossToolApprovals {
 
 /** JSON escapes keep untrusted tool parameters inside the private code block. */
 export function mossToolApprovalNotice(item: PendingMossToolApproval): string {
-  const input = JSON.stringify(item.event.request.rawInput ?? null, null, 2)
+  let argumentsValue = item.event.request.rawInput ?? null
+  if (typeof argumentsValue === 'string') {
+    try { argumentsValue = JSON.parse(argumentsValue) }
+    catch { /* Preserve the complete original value if it is not JSON. */ }
+  }
+  const input = JSON.stringify(argumentsValue, null, 2)
     .replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/`/g, '\\u0060')
   return `Moss 工具确认（2 分钟内有效，只允许这一次）\n工具：${item.event.request.tool_name}\n会话：${item.sessionId}\n参数（JSON）：\n\`\`\`\n${input}\n\`\`\`\n` +
     `确认后请在本私聊回复：\n/approve ${item.event.request_id}\n拒绝请回复：\n/deny ${item.event.request_id}\n不要在群里发送确认命令。`
