@@ -3,6 +3,22 @@ import { describe, test } from 'node:test'
 import { SudorouterAdapter, pointsToQuota, quotaToPoints, sudorouterInitialPassword } from './sudorouterAdapter.js'
 
 void describe('SudorouterAdapter', () => {
+  void test('generated member accounts receive opaque initial passwords instead of their public account names', async () => {
+    const username = 'mbr_0123456789abcdef'
+    const passwords: string[] = []
+    const adapter = new SudorouterAdapter({ baseUrl: 'https://router.example.test', apiToken: 'test', fetch: async (_url, init) => {
+      const body = JSON.parse(String(init?.body))
+      assert.equal(body.username, username)
+      assert.equal(body.password.length, 20)
+      assert.notEqual(body.password, username)
+      passwords.push(body.password)
+      return new Response(JSON.stringify({ success: true, data: { id: 1, username } }))
+    } })
+    await adapter.createUser({ username, displayName: 'Member', idempotencyKey: 'member-account' })
+    await adapter.createUser({ username, displayName: 'Member', idempotencyKey: 'another-member-account' })
+    assert.notEqual(passwords[0], passwords[1])
+  })
+
   void test('pads short account names with 1 only in the initial password', async () => {
     assert.equal(sudorouterInitialPassword('test'), 'test1111')
     assert.equal(sudorouterInitialPassword('13800138000'), '13800138000')
