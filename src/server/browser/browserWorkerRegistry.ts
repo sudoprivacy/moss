@@ -50,8 +50,8 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
 
   private resolve(binding: BrowserBinding): Promise<HttpBrowserWorker>
   private resolve(binding: BrowserBinding, isExistingOnly: true): Promise<HttpBrowserWorker | null>
-  private resolve(binding: BrowserBinding, isExistingOnly: false, allowTakeover: boolean): Promise<HttpBrowserWorker>
-  private async resolve(binding: BrowserBinding, isExistingOnly = false, allowTakeover = true): Promise<HttpBrowserWorker | null> {
+  private resolve(binding: BrowserBinding, isExistingOnly: false, allowTakeover: boolean, isExplicitTakeover: boolean): Promise<HttpBrowserWorker>
+  private async resolve(binding: BrowserBinding, isExistingOnly = false, allowTakeover = true, isExplicitTakeover = false): Promise<HttpBrowserWorker | null> {
     const image = this.ownerImages.find(owner => owner.orgId === binding.orgId && owner.userId === binding.userId)?.image ?? this.image
     if (!image) {
       const { MOSS_BROWSER_GATEWAY_URL: endpoint, MOSS_BROWSER_GATEWAY_TOKEN: token, MOSS_BROWSER_GATEWAY_AI_TOKEN: aiToken } = process.env
@@ -64,7 +64,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
       const identity = await response.json() as { binding: BrowserBinding | null; browserRunning?: boolean }
       const owner = identity.binding
       if (isExistingOnly && (!owner || owner.sessionId !== binding.sessionId || owner.orgId !== binding.orgId || owner.userId !== binding.userId)) return null
-      await this.claim(worker, binding, owner, identity.browserRunning !== false, allowTakeover)
+      await this.claim(worker, binding, owner, identity.browserRunning !== false, allowTakeover, isExplicitTakeover)
       return worker
     }
     const key = this.ownerKey(binding)
@@ -133,18 +133,19 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
     }
     if (owner === undefined) throw new HttpError(503, 'managed_browser_worker_unavailable')
     if (isExistingOnly && (!owner || owner.sessionId !== binding.sessionId || owner.orgId !== binding.orgId || owner.userId !== binding.userId)) return null
-    await this.claim(worker, binding, owner, ownerBrowserRunning, allowTakeover)
+    await this.claim(worker, binding, owner, ownerBrowserRunning, allowTakeover, isExplicitTakeover)
     this.workers.set(key, { worker, sessionId: binding.sessionId, checkedAt: Date.now() })
     return worker
   }
 
-  private async claim(worker: HttpBrowserWorker, binding: BrowserBinding, owner: BrowserBinding | null, ownerBrowserRunning: boolean, allowTakeover: boolean): Promise<void> {
+  private async claim(worker: HttpBrowserWorker, binding: BrowserBinding, owner: BrowserBinding | null, ownerBrowserRunning: boolean, allowTakeover: boolean, isExplicitTakeover: boolean): Promise<void> {
     if (owner && owner.sessionId !== binding.sessionId) {
       if (owner.orgId !== binding.orgId || owner.userId !== binding.userId) throw new HttpError(403, 'browser_profile_owner_mismatch')
       const previous = await this.getSession(owner.sessionId)
-      // A stopped browser is free for any conversation to claim on an explicit
-      // start; a running one stays with the active session that holds it.
-      if (!allowTakeover || (previous?.desiredState === 'active' && ownerBrowserRunning)) throw new HttpError(409, 'browser_profile_in_use')
+      // A stopped browser is free for any conversation to claim; a running one
+      // stays with the active session that holds it unless an explicit start
+      // takes it over.
+      if (!allowTakeover || (!isExplicitTakeover && previous?.desiredState === 'active' && ownerBrowserRunning)) throw new HttpError(409, 'browser_profile_in_use')
       await worker.invoke(binding, browserController(binding), { kind: 'bind-session', previousSessionId: owner.sessionId })
     }
   }
@@ -153,7 +154,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
     if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
     const key = this.ownerKey(binding)
     // Passive state polls never move a profile; only an explicit start claims it.
-    const worker = await this.mutex.run(key, () => this.resolve(binding, false, action.kind !== 'state'))
+    const worker = await this.mutex.run(key, () => this.resolve(binding, false, action.kind !== 'state', action.kind === 'start'))
     try {
       return await worker.invoke(binding, controller, action)
     } catch (error) {
@@ -162,7 +163,7 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
         // Refresh only the exact state read after a worker stopped. An input,
         // navigation or handoff with an uncertain outcome is never replayed.
         if (action.kind === 'state') {
-          const refreshed = await this.mutex.run(key, () => this.resolve(binding, false, false))
+          const refreshed = await this.mutex.run(key, () => this.resolve(binding, false, false, false))
           return refreshed.invoke(binding, controller, action)
         }
       }

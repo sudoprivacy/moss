@@ -225,13 +225,22 @@ try {
   assert.equal(reclaimed.state, 'human')
   assert.equal(reclaimed.profileId, halted.profileId)
   const running = (await invoke(a, { kind: 'state' })).session
-  await invoke(a, { kind: 'stop', controlEpoch: running.controlEpoch, targetEpoch: running.targetEpoch })
+  // An explicit start also takes a browser that is running under an active owner.
+  const seized = (await invoke(next, { kind: 'start', isHeadless: true, transport: 'extension' })).session
+  assert.equal(seized.state, 'human')
+  assert.equal(seized.browserSessionId, running.browserSessionId)
+  assert.ok(seized.targetEpoch > running.targetEpoch)
+  await assert.rejects(invoke(a, { kind: 'state' }), /browser_profile_in_use/)
+  const back = (await invoke(a, { kind: 'start', isHeadless: true, transport: 'extension' })).session
+  assert.equal(back.state, 'human')
+  assert.equal(back.browserSessionId, running.browserSessionId)
+  await invoke(a, { kind: 'stop', controlEpoch: back.controlEpoch, targetEpoch: back.targetEpoch })
   const launched = await tool(next, 'browser_launch', { isHeadless: true, transport: 'extension' })
   assert.notEqual(launched.isError, true, JSON.stringify(launched))
   const fresh = { orgId, userId: randomUUID(), sessionId: randomUUID() }
   sessions.set(fresh.sessionId, { ...fresh, desiredState: 'active' })
   assert.deepEqual(await registry.ownerInfo(fresh), { owner: null, browserRunning: false })
-  receipts.push({ stoppedBrowserReclaimedByStart: true, statePollNeverClaims: true, mcpLaunchTakesOver: true, ownerInfoNoWorker: true })
+  receipts.push({ stoppedBrowserReclaimedByStart: true, statePollNeverClaims: true, mcpLaunchTakesOver: true, ownerInfoNoWorker: true, explicitStartTakesOverRunning: true })
   receipts.push({ restrictedRolloutVerified: true, ownersIsolated: true, concurrentConversationRejected: true, sameProfileAcrossConversations: true, humanLeasePreserved: true, staleSessionRejected: true, restartRequiresExplicitReturn: true })
   console.log(JSON.stringify({ status: 'passed', receipts }))
 } finally {
