@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto'
+
 export interface QuotaSnapshot {
   externalUserId: string
   quotaUnits: number
@@ -85,6 +87,7 @@ export function validateSudorouterAccountName(username: string): void {
 
 export function sudorouterInitialPassword(username: string): string {
   const name = username.trim()
+  if (/^mbr_[a-f0-9]{16}$/.test(name)) return randomBytes(15).toString('base64url')
   return name + '1'.repeat(Math.max(0, 8 - [...name].length))
 }
 

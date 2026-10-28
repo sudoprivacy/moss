@@ -150,7 +150,7 @@ export class SudorouterAccountService {
       } else {
         token = await this.provider.createToken({
           externalUserId: operation.externalAccountId!,
-          name: `${input.username.trim()}-token`,
+          name: `${providerUsername(input)}-token`,
           idempotencyKey: `${context.idempotencyKey}:token`,
         })
         await this.secrets.putSecret(TOKEN_NAMESPACE, input.ownerId, token, `org:${input.orgId}`)
@@ -190,9 +190,9 @@ export class SudorouterAccountService {
   ): Promise<SudorouterUserAccount> {
     if (operation.externalAccountId) {
       const existing = await this.provider.getUser(operation.externalAccountId)
-      if (existing) return { ...existing, username: input.username.trim() }
+      if (existing) return { ...existing, username: providerUsername(input) }
     }
-    const username = input.username.trim()
+    const username = providerUsername(input)
     const account = await this.provider.findUserByUsername(username)
       ?? await this.provider.createUser({
         username, displayName: input.displayName,
@@ -275,6 +275,13 @@ function fingerprint(input: EnsureSudorouterAccountInput): string {
     input.ownerId, input.orgId, input.username.trim(),
     input.displayName.trim(), input.initialQuotaUnits,
   ])).digest('hex')
+}
+
+/** Bound generated membership names at the gateway without changing durable retry fingerprints. */
+function providerUsername(input: EnsureSudorouterAccountInput): string {
+  const username = input.username.trim()
+  if (!/^member-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(username)) return username
+  return 'mbr_' + createHash('sha256').update(JSON.stringify([input.orgId, input.ownerId])).digest('hex').slice(0, 16)
 }
 
 function secretRef(ownerId: string): string {
