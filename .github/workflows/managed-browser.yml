@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: sudoprivacy/ai-dev-browser
-          ref: c779d34c645e5f9a9ad443b12b7614092aaec4b7 # ai-dev-browser v0.58.10.
+          ref: 011d8eb102a276e566db352a1da1220a39541aad # ai-dev-browser v0.58.11.
           path: adb-core
       - uses: actions/checkout@v4
         with:
@@ -98,6 +98,7 @@ jobs:
             tests/integration/test_remote_selection_live.py \
             tests/integration/test_browser_worker_live.py \
             tests/integration/test_remote_vnc.py \
+            tests/integration/test_worker_page_drag_live.py \
             tests/integration/test_worker_window_stream_live.py -v --tb=short -p no:cacheprovider \
             2>&1 | tee "$RUNNER_TEMP/browser-selection-native.log"
       - name: Verify signed extension upgrade and profile crash recovery

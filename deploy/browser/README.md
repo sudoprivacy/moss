@@ -6,13 +6,13 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.58.10 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.58.11 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
 the consumer test verifies it against the installed public package.
 
-The managed-browser workflow builds the SDK v0.58.10 base, applies
+The managed-browser workflow builds the SDK v0.58.11 base, applies
 `chrome-version.Dockerfile`, then builds this worker. The Chrome layer downloads
 the versioned official package, verifies its SHA-256 before installation and
 checks the installed package version. The current runtime uses Chrome
@@ -143,7 +143,7 @@ interrupt and native agent communication without adding business handoff
 buttons. The new worker capability is optional, so older workers continue to
 offer the existing JPEG/native-input path.
 
-This source adapter pins SDK v0.58.10, tagged from merged SDK PR #43, and the
+This source adapter pins SDK v0.58.11, tagged from merged SDK PR #44, and the
 managed-browser workflow uses its matching source commit. Public artifact
 verification, the shared renderer and WebUI proxy, actual public graph/phone
 acceptance and production rollout remain separate delivery gates. Local real
@@ -156,6 +156,20 @@ The SDK supports a host-authorized review-page bootstrap for managed CDP and
 extension sessions. Personal Chrome attachments retain their own authorization
 boundary. Product review-page launch still requires the host authorization and
 Moss adapter integration described by its separate acceptance gate.
+
+Page drag support is negotiated through `liveDragSurfaces`. The shared worker
+streams checked page input while keeping page pixels readable during the
+gesture. Control and target changes fence in-flight frames, and viewer loss
+releases the held button without returning automation control. Managed-browser
+CI exercises the installed public worker's page-drag journey with both CDP and
+the signed extension, alongside the existing window-stream coverage.
+
+The public 0.58.11 image was built through this Dockerfile and qualified with
+Google Chrome 156.0.8078.47. Six real Moss HTTP/MCP lifecycle and file cases and
+six SDK page/window drag cases passed in isolated containers with one CPU,
+1536 MB memory, 384 PIDs and init enabled. This qualifies the image; production
+owner promotion, public graph latency and physical phone input remain separate
+gates. Existing active tasks and persistent profiles must survive promotion.
 
 `browser_launch` requires a launch mode and keeps an existing browser in that
 mode. A different mode returns `browser_restart_required`.
