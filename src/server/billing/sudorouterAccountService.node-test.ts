@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, test } from 'node:test'
 import { onlineCommandContext } from '../application/commandContext.js'
@@ -6,6 +7,7 @@ import { SqliteDriver } from '../db/driver.js'
 import { createBillingTestRepository } from '../testing/compatibilityRepositories.js'
 import { SudorouterAccountService } from './sudorouterAccountService.js'
 import type { SudorouterAccountPort, SudorouterUserAccount } from './sudorouterAdapter.js'
+import { validateSudorouterAccountName } from './sudorouterAdapter.js'
 
 class FakeSudorouter implements SudorouterAccountPort {
   accounts = new Map<string, SudorouterUserAccount>()
@@ -13,12 +15,14 @@ class FakeSudorouter implements SudorouterAccountPort {
   createCalls = 0
   quotaCalls = 0
   tokenCalls = 0
+  tokenNames: string[] = []
 
   async findUserByUsername(username: string) {
     this.findCalls += 1
     return [...this.accounts.values()].find(account => account.username === username) ?? null
   }
   async createUser(input: { username: string }) {
+    validateSudorouterAccountName(input.username)
     this.createCalls += 1
     const account = {
       externalUserId: String(90 + this.createCalls), username: input.username,
@@ -27,8 +31,9 @@ class FakeSudorouter implements SudorouterAccountPort {
     this.accounts.set(account.externalUserId, account)
     return account
   }
-  async createToken(input: { externalUserId: string }) {
+  async createToken(input: { externalUserId: string; name: string }) {
     this.tokenCalls += 1
+    this.tokenNames.push(input.name)
     return `sk-user-${input.externalUserId}`
   }
   async getUser(externalUserId: string) {
@@ -72,6 +77,70 @@ function setup() {
 }
 
 void describe('SudorouterAccountService', () => {
+  void test('generated enterprise members recover failed provisioning within the real gateway name limit', async () => {
+    const context = setup()
+    try {
+      const input = {
+        ownerId: 'company-member', orgId: 'company',
+        username: 'member-8b265db0-d245-4785-9c9d-800c0c8d0024',
+        displayName: 'Company human', initialQuotaUnits: 500_000,
+      }
+      const key = 'native-sudorouter:company-member'
+      const requestFingerprint = createHash('sha256').update(JSON.stringify([
+        input.ownerId, input.orgId, input.username, input.displayName, input.initialQuotaUnits,
+      ])).digest('hex')
+      await context.repository.insertSudorouterProvisioning({
+        id: 'previous-failure', ownerId: input.ownerId, orgId: input.orgId,
+        username: input.username, displayName: input.displayName,
+        initialQuotaUnits: input.initialQuotaUnits, status: 'PENDING',
+        idempotencyKey: key, requestFingerprint, contextSource: 'online', createdAt: 1,
+      })
+      await context.repository.updateSudorouterProvisioning({
+        id: 'previous-failure', status: 'FAILED', errorText: 'Gateway username exceeds 20 characters', updatedAt: 2,
+      })
+      const result = await context.service.ensureAccount(input, onlineCommandContext(key))
+      assert.deepEqual(await context.service.ensureAccount(input, onlineCommandContext(key)), result)
+      const account = context.provider.accounts.get(result.externalUserId)!
+      assert.match(account.username, /^mbr_[a-f0-9]{16}$/)
+      assert.equal(account.username.length, 20)
+      assert.deepEqual(context.provider.tokenNames, [account.username + '-token'])
+      assert.equal(context.provider.createCalls, 1)
+      assert.equal(context.provider.quotaCalls, 1)
+      assert.equal(context.provider.tokenCalls, 1)
+      const operation = await context.repository.getSudorouterProvisioningByKey(key)
+      assert.equal(operation?.id, 'previous-failure')
+      assert.equal(operation?.username, input.username)
+      assert.equal(operation?.requestFingerprint, requestFingerprint)
+      assert.equal(operation?.status, 'COMPLETED')
+    } finally { context.db.close() }
+  })
+
+  void test('generated member gateway identities are distinct across owners and enterprises', async () => {
+    const context = setup()
+    try {
+      const username = 'member-8b265db0-d245-4785-9c9d-800c0c8d0024'
+      const results = []
+      for (const [ownerId, orgId] of [['owner-a', 'org-a'], ['owner-b', 'org-a'], ['owner-c', 'org-b']]) {
+        results.push(await context.service.ensureAccount({ ownerId, orgId, username,
+          displayName: 'Same human name', initialQuotaUnits: 0 }, onlineCommandContext(ownerId)))
+      }
+      assert.equal(new Set(results.map(result => result.externalUserId)).size, 3)
+      assert.equal(new Set(results.map(result => result.token)).size, 3)
+      assert.equal(new Set([...context.provider.accounts.values()].map(account => account.username)).size, 3)
+    } finally { context.db.close() }
+  })
+
+  void test('unrecognized overlong usernames still obey the gateway validation contract', async () => {
+    const context = setup()
+    try {
+      await assert.rejects(context.service.ensureAccount({ ownerId: 'invalid', orgId: 'org',
+        username: 'ordinary-name-that-is-too-long', displayName: 'Invalid', initialQuotaUnits: 0,
+      }, onlineCommandContext('invalid')), /1.*20/)
+      assert.equal(context.provider.createCalls, 0)
+      assert.equal(context.secrets.putCalls, 0)
+    } finally { context.db.close() }
+  })
+
   void test('已绑定的欠费用户复用原 Key，不开户、不改额度', async () => {
     const context = setup()
     try {
