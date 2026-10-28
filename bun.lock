@@ -41,7 +41,7 @@
         "@sudo/contracts": "github:sudoprivacy/sudostack#de257f2f37c7b79817290b55f5e111a87014fe92",
         "@sudo/egress-policy": "https://github.com/sudoprivacy/sudostack/releases/download/egress-policy-v0.1.0/sudo-egress-policy-0.1.0.tgz",
         "@sudo/resource-files": "https://github.com/sudoprivacy/sudostack/releases/download/resource-files-v0.1.0/sudo-resource-files-0.1.0.tgz",
-        "@sudo/user-runtime": "https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.2.1/sudo-user-runtime-0.2.1.tgz",
+        "@sudo/user-runtime": "https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.2.2/sudo-user-runtime-0.2.2.tgz",
         "@xenova/transformers": "^2.17.2",
         "@xmldom/xmldom": "^0.9.9",
         "ajv": "^8.18.0",
@@ -524,7 +524,7 @@
 
     "@sudo/resource-files": ["@sudo/resource-files@https://github.com/sudoprivacy/sudostack/releases/download/resource-files-v0.1.0/sudo-resource-files-0.1.0.tgz", { "dependencies": { "jszip": "3.10.1" } }, "sha512-sa8nFkZBPxuwijo9YiZO7iw9GYoQTzUivWNgnoA1oCPZuL6w7iDtlq0uGwuJ0azErTqmV64kDRK9a881H5hIww=="],
 
-    "@sudo/user-runtime": ["@sudo/user-runtime@https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.2.1/sudo-user-runtime-0.2.1.tgz", { "dependencies": { "@nexus-ai-fs/vfs-client": "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.7.3/nexus-ai-fs-vfs-client-0.7.3.tgz", "@sudo/egress-policy": "https://github.com/sudoprivacy/sudostack/releases/download/egress-policy-v0.1.0/sudo-egress-policy-0.1.0.tgz", "zod": "4.6.7" } }, "sha512-xpLPnuGWVnKqhb21Wqx5slEoGt95Gz8RiVSbCWLOba30cPU5Yc74n2tFdDUdihapy4fzx5XABoDzvfEyGd9TAw=="],
+    "@sudo/user-runtime": ["@sudo/user-runtime@https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.2.2/sudo-user-runtime-0.2.2.tgz", { "dependencies": { "@nexus-ai-fs/vfs-client": "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.7.3/nexus-ai-fs-vfs-client-0.7.3.tgz", "@sudo/egress-policy": "https://github.com/sudoprivacy/sudostack/releases/download/egress-policy-v0.1.0/sudo-egress-policy-0.1.0.tgz", "zod": "4.6.7" } }, "sha512-ftdE3650DpmT4uWT32k7eIh1IgSwdlJi/tlbU6STgxJTsaiJOEjoqcvMT4lm/knUGWcFuTcwJU/guC+reUtx9A=="],
 
     "@types/esrecurse": ["@types/esrecurse@4.3.1", "", {}, "sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw=="],
 
