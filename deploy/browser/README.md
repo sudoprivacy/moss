@@ -181,8 +181,8 @@ coordinates and frames are fenced before closing any resource.
 
 `browser_stop` releases Chrome and its display while keeping the profile.
 Every main/child call shares the same control lease. AI cannot stop, restart
-or relaunch a browser held by the human. After a human stop, Return to AI can
-release control while Chrome stays stopped; a subsequent task decides whether
+or relaunch a browser held by the human. After a human stop, the host's ordinary
+continuation flow can release control while Chrome stays stopped; a subsequent task decides whether
 to launch it. Failed or uncertain shutdown keeps automation fenced and requires
 explicit recovery instead of replaying the request.
 
@@ -247,6 +247,14 @@ v0.54.0 extension on Chrome 155.0.8059.84 and its earlier bootstrap contract,
 then upgrades to the current worker on Chrome 156.0.8078.47. Installed versions,
 signing identity, original cookie and human lease are checked against Chrome's
 actual state; containers and volumes carry unique ownership labels and are removed.
+
+For a candidate with controlled child-frame commands, add `--verify-frames` to
+that same runner. It waits for an actual cross-site iframe load and sends one
+MCP frame command after both graceful image upgrade and crash recovery. A
+separate HttpOnly fixture cookie is set only by the first container; later
+containers must receive it without exposing it to page JavaScript. Use a new
+`--output` path for each run so earlier failures remain available. The default
+journey remains compatible with the legacy public SDK fixture.
 
 `test_worker_live.py` validates the actual Chrome/HTTP control boundary.
 `test_agent_live.py` and SudoWork's `live_browser_handoff.py` cover configured

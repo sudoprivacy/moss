@@ -26,17 +26,28 @@ def docker(*args, check=True):
 
 
 FIXTURE = """
-from http.server import BaseHTTPRequestHandler,HTTPServer
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 class Page(BaseHTTPRequestHandler):
     def log_message(self,*args): pass
     def do_GET(self):
         page=b'<html><title>Persistent profile live fixture</title><input aria-label="Name" id="name"><p>Same isolated profile</p></html>'
-        self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(page)));self.end_headers();self.wfile.write(page)
-HTTPServer(('127.0.0.1',8813),Page).serve_forever()
+        if __VERIFY_FRAMES__:
+            if self.path=='/frame':
+                page=b'<html><h1 id="frame">Upgraded frame</h1></html>'
+            else:
+                present=b'present' if 'upgrade_fixture_http_only=retained' in self.headers.get('Cookie','') else b'missing'
+                page=page.replace(b'</html>',b'<p id="http-cookie" data-state="'+present+b'"></p><iframe src="http://localhost:8813/frame"></iframe></html>')
+        self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(page)))
+        if __SEED_HTTP_ONLY__ and self.path!='/frame':
+            self.send_header('Set-Cookie','upgrade_fixture_http_only=retained; Max-Age=86400; HttpOnly; SameSite=Lax')
+        self.end_headers();self.wfile.write(page)
+ThreadingHTTPServer(('127.0.0.1',8813),Page).serve_forever()
 """
 
 
-def run(image, output, prior_image=None):
+def run(image, output, prior_image=None, verify_frames=False):
+    if pathlib.Path(output).exists():
+        raise ValueError("Use a new evidence path; preserve the previous receipt")
     prefix = "moss-browser-live-" + secrets.token_hex(6)
     volume = prefix + "-profile"
     names = [prefix + "-first", prefix + "-flushed", prefix + "-recovered"]
@@ -46,7 +57,11 @@ def run(image, output, prior_image=None):
     controller = "user-" + prefix
     docker("volume", "create", "--label", label, volume)
     owned = []
-    evidence = {"workflow": "managed-extension-crash-recovery", "image": image}
+    evidence = {
+        "workflow": "managed-extension-crash-recovery",
+        "image": image,
+        "passed": False,
+    }
     if prior_image:
         evidence["previousImage"] = prior_image
     installed_versions = []
@@ -122,7 +137,10 @@ def run(image, output, prior_image=None):
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.1)
-        docker("exec", "-d", name, "/opt/browser/venv/bin/python", "-c", FIXTURE)
+        fixture = FIXTURE.replace("__VERIFY_FRAMES__", repr(verify_frames)).replace(
+            "__SEED_HTTP_ONLY__", repr(verify_frames and name == names[0])
+        )
+        docker("exec", "-d", name, "/opt/browser/venv/bin/python", "-c", fixture)
         return port, state
 
     def record_installed_version(name):
@@ -267,6 +285,80 @@ else:raise AssertionError('Installed signed extension not found')
                 },
             )
             assert marker + "=preserved" in cookie["result"]["result"]["value"]
+            if verify_frames:
+                # Parent navigation can finish before its embedded document.
+                # Wait on real load state, then send exactly one MCP command.
+                deadline = time.monotonic() + 10
+                while True:
+                    loaded = agent(
+                        new_port,
+                        {
+                            "kind": "command",
+                            "method": "Runtime.evaluate",
+                            "params": {
+                                "expression": "({ready:document.readyState,url:location.href,iframes:[...document.querySelectorAll('iframe')].map(frame=>frame.src)})",
+                                "returnByValue": True,
+                            },
+                            **epochs(cookie),
+                        },
+                    )
+                    current = loaded["result"]["result"].get("value", {})
+                    if current.get("ready") == "complete":
+                        break
+                    assert time.monotonic() < deadline, (
+                        "Review iframe did not finish loading",
+                        current,
+                    )
+                    time.sleep(0.05)
+                persisted = agent(
+                    new_port,
+                    {
+                        "kind": "command",
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "expression": "document.querySelector('#http-cookie').dataset.state==='present' && !document.cookie.includes('upgrade_fixture_http_only')",
+                            "returnByValue": True,
+                        },
+                        **epochs(loaded),
+                    },
+                )
+                assert persisted["result"]["result"]["value"] is True
+                frame = request(
+                    new_port,
+                    "mcp",
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "browser_action",
+                            "arguments": {
+                                "kind": "command",
+                                "method": "Runtime.evaluate",
+                                "frame": "localhost:8813/frame",
+                                "paramsJson": json.dumps(
+                                    {
+                                        "expression": "document.querySelector('#frame').textContent",
+                                        "returnByValue": True,
+                                    }
+                                ),
+                                **epochs(persisted),
+                            },
+                        },
+                    },
+                    ai=True,
+                )
+                result = frame["result"]
+                assert not result.get("isError"), result
+                value = json.loads(result["content"][0]["text"])
+                assert value["result"]["result"]["value"] == "Upgraded frame", value
+                evidence.setdefault("frameCommandsAfterRecovery", []).append(
+                    {
+                        "phase": index,
+                        "firstMcpAttemptPassed": True,
+                        "httpOnlyCookiePreserved": True,
+                    }
+                )
             assert_no_display(names[index])
             if index == 1:
                 held = host(new_port, {"kind": "take", **epochs(cookie)})
@@ -287,6 +379,7 @@ else:raise AssertionError('Installed signed extension not found')
             assert installed_versions[0]["version"] != installed_versions[1]["version"]
             assert installed_versions[1] == installed_versions[2]
             evidence["extensionUpgradePreservedProfile"] = True
+        evidence["passed"] = True
     except BaseException:
         for name in owned:
             logs = docker("logs", "--tail", "20", name, check=False)
@@ -324,8 +417,8 @@ else:raise AssertionError('Installed signed extension not found')
             and item["Labels"].get("sudowork.browser-live") == prefix
         )
         docker("volume", "rm", volume)
-    evidence["ownedResourcesRemoved"] = True
-    pathlib.Path(output).write_text(json.dumps(evidence, indent=2))
+        evidence["ownedResourcesRemoved"] = True
+        pathlib.Path(output).write_text(json.dumps(evidence, indent=2))
     print(json.dumps(evidence))
 
 
@@ -334,8 +427,13 @@ if __name__ == "__main__":
     parser.add_argument("--image", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument(
+        "--verify-frames",
+        action="store_true",
+        help="Also verify the first MCP child-frame command and a persisted HttpOnly cookie after image upgrade and crash recovery. Requires frame-capable candidate SDK.",
+    )
+    parser.add_argument(
         "--prior-image",
         help="Earlier signed worker image with the same signing identity, to verify a real persistent profile upgrade.",
     )
     args = parser.parse_args()
-    run(args.image, args.output, args.prior_image)
+    run(args.image, args.output, args.prior_image, args.verify_frames)
