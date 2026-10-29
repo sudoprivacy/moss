@@ -4,18 +4,18 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - 'deploy/browser/**'
-      - 'src/server/browser/**'
-      - 'src/server/runtime/dockerCommand.ts'
-      - 'src/server/runtimeService.ts'
-      - 'src/server/server.ts'
-      - '.github/workflows/managed-browser.yml'
+      - "deploy/browser/**"
+      - "src/server/browser/**"
+      - "src/server/runtime/dockerCommand.ts"
+      - "src/server/runtimeService.ts"
+      - "src/server/server.ts"
+      - ".github/workflows/managed-browser.yml"
   push:
     branches: [dev]
     paths:
-      - 'deploy/browser/**'
-      - 'src/server/browser/**'
-      - '.github/workflows/managed-browser.yml'
+      - "deploy/browser/**"
+      - "src/server/browser/**"
+      - ".github/workflows/managed-browser.yml"
   workflow_dispatch:
 
 permissions:
@@ -28,16 +28,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      CHROME_VERSION: '156.0.8078.73-1'
-      CHROME_SHA256: 'fd19c6895dad77f4d7f712c2d9f0d5eb682f4a6e7ff22b1bd0d40d03710d288c'
-      LEGACY_CHROME_VERSION: '155.0.8059.84-1'
-      LEGACY_CHROME_SHA256: '8fbd2ae69cdf7ee98b7513c3396a7b5e06f974f8625fdd590df3091dd0c3e9de'
+      CHROME_VERSION: "156.0.8078.73-1"
+      CHROME_SHA256: "fd19c6895dad77f4d7f712c2d9f0d5eb682f4a6e7ff22b1bd0d40d03710d288c"
+      LEGACY_CHROME_VERSION: "155.0.8059.84-1"
+      LEGACY_CHROME_SHA256: "8fbd2ae69cdf7ee98b7513c3396a7b5e06f974f8625fdd590df3091dd0c3e9de"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: sudoprivacy/ai-dev-browser
-          ref: 139cfaa540e26d73abf30705bbfdb00be37f745d # ai-dev-browser v0.58.13 source; qualify the public release before landing.
+          ref: 2926e25d514f15c6d36c2c52c80ddfebd2df13c0 # ai-dev-browser v0.58.13 source; qualify the public release before landing.
           path: adb-core
       - uses: actions/checkout@v4
         with:
@@ -47,7 +47,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: "22"
       - run: bun install --frozen-lockfile
       - name: Build branded Chrome and private worker
         shell: bash

@@ -31,12 +31,15 @@ Keep this update in draft until the public SDK release is available and its
 exact artifact has passed qualification. A candidate image test does not publish
 the package or upgrade the running Moss service.
 
-The integrated candidate with Chrome 156.0.8078.73 passed twenty actual Linux
-browser cases, with two existing fixture skips, and the signed profile upgrade
-and forced-crash recovery journey. The first frame command, extension identity,
-ordinary and HttpOnly cookies, and input exclusion survived both recoveries.
-This is candidate evidence; the released package and production promotion still
-require their own acceptance.
+The integrated source `2926e25` includes the merged extension readiness and
+explicit consent recovery from SDK #48, plus SDK #47's frame tools. Its combined
+extension is versioned `0.4.8`. Installed Chrome 156.0.8078.73 passed twenty actual
+Linux browser cases with two existing fixture skips, and the signed profile
+upgrade and forced-crash recovery journey. The first frame command, extension
+identity, ordinary and HttpOnly cookies, and input exclusion survived both
+recoveries. All 204 installed package files and signed extension assets matched
+the candidate wheel. This is candidate evidence; the released package and
+production promotion still require their own acceptance.
 
 This patch adds bounded selection drag, selection text and multiline paste over
 the existing authenticated input channel. Copy reads the active page selection;
