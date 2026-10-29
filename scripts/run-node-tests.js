@@ -17,6 +17,7 @@ const nodeTestFiles = [
   'src/server/ontology/projectRegistry.node-test.ts',
   'src/server/ontology/runnerContext.node-test.ts',
   'src/server/ontology/runnerHost.node-test.ts',
+  'src/server/ontology/compilerContextWorker.node-test.ts',
   'src/server/ontology/mcpContextPorts.node-test.ts',
   'src/server/runnerReadiness.node-test.ts',
   'src/server/runtimeModelEnvironment.node-test.ts',

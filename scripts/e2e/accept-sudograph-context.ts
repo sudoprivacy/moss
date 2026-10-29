@@ -5,12 +5,11 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { SudographModelClient } from '@sudowork/sudograph-runtime'
 import { McpStore } from '../../src/server/mcp/db.js'
 import { ReviewedMcpAccess, mcpServerDigest } from '../../src/server/mcp/reviewedAccess.js'
 import { ToolGatewayStore } from '../../src/server/agentFederation/toolGatewayStore.js'
-import { registerModelContextTool } from '../../src/server/ontology/contextWorker.js'
+import { createCompilerContextWorker } from '../../src/server/ontology/compilerContextWorker.js'
 import { McpOntologyContextPorts } from '../../src/server/ontology/mcpContextPorts.js'
 import { createSessionRunnerHost } from '../../src/server/ontology/runnerHost.js'
 import { AuthCenterDb } from '../../src/server/authCenter/db.js'
@@ -23,7 +22,7 @@ import { DirectConnectStore } from '../../src/server/db.js'
 
 const { values } = parseArgs({ options: {
   engine: { type: 'string' }, 'engine-sha256': { type: 'string' },
-  python: { type: 'string' }, evidence: { type: 'string' },
+  python: { type: 'string' }, evidence: { type: 'string' }, worker: { type: 'string' },
 } })
 assert(values.engine && values['engine-sha256'] && values.python && values.evidence,
   'Supply --engine, --engine-sha256, --python (installed compiler) and --evidence')
@@ -35,7 +34,9 @@ await mkdir(resolve(values.evidence), { recursive: true })
 const root = await mkdtemp(join(resolve(values.evidence), 'moss-context-'))
 const workspace = join(root, 'workspace'), profile = join(root, 'profile'), config = join(root, 'config')
 await Promise.all([workspace, profile, config].map(path => mkdir(path)))
-const store = join(root, 'model.db'), source = join(root, 'source.sqlite')
+const source = join(root, 'source.sqlite'), modelRef = 'fixture-model', actor = 'fixture-moss-host'
+const runtime = { python, compilerRoot: root, modelDirectory: root }
+const modelClient = new SudographModelClient(runtime)
 console.log(`Acceptance evidence: ${root}`)
 
 function runPython(args: string[], input?: unknown): string {
@@ -46,11 +47,6 @@ function runPython(args: string[], input?: unknown): string {
   assert(!process.error, String(process.error))
   assert.equal(process.status, 0, process.stderr)
   return process.stdout
-}
-function worker(module: string, request: unknown): any {
-  const response = JSON.parse(runPython(['-m', module, '--store', store, '--actor', 'fixture-moss-host'], request))
-  assert.equal(response.ok, true, JSON.stringify(response.error))
-  return response.result
 }
 const compiler = JSON.parse(runPython(['-c', `
 import compiler, json
@@ -67,8 +63,8 @@ with sqlite3.connect(sys.argv[1]) as db:
     db.executescript('CREATE TABLE Tickets(id INTEGER PRIMARY KEY, amount REAL); INSERT INTO Tickets VALUES (1,7),(2,NULL);')
 `, source])
 const sourceBefore = hash(await readFile(source))
-const registered = worker('compiler.registration', { source: 'sqlite:///' + source.replaceAll('\\', '/'),
-  namespace: 'support', operation_id: 'source', language: 'en', snapshot_records: false })
+const registered = await modelClient.registerSource(modelRef, actor, { source: 'sqlite:///' + source.replaceAll('\\', '/'),
+  namespace: 'support', operationId: 'source', language: 'en' })
 assert.equal(registered.registration.scan.structure_complete, true)
 const definition = { concept: 'revenue', category: 'meaning', role: 'business',
   purpose: { stakeholder: 'Support manager', decision: 'Choose revenue policy' },
@@ -76,13 +72,13 @@ const definition = { concept: 'revenue', category: 'meaning', role: 'business',
   contributor: 'model', version: 1, targets: [] }
 const model = { format: 'sudograph-business-overlay/v5', namespace: 'support',
   baseline: registered.contract.baseline, definitions: { revenue: definition } }
-function apply(operation: string): any {
-  const contract = worker('compiler.workspace', { operation: 'contract' })
-  return worker('compiler.workspace', { operation: 'apply', request: {
+async function apply(operation: string): Promise<any> {
+  const contract = await modelClient.invoke<any>(modelRef, actor, { operation: 'contract' })
+  return modelClient.invoke<any>(modelRef, actor, { operation: 'apply', request: {
     base_revision: contract.revision, operation_id: operation, model: JSON.stringify(model),
   } })
 }
-apply('revision-a')
+await apply('revision-a')
 const contexts: any[] = [], requests: any[] = [], output: any[] = [], diagnostics: string[] = []
 let hostStore = new DirectConnectStore(join(root, 'host.db'))
 const auth = new AuthCenterDb(hostStore)
@@ -97,29 +93,49 @@ await hostStore.driver.run(`INSERT INTO sessions
 ['fixture-moss-session', 'fixture-native-history', 'fixture-org', 'fixture-user', 'user', '[]', workspace,
   'cohost', 'active', 'active', join(root, 'transcript.jsonl'), Date.now(), Date.now()])
 // The registered worker is a separate authenticated MCP endpoint, not a host path.
-const modelIdentity = { authorityRef: 'canonical-fixture', modelRef: 'fixture-model', sourceRefs: ['registered-fixture-source'] }
-const workerServer = createServer((req, res) => {
-  void (async () => {
-    if (req.headers.authorization !== 'Bearer fixture-worker-only') { res.writeHead(401); res.end(); return }
-    const sdk = new McpServer({ name: 'registered-compiler-worker', version: '1.0.0' })
-    registerModelContextTool(sdk, modelIdentity, async () => {
-      const context = worker('compiler.workspace', { operation: 'read', product: 'context' })
-      contexts.push(context)
-      return context
+const modelIdentity = { authorityRef: 'canonical-fixture', modelRef, sourceRefs: ['registered-fixture-source'] }
+const workerToken = 'fixture-worker-token-for-acceptance-only'
+let workerServer: ReturnType<typeof createCompilerContextWorker> | undefined
+let stopWorker: () => Promise<void>
+let workerPort: number
+if (values.worker) {
+  const path = join(root, 'worker-deployment.json')
+  await writeFile(path, JSON.stringify({ binding: modelIdentity, runtime, actor, host: '127.0.0.1', port: 0 }))
+  const child = spawn(process.execPath, [resolve(values.worker), path], {
+    env: { ...process.env, SUDOGRAPH_WORKER_TOKEN: workerToken }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  })
+  const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
+  child.stderr.on('data', chunk => diagnostics.push(String(chunk)))
+  workerPort = await new Promise<number>((resolve, reject) => {
+    const timer = setTimeout(() => { child.kill(); reject(new Error('Packaged compiler worker did not become ready')) }, 10000)
+    child.once('error', error => { clearTimeout(timer); reject(error) })
+    child.once('exit', () => { clearTimeout(timer); reject(new Error('Packaged compiler worker exited before readiness')) })
+    let buffer = ''
+    child.stdout.on('data', chunk => {
+      buffer += String(chunk)
+      if (!buffer.includes('\n')) return
+      clearTimeout(timer)
+      try {
+        const ready = JSON.parse(buffer.split('\n')[0])
+        assert.equal(ready.format, 'sudograph-worker-ready/v1')
+        assert(Number.isSafeInteger(ready.port) && ready.port > 0 && ready.port <= 65535)
+        resolve(ready.port)
+      } catch (error) { child.kill(); reject(error) }
     })
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
-    res.once('close', () => { void sdk.close() })
-    await sdk.connect(transport)
-    await transport.handleRequest(req, res)
-  })().catch(() => res.destroy())
-})
-await new Promise<void>(resolve => workerServer.listen(0, '127.0.0.1', resolve))
-const workerAddress = workerServer.address()
-assert(workerAddress && typeof workerAddress !== 'string')
+  })
+  stopWorker = async () => { child.kill(); await exited }
+} else {
+  workerServer = createCompilerContextWorker({ binding: modelIdentity, runtime, actor, token: workerToken })
+  await new Promise<void>(resolve => workerServer!.listen(0, '127.0.0.1', resolve))
+  const address = workerServer.address()
+  assert(address && typeof address !== 'string')
+  workerPort = address.port
+  stopWorker = async () => { workerServer!.closeAllConnections(); await new Promise<void>(resolve => workerServer!.close(() => resolve())) }
+}
 const mcpStore = new McpStore(hostStore.driver)
 const registeredWorker = await mcpStore.createMcpServer('fixture-org', { name: 'Compiler worker', scope: 'org', owner_type: 'system', owner_id: 'fixture-org',
-  mcp_type: 'http', url: `http://127.0.0.1:${workerAddress.port}/mcp`, auth_type: 'bearer',
-  auth_config_json: JSON.stringify({ header_name: 'Authorization', prefix: 'Bearer', token: 'fixture-worker-only' }),
+  mcp_type: 'http', url: `http://127.0.0.1:${workerPort}/mcp`, auth_type: 'bearer',
+  auth_config_json: JSON.stringify({ header_name: 'Authorization', prefix: 'Bearer', token: workerToken }),
   allow_read: true, allow_read_sensitive_fields: true, allow_write: false }, 'fixture-manager')
 await mcpStore.setMcpServerStatus('fixture-org', registeredWorker.id, 'enabled', 'fixture-manager')
 await mcpStore.upsertMcpPolicy('fixture-org', { allow_http_sse_mcp: true, allow_external_network: true, domain_whitelist_json: ['127.0.0.1'] }, 'fixture-manager')
@@ -209,13 +225,15 @@ function prompt(text: string): Promise<any> {
 const systemText = (body: any): string => typeof body.system === 'string' ? body.system : body.system.map((block: any) => block.text).join('\n')
 let receipt: unknown
 try {
+  contexts.push(await modelClient.invoke(modelRef, actor, { operation: 'read', product: 'context' }))
   assert(!(await prompt('FIRST_USER_TURN')).is_error)
   assert.equal(requests.length, 1)
   assert.equal(contexts.length, 1)
   assert(systemText(requests[0].body).includes(contexts[0].text))
   assert(systemText(requests[0].body).includes('CONTEXT_A_USE_ORDER_DATE'))
   definition.version = 2; definition.statement = 'CONTEXT_B_USE_SHIPMENT_DATE'
-  const updated = apply('revision-b')
+  const updated = await apply('revision-b')
+  contexts.push(await modelClient.invoke(modelRef, actor, { operation: 'read', product: 'context' }))
   assert(!(await prompt('SECOND_USER_TURN')).is_error)
   assert.equal(requests.length, 2)
   assert.equal(contexts.length, 2)
@@ -226,7 +244,7 @@ try {
   const history = JSON.stringify(requests[1].body.messages)
   assert(history.includes('FIRST_USER_TURN'))
   assert(!history.includes('CONTEXT_A_USE_ORDER_DATE') && !history.includes('CONTEXT_B_USE_SHIPMENT_DATE'))
-  const html = worker('compiler.workspace', { operation: 'read', product: 'html' })
+  const html = await modelClient.invoke<string>(modelRef, actor, { operation: 'read', product: 'html' })
   assert(html.includes(updated.revision) && html.includes('CONTEXT_B_USE_SHIPMENT_DATE'))
   await hostStore.driver.run("UPDATE users SET status = 'disabled' WHERE id = 'fixture-user'")
   assert((await prompt('DENIED_TURN')).is_error)
@@ -236,6 +254,7 @@ try {
   receipt = { format: 'moss-sudograph-context-acceptance/v1', passed: true, engine_sha256: values['engine-sha256'], compiler,
     canonical_revisions: contexts.map(context => context.revision), real_engine: true, installed_compiler: true,
     moss_acp_bridge: true, durable_project_binding_recovered: true, registered_mcp_worker: true, production_host_factory: true,
+    published_host_sdk: true, compiler_worker_endpoint: true, packaged_worker: Boolean(values.worker),
     exact_context_in_requests: true, history_preserved: true, context_not_in_user_history: true,
     denied_model_requests: 0, source_unchanged: true,
     scope: 'Real engine stdio, Moss ACP bridge, registered MCP worker and installed compiler; deterministic loopback provider. Not Nexus mailbox, tenant grants, cloud login, WebUI or ShareOne comments.' }
@@ -243,8 +262,7 @@ try {
   await handle.destroy(true)
   await exited
   await host.close?.()
-  workerServer.closeAllConnections()
-  await new Promise<void>(resolve => workerServer.close(() => resolve()))
+  await stopWorker()
   await hostStore.close()
   server.closeAllConnections()
   await new Promise<void>(resolve => server.close(() => resolve()))
