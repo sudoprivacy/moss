@@ -4,6 +4,11 @@ Moss manages policy; the existing Nexus `egress_gate` service enforces it.
 Shared policy validation, scoped persistence and runtime delivery live in
 `sudostack/packages/egress-policy` and `packages/user-runtime`. Deployment
 profiles belong in sudocloud, sudoprivate and sudoedge. Cloud starts disabled.
+Delivery may leave the platform default disabled. Acceptance must demonstrate
+that an administrator can enable protection in Moss, observe matching native
+application status, verify real model redaction and refusal, and disable it
+again without restarting the controller or runtime. Saving the switch alone
+does not establish enforcement.
 
 ## Management surface
 
@@ -34,10 +39,15 @@ bootstrap policy. It seeds new policy storage; changing the file does not
 overwrite saved policy. No file means disabled defaults with no claimed mounts.
 
 Managed owner Pods use either `egressGate.analyzerRelay = { image, secretName }`
-for one analyzer per compute node, or an optional dedicated `analyzerImage`
-per Pod. These options are mutually exclusive. The node relay uses its actual
-Kubernetes node IP and an infrastructure-owned TLS/authentication Secret that
-is mounted only in the relay container. Tenant policy retains a loopback URL.
+for a shared analyzer host or one analyzer per compute node, or an optional
+dedicated `analyzerImage` per Pod. These options are mutually exclusive.
+SDK 0.2.2 supports both relay placements through the shared infrastructure
+preparer in `sudostack/security/egress-gate/node-analyzer/configure.mjs`.
+Its `relayMode: shared` fixes the verified analyzer host address in the Secret;
+node mode uses the Pod's actual Kubernetes node IP. Tenant policy cannot change
+that address. Both modes verify the analyzer's TLS name, CA and classifier
+authentication. The infrastructure-owned Secret is mounted only in the small
+relay container, and tenant policy retains a loopback URL.
 
 For an external host cohost, configure `localPolicyFile` and
 `localOrganizationId` together. Only that organization may deliver policy to
@@ -59,7 +69,10 @@ the policy file. New owner Pods receive the effective organization policy.
 When protection is enabled, model session startup checks that selected owner's
 native runtime receipt before handing off execution. An old, unavailable or
 pending native policy returns 503; a saved policy alone does not admit model
-work. Disabled Cloud deployments can complete their controlled runtime upgrade
+work. If session creation already committed its durable identity, the response
+contains the failed session and startup code `EGRESS_POLICY_NOT_APPLIED` instead
+of discarding that identity. Its message directs the caller to retry policy
+delivery or update the runtime. Disabled Cloud deployments can complete their controlled runtime upgrade
 before enabling protection. Existing in-flight work and policy propagation are
 still represented by the native applied status, rather than the saved revision.
 Local and external model routes must keep their separate provider credentials

@@ -30,3 +30,20 @@ After collecting the result, terminate only the newly created fixture through th
 - The private credential configuration was removed and all probe tokens were logged out. No controller policy or model configuration changed during the live journey.
 
 The old fixture was formally terminated during an earlier cleanup attempt. Its subsequent recovery request returned HTTP 409, `Session was terminated`; this rejected recovery remains recorded separately. The successful new fixture establishes current production conversation and reconnection behavior. It does not establish model continuation of that old terminated fixture, a controller restart between these four requests, browser UI acceptance, or physical phone acceptance.
+
+## Qualify deployed model DLP
+
+`egress-production-live.ts` reuses the product conversation driver and the shared runtime package. Run it on the controller after installing the published runtime manifest, relay Secret and Cloud policy profile. The platform policy must remain disabled. The probe requires a dedicated organization named `DLP acceptance ...` and an organization administrator named `egress-canary-...`; it rejects platform administrator credentials and another running owner in that organization.
+
+```sh
+bun build scripts/e2e/egress-production-live.ts --target=node --format=esm --outfile=bin/moss-egress-production-live.mjs
+MOSS_COHOST_LIVE=1 node bin/moss-egress-production-live.mjs --execute < /private/egress-fixture.json
+```
+
+The private stdin JSON contains `fixture: "sudo-egress-production"`, `baseUrl`, `accessToken`, `ownerId`, `organizationId`, `modelId`, `modelMount`, a new absolute `outputDirectory`, and the deployed `userPod` configuration. The latter includes its published image, node, namespace, storage class and `egressAnalyzerRelay` image/Secret. Reuse the controller's existing external Nexus mTLS environment and absolute `MOSS_RUNTIME_MANIFEST_PATH`. Keep this input and the resulting WebSocket evidence private.
+
+The probe first creates a session without a runtime override and requires the deployed Cloud default to select cohost. It also requires HTTP 403 for an explicit new legacy K8s session; an unexpectedly created fixture is retained in its cleanup list. It then uses synthetic data and checks disabled-before, allow, redact, deny, analyzer outage and disabled-after. It verifies real model replies, native post-hook prompt cache contents, original persisted conversation text, policy application receipts and an unchanged owner Pod UID/restart count. Public-corpus detection quality remains covered by the shared analyzer benchmarks; this journey isolates an explicit business protection rule.
+
+The probe restores inherited disabled organization policy and terminates its own conversations. It records failed cleanup and preserves policy changes made by another administrator. The isolated owner runtime is retained for explicit operator cleanup. This journey does not test a cold restart or credential recovery; record those separately. A compiled probe is not a production acceptance result: retain its completed `acceptance.json` with the exact released engine and image identities.
+
+On 2026-10-27, deployed Moss `server-v0.1.83` passed the control-plane journey in a new isolated organization: save disabled/enabled policy, read the saved revision, reject a stale revision with HTTP 409, and restore inheritance. The actual administration page also saved an enabled `/model` policy, restored inheritance and remained disabled after reload. Desktop and mobile screenshots were inspected. The platform and existing organizations were unchanged; this journey created no native runtime and sent no model requests. Native enforcement and the real-model journey above remain separate acceptance requirements.
