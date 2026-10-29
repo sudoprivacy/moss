@@ -199,7 +199,9 @@ jobs:
         if: always()
         with:
           name: nexus-runtime-${{ matrix.os }}
-          path: ${{ runner.temp }}/moss-runtime-evidence/**/acceptance.json
+          path: |
+            ${{ runner.temp }}/moss-runtime-evidence/**/acceptance.json
+            ${{ runner.temp }}/moss-runtime-evidence/**/daemon.log
 
   cohost-live:
     # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
