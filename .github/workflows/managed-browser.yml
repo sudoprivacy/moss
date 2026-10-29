@@ -4,18 +4,18 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - 'deploy/browser/**'
-      - 'src/server/browser/**'
-      - 'src/server/runtime/dockerCommand.ts'
-      - 'src/server/runtimeService.ts'
-      - 'src/server/server.ts'
-      - '.github/workflows/managed-browser.yml'
+      - "deploy/browser/**"
+      - "src/server/browser/**"
+      - "src/server/runtime/dockerCommand.ts"
+      - "src/server/runtimeService.ts"
+      - "src/server/server.ts"
+      - ".github/workflows/managed-browser.yml"
   push:
     branches: [dev]
     paths:
-      - 'deploy/browser/**'
-      - 'src/server/browser/**'
-      - '.github/workflows/managed-browser.yml'
+      - "deploy/browser/**"
+      - "src/server/browser/**"
+      - ".github/workflows/managed-browser.yml"
   workflow_dispatch:
 
 permissions:
@@ -28,16 +28,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      CHROME_VERSION: '156.0.8078.47-1'
-      CHROME_SHA256: '6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8'
-      LEGACY_CHROME_VERSION: '155.0.8059.84-1'
-      LEGACY_CHROME_SHA256: '8fbd2ae69cdf7ee98b7513c3396a7b5e06f974f8625fdd590df3091dd0c3e9de'
+      CHROME_VERSION: "156.0.8078.73-1"
+      CHROME_SHA256: "fd19c6895dad77f4d7f712c2d9f0d5eb682f4a6e7ff22b1bd0d40d03710d288c"
+      LEGACY_CHROME_VERSION: "155.0.8059.84-1"
+      LEGACY_CHROME_SHA256: "8fbd2ae69cdf7ee98b7513c3396a7b5e06f974f8625fdd590df3091dd0c3e9de"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: sudoprivacy/ai-dev-browser
-          ref: 011d8eb102a276e566db352a1da1220a39541aad # ai-dev-browser v0.58.11.
+          ref: 15fc78a5812d2644cb534e491bc46cbeda00237e # ai-dev-browser v0.58.14 source; qualify the public release before landing.
           path: adb-core
       - uses: actions/checkout@v4
         with:
@@ -47,7 +47,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: "22"
       - run: bun install --frozen-lockfile
       - name: Build branded Chrome and private worker
         shell: bash
@@ -67,6 +67,16 @@ jobs:
             -t managed-browser-chrome:ci deploy/browser
           docker build --build-arg ADB_BROWSER_IMAGE=managed-browser-chrome:ci \
             -t managed-browser-worker:ci deploy/browser
+      - name: Verify pre-launch tools match the installed public SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --init --network none --cpus 0.5 --memory 256m --pids-limit 64 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --mount "type=bind,source=$PWD/deploy/browser,target=/moss-contract,readonly" \
+            --entrypoint /opt/browser/venv/bin/python managed-browser-worker:ci \
+            /moss-contract/verify_tool_catalog.py \
+            2>&1 | tee "$RUNNER_TEMP/browser-tool-catalog.log"
       - name: Verify isolated persistent profiles with actual Chrome
         shell: bash
         run: |
@@ -117,6 +127,7 @@ jobs:
           python3 deploy/browser/live_docker.py \
             --image managed-browser-worker:ci \
             --prior-image managed-browser-worker:legacy-extension-ci \
+            --verify-frames \
             --output "$RUNNER_TEMP/browser-profile-upgrade.json" \
             2>&1 | tee "$RUNNER_TEMP/browser-profile-upgrade.log"
       - name: Verify staged per-owner upgrade with human control
@@ -135,6 +146,7 @@ jobs:
         with:
           name: browser-profile-acceptance
           path: |
+            ${{ runner.temp }}/browser-tool-catalog.log
             ${{ runner.temp }}/browser-profile-acceptance.log
             ${{ runner.temp }}/browser-lifecycle.log
             ${{ runner.temp }}/browser-selection-native.log

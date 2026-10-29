@@ -6,18 +6,48 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.58.11 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.58.14 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
 the consumer test verifies it against the installed public package.
 
-The managed-browser workflow builds the SDK v0.58.11 base, applies
+The managed-browser workflow builds the SDK v0.58.14 base, applies
 `chrome-version.Dockerfile`, then builds this worker. The Chrome layer downloads
 the versioned official package, verifies its SHA-256 before installation and
 checks the installed package version. The current runtime uses Chrome
-156.0.8078.47. The upstream base still downloads `stable_current`; the version
+156.0.8078.73. The upstream base still downloads `stable_current`; the version
 pin applies to the final runtime, not every intermediate build dependency.
+
+The controlled command tool supports a bounded optional `frame` selector for a
+descendant of the selected tab. The SDK resolves it for both native CDP and the
+managed extension while retaining human input leases and operation epochs.
+Moss forwards the original MCP arguments and advertises the same pinned schema
+before allocating a worker. The workflow checks the installed package catalog
+offline and verifies the first frame command after signed profile upgrade and
+crash recovery.
+
+Land this update only after the public SDK release is available and its
+exact artifact has passed qualification. A candidate image test does not publish
+the package or upgrade the running Moss service.
+
+The integrated source `2926e25` includes the merged extension readiness and
+explicit consent recovery from SDK #48, plus SDK #47's frame tools. Its combined
+extension is versioned `0.4.8`. Installed Chrome 156.0.8078.73 passed twenty actual
+Linux browser cases with two existing fixture skips, and the signed profile
+upgrade and forced-crash recovery journey. The first frame command, extension
+identity, ordinary and HttpOnly cookies, and input exclusion survived both
+recoveries. All 204 installed package files and signed extension assets matched
+the candidate wheel. Public v0.58.13 subsequently passed exact artifact and
+installed Windows/Linux qualification with the same signed extension identity.
+
+The v0.58.14 target `15fc78a` additionally preserves completed drags across focus
+changes, supplies a terminal input acknowledgement barrier, and sequences the
+initial-document/profile-network readiness probes. Its extension assets remain
+0.4.8. A prior full CI retained a Windows startup CookieManager timeout; the
+ordering regression, 316 unit cases and 20 actual Windows startup/scroll cases
+passed locally. Public v0.58.14, the complete managed image and production
+promotion require their own acceptance.
 
 This patch adds bounded selection drag, selection text and multiline paste over
 the existing authenticated input channel. Copy reads the active page selection;
@@ -244,7 +274,7 @@ restart recovery. `.github/workflows/managed-browser.yml` runs it in CI.
 also verifies a real signed extension upgrade in the same persistent profile,
 then graceful and crash recovery. The fixture image uses the unchanged public
 v0.54.0 extension on Chrome 155.0.8059.84 and its earlier bootstrap contract,
-then upgrades to the current worker on Chrome 156.0.8078.47. Installed versions,
+then upgrades to the current worker on Chrome 156.0.8078.73. Installed versions,
 signing identity, original cookie and human lease are checked against Chrome's
 actual state; containers and volumes carry unique ownership labels and are removed.
 
@@ -255,6 +285,17 @@ separate HttpOnly fixture cookie is set only by the first container; later
 containers must receive it without exposing it to page JavaScript. Use a new
 `--output` path for each run so earlier failures remain available. The default
 journey remains compatible with the legacy public SDK fixture.
+
+### Pre-launch MCP discovery
+
+Moss advertises browser tools before a browser task starts, without allocating a
+worker or claiming a profile. Its `mcp-tools.json` is a generated snapshot of the
+SDK catalog. After installing the intended SDK, run
+`python deploy/browser/verify_tool_catalog.py --update` to regenerate it.
+The managed-browser job checks this snapshot against the SDK actually installed
+in the worker image, with networking disabled and no Chrome process. Update the
+SDK pin and its catalog together. This keeps parameters such as child-frame
+selectors discoverable to the model while the host retains its launch guidance.
 
 `test_worker_live.py` validates the actual Chrome/HTTP control boundary.
 `test_agent_live.py` and SudoWork's `live_browser_handoff.py` cover configured
