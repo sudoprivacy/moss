@@ -204,6 +204,13 @@ build('bin/direct-connect-session-runner.mjs', [
   ...defines,
 ])
 
+// Deployment-owned MCP endpoint for the same registered compiler model.
+build('bin/sudograph-context-worker.mjs', [
+  'build', 'src/server/ontology/compilerContextWorkerCli.ts',
+  '--outfile=bin/sudograph-context-worker.mjs', '--target=node', '--format=esm',
+  ...aliases, ...defines,
+])
+
 // bin/wiki（Document Center: in-scode wiki CLI; written in Go so scode's
 // shell can shell out to it. server.ts prepends bin/ to PATH for scode
 // subprocesses so it resolves without manual install.）

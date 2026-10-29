@@ -175,3 +175,60 @@ HTTP/MCP tests exercise this production factory without injecting authorization
 or context ports, including live member/account/visibility/policy revocation and
 current credential resolution. Their Nexus values are synthetic; deployment
 connectivity and end-user journeys still require production acceptance.
+
+## Compiler worker executable
+
+`bun run build:node` also builds `bin/sudograph-context-worker.mjs`. It uses the
+published `@sudowork/sudograph-runtime` package, pinned by release URL and Bun lock
+integrity, and the same installed Python compiler as Desktop. There is no second
+compiler subprocess implementation or copied model in Moss.
+
+An operator supplies a deployment-owned configuration file, for example:
+
+```json
+{
+  "binding": {
+    "authorityRef": "sales-project",
+    "modelRef": "sales-model",
+    "sourceRefs": ["registered-sales-source"]
+  },
+  "runtime": {
+    "python": "/opt/sudograph/bin/python",
+    "compilerRoot": "/srv/sudograph/worker",
+    "modelDirectory": "/srv/sudograph/models"
+  },
+  "actor": "sales-model-worker",
+  "host": "127.0.0.1",
+  "port": 9041
+}
+```
+
+The runtime must already contain the installed compiler and canonical registered
+model. Inject `SUDOGRAPH_WORKER_TOKEN` from the deployment's secret manager; it is
+required, contains 32-512 printable ASCII characters, and is not stored in that
+configuration. Start the worker with:
+
+```sh
+node bin/sudograph-context-worker.mjs /etc/sudograph/worker.json
+```
+
+Register its exact `/mcp` endpoint in the existing Moss MCP catalogue, approve its
+read-only descriptor through the existing IT tool review, and reference the same
+credential using an organization-scoped system `secret_ref`. Remote deployment
+owns the authenticated network route/TLS and Nexus secret injection. The worker
+does not start Nexus or publish itself into the catalogue. Default binding is
+loopback; a zero port is available for isolated acceptance. Readiness reports the
+listening port only; it does not claim source registration or complete coverage.
+
+The endpoint requires authentication before MCP handling, rejects browser origins
+and alternate paths, and exposes only the empty-argument context tool. Model,
+actor, paths and policy cannot be selected by a request. Canonical reads execute
+through the published client on every call; compiler errors are sanitized by the
+shared worker contract. Configuration is copied at server creation.
+
+The maintained acceptance driver accepts `--worker bin/sudograph-context-worker.mjs`
+to launch that actual packaged process with an isolated deployment file and
+process-owned credential. It registers and modifies the canonical model through
+the published SDK, then verifies the production runner/HTTP/MCP/engine chain.
+This remains fixture acceptance, not production worker rollout, source intake,
+Nexus mailbox transport or ShareOne comment delivery.
