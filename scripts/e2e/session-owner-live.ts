@@ -1,36 +1,20 @@
 /** Verify certificate-bound session ownership through Moss and a real mTLS daemon. */
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
-
-import grpc from '@grpc/grpc-js'
-import protoLoader from '@grpc/proto-loader'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
 
 import { mintSessionIdentity, ownerField } from '../../src/server/nexus/sessionIdentity.js'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
+import { connectNodeAdmin } from '../../deploy/nexus/nodeAdmin.js'
 
 const [tlsDirectory, endpoint] = process.argv.slice(2)
 assert(tlsDirectory && endpoint, 'Node TLS directory and endpoint are required')
 const user = `e2e-user-${process.pid}`
 const agentId = `moss-e2e-${process.pid}`
-const protoDirectory = join(process.cwd(), 'node_modules', '@nexus-ai-fs', 'vfs-client', 'proto')
-const ZoneApi = (
-  grpc.loadPackageDefinition(protoLoader.loadSync(join(protoDirectory, 'nexus', 'raft', 'transport.proto'), {
-    keepCase: true, longs: String, defaults: true, includeDirs: [protoDirectory],
-  })) as any
-).nexus.raft.ZoneApiService
-const node = new ZoneApi(endpoint, grpc.credentials.createSsl(
-  readFileSync(join(tlsDirectory, 'ca.pem')),
-  readFileSync(join(tlsDirectory, 'node-key.pem')),
-  readFileSync(join(tlsDirectory, 'node.pem')),
-), { 'grpc.ssl_target_name_override': 'nexus-node', 'grpc.default_authority': 'nexus-node' })
-const admin = (method: string, request: unknown): Promise<any> => new Promise((resolve, reject) => {
-  node[method](request, new grpc.Metadata({ waitForReady: true }), { deadline: Date.now() + 20_000 },
-    (error: grpc.ServiceError | null, value: unknown) => error ? reject(error) : resolve(value))
-})
+const node = connectNodeAdmin(tlsDirectory, endpoint)
+const admin = node.rpc
 
 const clients: ManagedAgentClient[] = []
 const sessions: Array<{ client: ManagedAgentClient; id: string }> = []
@@ -50,20 +34,7 @@ async function start(client: ManagedAgentClient, input: Parameters<ManagedAgentC
 }
 let failure: unknown
 try {
-  // The transport starts before the replicated issuer store is bound.
-  const readyDeadline = Date.now() + 20_000
-  let isIssuerReady = false
-  while (Date.now() < readyDeadline) {
-    const state = await admin('ListSessionMinters', {})
-    if (state.success) {
-      isIssuerReady = true
-      break
-    }
-    assert.equal(state.error, 'this node has no session-mint plane (auth-off)',
-      'unexpected issuer readiness failure')
-    await delay(100)
-  }
-  assert(isIssuerReady, 'the authenticated issuer store must become ready')
+  await node.waitForIssuer()
   const minted = await admin('MintAgent', { subject_id: agentId, display_name: agentId })
   assert.equal(minted.success, true, `the Node operator must mint the Moss Agent: ${minted.error ?? 'missing result'}`)
   const allowed = await admin('AllowSessionMinter', { agent_id: agentId })
@@ -72,7 +43,10 @@ try {
   const directory = mkdtempSync(join(tmpdir(), 'moss-session-owner-'))
   for (const [name, value] of Object.entries({
     'ca.pem': minted.ca_pem, 'agent.pem': minted.agent_cert_pem, 'agent-key.pem': minted.agent_key_pem,
-  })) writeFileSync(join(directory, name), value as string, { mode: 0o600 })
+  })) {
+    assert(Buffer.isBuffer(value), 'the Node operator must mint complete credentials')
+    writeFileSync(join(directory, name), value, { mode: 0o600 })
+  }
   const mossTls = { ca: join(directory, 'ca.pem'), cert: join(directory, 'agent.pem'),
     key: join(directory, 'agent-key.pem'), serverName: 'nexus-node' }
   const identity = await mintSessionIdentity(endpoint, mossTls, user)

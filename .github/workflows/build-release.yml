@@ -162,7 +162,7 @@ jobs:
           node bin/node-issuer-live.mjs "$binary"
         env:
           MOSS_NEXUS_LIVE_ARTIFACTS: ${{ runner.temp }}/moss-runtime-evidence
-      - name: Verify upgrade and rollback from the cloud broker version
+      - name: Verify upgrade and rollback from the deployed broker baseline
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -173,12 +173,12 @@ jobs:
           node --input-type=module <<'NODE'
           import { downloadWithFallback } from './scripts/fetch-nexus-runtime.js'
           const artifacts = [
-            { file: 'runtime.tar.gz', sha: 'deb36ed3f2c63a5c8a53ecef60d76806edcbc3e2826628db701b36094ec0ae34',
-              path: 'nexus-vfs/release/v0.7.19/nexusd-cluster-linux-x86_64.tar.gz',
-              github: 'nexi-lab/nexus-vfs/releases/download/v0.7.19/nexusd-cluster-linux-x86_64.tar.gz' },
-            { file: 'vault.tar.gz', sha: '380ad81dafaaf919acb76ec8c0f57869295b1580bfde8f9e4ccef321e1065735',
-              path: 'nexus-vault/release/v0.5.67/nexus-vault-linux-x86_64.tar.gz',
-              github: 'nexi-lab/nexus/releases/download/vault-v0.5.67/nexus-vault-linux-x86_64.tar.gz' },
+            { file: 'runtime.tar.gz', sha: '696e26a86862096f800bdd0464aa0a83e572bac54f47e92ef0113216ebfb1eed',
+              path: 'nexus-vfs/release/v0.8.24/nexusd-cluster-linux-x86_64.tar.gz',
+              github: 'nexi-lab/nexus-vfs/releases/download/v0.8.24/nexusd-cluster-linux-x86_64.tar.gz' },
+            { file: 'vault.tar.gz', sha: '2f7f32d3b2dde51fa5947cb635d4c0072a98cb0d7256287f8d8c8a42a556de16',
+              path: 'nexus-vault/release/v0.5.71/nexus-vault-linux-x86_64.tar.gz',
+              github: 'nexi-lab/nexus/releases/download/vault-v0.5.71/nexus-vault-linux-x86_64.tar.gz' },
           ]
           for (const artifact of artifacts) {
             await downloadWithFallback([
@@ -199,7 +199,9 @@ jobs:
         if: always()
         with:
           name: nexus-runtime-${{ matrix.os }}
-          path: ${{ runner.temp }}/moss-runtime-evidence/**/acceptance.json
+          path: |
+            ${{ runner.temp }}/moss-runtime-evidence/**/acceptance.json
+            ${{ runner.temp }}/moss-runtime-evidence/**/daemon.log
 
   cohost-live:
     # Skipped on draft PRs: heavy CI starts once the PR is marked ready.

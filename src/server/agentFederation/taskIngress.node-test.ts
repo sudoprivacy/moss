@@ -240,19 +240,21 @@ void test('source identity remains explicitly unverified and strong-audit tasks 
 
 void test('history follows durable session creation order despite deadlines and clock changes', async () => {
   const f = await setup(), first = await f.run()
-  const second = await f.run({ ...f.input(), session_id: first.session_id, constraints: { idempotency_key: randomUUID(), timeout_ms: 1000 } })
-  assert(second.deadline_at < first.deadline_at)
+  const second = await f.run({ ...f.input(), session_id: first.session_id })
   const third = await f.run({ ...f.input(), session_id: first.session_id })
-  // Simulate equal timestamps and a clock rollback without changing the durable ordinal.
+  // Arrange history facts after execution so dispatch budgets remain independent
+  // of this ordering test. Keep the durable ordinal through every mutation.
   for (const task of [second, third]) {
     const row = await f.driver.get('SELECT document FROM tasks WHERE id = ?', [task.id])
     const document = JSON.parse(String(row?.document))
     document.created_at = task.id === second.id ? first.created_at : first.created_at - 60_000
+    if (task.id === second.id) document.deadline_at = first.deadline_at - 1000
     await f.driver.run('UPDATE tasks SET document = ? WHERE id = ?', [JSON.stringify(document), task.id])
   }
   const { ExternalTaskStore } = await import('../externalProviders/store.js')
   const reopened = new ExternalTaskStore(f.driver)
   const history = await reopened.history(f.actor, first.session_id)
+  assert(history[1].deadline_at < history[0].deadline_at)
   assert.deepEqual(history.map(task => task.id), [first.id, second.id, third.id])
   assert.deepEqual(history.map(task => task.session_sequence), [1, 2, 3])
   assert.equal(f.calls.length, 3)

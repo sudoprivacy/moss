@@ -32,8 +32,8 @@ export function connectNodeAdmin(directory: string, endpoint: string) {
     readFileSync(join(directory, 'ca.pem')), readFileSync(join(directory, 'node-key.pem')),
     readFileSync(join(directory, 'node.pem')),
   ), { 'grpc.ssl_target_name_override': 'nexus-node' }) as unknown as grpc.Client & Record<NodeMethod, NodeCall>
-  const rpc = (method: NodeMethod, request: object): Promise<INodeResponse> => new Promise((resolve, reject) => {
-    client[method](request, { deadline: Date.now() + 20_000 }, (error, response) => {
+  const rpc = (method: NodeMethod, request: object, deadline = Date.now() + 20_000): Promise<INodeResponse> => new Promise((resolve, reject) => {
+    client[method](request, { deadline }, (error, response) => {
       if (error) reject(error)
       else resolve(response)
     })
@@ -41,10 +41,9 @@ export function connectNodeAdmin(directory: string, endpoint: string) {
   return {
     rpc,
     /** The listener can precede the replicated issuer store; readiness uses a read-only RPC. */
-    async waitForIssuer(): Promise<void> {
-      const deadline = Date.now() + 20_000
+    async waitForIssuer(deadline = Date.now() + 20_000): Promise<void> {
       while (Date.now() < deadline) {
-        const response = await rpc('ListSessionMinters', {})
+        const response = await rpc('ListSessionMinters', {}, Math.min(deadline, Date.now() + 20_000))
         if (response.success) return
         assert.equal(response.error, 'this node has no session-mint plane (auth-off)',
           'unexpected issuer readiness failure')
