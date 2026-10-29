@@ -16,11 +16,13 @@ async function main(): Promise<void> {
   const store = await openStoreAsync(manifest.config)
   try {
     const host = await createSessionRunnerHost(store, manifest.session.sessionId)
-    const daemon = new SessionRunnerDaemon(manifest, store, host)
-    try { await daemon.start() }
+    try {
+      const daemon = new SessionRunnerDaemon(manifest, store, host)
+      await daemon.start()
+    }
     catch (error) { await host.close?.(); throw error }
   } catch (error) {
-    await store.close()
+    if (store.isOpen()) await store.close()
     throw error
   }
 }
