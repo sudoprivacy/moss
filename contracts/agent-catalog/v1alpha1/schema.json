@@ -632,6 +632,14 @@
               "type": "null"
             }
           ]
+        },
+        "requested_version": {
+          "type": "string",
+          "maxLength": 29
+        },
+        "release_note": {
+          "type": "string",
+          "maxLength": 2000
         }
       }
     },

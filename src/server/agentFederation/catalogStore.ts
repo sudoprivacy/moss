@@ -50,6 +50,10 @@ export async function initializeCatalogGovernance(db: DbDriver): Promise<void> {
       UNIQUE(org_id, catalog_id)
     );
     CREATE INDEX IF NOT EXISTS agent_catalog_sources_org ON agent_catalog_sources(org_id, id);
+    CREATE TABLE IF NOT EXISTS agent_catalog_working_sources (
+      id TEXT PRIMARY KEY, org_id TEXT NOT NULL, catalog_id TEXT NOT NULL, owner_id TEXT NOT NULL, document TEXT NOT NULL,
+      UNIQUE(org_id, catalog_id, owner_id)
+    );
     CREATE TABLE IF NOT EXISTS agent_import_candidates (
       id TEXT PRIMARY KEY, org_id TEXT NOT NULL, source_id TEXT NOT NULL, candidate_key TEXT NOT NULL,
       status TEXT NOT NULL, document TEXT NOT NULL, UNIQUE(source_id, candidate_key)
@@ -96,8 +100,8 @@ export class CatalogGovernanceStore {
   async source(actor: ExternalActor, id: string): Promise<SourceRecord> {
     await this.ready
     const row = await this.db.get(
-      'SELECT document FROM agent_catalog_sources WHERE id = ? AND org_id = ?',
-      [id, actor.orgId],
+      'SELECT document FROM agent_catalog_sources WHERE id = ? AND org_id = ? UNION ALL SELECT document FROM agent_catalog_working_sources WHERE id = ? AND org_id = ?',
+      [id, actor.orgId, id, actor.orgId],
     )
     if (!row) throw new ExternalProviderError(404, 'CATALOG_SOURCE_NOT_FOUND')
     return JSON.parse(String(row.document))
@@ -129,6 +133,7 @@ export class CatalogGovernanceStore {
       'UPDATE agent_catalog_sources SET document = ? WHERE id = ? AND org_id = ?',
       [JSON.stringify(record), record.view.id, record.view.org_id],
     )
+    await this.db.run('UPDATE agent_catalog_working_sources SET document = ? WHERE id = ? AND org_id = ?', [JSON.stringify(record), record.view.id, record.view.org_id])
   }
   async saveCandidate(record: CandidateRecord) {
     validateCatalogDocument('ImportCandidate', record.view)
@@ -165,7 +170,7 @@ export class CatalogGovernanceStore {
     )
       throw new ExternalProviderError(400, 'INVALID_CURSOR')
     const tables = {
-      sources: 'agent_catalog_sources',
+      sources: '(SELECT id, org_id, catalog_id, document FROM agent_catalog_sources UNION ALL SELECT id, org_id, catalog_id, document FROM agent_catalog_working_sources)',
       candidates: 'agent_import_candidates',
       syncs: 'agent_source_syncs',
       audit: 'agent_catalog_audit',
@@ -223,7 +228,7 @@ export class CatalogGovernanceStore {
       if (kind === 'sources') exact(field('owner_id'), query.owner)
       else if (kind === 'candidates') {
         where.push(
-          `EXISTS (SELECT 1 FROM agent_catalog_sources s WHERE s.id = d.source_id AND s.org_id = d.org_id AND ${json('view.owner_id', 's.document')} = ?)`,
+          `EXISTS (SELECT 1 FROM (SELECT id, org_id, document FROM agent_catalog_sources UNION ALL SELECT id, org_id, document FROM agent_catalog_working_sources) s WHERE s.id = d.source_id AND s.org_id = d.org_id AND ${json('view.owner_id', 's.document')} = ?)`,
         )
         params.push(query.owner)
       } else exact(field('actor_id'), query.owner)

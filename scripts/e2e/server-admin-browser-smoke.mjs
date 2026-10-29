@@ -668,20 +668,20 @@ async function main() {
   await navigate("/settings/agents");
   await waitForText("Moss E2E 智能体", "mock Hub agent");
   await waitForExpression(
-    `Boolean(document.querySelector('input[placeholder="搜索智能体..."]'))`,
+    `Boolean(document.querySelector('input[placeholder="搜索专家..."]'))`,
     "agent search input",
   );
-  await selectTab("专属智能体");
-  await selectTab("自定义智能体");
-  await selectTab("智能体库");
+  await selectTab("我的专家");
+  await selectTab("审核与发布");
+  await selectTab("可用专家");
   await capture("06-agent-management", [
-    "智能体管理",
-    "智能体库",
-    "专属智能体",
-    "自定义智能体",
+    "专家库",
+    "可用专家",
+    "我的专家",
+    "审核与发布",
     "Moss E2E 智能体",
   ]);
-  recordAssertion("智能体管理加载 Hub 数据并可切换页签");
+  recordAssertion("专家库加载 Hub 数据并可切换可用、我的及审核发布页签");
 
   await navigate("/settings/skill");
   await waitForText("Moss E2E 技能", "mock Hub skill");
@@ -689,18 +689,18 @@ async function main() {
     `Boolean(document.querySelector('input[placeholder="搜索技能..."]'))`,
     "skill search input",
   );
-  await selectTab("专属技能");
-  await selectTab("自定义技能");
-  await selectTab("技能库");
+  await selectTab("我的技能");
+  await selectTab("审核与发布");
+  await selectTab("可用技能");
   await capture("07-skill-store", [
-    "技能商店",
     "技能库",
-    "专属技能",
-    "自定义技能",
+    "可用技能",
+    "我的技能",
+    "审核与发布",
     "Moss E2E 技能",
     "最新版本 1.0.0",
   ]);
-  recordAssertion("技能商店加载 Hub 数据并可切换页签");
+  recordAssertion("技能库加载 Hub 数据并可切换可用、我的及审核发布页签");
 
   await navigate("/secrets/config-items");
   await waitForList("配置项列表");

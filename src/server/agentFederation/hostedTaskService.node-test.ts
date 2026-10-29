@@ -16,6 +16,13 @@ import { TASK_API } from './taskContract.js'
 import { dispatchHostedTask } from './hostedTaskRoutes.js'
 
 const actor = { userId: 'member-a', orgId: 'org-a' }, hash = 'sha256:' + 'a'.repeat(64)
+void test('an unconfigured hosted runtime has an empty directory only when no published hosted experts exist', async t => {
+  const f = await fixture(t)
+  const url = new URL('http://localhost/api/v1/hosted-agents')
+  assert.equal((await dispatchHostedTask(undefined, f.driver, actor, 'GET', url, {}))?.status, 503)
+  await f.catalog.updateAgentConfiguration(f.id, actor.orgId, { enabled: false })
+  assert.deepEqual(await dispatchHostedTask(undefined, f.driver, actor, 'GET', url, {}), { status: 200, body: { success: true, data: { items: [], next_cursor: null } } })
+})
 async function fixture(t: { after: (fn: () => void) => void }, native = false) {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close())
   const catalog = createCatalogTestRepository(db), driver = new SqliteDriver(db)

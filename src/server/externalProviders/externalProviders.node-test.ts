@@ -82,6 +82,9 @@ void test('full definition rejects hidden tools, sources, non-query inputs and i
   const valid = queryOnlyDefinition()
   assert.match(definitionDigest(JSON.stringify(valid)), /^sha256:/)
   assert.match(definitionDigest(JSON.stringify({ ...valid, workflow: { ...valid.workflow, features: { ...valid.workflow.features, retriever_resource: { enabled: true } } } })), /^sha256:/)
+  const modern = { ...valid, dependencies: [{ type: 'marketplace', current_identifier: null, value: { marketplace_plugin_unique_identifier: 'langgenius/openai_api_compatible:0.0.73@test', version: null } }] }
+  assert.match(definitionDigest(JSON.stringify(modern)), /^sha256:/)
+  assert.throws(() => definitionDigest(JSON.stringify({ ...modern, dependencies: [{ ...modern.dependencies[0], current_identifier: { tools: [] } }] })), { code: 'UNSUPPORTED_DIFY_DEFINITION' })
   const withLlm = (patch: Record<string, unknown>) => ({ ...valid, workflow: { ...valid.workflow, graph: { ...valid.workflow.graph, nodes: valid.workflow.graph.nodes.map(node => node.id === 'llm' ? { ...node, data: { ...node.data, ...patch } } : node) } } })
   const invalid = [
     { workflow: { graph: valid.workflow.graph } },

@@ -182,17 +182,24 @@ const menuItems: PrimaryNavItem[] = [
     requiredScope: 'admin:settings',
   },
   {
-    title: '智能体管理',
+    title: '专家库',
     group: 'workspace',
     url: '/settings/agents',
     icon: Bot,
     requiredAnyScopes: ['admin:settings', 'store:read'],
   },
   {
-    title: '技能商店',
+    title: '技能库',
     group: 'workspace',
     url: '/settings/skill',
     icon: Sparkles,
+    requiredAnyScopes: ['admin:settings', 'store:read'],
+  },
+  {
+    title: '智能体台账',
+    group: 'operations',
+    url: '/settings/agent-ledger',
+    icon: ClipboardList,
     requiredAnyScopes: ['admin:settings', 'store:read'],
   },
   {

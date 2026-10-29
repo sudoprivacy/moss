@@ -191,6 +191,8 @@ export interface ExternalPilotPolicy {
 }
 export interface ExternalProviderAccess {
   can_manage: boolean
+  can_create?: boolean
+  can_review?: boolean
   can_manage_policy: boolean
   credential_storage_available: boolean
 }

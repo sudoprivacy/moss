@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { listOrganizationResources } from '../server/catalog/organizationResources.js'
 import { ResourceAccessError } from '../server/catalog/resourceError.js'
 import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs'
@@ -62,12 +63,21 @@ export async function resolveWorkspaceSkillSources(
   // 收集所有启用的技能
   const skillTargets = new Map<string, string>() // skillName -> sourcePath
   if (scopedSkills) {
+    for (const ref of enabledSkillNames ?? []) {
+      const exact = scopedSkills.filter(skill => skill.id === ref && skill.meta.enabled !== false)
+      const matches = exact.length ? exact : scopedSkills.filter(skill => skill.name === ref && skill.meta.enabled !== false)
+      if (matches.length > 1) throw new ResourceAccessError(409, 'Ambiguous skill name; use its ID')
+    }
     for (const skill of scopedSkills) {
       if (skill.meta.enabled === false) continue
       if (enabledSkillNames && !enabledSkillNames.includes(skill.id) && !enabledSkillNames.includes(skill.name)) continue
       if (skill.name !== path.basename(skill.name) || skill.name === '..') throw new ResourceAccessError(400, 'Invalid skill name')
-      if (skillTargets.has(skill.name)) throw new ResourceAccessError(409, 'Ambiguous skill name')
-      skillTargets.set(skill.name, skill.path)
+      // Personal drafts and published versions can share a display name. Keep
+      // both addressable by ID and use distinct runtime directory names.
+      const name = scopedSkills.filter(item => item.name === skill.name).length > 1
+        ? `${skill.name}--${createHash('sha256').update(skill.id).digest('hex').slice(0, 16)}` : skill.name
+      if (skillTargets.has(name) && skillTargets.get(name) !== skill.path) throw new ResourceAccessError(409, 'Conflicting skill resource IDs')
+      skillTargets.set(name, skill.path)
     }
     for (const ref of enabledSkillNames ?? []) {
       if (!scopedSkills.some(skill => skill.meta.enabled !== false && (skill.id === ref || skill.name === ref))) throw new ResourceAccessError(404, 'Skill not available')

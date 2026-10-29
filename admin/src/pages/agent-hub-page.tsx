@@ -1,8 +1,12 @@
+import type { VisibleTo } from "../../lib/api/agent-hub"
+import { AssetVisibilityEditor } from "../../components/asset-visibility-editor"
+import { PrivateAssetActions, EditPublishedAsset } from '@/components/private-asset-actions'
+import { AvailableServiceExperts } from '@/components/available-service-experts'
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { MyServiceExperts, DepartmentServiceReviews } from '@/components/my-service-experts'
 import ExternalAgentsSection from '@/components/external-agents-section'
-import AgentInventorySection from '@/components/agent-inventory-section'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
@@ -61,6 +65,8 @@ import {
   uninstallAgent,
   updateInstalledAgentMeta,
   createTenantAssistant,
+  importAgentArchive,
+  submitImportedAssistantForReview,
   getAgentSyncStatus,
   getTenantAssistants,
   approveTenantAssistant,
@@ -103,7 +109,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 
-type AgentHubTab = 'store' | 'exclusive' | 'custom' | 'inventory'
+type AgentHubTab = 'available' | 'mine' | 'review'
 
 type CoreFeature = {
   title: string
@@ -170,6 +176,26 @@ function normalizeVersion(value: unknown): string {
   return normalized
 }
 
+function hubVersion(agent: AgentHubAssistant | null): string {
+  if (!agent) return ''
+  const latest = agent.latestVersion as { version?: unknown } | undefined
+  const versions = agent.versions as Array<{ version?: unknown }> | undefined
+  return normalizeVersion(agent.version || latest?.version || versions?.[0]?.version)
+}
+
+function expertTypeLabel(value: unknown, fallback: 'hub' | 'tenant' | 'custom' = 'tenant'): string {
+  const type = String(value || fallback).trim().toLowerCase()
+  if (type === 'local') return '本地服务'
+  if (type === 'dify') return 'Dify'
+  if (type === 'a2a') return 'A2A'
+  if (type === 'custom_http' || type === 'api' || type === 'external') return '外部 API'
+  if (type === 'static' || type === 'file') return '静态描述文件'
+  if (type === 'moss_runtime' || type === 'runtime' || type === 'hosted') return '运行时专家'
+  if (type === 'hub') return '平台专家'
+  if (type === 'custom' || type === 'upload') return '导入专家'
+  return '组织专家'
+}
+
 function installedToHubAssistant(agent: InstalledAgentInfo): AgentHubAssistant {
   return {
     id: agent.meta?.id || agent.id || agent.name,
@@ -181,6 +207,7 @@ function installedToHubAssistant(agent: InstalledAgentInfo): AgentHubAssistant {
     category: agent.category,
     categories: agent.categories,
     skills: agent.skills,
+    version: agent.version,
     sourceUrl: '',
   }
 }
@@ -209,13 +236,9 @@ type StoreAgentCardProps = {
   installed: boolean
   installedAgent?: InstalledAgentInfo | null
   busy: boolean
-  /** Whether the viewer may install hub agents (store admins only). */
-  canInstall?: boolean
   onOpen: (agent: AgentHubAssistant) => void
-  onInstall: (agent: AgentHubAssistant, skillIds: string[]) => void
   onOpenEdit?: (agent: InstalledAgentInfo) => void
-  onOpenVisibility?: (agent: InstalledAgentInfo) => void
-  onRequestUninstall?: (agent: InstalledAgentInfo) => void
+  onDraft?: (id: string) => Promise<void>
 }
 
 function StoreAgentCard({
@@ -223,12 +246,9 @@ function StoreAgentCard({
   installed,
   installedAgent,
   busy,
-  canInstall = true,
   onOpen,
-  onInstall,
   onOpenEdit,
-  onOpenVisibility,
-  onRequestUninstall,
+  onDraft,
 }: StoreAgentCardProps) {
   const skillIds = agent.skills || []
   const canManage = installedAgent && !installedAgent.isBuiltin
@@ -256,7 +276,8 @@ function StoreAgentCard({
       <div className="min-w-0 flex-1 space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-semibold">{agent.display_name}</h3>
-          {installed ? <Badge variant="secondary">已安装</Badge> : null}
+          {hubVersion(agent) ? <Badge variant="outline">版本 {hubVersion(agent)}</Badge> : null}
+          <Badge variant="outline">{expertTypeLabel(agent.provider_type || agent.source_type, 'hub')}</Badge>
           {skillIds.length > 0 ? (
             <Badge variant="outline">{skillIds.length} 个关联技能</Badge>
           ) : null}
@@ -278,63 +299,7 @@ function StoreAgentCard({
       </div>
 
       <div className="shrink-0 flex items-center gap-2" onClick={event => event.stopPropagation()}>
-        {busy ? (
-          <Button size="sm" disabled>
-            <Loader2 className="mr-2 size-4 animate-spin" />
-            安装中
-          </Button>
-        ) : installed && canManage ? (
-          <>
-            {/* Hub/system agents are org-wide installs with no per-user creator;
-                only a store admin may change their visibility or edit them.
-                canInstall === isStoreAdmin here. */}
-            {onOpenVisibility && canInstall && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => onOpenVisibility(installedAgent!)}
-              >
-                <Shield className="size-4" />
-              </Button>
-            )}
-            {onOpenEdit && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onOpenEdit(installedAgent!)}
-              >
-                {canInstall ? '编辑' : '查看'}
-              </Button>
-            )}
-            {onRequestUninstall && (
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={() => onRequestUninstall(installedAgent!)}
-              >
-                <Trash2 className="size-4" />
-              </Button>
-            )}
-          </>
-        ) : installed ? (
-          <Button size="sm" variant="outline" disabled>
-            已安装
-          </Button>
-        ) : !canInstall ? null : agent.sourceUrl ? (
-          <Button
-            size="sm"
-            onClick={event => {
-              event.stopPropagation()
-              onInstall(agent, skillIds)
-            }}
-          >
-            安装
-          </Button>
-        ) : (
-          <Button size="sm" variant="outline" disabled>
-            不可安装
-          </Button>
-        )}
+        {onDraft ? <EditPublishedAsset kind="agents" id={agent.id} onDraft={onDraft} /> : null}
       </div>
     </div>
   )
@@ -368,7 +333,7 @@ function InstalledAgentCard({
     agent.isBuiltin ? '系统内置' : agent.isHubInstalled ? 'Hub' : '本地',
     agent.version ? `v${agent.version}` : '',
     agent.skills.length > 0 ? `${agent.skills.length} 个关联技能` : '',
-    (agent.agentType || agent.meta?.agent_type) === 'workflow' ? '业务流程' : '对话智能体',
+    (agent.agentType || agent.meta?.agent_type) === 'workflow' ? '业务流程' : '对话专家',
   ].filter(Boolean)
 
   return (
@@ -466,11 +431,13 @@ export default function AgentHubPage() {
   // A dept_admin/user sees hub read-only and manages only tenant/custom agents
   // in scope (server-provided can_manage on tenant rows).
   const isStoreAdmin = hasScope(scopes, 'admin:settings')
+  const canReview = isStoreAdmin || user?.role === 'dept_admin'
   const [settings, setSettings] = useState<StoreConfig | null>(null)
   const [pageLoading, setPageLoading] = useState(true)
   const [pageError, setPageError] = useState('')
 
-  const [activeTab, setActiveTab] = useState<AgentHubTab>('store')
+  const [catalogRefreshKey, setCatalogRefreshKey] = useState(0)
+  const [activeTab, setActiveTab] = useState<AgentHubTab>('available')
   const [assistants, setAssistants] = useState<AgentHubAssistant[]>([])
   const [categories, setCategories] = useState<string[]>([])
   const [selectedCategory, setSelectedCategory] = useState('all')
@@ -499,7 +466,7 @@ export default function AgentHubPage() {
 
   const [editOpen, setEditOpen] = useState(false)
   const [editingAgent, setEditingAgent] = useState<InstalledAgentInfo | null>(null)
-  // Who may edit the agent open in the 编辑智能体 modal. A CUSTOM agent (created
+  // Who may edit the agent open in the 编辑专家 modal. A CUSTOM agent (created
   // from SudoWork, visible only to its owner) is strictly creator-only — editable
   // ONLY by its owner, even for an admin who didn't create it. Hub/system agents
   // are admin-only.
@@ -547,6 +514,7 @@ export default function AgentHubPage() {
   const [savingAgentVisibility, setSavingAgentVisibility] = useState(false)
 
   const [createOpen, setCreateOpen] = useState(false)
+  const [importingArchive, setImportingArchive] = useState(false)
   const [createName, setCreateName] = useState('')
   const [createDisplayName, setCreateDisplayName] = useState('')
   const [createDescription, setCreateDescription] = useState('')
@@ -557,6 +525,9 @@ export default function AgentHubPage() {
   const [createEmoji, setCreateEmoji] = useState('')
   const [createRules, setCreateRules] = useState('')
   const [createAgentType, setCreateAgentType] = useState<'chat' | 'workflow'>('chat')
+  const [sourcePickerOpen, setSourcePickerOpen] = useState(false)
+  const [externalCreateRequest, setExternalCreateRequest] = useState(0)
+  const [createProviderType, setCreateProviderType] = useState<'static' | 'moss_runtime'>('static')
   const [createMemoryMode, setCreateMemoryMode] = useState<'session' | 'user'>('session')
   const [createVisibilityMode, setCreateVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
   const [createVisibleTo, setCreateVisibleTo] = useState<string[]>([])
@@ -634,9 +605,7 @@ export default function AgentHubPage() {
   const [tenantEditEmoji, setTenantEditEmoji] = useState('')
   const [tenantEditAgentType, setTenantEditAgentType] = useState<'chat' | 'workflow'>('chat')
   const [tenantEditMemoryMode, setTenantEditMemoryMode] = useState<'session' | 'user'>('session')
-  const [tenantEditVisibilityMode, setTenantEditVisibilityMode] = useState<'all' | 'departments' | 'users' | 'admin'>('all')
-  const [tenantEditVisibleTo, setTenantEditVisibleTo] = useState<string[]>([])
-  const [tenantEditVisibleUserIds, setTenantEditVisibleUserIds] = useState<string[]>([])
+  const [tenantEditScope, setTenantEditScope] = useState<VisibleTo | null>(null)
   const [tenantEditSkills, setTenantEditSkills] = useState<string[]>([])
   const [tenantEditEnabledSkills, setTenantEditEnabledSkills] = useState<string[]>([])
   const [tenantEditEnabledWikis, setTenantEditEnabledWikis] = useState<string[]>([])
@@ -810,7 +779,7 @@ export default function AgentHubPage() {
       const message =
         categoriesResult.reason instanceof Error
           ? categoriesResult.reason.message
-          : '读取智能体分类失败'
+          : '读取专家分类失败'
       setPageError(message)
     }
 
@@ -818,7 +787,7 @@ export default function AgentHubPage() {
       const message =
         installedResult.reason instanceof Error
           ? installedResult.reason.message
-          : '读取已安装智能体失败'
+          : '读取已使用专家失败'
       setPageError(current => current || message)
     }
 
@@ -887,7 +856,7 @@ export default function AgentHubPage() {
         if (params.requestId !== requestIdRef.current) {
           return
         }
-        setStoreError(error instanceof Error ? error.message : '获取智能体列表失败')
+        setStoreError(error instanceof Error ? error.message : '获取专家列表失败')
       } finally {
         if (params.requestId === requestIdRef.current) {
           setStoreLoading(false)
@@ -899,7 +868,7 @@ export default function AgentHubPage() {
   )
 
   useEffect(() => {
-    if (activeTab !== 'store') {
+    if (activeTab !== 'available') {
       return
     }
 
@@ -919,7 +888,7 @@ export default function AgentHubPage() {
 
   const handleLoadMore = useCallback(() => {
     if (
-      activeTab !== 'store' ||
+    activeTab !== 'available' ||
       storeLoading ||
       loadingMore ||
       !hasMore ||
@@ -948,7 +917,7 @@ export default function AgentHubPage() {
 
   useEffect(() => {
     const sentinel = sentinelRef.current
-    if (!sentinel || !hasMore || activeTab !== 'store') {
+    if (!sentinel || !hasMore || activeTab !== 'available') {
       return
     }
 
@@ -1025,7 +994,7 @@ export default function AgentHubPage() {
           setDetailSkills(buildSkillSummaries([...localResolved, ...hubResolved]))
         }
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : '读取智能体详情失败')
+        toast.error(error instanceof Error ? error.message : '读取专家详情失败')
       } finally {
         setDetailLoading(false)
       }
@@ -1152,7 +1121,7 @@ export default function AgentHubPage() {
 
       const sourceUrl = agent.sourceUrl?.trim() || ''
       if (!sourceUrl) {
-        toast.error('该智能体暂不支持安装')
+        toast.error('该专家暂不可用')
         return
       }
 
@@ -1171,18 +1140,18 @@ export default function AgentHubPage() {
           selectedSkillIds: skillIds,
         })
 
-        let message = `已安装 ${agent.display_name}`
+        let message = `已准备 ${agent.display_name}，可以使用`
         if (result.installedSkills.length > 0) {
-          message += `，并安装 ${result.installedSkills.length} 个关联技能`
+          message += `，并准备 ${result.installedSkills.length} 个关联技能`
         }
         if (result.failedSkills.length > 0) {
-          message += `，${result.failedSkills.length} 个关联技能安装失败`
+          message += `，${result.failedSkills.length} 个关联技能准备失败`
         }
         toast.success(message)
         await fetchInstalledState(false)
         setDetailOpen(false)
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : '安装智能体失败')
+        toast.error(error instanceof Error ? error.message : '准备专家失败')
       } finally {
         setInstallingAssistantId(null)
       }
@@ -1236,7 +1205,7 @@ export default function AgentHubPage() {
       await fetchInstalledState(false)
       setEditOpen(false)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '保存智能体信息失败')
+      toast.error(error instanceof Error ? error.message : '保存专家信息失败')
     } finally {
       setSavingEdit(false)
     }
@@ -1252,7 +1221,7 @@ export default function AgentHubPage() {
         assistantName: pendingUninstallAgent.id,
         sourcePath: pendingUninstallAgent.source,
       })
-      toast.success(`已卸载 ${pendingUninstallAgent.displayName}`)
+      toast.success(`已删除 ${pendingUninstallAgent.displayName}`)
       await fetchInstalledState(false)
       if (detailResolvedInstalledAgent?.name === pendingUninstallAgent.name) {
         setDetailOpen(false)
@@ -1261,7 +1230,7 @@ export default function AgentHubPage() {
         setEditOpen(false)
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '卸载智能体失败')
+      toast.error(error instanceof Error ? error.message : '删除专家失败')
     } finally {
       setPendingUninstallAgent(null)
     }
@@ -1328,7 +1297,7 @@ export default function AgentHubPage() {
       const data = await getTenantAssistants()
       setTenantAssistants(data)
     } catch {
-      toast.error('获取专属智能体列表失败')
+      toast.error('获取专属专家列表失败')
     } finally {
       setTenantAssistantsLoading(false)
     }
@@ -1392,16 +1361,12 @@ export default function AgentHubPage() {
         enabled_wikis: createSelectedWikis.length > 0 ? createSelectedWikis : undefined,
         enabled_corp_apps: createSelectedCorpApps.length > 0 ? createSelectedCorpApps : undefined,
         agent_type: createAgentType,
+        provider_type: createProviderType,
         memory_mode: createAgentType === 'chat' ? createMemoryMode : undefined,
         visible_to,
         workflow,
       })
-      // Non-admins submit a pending approval request; admins create it live.
-      toast.success(
-        createRes.status === 'pending'
-          ? (createRes.message || '发布申请已提交，等待管理员审批')
-          : `已创建专属智能体 ${displayName}`,
-      )
+      toast.success(createRes.message || `已保存 ${displayName} 到我的专家`)
       setCreateOpen(false)
       setCreateName('')
       setCreateDisplayName('')
@@ -1413,6 +1378,7 @@ export default function AgentHubPage() {
       setCreateEmoji('')
       setCreateRules('')
       setCreateAgentType('chat')
+      setCreateProviderType('static')
       setCreateMemoryMode('session')
       setCreateVisibilityMode('all')
       setCreateVisibleTo([])
@@ -1428,14 +1394,14 @@ export default function AgentHubPage() {
       setCreateSelectedCorpApps([])
       // The new agent is a tenant (专属) item — land on that tab and refresh
       // both the tenant list and the installed list (it appears in both).
-      setActiveTab('exclusive')
+      setActiveTab('mine')
       await Promise.all([fetchTenantAssistants(), fetchInstalledState(false)])
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '创建专属智能体失败')
+      toast.error(error instanceof Error ? error.message : '创建专属专家失败')
     } finally {
       setCreatingAssistant(false)
     }
-  }, [createAvatar, createCategories, createDefaultInitPrompt, createDescription, createDisplayName, createEmoji, createName, createPromptExamples, createRules, createAgentType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, createSelectedCorpApps, isStoreAdmin, user, fetchInstalledState, fetchTenantAssistants])
+  }, [createAvatar, createCategories, createDefaultInitPrompt, createDescription, createDisplayName, createEmoji, createName, createPromptExamples, createRules, createAgentType, createProviderType, createMemoryMode, createVisibilityMode, createVisibleTo, createVisibleUserIds, createWorkflowTrigger, createWorkflowCron, createWorkflowWebhookPath, createWorkflowOutputWebhook, createWorkflowTimeout, createWorkflowOutputTargets, createSelectedSkills, createSelectedWikis, createSelectedCorpApps, isStoreAdmin, user, fetchInstalledState, fetchTenantAssistants])
 
   const handleApproveTenantAssistant = useCallback(async (approved: boolean) => {
     if (!approvingAssistant) return
@@ -1547,25 +1513,7 @@ export default function AgentHubPage() {
     setTenantEditAddSkillOpen(false)
     setTenantEditAddSkillSelection([])
 
-    // Set visibility
-    const deptIds = assistant.visible_to?.department_ids
-    const userIds = assistant.visible_to?.user_ids
-
-    if (deptIds === null && userIds === null) {
-      setTenantEditVisibilityMode('all')
-    } else if ((deptIds?.length === 0 && (userIds === null || userIds?.length === 0)) ||
-               (userIds?.length === 0 && (deptIds === null || deptIds?.length === 0))) {
-      setTenantEditVisibilityMode('admin')
-    } else if (userIds !== null && userIds !== undefined && userIds.length > 0) {
-      setTenantEditVisibilityMode('users')
-    } else if (deptIds !== null && deptIds !== undefined && deptIds.length > 0) {
-      setTenantEditVisibilityMode('departments')
-    } else {
-      setTenantEditVisibilityMode('all')
-    }
-
-    setTenantEditVisibleTo(deptIds || [])
-    setTenantEditVisibleUserIds(userIds || [])
+    setTenantEditScope(assistant.visible_to ?? null)
 
     void loadAvailableWikis()
     void loadAvailableCorpApps()
@@ -1645,19 +1593,20 @@ export default function AgentHubPage() {
     setTenantEditOpen(true)
   }, [installedSkills, loadAvailableWikis, loadAvailableCorpApps])
 
+  const openCatalogDraft = async (id: string) => {
+    const rows = await getTenantAssistants()
+    setTenantAssistants(rows)
+    const draft = rows.find(item => item.id === id)
+    if (!draft) throw new Error('草稿不存在')
+    setDetailOpen(false)
+    openTenantEdit(draft)
+  }
+
   const handleSaveTenantEdit = useCallback(async () => {
     if (!editingTenantAgent) return
     setSavingTenantEdit(true)
 
     try {
-      const visible_to = tenantEditVisibilityMode === 'all'
-        ? null
-        : tenantEditVisibilityMode === 'admin'
-          ? { department_ids: [], user_ids: [] }
-          : tenantEditVisibilityMode === 'departments'
-            ? { department_ids: tenantEditVisibleTo, user_ids: null }
-            : { department_ids: null, user_ids: tenantEditVisibleUserIds }
-
       await updateTenantAssistantMeta({
         id: editingTenantAgent.id,
         display_name: tenantEditName,
@@ -1673,7 +1622,7 @@ export default function AgentHubPage() {
           : {}),
         agent_type: tenantEditAgentType,
         memory_mode: tenantEditMemoryMode,
-        visible_to,
+        ...(tenantEditScope !== (editingTenantAgent.visible_to ?? null) ? { visible_to: tenantEditScope } : {}),
         enabledSkills: tenantEditEnabledSkills,
         enabledWikis: tenantEditEnabledWikis,
         enabledCorpApps: tenantEditEnabledCorpApps,
@@ -1681,7 +1630,8 @@ export default function AgentHubPage() {
         workflow: tenantEditWorkflow,
       })
 
-      toast.success('保存成功')
+      toast.success('已保存到我的专家，可继续编辑或提交审核；原发布版本保持不变')
+      setActiveTab('mine')
       setTenantEditOpen(false)
       setEditingTenantAgent(null)
       await fetchTenantAssistants()
@@ -1692,8 +1642,7 @@ export default function AgentHubPage() {
     }
   }, [editingTenantAgent, tenantEditName, tenantEditDescription, tenantEditAvatar, tenantEditRemoveAvatar, tenantEditCategories, tenantEditDefaultInitPrompt, tenantEditEmoji, tenantEditPromptExamples, tenantEditRules,
       tenantEditRulesEditable, tenantEditRulesLoadFailed,
-      tenantEditAgentType, tenantEditMemoryMode, tenantEditVisibilityMode, tenantEditVisibleTo,
-      tenantEditVisibleUserIds, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditEnabledCorpApps, tenantEditSkills,
+      tenantEditAgentType, tenantEditMemoryMode, tenantEditScope, tenantEditEnabledSkills, tenantEditEnabledWikis, tenantEditEnabledCorpApps, tenantEditSkills,
       tenantEditWorkflow, fetchTenantAssistants])
 
   const departmentNameMap = useMemo(
@@ -1835,10 +1784,9 @@ export default function AgentHubPage() {
     })
   }, [tenantAssistants, searchQuery, installedFilterAgentType, installedFilterVisibility])
 
-  // 专属 badge counts only approved tenant assistants (the tab still renders
-  // pending/rejected ones, but the badge reflects what's actually active).
-  const approvedTenantAssistantCount = useMemo(
-    () => filteredTenantAssistants.filter(a => a.status === 'approved').length,
+  // The governance tab badge reflects work awaiting review/publication.
+  const pendingTenantAssistantCount = useMemo(
+    () => filteredTenantAssistants.filter(a => a.status === 'pending' || a.status === 'reviewed').length,
     [filteredTenantAssistants],
   )
 
@@ -1902,7 +1850,7 @@ export default function AgentHubPage() {
 
   const handleRefresh = useCallback(async () => {
     await loadBootstrapData()
-    if (activeTab === 'store') {
+    if (activeTab === 'available') {
       const requestId = requestIdRef.current + 1
       requestIdRef.current = requestId
       setAssistants([])
@@ -1924,6 +1872,29 @@ export default function AgentHubPage() {
     selectedCategory,
   ])
 
+  const handleImportArchive = useCallback(async (file: File | undefined) => {
+    if (!file) return
+    setImportingArchive(true)
+    try {
+      const archiveBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => {
+          const value = String(reader.result || '')
+          resolve(value.includes(',') ? value.slice(value.indexOf(',') + 1) : value)
+        }
+        reader.onerror = () => reject(reader.error || new Error('读取专家包失败'))
+        reader.readAsDataURL(file)
+      })
+      await importAgentArchive({ fileName: file.name, archiveBase64 })
+      toast.success('专家包已导入我的专家，可编辑后提交审核')
+      await loadBootstrapData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '导入专家包失败')
+    } finally {
+      setImportingArchive(false)
+    }
+  }, [loadBootstrapData])
+
   const handleSync = useCallback(async () => {
     setSyncing(true)
     try {
@@ -1939,11 +1910,11 @@ export default function AgentHubPage() {
             setSyncing(false)
             if (status.status === 'done') {
               const parts: string[] = []
-              if (status.installed > 0) parts.push(`新安装 ${status.installed} 个`)
+              if (status.installed > 0) parts.push(`新使用 ${status.installed} 个`)
               if (status.updated > 0) parts.push(`更新 ${status.updated} 个`)
               if (status.failed > 0) parts.push(`${status.failed} 个失败`)
               if (parts.length === 0) {
-                toast.info('所有智能体已是最新版本')
+                toast.info('所有专家已是最新版本')
               } else {
                 toast.success(`同步完成：${parts.join('，')}`)
               }
@@ -1958,7 +1929,7 @@ export default function AgentHubPage() {
         }
       }, 1000)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '同步智能体失败')
+      toast.error(error instanceof Error ? error.message : '同步专家失败')
       setSyncing(false)
     }
   }, [fetchInstalledState])
@@ -1966,8 +1937,8 @@ export default function AgentHubPage() {
   if (pageLoading) {
     return (
       <DashboardLayout
-        title="智能体管理"
-        description="浏览、安装和管理 Hub 智能体，安装动作在 server 侧执行。"
+        title="专家库"
+        description="统一管理可用专家、本人添加的专家，以及组织审核与发布流程。"
       >
         <div className="space-y-6">
           <Skeleton className="h-10 w-64" />
@@ -1980,7 +1951,7 @@ export default function AgentHubPage() {
   const installedAgentFilters = (
     <div className="flex flex-wrap items-center gap-2">
       <span className="text-sm text-muted-foreground mr-1">类型</span>
-      {([['all', '全部'], ['chat', '对话智能体'], ['workflow', '业务流程']] as const).map(([key, label]) => (
+      {([['all', '全部'], ['chat', '对话专家'], ['workflow', '业务流程']] as const).map(([key, label]) => (
         <button
           key={key}
           type="button"
@@ -2016,8 +1987,8 @@ export default function AgentHubPage() {
 
   return (
     <DashboardLayout
-      title="智能体管理"
-      description="浏览智能体库，管理组织专属智能体、外部平台接入和个人配置。"
+      title="专家库"
+      description="统一管理可用专家、本人添加的专家，以及组织审核与发布流程。"
     >
       <div className="space-y-6">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -2025,17 +1996,13 @@ export default function AgentHubPage() {
             {/* <Badge variant={tenantId ? 'secondary' : 'outline'}>
               {tenantId ? `专属技能租户: ${tenantId}` : '未配置专属技能租户 ID'}
             </Badge> */}
-            <Badge variant="secondary">已安装 {hubAgents.length + approvedTenantAssistantCount + filteredCustomAgents.length} 个内部托管智能体</Badge>
+            <Badge variant="secondary">
+              已发布专家 · 按当前账号权限展示
+            </Badge>
           </div>
 
           <div className="flex items-center gap-2">
-            {isStoreAdmin ? (
-              <Button variant="outline" onClick={() => void handleSync()} disabled={syncing}>
-                {syncing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
-                批量同步
-              </Button>
-            ) : null}
-            <Button variant="outline" onClick={() => void handleRefresh()}>
+            <Button variant="outline" onClick={() => { setCatalogRefreshKey(value => value + 1); void handleRefresh() }}>
               <RefreshCw className="mr-2 size-4" />
               刷新
             </Button>
@@ -2059,31 +2026,30 @@ export default function AgentHubPage() {
                 className="gap-0"
               >
                 <TabsList>
-                  <TabsTrigger value="inventory">智能体台账</TabsTrigger>
-                  <TabsTrigger value="store">
-                    智能体库
+                  <TabsTrigger value="available">
+                    可用专家
                     {hubAgents.length > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
                         {hubAgents.length}
                       </span>
                     ) : null}
                   </TabsTrigger>
-                  <TabsTrigger value="exclusive">
-                    专属智能体
-                    {approvedTenantAssistantCount > 0 ? (
-                      <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {approvedTenantAssistantCount}
-                      </span>
-                    ) : null}
-                  </TabsTrigger>
-                  <TabsTrigger value="custom">
-                    自定义智能体
+                  <TabsTrigger value="mine">
+                    我的专家
                     {filteredCustomAgents.length > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
                         {filteredCustomAgents.length}
                       </span>
                     ) : null}
                   </TabsTrigger>
+                  {canReview ? <TabsTrigger value="review">
+                    审核与发布
+                    {pendingTenantAssistantCount > 0 ? (
+                      <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
+                        {pendingTenantAssistantCount}
+                      </span>
+                    ) : null}
+                  </TabsTrigger> : null}
                 </TabsList>
               </Tabs>
 
@@ -2093,14 +2059,14 @@ export default function AgentHubPage() {
                   <Input
                     value={searchQuery}
                     onChange={event => setSearchQuery(event.target.value)}
-                    placeholder="搜索智能体..."
+                    placeholder="搜索专家..."
                     className="pl-9"
                   />
                 </div>
               </div>
             </div>
 
-            {activeTab === 'store' ? (
+            {activeTab === 'available' ? (
               <div className="flex flex-wrap items-center gap-2">
                 {/* Category filter */}
                 {[{ key: 'all', label: '全部' }, ...categories.map(item => ({ key: item, label: item }))].map(item => (
@@ -2118,35 +2084,18 @@ export default function AgentHubPage() {
                     {item.label}
                   </button>
                 ))}
-                {/* Visibility filter for installed agents */}
-                <span className="text-sm text-muted-foreground ml-3 mr-1">可见性</span>
-                {([['all', '全部'], ['public', '全员可见'], ['restricted', '指定部门'], ['admin-only', '仅管理员']] as const).map(([key, label]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => setInstalledFilterVisibility(key)}
-                    className={cn(
-                      'rounded-full px-3 py-1 text-sm transition-colors',
-                      installedFilterVisibility === key
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
               </div>
-            ) : activeTab === 'custom' ? installedAgentFilters : null}
+            ) : activeTab === 'mine' || activeTab === 'review' ? installedAgentFilters : null}
           </CardHeader>
 
           <CardContent className="pt-6">
             <Tabs value={activeTab} className="gap-0">
-              <TabsContent value="inventory" className="space-y-4"><AgentInventorySection query={searchQuery} /></TabsContent>
-              <TabsContent value="store" className="space-y-4">
+              <TabsContent value="available" className="space-y-4">
+                <AvailableServiceExperts query={searchQuery} refreshKey={catalogRefreshKey} />
                 {storeError ? (
                   <Alert variant="destructive">
                     <TriangleAlert className="size-4" />
-                    <AlertTitle>读取智能体失败</AlertTitle>
+                    <AlertTitle>读取专家失败</AlertTitle>
                     <AlertDescription>{storeError}</AlertDescription>
                   </Alert>
                 ) : null}
@@ -2159,7 +2108,7 @@ export default function AgentHubPage() {
                       <EmptyMedia variant="icon">
                         <Sparkles className="size-5" />
                       </EmptyMedia>
-                      <EmptyTitle>暂无可用智能体</EmptyTitle>
+                      <EmptyTitle>暂无可用专家</EmptyTitle>
                       <EmptyDescription>
                         当前筛选条件下没有结果，试试切换分类或调整搜索词。
                       </EmptyDescription>
@@ -2167,7 +2116,7 @@ export default function AgentHubPage() {
                   </Empty>
                 ) : (
                   <div className="grid gap-4 md:grid-cols-2">
-                    {filteredStoreAssistants.map(agent => {
+                    {filteredStoreAssistants.filter(agent => !tenantAssistants.some(row => row.status === 'approved' && row.isAvailable !== false && row.replaces_id === agent.id)).map(agent => {
                       const installed =
                         installedAgentLookup.has(agent.id)
 
@@ -2186,15 +2135,10 @@ export default function AgentHubPage() {
                           agent={agent}
                           installed={installed}
                           installedAgent={installedAgentInfo}
-                          busy={installingAssistantId === agent.id}
-                          canInstall={isStoreAdmin}
+                          busy={false}
                           onOpen={item => void openDetail(item)}
-                          onInstall={(item, skillIds) =>
-                            void handleInstall(item, skillIds)
-                          }
                           onOpenEdit={openEdit}
-                          onOpenVisibility={openAgentVisibility}
-                          onRequestUninstall={setPendingUninstallAgent}
+                          onDraft={canReview ? openCatalogDraft : undefined}
                         />
                       )
                     })}
@@ -2203,29 +2147,37 @@ export default function AgentHubPage() {
 
                 {loadingMore ? <LoadingSkeleton /> : null}
                 {hasMore ? <div ref={sentinelRef} className="h-1" /> : null}
+                {filteredTenantAssistants.filter(assistant => assistant.status === 'approved' && assistant.isAvailable !== false).length > 0 ? (
+                  <section className="space-y-3">
+                    <div className="grid gap-4 md:grid-cols-2">
+                      {filteredTenantAssistants.filter(assistant => assistant.status === 'approved' && assistant.isAvailable !== false).map(assistant => (
+                        <button key={`available:${assistant.id}`} type="button" className="rounded-xl border bg-card p-4 text-left transition-colors hover:bg-accent/30" onClick={() => canReview && assistant.can_manage ? openTenantEdit(assistant) : setTenantAssistantDetail(assistant)}>
+                          <div className="flex items-start gap-3">
+                            <div className="flex size-10 items-center justify-center rounded-lg bg-muted text-lg">{assistant.emoji || <Bot className="size-5" />}</div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="font-medium">{assistant.display_name || assistant.name}</div>
+                                <Badge variant="outline" className="text-[10px]">{expertTypeLabel(assistant.expert_type || assistant.provider_type || assistant.source_type)}</Badge>
+                                {assistant.version ? <Badge variant="outline" className="text-[10px]">v{assistant.version}</Badge> : null}
+                              </div>
+                              <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{assistant.description || '暂无描述'}</p>
+                              <span className="mt-2 inline-block text-xs text-muted-foreground">已发布 · 当前账号可见</span>
+                              <span className="mt-2 block text-sm text-primary">{canReview && assistant.can_manage ? '编辑' : '查看详情'}</span>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
               </TabsContent>
 
-              <TabsContent value="exclusive" className="space-y-4">
+              <TabsContent value="review" className="space-y-4">
                 <ExternalAgentsSection query={searchQuery} />
-                <div role="group" aria-label="内部托管操作" className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h3 className="font-semibold">内部托管</h3>
-                    <p className="mt-1 text-sm text-muted-foreground">由组织创建和管理，使用 Sudo 执行能力的智能体。</p>
-                  </div>
-                  <Button onClick={() => {
-                    void loadAvailableWikis()
-                    void loadAvailableCorpApps()
-                    applyDefaultCreateVisibility()
-                    setCreateOpen(true)
-                  }}>
-                    <Plus className="mr-2 size-4" />
-                    创建智能体
-                  </Button>
-                </div>
-                {installedAgentFilters}
+                {user?.role === 'dept_admin' ? <DepartmentServiceReviews /> : null}
                 {tenantAssistantsLoading ? (
                   <LoadingSkeleton />
-                ) : filteredTenantAssistants.length === 0 ? (
+                ) : filteredTenantAssistants.filter(assistant => assistant.status === 'pending' || assistant.status === 'reviewed').length === 0 ? (
                   <Empty className="rounded-xl border bg-muted/20">
                     <EmptyHeader>
                       <EmptyMedia variant="icon">
@@ -2233,19 +2185,19 @@ export default function AgentHubPage() {
                       </EmptyMedia>
                       <EmptyTitle>
                         {searchQuery.trim() || installedFilterAgentType !== 'all' || installedFilterVisibility !== 'all'
-                          ? '未找到匹配的内部托管智能体'
-                          : '暂无内部托管智能体'}
+                          ? '未找到匹配的专家'
+                          : '暂无待审核专家'}
                       </EmptyTitle>
                       <EmptyDescription>
                         {searchQuery.trim() || installedFilterAgentType !== 'all' || installedFilterVisibility !== 'all'
                           ? '请尝试调整筛选条件。'
-                          : '组织创建并审批的内部托管智能体会在这里展示。'}
+                          : '提交后的专家会在这里等待部门管理员、组织管理员或超级管理员审核。'}
                       </EmptyDescription>
                     </EmptyHeader>
                   </Empty>
                 ) : (
                   <div className="grid gap-4 md:grid-cols-2">
-                    {filteredTenantAssistants.map(assistant => (
+                    {filteredTenantAssistants.filter(assistant => assistant.status === 'pending' || assistant.status === 'reviewed').map(assistant => (
                       <div
                         key={assistant.id}
                         role="button"
@@ -2293,6 +2245,8 @@ export default function AgentHubPage() {
                               >
                                 {assistant.status === 'approved'
                                   ? '已通过'
+                                  : assistant.status === 'reviewed'
+                                    ? '部门已审核，待发布'
                                   : assistant.status === 'pending'
                                     ? '待审批'
                                     : '已拒绝'}
@@ -2337,9 +2291,9 @@ export default function AgentHubPage() {
                             {/* Edit/delete follow the server's can_manage flag
                                 (author in the viewer's scope); approval is a
                                 store-admin-only action. */}
-                            {assistant.status === 'pending' ? (
+                            {assistant.status === 'pending' || assistant.status === 'reviewed' ? (
                               <>
-                                {isStoreAdmin ? (
+                                {isStoreAdmin || user?.role === 'dept_admin' ? (
                                   <Button
                                     size="sm"
                                     variant="outline"
@@ -2349,7 +2303,7 @@ export default function AgentHubPage() {
                                       setApprovalDialogOpen(true)
                                     }}
                                   >
-                                    审批
+                                    {assistant.status === 'reviewed' && isStoreAdmin ? '发布' : '审核'}
                                   </Button>
                                 ) : (
                                   // Non-admin: no 审批 modal, so surface a read-only
@@ -2444,10 +2398,67 @@ export default function AgentHubPage() {
                 )}
               </TabsContent>
 
-              <TabsContent value="custom" className="space-y-4">
+              <TabsContent value="mine" className="space-y-4">
+                <ExternalAgentsSection query="" mode="create" createRequest={externalCreateRequest} />
+                <MyServiceExperts query={searchQuery} refreshKey={catalogRefreshKey} />
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4">
+                  <div>
+                    <h3 className="font-semibold">创建我的专家</h3>
+                    <p className="mt-1 text-sm text-muted-foreground">创建、导入、编辑和本地调试专家，完成后可提交审核。</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="agent-mine-archive-import"
+                      type="file"
+                      accept=".zip,application/zip"
+                      className="hidden"
+                      onChange={event => {
+                        void handleImportArchive(event.target.files?.[0])
+                        event.target.value = ''
+                      }}
+                    />
+                    <Button variant="outline" disabled={importingArchive} onClick={() => document.getElementById('agent-mine-archive-import')?.click()}>
+                      {importingArchive ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Package className="mr-2 size-4" />}
+                      导入专家包
+                    </Button>
+                    <Button onClick={() => {
+                      void loadAvailableWikis()
+                      void loadAvailableCorpApps()
+                      applyDefaultCreateVisibility()
+                      setSourcePickerOpen(true)
+                    }}>
+                      <Plus className="mr-2 size-4" />
+                      创建专家
+                    </Button>
+                  </div>
+                </div>
+                {filteredTenantAssistants.filter(assistant => assistant.author_id === user?.id && assistant.status !== 'superseded').length > 0 ? (
+                  <section className="space-y-3"><h3 className="font-semibold">我的版本</h3><div className="grid gap-4 md:grid-cols-2">{filteredTenantAssistants.filter(assistant => assistant.author_id === user?.id && assistant.status !== 'superseded').map(assistant => (
+                    <div key={`mine-tenant:${assistant.id}`}><button type="button" className="rounded-xl border bg-card p-4 text-left hover:bg-accent/30" onClick={() => (assistant.status !== 'approved' || canReview) && assistant.can_manage ? openTenantEdit(assistant) : setTenantAssistantDetail(assistant)}>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="font-medium">{assistant.display_name || assistant.name}</div>
+                        <Badge variant="outline" className="text-[10px]">Moss 资产</Badge>
+                        {assistant.version ? <Badge variant="outline" className="text-[10px]">v{assistant.version}</Badge> : null}
+                      </div>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {assistant.status === 'approved'
+                          ? assistant.isAvailable === false
+                            ? '已发布；当前可见范围外，仅在我的专家中管理'
+                            : '已发布；同一版本在可用专家中供授权用户使用'
+                          : assistant.status === 'draft' ? '草稿，可编辑后提交审核' : assistant.status === 'reviewed'
+                            ? '部门已审核，等待组织管理员发布'
+                            : assistant.status === 'pending'
+                              ? '等待审核'
+                              : '已拒绝，可修改后重新提交'}
+                      </p>
+                    </button>
+                    <PrivateAssetActions kind="agent" id={assistant.id} name={assistant.name} source="tenant" canSubmit={['draft', 'rejected'].includes(assistant.status)} onSubmitted={async () => { await Promise.all([fetchTenantAssistants(), fetchInstalledState()]) }} />
+                    </div>
+                  ))}</div></section>
+                ) : null}
                 {installedLoading ? (
                   <LoadingSkeleton />
-                ) : filteredCustomAgents.length === 0 ? (
+                ) : filteredCustomAgents.length === 0 && !filteredTenantAssistants.some(item => item.author_id === user?.id && item.status !== 'superseded') ? (
                   <Empty className="rounded-xl border bg-muted/20">
                     <EmptyHeader>
                       <EmptyMedia variant="icon">
@@ -2455,13 +2466,13 @@ export default function AgentHubPage() {
                       </EmptyMedia>
                       <EmptyTitle>
                         {searchQuery.trim() || installedFilterAgentType !== 'all' || installedFilterVisibility !== 'all'
-                          ? '未找到匹配的自定义智能体'
-                          : '暂无自定义智能体'}
+                          ? '未找到匹配的我的专家'
+                          : '暂无我的专家'}
                       </EmptyTitle>
                       <EmptyDescription>
                         {searchQuery.trim() || installedFilterAgentType !== 'all' || installedFilterVisibility !== 'all'
                           ? '请尝试调整筛选条件。'
-                          : '通过前端创建或上传的自定义智能体会在这里展示。'}
+                          : '通过创建、导入或上传形成的专家会在这里展示。'}
                       </EmptyDescription>
                     </EmptyHeader>
                   </Empty>
@@ -2472,13 +2483,15 @@ export default function AgentHubPage() {
                       // creator-only by design — no visibility management here (any
                       // role). onOpenVisibility is intentionally omitted so the
                       // Shield button doesn't render.
+                      <div key={`${agent.source}:${agent.name}`}>
                       <InstalledAgentCard
-                        key={`${agent.source}:${agent.name}`}
                         agent={agent}
                         uninstalling={pendingUninstallAgent?.source === agent.source}
                         onOpenEdit={item => void openEdit(item)}
                         onRequestUninstall={setPendingUninstallAgent}
                       />
+                      <PrivateAssetActions kind="agent" id={agent.id} name={agent.name} onSubmitted={async () => { await Promise.all([fetchTenantAssistants(), fetchInstalledState()]) }} />
+                      </div>
                     ))}
                   </div>
                 )}
@@ -2488,12 +2501,21 @@ export default function AgentHubPage() {
         </Card>
       </div>
 
+      <Dialog open={sourcePickerOpen} onOpenChange={setSourcePickerOpen}>
+        <DialogContent><DialogHeader><DialogTitle>选择专家来源</DialogTitle><DialogDescription>根据资产来源使用对应的创建和校验流程。</DialogDescription></DialogHeader>
+          <Button variant="outline" onClick={() => { setCreateProviderType('static'); setSourcePickerOpen(false); setCreateOpen(true) }}>静态描述文件</Button>
+          <Button variant="outline" onClick={() => { setCreateProviderType('moss_runtime'); setSourcePickerOpen(false); setCreateOpen(true) }}>Moss 运行时专家</Button>
+          <Button variant="outline" onClick={() => { setSourcePickerOpen(false); document.getElementById('agent-mine-archive-import')?.click() }}>从本地导入专家包</Button>
+          <Button variant="outline" onClick={() => { setSourcePickerOpen(false); setExternalCreateRequest(value => value + 1) }}>Dify / A2A / 外部 API 服务</Button>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
-            <DialogTitle>{detailDisplayName || '智能体详情'}</DialogTitle>
+            <DialogTitle>{detailDisplayName || '专家详情'}</DialogTitle>
             <DialogDescription>
-              查看智能体说明、关联技能和当前安装状态。
+              查看专家说明、关联技能和使用状态。
             </DialogDescription>
           </DialogHeader>
 
@@ -2518,11 +2540,8 @@ export default function AgentHubPage() {
 
                     <div className="min-w-0 flex-1 space-y-3">
                       <div className="flex flex-wrap items-center gap-2">
-                        {detailResolvedInstalledAgent ? (
-                          <Badge variant="secondary">已安装</Badge>
-                        ) : (
-                          <Badge variant="outline">未安装</Badge>
-                        )}
+                        <Badge variant="outline">已发布资源</Badge>
+                        {hubVersion(detailData || detailAgent) ? <Badge variant="outline">版本 {hubVersion(detailData || detailAgent)}</Badge> : null}
                         {detailCategories.map(category => (
                           <Badge key={`detail:${category}`} variant="outline">
                             {category}
@@ -2544,7 +2563,7 @@ export default function AgentHubPage() {
                     <Card>
                       <CardHeader>
                         <CardTitle className="text-base">核心能力</CardTitle>
-                        <CardDescription>智能体在 Hub 中声明的能力说明。</CardDescription>
+                        <CardDescription>专家在 Hub 中声明的能力说明。</CardDescription>
                       </CardHeader>
                       <CardContent className="space-y-3">
                         {detailCoreFeatures.map(feature => (
@@ -2565,7 +2584,7 @@ export default function AgentHubPage() {
                     <Card>
                       <CardHeader>
                         <CardTitle className="text-base">适用场景</CardTitle>
-                        <CardDescription>适合部署该智能体的业务场景。</CardDescription>
+                        <CardDescription>适合部署该专家的业务场景。</CardDescription>
                       </CardHeader>
                       <CardContent className="flex flex-wrap gap-2">
                         {detailScenarios.map(scenario => (
@@ -2581,13 +2600,13 @@ export default function AgentHubPage() {
                     <CardHeader>
                       <CardTitle className="text-base">关联技能</CardTitle>
                       <CardDescription>
-                        安装智能体时会尝试自动安装这些技能到 server。
+                        使用专家时，系统会按执行环境自动准备关联技能。
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-3">
                       {detailSkillIds.length === 0 ? (
                         <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-6 text-sm text-muted-foreground">
-                          该智能体没有声明关联技能。
+                          该专家没有声明关联技能。
                         </div>
                       ) : detailSkills.length === 0 ? (
                         <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-6 text-sm text-muted-foreground">
@@ -2622,9 +2641,7 @@ export default function AgentHubPage() {
                                 </div>
                               ) : null}
                             </div>
-                            <Badge variant={skill.isInstalled ? 'secondary' : 'outline'}>
-                              {skill.isInstalled ? '已安装' : '未安装'}
-                            </Badge>
+                            <Badge variant="outline">关联能力</Badge>
                           </div>
                         ))
                       )}
@@ -2638,53 +2655,11 @@ export default function AgentHubPage() {
           <DialogFooter className="items-center sm:justify-between">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Shield className="size-4" />
-              <span>安装与卸载动作都在 server 侧执行。</span>
+              <span>可用专家仅在 Moss 中展示和编辑；使用入口位于 SudoWork。</span>
             </div>
 
             <div className="flex items-center gap-2">
-              {detailResolvedInstalledAgent ? (
-                <>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setDetailOpen(false)
-                      void openEdit(detailResolvedInstalledAgent)
-                    }}
-                  >
-                    {isStoreAdmin ? '编辑已安装项' : '查看已安装项'}
-                  </Button>
-                  {!detailResolvedInstalledAgent.isBuiltin ? (
-                    <Button
-                      variant="destructive"
-                      onClick={() => setPendingUninstallAgent(detailResolvedInstalledAgent)}
-                    >
-                      <Trash2 className="mr-2 size-4" />
-                      卸载
-                    </Button>
-                  ) : null}
-                </>
-              ) : (
-                <Button
-                  disabled={
-                    detailLoading ||
-                    installingAssistantId === detailAgent?.id ||
-                    !(detailData?.sourceUrl || detailAgent?.sourceUrl)
-                  }
-                  onClick={() => {
-                    if (!detailAgent) return
-                    void handleInstall(detailData || detailAgent, detailSkillIds)
-                  }}
-                >
-                  {installingAssistantId === detailAgent?.id ? (
-                    <>
-                      <Loader2 className="mr-2 size-4 animate-spin" />
-                      安装中
-                    </>
-                  ) : (
-                    '安装到 Server'
-                  )}
-                </Button>
-              )}
+              {detailAgent && canReview ? <EditPublishedAsset kind="agents" id={detailAgent.id} onDraft={openCatalogDraft} /> : null}
             </div>
           </DialogFooter>
         </DialogContent>
@@ -2702,9 +2677,10 @@ export default function AgentHubPage() {
         >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>编辑智能体</DialogTitle>
+            <DialogTitle>编辑专家</DialogTitle>
+            {editingAgent?.version ? <p className="text-sm text-muted-foreground">当前版本：{editingAgent.version}</p> : null}
             <DialogDescription>
-              修改 server 上已安装智能体的展示信息，不影响 Hub 原始数据。
+              修改 server 上已使用专家的展示信息，不影响 Hub 原始数据。
             </DialogDescription>
           </DialogHeader>
 
@@ -2714,7 +2690,7 @@ export default function AgentHubPage() {
               <label className="text-sm font-medium">标识名称</label>
               <Input value={editingAgent?.name ?? ''} readOnly disabled className="font-mono" />
               <p className="text-xs text-muted-foreground">
-                智能体的唯一标识与目录名称，创建后不可修改。
+                专家的唯一标识与目录名称，创建后不可修改。
               </p>
             </div>
 
@@ -2723,7 +2699,7 @@ export default function AgentHubPage() {
               <Input
                 value={editName}
                 onChange={event => setEditName(event.target.value)}
-                placeholder="输入智能体显示名称"
+                placeholder="输入专家显示名称"
               />
             </div>
 
@@ -2752,7 +2728,7 @@ export default function AgentHubPage() {
                 value={editDescription}
                 onChange={event => setEditDescription(event.target.value)}
                 rows={4}
-                placeholder="输入智能体描述"
+                placeholder="输入专家描述"
               />
             </div>
 
@@ -2762,11 +2738,11 @@ export default function AgentHubPage() {
                 value={editRules}
                 onChange={event => setEditRules(event.target.value)}
                 rows={10}
-                placeholder="# 角色\n\n在这里输入智能体规则"
+                placeholder="# 角色\n\n在这里输入专家规则"
                 className="font-mono text-xs"
               />
               <p className="text-xs text-muted-foreground">
-                这里的 Markdown 内容会作为智能体指令文件保存。
+                这里的 Markdown 内容会作为专家指令文件保存。
               </p>
             </div>
 
@@ -2777,7 +2753,7 @@ export default function AgentHubPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="chat">对话智能体</SelectItem>
+                  <SelectItem value="chat">对话专家</SelectItem>
                   <SelectItem value="workflow">业务流程</SelectItem>
                 </SelectContent>
               </Select>
@@ -2971,7 +2947,7 @@ export default function AgentHubPage() {
               <div>
                 <div className="text-sm font-medium">关联技能</div>
                 <p className="text-sm text-muted-foreground">
-                  管理该智能体关联的技能，可勾选启用、添加或移除。
+                  管理该专家关联的技能，可勾选启用、添加或移除。
                 </p>
               </div>
 
@@ -3020,7 +2996,7 @@ export default function AgentHubPage() {
                               ) : null}
                             </div>
                             {isInstalled ? (
-                              <Badge variant="secondary">已安装</Badge>
+                              <Badge variant="secondary">已使用</Badge>
                             ) : (
                               <Button
                                 size="sm"
@@ -3030,7 +3006,7 @@ export default function AgentHubPage() {
                                     const detail = await getSkillHubDetail(skillId)
                                     const latestVersion = detail?.versions?.[0]
                                     if (!latestVersion?.source_url) {
-                                      toast.error('该技能暂不支持安装')
+                                      toast.error('该技能暂不可用')
                                       return
                                     }
                                     await installSkill({
@@ -3040,14 +3016,14 @@ export default function AgentHubPage() {
                                       checksum: typeof latestVersion.checksum === 'string' ? latestVersion.checksum : undefined,
                                       skillMeta: skill,
                                     })
-                                    toast.success(`已安装技能 ${skill.display_name || skill.name}`)
+                                    toast.success(`已准备技能 ${skill.display_name || skill.name}`)
                                     await fetchInstalledState(false)
                                   } catch (err) {
-                                    toast.error(err instanceof Error ? err.message : '安装技能失败')
+                                    toast.error(err instanceof Error ? err.message : '准备技能失败')
                                   }
                                 }}
                               >
-                                安装
+                                使用
                               </Button>
                             )}
                             <Button
@@ -3068,7 +3044,7 @@ export default function AgentHubPage() {
                     </div>
                   ) : (
                     <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-6 text-sm text-muted-foreground">
-                      该智能体暂无关联技能，点击下方按钮添加。
+                      该专家暂无关联技能，点击下方按钮添加。
                     </div>
                   )}
 
@@ -3085,7 +3061,7 @@ export default function AgentHubPage() {
                           onClick={() => setEditAddSkillOpen(!editAddSkillOpen)}
                         >
                           <Plus className="mr-1 size-4" />
-                          添加已安装技能
+                          添加已关联技能
                         </Button>
                         {editAddSkillOpen ? (
                           <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border p-2">
@@ -3159,7 +3135,7 @@ export default function AgentHubPage() {
                 <Badge variant="outline">{editEnabledWikis.length} / {availableWikis.length} 已关联</Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                勾选 Wiki 即可让该智能体在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
+                勾选 Wiki 即可让该专家在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
               </p>
               {availableWikis.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -3230,7 +3206,7 @@ export default function AgentHubPage() {
                 <Badge variant="outline">{editEnabledCorpApps.length} / {availableCorpApps.length} 已关联</Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                勾选后,该智能体可通过 corpapp CLI 使用这些企业应用收发消息与文件。
+                勾选后,该专家可通过 corpapp CLI 使用这些企业应用收发消息与文件。
               </p>
               {availableCorpApps.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -3284,9 +3260,9 @@ export default function AgentHubPage() {
             {editingAgent?.isHubInstalled ? (
               <Alert>
                 <CheckCircle2 className="size-4" />
-                <AlertTitle>当前安装源</AlertTitle>
+                <AlertTitle>当前使用源</AlertTitle>
                 <AlertDescription>
-                  该智能体来自 Hub，当前修改只会写入 server 本地的
+                  该专家来自 Hub，当前修改只会写入 server 本地的
                   `_moss_meta.json`。
                 </AlertDescription>
               </Alert>
@@ -3298,8 +3274,8 @@ export default function AgentHubPage() {
             {!canEditEditingAgent ? (
               <span className="mr-auto self-center text-xs text-muted-foreground">
                 {editingAgent?.meta?.source_type === 'custom'
-                  ? '仅创建者可编辑该自定义智能体'
-                  : '仅管理员可编辑已安装智能体'}
+                  ? '仅创建者可编辑该自定义专家'
+                  : '仅管理员可编辑已使用专家'}
               </span>
             ) : null}
             <Button variant="outline" onClick={() => setEditOpen(false)}>
@@ -3329,17 +3305,17 @@ export default function AgentHubPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认卸载智能体</AlertDialogTitle>
+            <AlertDialogTitle>确认删除专家</AlertDialogTitle>
             <AlertDialogDescription>
               {pendingUninstallAgent
                 ? `将从 server 上移除 ${pendingUninstallAgent.displayName}，该操作不会删除 Hub 中的原始数据。`
-                : '确认后将从 server 上卸载该智能体。'}
+                : '确认后将从 server 上删除该专家。'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction onClick={() => void handleConfirmUninstall()}>
-              卸载
+              删除
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -3360,6 +3336,7 @@ export default function AgentHubPage() {
             setCreateEmoji('')
             setCreateRules('')
             setCreateAgentType('chat')
+            setCreateProviderType('static')
             setCreateMemoryMode('session')
             setCreateVisibilityMode('all')
             setCreateVisibleTo([])
@@ -3381,11 +3358,9 @@ export default function AgentHubPage() {
       >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{isStoreAdmin ? '创建智能体' : '提交智能体发布申请'}</DialogTitle>
+            <DialogTitle>创建专家</DialogTitle>
             <DialogDescription>
-              {isStoreAdmin
-                ? '创建一个组织内共享的专属智能体（自动审批通过，按可见范围对成员可见）。自定义智能体由客户端创建并同步。'
-                : '提交一个专属智能体发布申请。提交后需管理员审批，审批通过后才会对组织成员可见；可见范围默认限定为你所在部门/本人。'}
+              创建草稿到我的专家。编辑完成后可提交审核，发布后按可见范围展示。
             </DialogDescription>
           </DialogHeader>
 
@@ -3402,7 +3377,7 @@ export default function AgentHubPage() {
                   placeholder="my-agent（英文，用作目录名）"
                 />
                 <p className="text-xs text-muted-foreground">
-                  仅支持英文、数字和连字符，将作为智能体的唯一标识和目录名称
+                  仅支持英文、数字和连字符，将作为专家的唯一标识和目录名称
                 </p>
               </div>
 
@@ -3413,7 +3388,7 @@ export default function AgentHubPage() {
                 <Input
                   value={createDisplayName}
                   onChange={event => setCreateDisplayName(event.target.value)}
-                  placeholder="我的智能体"
+                  placeholder="我的专家"
                 />
               </div>
             </div>
@@ -3444,7 +3419,7 @@ export default function AgentHubPage() {
                 value={createDescription}
                 onChange={event => setCreateDescription(event.target.value)}
                 rows={2}
-                placeholder="输入智能体描述"
+                placeholder="输入专家描述"
               />
             </div>
 
@@ -3483,11 +3458,11 @@ export default function AgentHubPage() {
                 value={createRules}
                 onChange={event => setCreateRules(event.target.value)}
                 rows={10}
-                placeholder="# 角色\n\n在这里输入智能体规则"
+                placeholder="# 角色\n\n在这里输入专家规则"
                 className="font-mono text-xs"
               />
               <p className="text-xs text-muted-foreground">
-                使用 Markdown 编写系统规则，创建后会保存为该智能体的指令文件。
+                使用 Markdown 编写系统规则，创建后会保存为该专家的指令文件。
               </p>
             </div>
 
@@ -3498,10 +3473,24 @@ export default function AgentHubPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="chat">对话智能体</SelectItem>
+                  <SelectItem value="chat">对话专家</SelectItem>
                   <SelectItem value="workflow">业务流程</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">专家类型</label>
+              <Select value={createProviderType} onValueChange={value => setCreateProviderType(value as typeof createProviderType)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="static">静态描述文件</SelectItem>
+                  <SelectItem value="moss_runtime">运行时专家</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">类型只用于识别专家来源和运行方式，审核发布后会在可用专家卡片中展示。</p>
             </div>
 
             {createAgentType === 'chat' ? (
@@ -3692,7 +3681,7 @@ export default function AgentHubPage() {
               <div className="space-y-2">
                 <label className="text-sm font-medium">可见范围</label>
                 <p className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
-                  该专属智能体将提交给管理员审批，默认仅你本人可见。如需扩大可见范围，请由管理员在审批时调整。
+                  该专属专家将提交给管理员审批，默认仅你本人可见。如需扩大可见范围，请由管理员在审批时调整。
                 </p>
               </div>
             )}
@@ -3701,12 +3690,12 @@ export default function AgentHubPage() {
               <div>
                 <div className="text-sm font-medium">关联技能</div>
                 <p className="text-sm text-muted-foreground">
-                  选择要关联到该智能体的已安装技能。
+                  选择要关联到该专家的已关联技能。
                 </p>
               </div>
               {installedSkills.length === 0 ? (
                 <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-6 text-sm text-muted-foreground">
-                  暂无已安装技能，请先在技能商店安装技能。
+                  暂无已关联技能，请先在技能库使用技能。
                 </div>
               ) : (
                 <div className="space-y-2 max-h-48 overflow-y-auto">
@@ -3755,7 +3744,7 @@ export default function AgentHubPage() {
                 <Badge variant="outline">{createSelectedWikis.length} / {availableWikis.length} 已关联</Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                创建时即可绑定 Wiki，让智能体可直接查询这些知识库。
+                创建时即可绑定 Wiki，让专家可直接查询这些知识库。
               </p>
               {availableWikis.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -3820,7 +3809,7 @@ export default function AgentHubPage() {
                 <Badge variant="outline">{createSelectedCorpApps.length} / {availableCorpApps.length} 已关联</Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                勾选后,该智能体可通过 corpapp CLI 使用这些企业应用收发消息与文件。
+                勾选后,该专家可通过 corpapp CLI 使用这些企业应用收发消息与文件。
               </p>
               {availableCorpApps.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -3884,10 +3873,10 @@ export default function AgentHubPage() {
               {creatingAssistant ? (
                 <>
                   <Loader2 className="mr-2 size-4 animate-spin" />
-                  {isStoreAdmin ? '创建中' : '提交中'}
+                  创建中
                 </>
               ) : (
-                isStoreAdmin ? '创建' : '提交发布申请'
+                '创建并提交审核'
               )}
             </Button>
           </DialogFooter>
@@ -3897,10 +3886,10 @@ export default function AgentHubPage() {
       <Dialog open={syncProgressOpen} onOpenChange={open => { if (!open) setSyncProgressOpen(false) }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>智能体同步进度</DialogTitle>
+            <DialogTitle>专家同步进度</DialogTitle>
             <DialogDescription>
               {syncProgress?.status === 'running'
-                ? '正在从 Hub 同步智能体...'
+                ? '正在从 Hub 同步专家...'
                 : syncProgress?.status === 'done'
                   ? '同步完成'
                   : syncProgress?.status === 'error'
@@ -3927,7 +3916,7 @@ export default function AgentHubPage() {
                 />
               </div>
               <div className="grid grid-cols-2 gap-2 text-sm">
-                <div>新安装: <span className="font-medium">{syncProgress.installed}</span></div>
+                <div>新使用: <span className="font-medium">{syncProgress.installed}</span></div>
                 <div>更新: <span className="font-medium">{syncProgress.updated}</span></div>
                 <div>跳过: <span className="font-medium">{syncProgress.skipped}</span></div>
                 <div>失败: <span className="font-medium text-destructive">{syncProgress.failed}</span></div>
@@ -3956,7 +3945,7 @@ export default function AgentHubPage() {
       <Dialog open={agentVisibilityOpen} onOpenChange={setAgentVisibilityOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>编辑智能体可见性</DialogTitle>
+            <DialogTitle>编辑专家可见性</DialogTitle>
             <DialogDescription>
               {editingVisibilityAgent?.displayName ?? ''}
             </DialogDescription>
@@ -4056,14 +4045,15 @@ export default function AgentHubPage() {
       <Dialog open={approvalDialogOpen} onOpenChange={open => { if (!open) setApprovalDialogOpen(false) }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>审批专属智能体</DialogTitle>
+            <DialogTitle>审批专属专家</DialogTitle>
             <DialogDescription>
-              {approvingAssistant ? `审批智能体: ${approvingAssistant.display_name || approvingAssistant.name}` : '审批专属智能体发布申请'}
+              {approvingAssistant ? `审批专家: ${approvingAssistant.display_name || approvingAssistant.name}` : '审批专属专家发布申请'}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div className="text-sm">
               <p className="font-medium">发布说明</p>
+              <p className="text-sm">提交版本：{approvingAssistant?.version || "未设置"}</p>
               <p className="mt-1 text-muted-foreground">{approvingAssistant?.publish_note || '无发布说明'}</p>
             </div>
             <div className="space-y-2">
@@ -4262,9 +4252,9 @@ export default function AgentHubPage() {
       <Dialog open={tenantVisibilityOpen} onOpenChange={open => { if (!open) setTenantVisibilityOpen(false) }}>
         <DialogContent className='max-w-lg'>
           <DialogHeader>
-            <DialogTitle>编辑专属智能体可见性</DialogTitle>
+            <DialogTitle>编辑专属专家可见性</DialogTitle>
             <DialogDescription>
-              {editingTenantAssistant ? `设置 ${editingTenantAssistant.display_name || editingTenantAssistant.name} 的可见范围` : '设置专属智能体的可见范围'}
+              {editingTenantAssistant ? `设置 ${editingTenantAssistant.display_name || editingTenantAssistant.name} 的可见范围` : '设置专属专家的可见范围'}
             </DialogDescription>
           </DialogHeader>
           {(() => {
@@ -4401,7 +4391,7 @@ export default function AgentHubPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>确认覆盖可见范围</AlertDialogTitle>
             <AlertDialogDescription>
-              管理员为该智能体设置了
+              管理员为该专家设置了
               {tenantVisibilityOutOfScope.deptCount > 0 ? ` ${tenantVisibilityOutOfScope.deptCount} 个部门` : ''}
               {tenantVisibilityOutOfScope.deptCount > 0 && tenantVisibilityOutOfScope.userCount > 0 ? ' 和' : ''}
               {tenantVisibilityOutOfScope.userCount > 0 ? ` ${tenantVisibilityOutOfScope.userCount} 个用户` : ''}
@@ -4415,13 +4405,13 @@ export default function AgentHubPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* 专属智能体详情对话框 */}
+      {/* 专属专家详情对话框 */}
       <Dialog open={tenantAssistantDetail !== null} onOpenChange={open => { if (!open) setTenantAssistantDetail(null) }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{tenantAssistantDetail?.display_name || tenantAssistantDetail?.name || '专属智能体详情'}</DialogTitle>
+            <DialogTitle>{tenantAssistantDetail?.display_name || tenantAssistantDetail?.name || '专属专家详情'}</DialogTitle>
             <DialogDescription>
-              查看专属智能体详细信息。
+              查看专属专家详细信息。
             </DialogDescription>
           </DialogHeader>
           {tenantAssistantDetail && (
@@ -4515,7 +4505,7 @@ export default function AgentHubPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 专属智能体编辑对话框 */}
+      {/* 专属专家编辑对话框 */}
       <Dialog
         open={tenantEditOpen}
         onOpenChange={open => {
@@ -4528,9 +4518,10 @@ export default function AgentHubPage() {
       >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>编辑专属智能体</DialogTitle>
+            <DialogTitle>编辑专属专家</DialogTitle>
+            {editingTenantAgent?.version ? <p className="text-sm text-muted-foreground">当前版本：{editingTenantAgent.version}</p> : null}
             <DialogDescription>
-              修改专属智能体的展示信息和配置。
+              保存后在“我的专家”继续编辑或提交审核；新版本发布前，原版本继续可用。
             </DialogDescription>
           </DialogHeader>
 
@@ -4540,7 +4531,7 @@ export default function AgentHubPage() {
                 <label className="text-sm font-medium">标识名称</label>
                 <Input value={editingTenantAgent?.name ?? ''} readOnly disabled className="font-mono" />
                 <p className="text-xs text-muted-foreground">
-                  智能体的唯一标识与目录名称，创建后不可修改。
+                  专家的唯一标识与目录名称，创建后不可修改。
                 </p>
               </div>
 
@@ -4549,7 +4540,7 @@ export default function AgentHubPage() {
                 <Input
                   value={tenantEditName}
                   onChange={event => setTenantEditName(event.target.value)}
-                  placeholder="输入智能体显示名称"
+                  placeholder="输入专家显示名称"
                 />
               </div>
 
@@ -4598,7 +4589,7 @@ export default function AgentHubPage() {
                   value={tenantEditDescription}
                   onChange={event => setTenantEditDescription(event.target.value)}
                   rows={4}
-                  placeholder="输入智能体描述"
+                  placeholder="输入专家描述"
                 />
               </div>
 
@@ -4639,7 +4630,7 @@ export default function AgentHubPage() {
                   placeholder={
                     tenantEditRulesLoadFailed
                       ? '无法加载规则内容'
-                      : '# 角色\n\n在这里输入智能体规则'
+                      : '# 角色\n\n在这里输入专家规则'
                   }
                   className={`font-mono text-xs${tenantEditRulesEditable ? '' : ' bg-muted'}`}
                 />
@@ -4647,7 +4638,7 @@ export default function AgentHubPage() {
                   {tenantEditRulesLoadFailed
                     ? '规则内容加载失败，保存时将保留原有规则不变。'
                     : tenantEditRulesEditable
-                      ? '这里的 Markdown 内容会同步到专属智能体的规则文件。'
+                      ? '这里的 Markdown 内容会同步到专属专家的规则文件。'
                       : '仅创建者可编辑规则内容，此处为只读。'}
                 </p>
               </div>
@@ -4659,7 +4650,7 @@ export default function AgentHubPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="chat">对话智能体</SelectItem>
+                    <SelectItem value="chat">对话专家</SelectItem>
                     <SelectItem value="workflow">业务流程</SelectItem>
                   </SelectContent>
                 </Select>
@@ -4710,96 +4701,21 @@ export default function AgentHubPage() {
                 </div>
               ) : null}
 
-              {/* Visibility is NOT edited here. Pending items set visibility in
-                  the 审批 (approve) dialog; approved items use the Shield
-                  "编辑专属智能体可见性" dialog. Kept out of the general edit dialog
-                  to avoid a redundant/conflicting control. */}
-              {false ? (
-              <div className="space-y-3">
-                <div>
-                  <label className="text-sm font-medium">可见范围</label>
-                </div>
-                <RadioGroup
-                  value={tenantEditVisibilityMode}
-                  onValueChange={value => setTenantEditVisibilityMode(value as 'all' | 'departments' | 'users' | 'admin')}
-                >
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="all" />
-                    <label className="text-sm cursor-pointer">全员可见</label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="departments" />
-                    <label className="text-sm cursor-pointer">指定部门可见</label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="users" />
-                    <label className="text-sm cursor-pointer">指定人员可见</label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <RadioGroupItem value="admin" />
-                    <label className="text-sm cursor-pointer">仅管理员可见</label>
-                  </div>
-                </RadioGroup>
-                {tenantEditVisibilityMode === 'departments' ? (
-                  departmentOptions.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">暂无部门数据</p>
-                  ) : (
-                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-48 overflow-y-auto">
-                      {departmentOptions.map(dept => (
-                        <label
-                          key={dept.id}
-                          className="flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1"
-                        >
-                          <Checkbox
-                            checked={tenantEditVisibleTo.includes(dept.id)}
-                            onCheckedChange={checked => {
-                              setTenantEditVisibleTo(
-                                checked === true
-                                  ? [...tenantEditVisibleTo, dept.id]
-                                  : tenantEditVisibleTo.filter(id => id !== dept.id),
-                              )
-                            }}
-                          />
-                          <span>{'— '.repeat(dept.depth)}{dept.name}</span>
-                        </label>
-                      ))}
-                    </div>
-                  )
-                ) : tenantEditVisibilityMode === 'users' ? (
-                  users.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">暂无用户数据</p>
-                  ) : (
-                    <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-48 overflow-y-auto">
-                      {users.map(user => (
-                        <label
-                          key={user.id}
-                          className="flex items-center gap-2 text-sm cursor-pointer hover:bg-accent/30 rounded px-2 py-1"
-                        >
-                          <Checkbox
-                            checked={tenantEditVisibleUserIds.includes(user.id)}
-                            onCheckedChange={checked => {
-                              setTenantEditVisibleUserIds(
-                                checked === true
-                                  ? [...tenantEditVisibleUserIds, user.id]
-                                  : tenantEditVisibleUserIds.filter(id => id !== user.id),
-                              )
-                            }}
-                          />
-                          <span>{user.name || user.email}</span>
-                        </label>
-                      ))}
-                    </div>
-                  )
-                ) : null}
-              </div>
-              ) : null}
+              <AssetVisibilityEditor
+                value={tenantEditScope}
+                onChange={setTenantEditScope}
+                departments={departmentOptions}
+                users={users}
+                canChooseDepartments={isStoreAdmin || user?.role === 'dept_admin'}
+                isScoped={!isStoreAdmin}
+              />
 
               {/* Skills management section */}
               <div className="space-y-3 pt-4 border-t">
                 <div>
                   <div className="text-sm font-medium">关联技能</div>
                   <p className="text-sm text-muted-foreground">
-                    管理该智能体关联的技能，可勾选启用、添加或移除。
+                    管理该专家关联的技能，可勾选启用、添加或移除。
                   </p>
                 </div>
 
@@ -4848,7 +4764,7 @@ export default function AgentHubPage() {
                                 ) : null}
                               </div>
                               {isInstalled ? (
-                                <Badge variant="secondary">已安装</Badge>
+                                <Badge variant="secondary">已使用</Badge>
                               ) : (
                                 <Button
                                   size="sm"
@@ -4858,7 +4774,7 @@ export default function AgentHubPage() {
                                       const detail = await getSkillHubDetail(skillId)
                                       const latestVersion = detail?.versions?.[0]
                                       if (!latestVersion?.source_url) {
-                                        toast.error('该技能暂不支持安装')
+                                        toast.error('该技能暂不可用')
                                         return
                                       }
                                       await installSkill({
@@ -4868,14 +4784,14 @@ export default function AgentHubPage() {
                                         checksum: typeof latestVersion.checksum === 'string' ? latestVersion.checksum : undefined,
                                         skillMeta: skill,
                                       })
-                                      toast.success(`已安装技能 ${skill.display_name || skill.name}`)
+                                      toast.success(`已准备技能 ${skill.display_name || skill.name}`)
                                       await fetchInstalledState(false)
                                     } catch (err) {
-                                      toast.error(err instanceof Error ? err.message : '安装技能失败')
+                                      toast.error(err instanceof Error ? err.message : '准备技能失败')
                                     }
                                   }}
                                 >
-                                  安装
+                                  使用
                                 </Button>
                               )}
                               <Button
@@ -4897,7 +4813,7 @@ export default function AgentHubPage() {
                       </div>
                     ) : (
                       <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-6 text-sm text-muted-foreground">
-                        该智能体暂无关联技能，点击下方按钮添加。
+                        该专家暂无关联技能，点击下方按钮添加。
                       </div>
                     )}
 
@@ -4914,7 +4830,7 @@ export default function AgentHubPage() {
                             onClick={() => setTenantEditAddSkillOpen(!tenantEditAddSkillOpen)}
                           >
                             <Plus className="mr-1 size-4" />
-                            添加已安装技能
+                            添加已关联技能
                           </Button>
                           {tenantEditAddSkillOpen ? (
                             <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border p-2">
@@ -4989,7 +4905,7 @@ export default function AgentHubPage() {
                   <Badge variant="outline">{tenantEditEnabledWikis.length} / {availableWikis.length} 已关联</Badge>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  勾选 Wiki 即可让该智能体在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
+                  勾选 Wiki 即可让该专家在对话中按需调用知识库回答用户问题。仅显示已构建的 Wiki。
                 </p>
                 {availableWikis.length === 0 ? (
                   <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -5059,7 +4975,7 @@ export default function AgentHubPage() {
                   <Badge variant="outline">{tenantEditEnabledCorpApps.length} / {availableCorpApps.length} 已关联</Badge>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  勾选后,该智能体可通过 corpapp CLI 使用这些企业应用收发消息与文件。
+                  勾选后,该专家可通过 corpapp CLI 使用这些企业应用收发消息与文件。
                 </p>
                 {availableCorpApps.length === 0 ? (
                   <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
@@ -5126,7 +5042,7 @@ export default function AgentHubPage() {
                   保存中
                 </>
               ) : (
-                '保存'
+                '保存到我的专家'
               )}
             </Button>
           </DialogFooter>

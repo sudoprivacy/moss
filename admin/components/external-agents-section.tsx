@@ -59,13 +59,13 @@ type DialogState =
   | { kind: 'endpointReview'; request: EndpointRequest; approved: boolean }
   | null
 
-export default function ExternalAgentsSection({ query }: { query: string }) {
+export default function ExternalAgentsSection({ query, mode = 'review', createRequest = 0 }: { query: string; mode?: 'review' | 'create'; createRequest?: number }) {
   const { user, activeOrgId } = useAuth()
   if (!user || !activeOrgId) return null
-  return <ScopedExternalAgents key={`${user.id}:${activeOrgId}`} query={query} />
+  return <ScopedExternalAgents key={`${user.id}:${activeOrgId}`} query={query} mode={mode} createRequest={createRequest} />
 }
 
-function ScopedExternalAgents({ query }: { query: string }) {
+function ScopedExternalAgents({ query, mode, createRequest }: { query: string; mode: 'review' | 'create'; createRequest: number }) {
   const controller = useRef(new AbortController())
   const api = useMemo(() => createExternalAgentsApi(undefined, () => controller.current.signal), [controller])
   const [access, setAccess] = useState<ExternalProviderAccess | null>(null)
@@ -112,6 +112,11 @@ function ScopedExternalAgents({ query }: { query: string }) {
     const permissions = await api.access()
     if (current.signal.aborted) return
     setAccess(permissions)
+    if (mode === 'create' && (permissions.can_create || permissions.can_manage)) {
+      const settings = await api.policy()
+      if (!current.signal.aborted) setPolicy(settings)
+      return
+    }
     if (!permissions.can_manage) return
     const [rows, settings, requests] = await Promise.all([api.listPage(), api.policy(), api.endpointRequests()])
     if (current.signal.aborted) return
@@ -120,7 +125,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
     setPolicy(settings)
     setEndpointRequests(requests.items)
     setEndpointCursor(requests.next_cursor)
-  }, [api, controller])
+  }, [api, controller, mode])
 
   useEffect(() => {
     if (controller.current.signal.aborted) controller.current = new AbortController()
@@ -157,6 +162,10 @@ function ScopedExternalAgents({ query }: { query: string }) {
     const timer = setTimeout(() => { void onMembers(memberSearch) }, 250)
     return () => { clearTimeout(timer); memberGeneration.current++ }
   }, [dialog, memberSearch, onMembers])
+
+  useEffect(() => {
+    if (mode === 'create' && createRequest > 0) onOpen({ kind: 'create' })
+  }, [mode, createRequest])
 
   async function onRun(operation: () => Promise<void>) {
     if (isBusyRef.current || !isLive()) return
@@ -319,10 +328,11 @@ function ScopedExternalAgents({ query }: { query: string }) {
       clearDialog()
       setNotice(message)
       await onReload()
+      window.dispatchEvent(new Event("expert-library-changed"))
     })
   }
 
-  if (access && !access.can_manage) return null
+  if (access && !access.can_manage && !(mode === 'create' && access.can_create)) return null
   const visibleAgents = agents.filter((agent) =>
     agent.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
   )
@@ -331,9 +341,9 @@ function ScopedExternalAgents({ query }: { query: string }) {
     dialog?.kind === 'endpointReview'
       ? dialog.approved ? '批准服务地址' : '拒绝地址申请'
     : dialog?.kind === 'create'
-      ? '接入外部智能体'
+      ? '创建服务专家'
       : dialog?.kind === 'edit'
-        ? '编辑外部智能体'
+        ? '编辑服务专家'
         : dialog?.kind === 'rotate'
           ? '更换密钥'
           : dialog?.kind === 'policy'
@@ -420,15 +430,16 @@ function ScopedExternalAgents({ query }: { query: string }) {
   )
 
   return (
-    <section aria-label="外部托管智能体" className="space-y-4 border-b pb-6">
+    <section aria-label={mode === 'review' ? "服务专家审核与发布" : "接入服务专家"} className={mode === 'review' ? "space-y-4 border-b pb-6" : undefined}>
+      {mode === 'review' ? <>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 className="flex items-center gap-2 font-semibold">
             <Cloud className="size-4" />
-            外部托管<Badge variant="secondary">{agents.length}</Badge>
+            服务专家审核与发布<Badge variant="secondary">{agents.length}</Badge>
           </h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            由组织接入和发布，在外部平台执行。授权成员可在 SudoWork 的专属智能体中对话。
+            管理服务来源、待审核版本、发布记录和运行治理。
           </p>
         </div>
         <div className="flex gap-2">
@@ -441,13 +452,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
           >
             <RefreshCw className="size-4" />
           </Button>
-          <Button
-            disabled={isLoading || isBusy || !access?.can_manage}
-            onClick={() => onOpen({ kind: 'create' })}
-          >
-            <Plus className="mr-2 size-4" />
-            接入外部智能体
-          </Button>
+
         </div>
       </div>
       {isLoading ? (
@@ -605,6 +610,7 @@ function ScopedExternalAgents({ query }: { query: string }) {
           {query.trim() ? '没有匹配的外部智能体' : '尚未接入外部智能体，接入并审核后可供授权成员使用。'}
         </p>
       ) : null}
+      </> : null}
       {versionAgent && <ExternalAgentVersions key={versionAgent.id} agent={versionAgent} managed={managedSources.some(source => source.catalog_id === versionAgent.id)} onChanged={onReload} onClose={() => setVersionAgent(null)} />}
       <Dialog
         open={Boolean(dialog)}
@@ -660,11 +666,11 @@ function ScopedExternalAgents({ query }: { query: string }) {
                         <option value="new">填写新地址</option>
                       </select>
                     </Field>
-                    <Field id="external-endpoint" label="服务 API 地址" hint="填写服务的固定 IP 地址，以 /v1 结尾，例如 http://10.0.1.158:8089/v1。Dify 可在应用的“访问 API”页面查看。">
+                    <Field id="external-endpoint" label="服务 API 地址" hint="填写服务的固定 IP 地址，以 /v1 结尾，例如 http://192.0.2.10:8089/v1。Dify 可在应用的“访问 API”页面查看。">
                       {endpointMode === 'existing' ? <select id="external-endpoint" className={selectClass} value={draft.endpoint} onChange={event => { setDialogNotice(''); setDraft({ ...draft, endpoint: event.target.value, api_key: '' }) }}>
                         {draft.endpoint && !endpointAllowed && <option value={draft.endpoint}>{draft.endpoint}（已移出允许范围）</option>}
                         {policy.endpoints.map(endpoint => <option key={endpoint} value={endpoint}>{endpoint}</option>)}
-                      </select> : <Input id="external-endpoint" value={draft.endpoint} maxLength={1024} placeholder="http://10.0.1.158:8089/v1" onChange={event => { setDialogNotice(''); setDraft({ ...draft, endpoint: event.target.value, api_key: '' }) }} />}
+                      </select> : <Input id="external-endpoint" value={draft.endpoint} maxLength={1024} placeholder="http://192.0.2.10:8089/v1" onChange={event => { setDialogNotice(''); setDraft({ ...draft, endpoint: event.target.value, api_key: '' }) }} />}
                       <p className="text-xs text-muted-foreground">{endpointAllowed ? '地址已批准，可直接测试连接。' : access?.can_manage_policy ? '你是超级管理员，确认后将批准此地址并测试连接。' : '新地址需超级管理员批准。提交申请不会连接远端服务，也不会提交 API Key。'}</p>
                     </Field>
                     {!endpointAllowed && <Field id="external-endpoint-note" label={access?.can_manage_policy ? '地址批准说明' : '地址申请说明'} hint="填写服务用途与归属，请勿填写密钥。">
