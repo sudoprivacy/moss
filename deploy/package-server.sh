@@ -26,6 +26,8 @@ docker buildx build \
 
 test -x "$STAGE_DIR/moss-server/node/bin/node"
 test -f "$STAGE_DIR/moss-server/app/bin/moss-server.mjs"
+test -f "$STAGE_DIR/moss-server/app/bin/moss-qualify-sqlite-upgrade.mjs"
+test -f "$STAGE_DIR/moss-server/app/bin/moss-inspect-existing-product.mjs"
 test -f "$STAGE_DIR/moss-server/app/bin/direct-connect-session-runner.mjs"
 test -f "$STAGE_DIR/moss-server/app/bin/artifact-mcp.mjs"
 test -x "$STAGE_DIR/moss-server/app/bin/nexus/nexusd"
