@@ -98,6 +98,9 @@ export type SessionCreateOptions = {
   assistantDisplayName?: string
 }
 
+/** The host closure owns authorization and the canonical project binding. */
+export type BackendHostContextResolver = (binding: { sessionId: string; nativeSessionId: string }) => Promise<string>
+
 export type BackendSpawnOptions = {
   sessionId: string
   /** Cancel pending execution recovery when its runner stops. Never serialized. */
@@ -136,6 +139,8 @@ export type BackendSpawnOptions = {
   availableCorpApps?: Array<{ id: string; name: string; type: string; key: string }>
   sharedMemory?: string | null
   agentInstructions?: string | null
+  /** Host-owned, live context reader. Never sourced from serialized client metadata. */
+  resolveHostContext?: BackendHostContextResolver
   /**
    * 可见性过滤上下文，用于过滤用户有权访问的技能
    */

@@ -125,6 +125,7 @@ const nodeTestFiles = [
   'src/server/auth/userUpdateRoutes.node-test.ts',
   'src/server/authCenter/profileAvatar.node-test.ts',
   'src/server/backends/acpBridge.node-test.ts',
+  'src/server/backends/acpHostContext.node-test.ts',
   'src/server/backends/acpModelChange.node-test.ts',
   'src/server/browser/browserGateway.node-test.ts',
   'src/server/browser/browserConversation.node-test.ts',
@@ -293,7 +294,14 @@ if (selected.length === 0) {
 
 console.log(`Running ${selected.length}/${nodeTestFiles.length} explicitly listed node-test files`)
 const tsxCli = join(repoRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs')
-const result = spawnSync(process.execPath, [tsxCli, '--test', ...selected], {
+// Shared developer machines can bound worker pressure without changing cases,
+// assertions or deadlines. CI keeps Node's existing default when unset.
+const concurrency = process.env.MOSS_NODE_TEST_CONCURRENCY
+if (concurrency !== undefined && (!/^[1-9][0-9]*$/.test(concurrency) || !Number.isSafeInteger(Number(concurrency)))) {
+  console.error('MOSS_NODE_TEST_CONCURRENCY must be a positive integer')
+  process.exit(1)
+}
+const result = spawnSync(process.execPath, [tsxCli, '--test', ...(concurrency ? [`--test-concurrency=${concurrency}`] : []), ...selected], {
   cwd: repoRoot,
   stdio: 'inherit',
 })
