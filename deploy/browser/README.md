@@ -6,13 +6,13 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.58.13 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.58.14 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
 the consumer test verifies it against the installed public package.
 
-The managed-browser workflow builds the SDK v0.58.13 base, applies
+The managed-browser workflow builds the SDK v0.58.14 base, applies
 `chrome-version.Dockerfile`, then builds this worker. The Chrome layer downloads
 the versioned official package, verifies its SHA-256 before installation and
 checks the installed package version. The current runtime uses Chrome
@@ -27,7 +27,7 @@ before allocating a worker. The workflow checks the installed package catalog
 offline and verifies the first frame command after signed profile upgrade and
 crash recovery.
 
-Keep this update in draft until the public SDK release is available and its
+Land this update only after the public SDK release is available and its
 exact artifact has passed qualification. A candidate image test does not publish
 the package or upgrade the running Moss service.
 
@@ -38,8 +38,16 @@ Linux browser cases with two existing fixture skips, and the signed profile
 upgrade and forced-crash recovery journey. The first frame command, extension
 identity, ordinary and HttpOnly cookies, and input exclusion survived both
 recoveries. All 204 installed package files and signed extension assets matched
-the candidate wheel. This is candidate evidence; the released package and
-production promotion still require their own acceptance.
+the candidate wheel. Public v0.58.13 subsequently passed exact artifact and
+installed Windows/Linux qualification with the same signed extension identity.
+
+The v0.58.14 target `15fc78a` additionally preserves completed drags across focus
+changes, supplies a terminal input acknowledgement barrier, and sequences the
+initial-document/profile-network readiness probes. Its extension assets remain
+0.4.8. A prior full CI retained a Windows startup CookieManager timeout; the
+ordering regression, 316 unit cases and 20 actual Windows startup/scroll cases
+passed locally. Public v0.58.14, the complete managed image and production
+promotion require their own acceptance.
 
 This patch adds bounded selection drag, selection text and multiline paste over
 the existing authenticated input channel. Copy reads the active page selection;
