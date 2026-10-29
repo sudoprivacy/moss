@@ -16,7 +16,7 @@ The managed-browser workflow builds the SDK v0.58.13 base, applies
 `chrome-version.Dockerfile`, then builds this worker. The Chrome layer downloads
 the versioned official package, verifies its SHA-256 before installation and
 checks the installed package version. The current runtime uses Chrome
-156.0.8078.47. The upstream base still downloads `stable_current`; the version
+156.0.8078.73. The upstream base still downloads `stable_current`; the version
 pin applies to the final runtime, not every intermediate build dependency.
 
 The controlled command tool supports a bounded optional `frame` selector for a
@@ -30,6 +30,13 @@ crash recovery.
 Keep this update in draft until the public SDK release is available and its
 exact artifact has passed qualification. A candidate image test does not publish
 the package or upgrade the running Moss service.
+
+The integrated candidate with Chrome 156.0.8078.73 passed twenty actual Linux
+browser cases, with two existing fixture skips, and the signed profile upgrade
+and forced-crash recovery journey. The first frame command, extension identity,
+ordinary and HttpOnly cookies, and input exclusion survived both recoveries.
+This is candidate evidence; the released package and production promotion still
+require their own acceptance.
 
 This patch adds bounded selection drag, selection text and multiline paste over
 the existing authenticated input channel. Copy reads the active page selection;
@@ -256,7 +263,7 @@ restart recovery. `.github/workflows/managed-browser.yml` runs it in CI.
 also verifies a real signed extension upgrade in the same persistent profile,
 then graceful and crash recovery. The fixture image uses the unchanged public
 v0.54.0 extension on Chrome 155.0.8059.84 and its earlier bootstrap contract,
-then upgrades to the current worker on Chrome 156.0.8078.47. Installed versions,
+then upgrades to the current worker on Chrome 156.0.8078.73. Installed versions,
 signing identity, original cookie and human lease are checked against Chrome's
 actual state; containers and volumes carry unique ownership labels and are removed.
 

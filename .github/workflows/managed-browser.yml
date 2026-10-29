@@ -28,8 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      CHROME_VERSION: '156.0.8078.47-1'
-      CHROME_SHA256: '6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8'
+      CHROME_VERSION: '156.0.8078.73-1'
+      CHROME_SHA256: 'fd19c6895dad77f4d7f712c2d9f0d5eb682f4a6e7ff22b1bd0d40d03710d288c'
       LEGACY_CHROME_VERSION: '155.0.8059.84-1'
       LEGACY_CHROME_SHA256: '8fbd2ae69cdf7ee98b7513c3396a7b5e06f974f8625fdd590df3091dd0c3e9de'
     steps:
