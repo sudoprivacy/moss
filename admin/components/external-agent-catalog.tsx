@@ -1,3 +1,4 @@
+import { PublicationSubmitButton } from './publication-submit-button'
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalCatalogOverview } from "./external-catalog-overview";
 import { ExternalRunEvents } from "./external-run-events";
@@ -268,7 +269,7 @@ export function ExternalAgentCatalog({
         <div>
           <h4 className="font-semibold">来源、候选与审计</h4>
           <p className="mt-1 text-xs text-muted-foreground">
-            同步生成待审核候选。批准、发布和频道切换分别记录，来源变更不会覆盖历史版本。
+            提交的版本在此审核，发布并上架后客户端默认使用新版本。
           </p>
         </div>
         <Button
@@ -896,7 +897,7 @@ export function ExternalAgentCatalog({
             <DialogHeader>
               <DialogTitle>{candidate.snapshot.name} · 候选审核</DialogTitle>
               <DialogDescription>
-                审核固定的来源快照。发布后仍需明确设置频道，用户才会默认选中该版本。
+                审核固定的来源快照；发布并上架后，授权用户默认使用新版本。
               </DialogDescription>
             </DialogHeader>
             <div className="flex flex-wrap gap-2">
@@ -1002,6 +1003,8 @@ export function ExternalAgentCatalog({
                 ))}
               </div>
             )}
+            {candidate.requested_version && <p className="text-sm">提交版本：{candidate.requested_version}</p>}
+            {candidate.release_note && <p className="text-sm whitespace-pre-wrap">更新说明：{candidate.release_note}</p>}
             <Label htmlFor="candidate-review-note">审核说明</Label>
             <Textarea
               id="candidate-review-note"
@@ -1031,23 +1034,9 @@ export function ExternalAgentCatalog({
             )}
             <div className="flex flex-wrap gap-2">
               {candidate.status === "draft" && (
-                <Button
-                  disabled={isBusy || !decisionNote.trim()}
-                  onClick={() =>
-                    void run(async () =>
-                      setCandidate(
-                        await api.decide(
-                          candidate,
-                          "submit",
-                          decisionNote,
-                          days,
-                        ),
-                      ),
-                    )
-                  }
-                >
-                  提交审核
-                </Button>
+                <PublicationSubmitButton disabled={isBusy}
+                  loadPreview={() => api.publicationPreview(candidate.source_id)}
+                  onSubmit={async (version, note) => setCandidate(await api.decide(candidate, 'submit', note, days, version))} />
               )}
               {candidate.status === "pending_approval" && (
                 <>
@@ -1088,12 +1077,15 @@ export function ExternalAgentCatalog({
                   disabled={isBusy}
                   onClick={() =>
                     void run(async () => {
-                      setCandidate(await api.publish(candidate));
+                      const published = await api.publish(candidate);
+                      setCandidate(published);
+                      const versions = await releases.versions(candidate.catalog_id);
+                      await releases.moveChannel(candidate.catalog_id, { name: "stable", version: published.published_version!, revision: versions.channels.find(channel => channel.name === "stable")?.revision ?? 0 });
                       await onChanged();
                     })
                   }
                 >
-                  发布固定版本
+                  发布并上架
                 </Button>
               )}
               {["publishing", "publication_unknown"].includes(
@@ -1222,7 +1214,7 @@ export function ExternalAgentCatalog({
   );
 }
 
-function SourceEditor({
+export function SourceEditor({
   source,
   endpoints,
   onClose,
@@ -1308,9 +1300,9 @@ function SourceEditor({
     >
       <DialogContent className="max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>编辑来源</DialogTitle>
+          <DialogTitle>编辑服务专家</DialogTitle>
           <DialogDescription>
-            修改会使旧候选校验失效。同步并审核发布后才更新执行配置；立即停止新任务请使用“停用来源”。
+            编辑内容保存为个人工作稿，重新提交审核并发布后更新可用版本；需要立即停用时请在治理中操作。
           </DialogDescription>
         </DialogHeader>
         {error && (
@@ -1435,7 +1427,7 @@ function SourceEditor({
             }
           }}
         >
-          保存来源配置
+          保存到我的专家
         </Button>
       </DialogContent>
     </Dialog>

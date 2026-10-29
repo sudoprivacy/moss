@@ -96,6 +96,7 @@ export type AssistantStoreMeta = {
   category?: string
   categories?: string[]
   source_type?: 'hub' | 'upload' | 'custom' | 'tenant'
+  provider_type?: 'local' | 'moss_runtime' | 'dify' | 'custom_http' | 'a2a' | 'static'
   feature?: string
   tag?: string
   is_builtin?: boolean
@@ -1385,6 +1386,7 @@ export async function uploadCustomAssistant(params: {
   version?: string
   enabledSkills?: string[]
   memoryMode?: 'session' | 'user'
+  targetId?: string
   userId: string
 }): Promise<{ id: string; name: string; version: string }> {
   // Use provided id (UUID) as directory name, fallback to sanitized name
@@ -1421,9 +1423,9 @@ export async function uploadCustomAssistant(params: {
 
     // Create or update metadata with visibility set to uploader only
     const existingMeta = await readAssistantMeta(targetDir)
-    const version = params.version || '1.0.0'
+    const version = params.version || existingMeta?.installed_version || '1.0.0'
     // Use displayName as the actual name, assistantId (UUID) as directory name/id
-    const actualName = params.displayName || params.name || existingMeta?.display_name || assistantId
+    const actualName = params.displayName || existingMeta?.display_name || params.name || assistantId
     const meta: AssistantStoreMeta = {
       ...existingMeta,
       id: assistantId,
@@ -1449,10 +1451,10 @@ export async function uploadCustomAssistant(params: {
       meta.enabledSkills = await resolveOrganizationSkillIds(meta.enabledSkills ?? [])
     }
     await writeAssistantMeta(targetDir, meta)
-    if (getOrganizationResourceScope()) await registerOrganizationCustom('agent', targetDir, meta)
+    if (getOrganizationResourceScope()) await registerOrganizationCustom('agent', targetDir, meta, params.targetId)
 
     return {
-      id: assistantId,
+      id: String(meta.id),
       name: actualName,
       version,
     }

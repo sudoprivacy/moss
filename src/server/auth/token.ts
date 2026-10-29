@@ -315,6 +315,16 @@ export function isStoreAdmin(auth: { role: string; scopes?: string[] }): boolean
 }
 
 /**
+ * Catalog governance is split into review and publication. Department
+ * administrators may review resources in their managed subtree, while only
+ * organization/super administrators (or an explicitly scoped store admin)
+ * may publish a shared version.
+ */
+export function isStoreReviewer(auth: { role: string; scopes?: string[] }): boolean {
+  return isStoreAdmin(auth) || auth.role === 'dept_admin'
+}
+
+/**
  * Org-pinned user lookup, except a super_admin resolves regardless of org.
  * A super_admin may have switched their effective org (see AuthService.switchOrg),
  * so lookups keyed by the switched org won't find their home-org record — that

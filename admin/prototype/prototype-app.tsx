@@ -12,7 +12,7 @@ const NAV_GROUPS = [
     { title: '智能体', icon: Bot },
     { title: '会话记录', icon: MessageSquare },
     { title: '知识与文档', icon: FolderOpen },
-    { title: '技能商店', icon: Boxes },
+    { title: '技能库', icon: Boxes },
     { title: '定时任务', icon: Clock3 },
   ] },
   { title: '组织管理', items: [

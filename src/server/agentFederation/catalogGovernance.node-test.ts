@@ -24,6 +24,7 @@ import { syntheticTaskSubmission, queryOnlyDefinition } from '../testing/externa
 import { ExternalTaskStore } from '../externalProviders/store.js'
 import { ExternalProviderService } from '../externalProviders/service.js'
 import { dispatchExternalProvider } from '../externalProviders/routes.js'
+import { ExternalProviderError } from '../externalProviders/policy.js'
 import { discoverStandardManifest } from './standardHttpAdapter.js'
 import { CatalogReadModel } from './catalogReadModel.js'
 import type { ImportCandidate } from '../../../contracts/agent-catalog/v1alpha1/contract.js'
@@ -448,7 +449,7 @@ void test('legacy adoption maps revoked, expired and disabled-channel authority 
   assert.equal(disabledView.versions[0].channels[0].enabled, false)
 })
 
-void test('source execution changes freeze published versions until a fresh candidate is approved', async (t) => {
+void test('source draft edits keep the published version live until a fresh candidate is approved', async (t) => {
   const f = await fixture('a2a')
   t.after(f.close)
   const published = await f.publish(await f.sync())
@@ -461,11 +462,11 @@ void test('source execution changes freeze published versions until a fresh cand
   })
   assert.equal(changed.last_error, 'SOURCE_REVALIDATION_REQUIRED')
   assert.equal(changed.revision, f.source!.revision + 1)
-  assert.equal((await f.g.data.version(actor, f.agent.id, published.published_version!))?.lifecycle, 'deprecated')
-  await assert.rejects(f.g.assertVersion(actor, f.agent.id, published.published_version!), { code: 'CATALOG_VERSION_NOT_ACTIVE' })
+  assert.equal((await f.g.data.version(actor, f.agent.id, published.published_version!))?.lifecycle, 'published')
+  await f.g.assertVersion(actor, f.agent.id, published.published_version!)
   const read = new CatalogReadModel(f.g)
   const entry = await read.entry(actor, f.agent.id)
-  assert.equal(entry.entry.status, 'deprecated')
+  assert.equal(entry.entry.is_selectable, true)
   assert.equal(entry.entry.has_drift, true)
   const fresh = await f.g.sync(actor, changed.id, { revision: changed.revision })
   assert.equal(fresh.status, 'succeeded')
@@ -920,4 +921,83 @@ void test('catalog scan cursor survives an empty filtered page',async t=>{
   assert.equal(first.items.length,0);assert.equal(first.next_cursor,'next-source-page')
   const next=await read.page(actor,first.next_cursor!,{provider:'a2a'})
   assert.equal(next.items.length,1);assert.equal(next.next_cursor,null)
+})
+
+void test('library authors submit only owned sources and department reviewers cannot publish or cross scope', async () => {
+  const f = await fixture()
+  try {
+    const denied = () => { throw new ExternalProviderError(403, 'ADMIN_REQUIRED') }
+    const library = (userId: string, inScope = false) => ({ canCreate: true, canReview: userId === 'dept', canReviewOwner: async (ownerId: string) => inScope && ownerId === actor.userId })
+    const route = (userId: string, method: string, path: string, body: unknown = {}, inScope = false) => dispatchExternalProvider(f.service, { ...actor, userId }, method, new URL(`http://localhost/api/v1/external-agents/admin/catalog/${path}`), body, denied, denied, library(userId, inScope))
+    const source = f.source!
+    assert.equal((await route('member', 'GET', `sources/${source.id}`)).status, 403)
+    assert.equal((await route('member', 'POST', `sources/${source.id}/update`, { revision: source.revision, name: 'stolen' })).status, 403)
+    const memberPage = await route('member', 'GET', 'sources')
+    assert.equal(memberPage.status, 200)
+    assert.deepEqual((memberPage.body.data as { items: unknown[] }).items, [])
+    assert.equal((await route(actor.userId, 'POST', `sources/${source.id}/update`, { revision: source.revision, enabled: false })).status, 403)
+    const candidate = await f.sync()
+    const submitted = await route(actor.userId, 'POST', `candidates/${candidate.id}/decide`, { revision: candidate.revision, action: 'submit', note: 'Owner submits for department review' })
+    assert.equal(submitted.status, 200)
+    const current = submitted.body.data as ImportCandidate
+    const approval = { revision: current.revision, action: 'approve', note: 'Department review accepted', review_days: 1 }
+    assert.equal((await route(actor.userId, 'POST', `candidates/${candidate.id}/decide`, approval)).status, 403)
+    assert.equal((await route('dept', 'POST', `candidates/${candidate.id}/decide`, approval)).status, 403)
+    const reviewed = await route('dept', 'POST', `candidates/${candidate.id}/decide`, approval, true)
+    assert.equal(reviewed.status, 200)
+    assert.equal((reviewed.body.data as ImportCandidate).status, 'approved')
+    assert.equal((await route('dept', 'POST', `candidates/${candidate.id}/publish`, { revision: (reviewed.body.data as ImportCandidate).revision }, true)).status, 403)
+    assert.equal((await route('member', 'GET', 'audit')).status, 403)
+    assert.equal((await f.g.publish(actor, candidate.id, { revision: (reviewed.body.data as ImportCandidate).revision })).status, 'published')
+  } finally { await f.close() }
+})
+
+void test('editing another author service keeps independent working copies and advances the same published expert', async () => {
+  const f = await fixture()
+  try {
+    const first = await f.publish(await f.sync())
+    const denied = () => { throw new ExternalProviderError(403, 'ADMIN_REQUIRED') }
+    const deniedDraft = await dispatchExternalProvider(f.service, actor, 'POST', new URL(`http://localhost/api/v1/external-agents/admin/catalog/agents/${f.agent.id}/draft`), {}, denied, denied, { canCreate: true, canReview: false, canReviewOwner: async () => true })
+    assert.equal(deniedDraft.status, 403, 'Even the original author cannot edit a published service from Available')
+    const editor = { ...actor, userId: 'editor' }
+    const copy = await f.g.forkWorkingSource(editor, f.agent.id)
+    assert.notEqual(copy.id, f.source!.id)
+    assert.equal(copy.owner_id, editor.userId)
+    assert.equal((await f.g.forkWorkingSource(editor, f.agent.id)).id, copy.id)
+    const edited = await f.g.updateSource(editor, copy.id, { revision: copy.revision, name: 'Editor version' })
+    assert.equal((await f.g.data.source(actor, f.source!.id)).view.owner_id, actor.userId)
+    assert.equal((await f.service.store.binding(actor, f.agent.id)).name, 'Catalog reference')
+    assert.equal((await f.g.data.version(actor, f.agent.id, first.published_version!))!.lifecycle, 'published')
+    const page = await f.g.data.page(editor, 'sources', '', '', { owner: editor.userId })
+    assert.equal(page.items.length, 1)
+    const synced = await f.g.sync(editor, copy.id, { revision: edited.revision })
+    assert.equal(synced.status, 'succeeded')
+    const candidate = (await f.g.data.candidate(editor, synced.candidate_id!)).view
+    const published = await f.publish(candidate)
+    assert.equal(published.catalog_id, f.agent.id)
+    assert.equal((await f.service.store.binding(actor, f.agent.id)).name, 'Editor version')
+    assert.equal((await f.g.data.page(editor, 'candidates', '', '', { owner: editor.userId })).items.length, 1)
+  } finally { await f.close() }
+})
+
+
+void test('service release version and changelog are chosen at submission and immutable through review/publication', async t => {
+  const f = await fixture(); t.after(f.close)
+  let c = await f.sync()
+  assert.equal((await f.g.publicationPreview(actor, c.source_id)).nextVersion, '1.0.0')
+  for (const version of ['v1.0.0', '1.0', '01.0.0', '', null]) await assert.rejects(f.g.decide(actor, c.id, { revision: c.revision, action: 'submit', version, note: 'Invalid version' }))
+  c = await f.g.decide(actor, c.id, { revision: c.revision, action: 'submit', version: '1.1.0', note: 'Added service capability' })
+  assert.equal(c.requested_version, '1.1.0'); assert.equal(c.release_note, 'Added service capability')
+  await assert.rejects(f.g.decide(actor, c.id, { revision: c.revision, action: 'approve', version: '9.0.0', note: 'Cannot change reviewed version', review_days: 1 }), { code: 'PUBLISHED_VERSION_IMMUTABLE' })
+  c = await f.g.decide(actor, c.id, { revision: c.revision, action: 'approve', note: 'Approved', review_days: 1 })
+  c = await f.g.publish(actor, c.id, { revision: c.revision })
+  assert.equal(c.status, 'published', c.publication_error || ''); assert.equal(c.published_version, '1.1.0')
+  assert.equal((await f.g.publicationPreview(actor, c.source_id)).nextVersion, '1.1.1')
+  await assert.rejects(f.g.decide(actor, c.id, { revision: c.revision, action: 'submit', version: '2.0.0', note: 'Immutable' }), { code: 'CANDIDATE_STATE_CONFLICT' })
+  const source = (await f.g.data.source(actor, c.source_id)).view
+  await f.g.updateSource(actor, source.id, { revision: source.revision, name: 'Version 2 source' })
+  let next = await f.sync()
+  for (const version of ['1.1.0', '1.0.9']) await assert.rejects(f.g.decide(actor, next.id, { revision: next.revision, action: 'submit', version, note: 'No duplicate or downgrade' }))
+  next = await f.g.decide(actor, next.id, { revision: next.revision, action: 'submit', version: '2.0.0', note: 'Next major service release' })
+  assert.equal(next.requested_version, '2.0.0')
 })

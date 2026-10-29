@@ -27,6 +27,12 @@ export async function dispatchHostedTask(service: HostedTaskService | undefined,
       hosted = row?.runtime_type === 'hosted'
     }
     if (!hosted) return null
+    if (!service && path === '/api/v1/hosted-agents' && method === 'GET') {
+      const rows = await db.all("SELECT provider_binding FROM tenant_assistants WHERE org_id = ? AND status = 'approved' AND enabled = 1", [actor.orgId])
+      if (!rows.some(row => row.provider_binding && JSON.parse(String(row.provider_binding)).executionMode === 'internal_hosted')) {
+        return { status: 200, body: { success: true, data: { items: [], next_cursor: null } } }
+      }
+    }
     if (!service) throw new ExternalProviderError(503, 'HOSTED_TASKS_UNAVAILABLE')
     await service.authorize(actor)
     let data: unknown, status = 200

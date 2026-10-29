@@ -1,3 +1,4 @@
+import { connectCatalogEvents, notifyCatalogPublished } from './catalog/catalogEvents.js'
 import { dispatchToolManagement, toolInvocationRoute, toolManagementRoute } from './agentFederation/toolGatewayRoutes.js'
 import { dispatchModelInvocation, modelInvocationRoute, readExecutionJson, MODEL_BODY_LIMIT, TOOL_BODY_LIMIT } from './agentFederation/executionGatewayRoutes.js'
 import { dispatchHostedTask, isHostedTaskRoute } from './agentFederation/hostedTaskRoutes.js'
@@ -22,6 +23,7 @@ import { PLATFORM_CREDENTIAL_GROUPS } from './configuration/platformConfigRuntim
 import { createHash as resourceContentHash } from 'node:crypto'
 import { cp } from 'node:fs/promises'
 import { MOSS_SKILLS_HUB_DIR } from '../utils/skills/localSkillDirectories.js'
+import { forkResourceRevision, publishResourceRevision, submitResourcePublication, previewResourcePublication, publicationMetadata } from './catalog/resourceRevisions.js'
 import { withOrganizationResources, updateOrganizationPrivateMetadata, assertOrganizationSkillUnused, requireOrganizationResource, newPrivateResourcePath, resolveOrganizationSkillIds } from './catalog/organizationResources.js'
 import { installAndPrepareClientCatalogResource, describeClientCatalogItem } from './catalog/clientCatalogInstall.js'
 import http from 'http'
@@ -44,7 +46,7 @@ import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
 import { readTenantAssistantMultipart, type TenantAssistantMultipartFile } from './utils/tenantAssistantMultipart.js'
 import { createServerLogger, type ServerLogger } from './serverLog.js'
-import { hasScope, hasExactScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, type AuthContext } from './auth/token.js'
+import { hasScope, hasExactScope, canReadDepartmentSecrets, canWriteUserSecrets, canReadSecretAudit, isStoreAdmin, isStoreReviewer, type AuthContext } from './auth/token.js'
 import { deptSecretNamespace } from './secrets/secretSubject.js'
 import { AuthService, AuthServiceError } from './auth/service.js'
 import { ZoneDelegationError } from './zones/binding/delegationService.js'
@@ -2787,7 +2789,7 @@ export function startServer(
           password: typeof body.password === 'string' ? body.password : '',
         })
         res.setHeader('Cache-Control', 'no-store')
-        writeJson(res, 200, result)
+        writeJson(res, 200, await attachSudocodeFields(result, authService))
         return
       }
 
@@ -4119,7 +4121,12 @@ export function startServer(
             try { authService.requireScope(auth!, 'admin:users') } catch { throw new ExternalProviderError(403, 'ADMIN_REQUIRED') }
           }, () => {
             if (auth!.role !== 'super_admin') throw new ExternalProviderError(403, 'PLATFORM_ADMIN_REQUIRED')
+          }, {
+            canCreate: hasScope(auth.scopes, 'store:tenant:write') || hasScope(auth.scopes, 'admin:settings'),
+            canReview: ['admin', 'super_admin', 'dept_admin'].includes(auth.role),
+            canReviewOwner: ownerId => authService.isCreatorInScope(auth.orgId, ownerId, auth),
           })
+        if (req.method === 'POST' && pathname.endsWith('/publish') && result.status < 300) notifyCatalogPublished(auth.orgId)
         writeJson(res, result.status, result.body)
         return
       }
@@ -9061,6 +9068,57 @@ export function startServer(
         return
       }
 
+      const catalogDraftMatch = pathname.match(/^\/api\/v1\/catalog\/(agents|skills)\/(hub|tenant)\/([^/]+)\/draft$/)
+      if (req.method === 'POST' && catalogDraftMatch) {
+        if (!isStoreReviewer(auth)) throw new HttpError(403, 'Only administrators may edit published resources')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
+        const kind = catalogDraftMatch[1] === 'agents' ? 'agent' : 'skill'
+        const source = catalogDraftMatch[2]!
+        const sourceId = decodeURIComponent(catalogDraftMatch[3]!)
+        const table = kind === 'agent' ? 'tenant_assistants' : 'tenant_skills'
+        const author = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
+        const ownedDrafts = await runtime.store.driver.all(`SELECT * FROM ${table} WHERE org_id = ? AND author_id = ? AND status = 'draft'`, [auth.orgId, auth.userId])
+        const prior = ownedDrafts.find(row => {
+          const meta = JSON.parse(String(row.config_json || '{}'))
+          return source === 'hub' ? meta.publication_hub_id === sourceId : meta.publication_base_id === sourceId
+        })
+        if (prior) { writeJson(res, 200, { id: prior.id, status: 'draft' }); return }
+        if (source === 'tenant') {
+          const original = await runtime.store.driver.get(`SELECT * FROM ${table} WHERE id = ? AND org_id = ? AND source_type = 'tenant'`, [sourceId, auth.orgId])
+          if (!original || original.status !== 'approved') throw new HttpError(404, 'Published resource not found')
+          if (!isStoreAdmin(auth) && !(await authService.isCreatorInScope(auth.orgId, String(original.author_id), auth))) throw new HttpError(403, 'You cannot edit this resource')
+          const draft = await forkResourceRevision(runtime.store.driver, kind, original, { id: auth.userId, name: author?.name })
+          writeJson(res, 200, { id: draft.id, status: 'draft' })
+          return
+        }
+        const { installClientCatalogResource } = await import('./catalog/clientCatalogInstall.js')
+        await installClientCatalogResource({ kind: kind === 'agent' ? 'agents' : 'skills', source: 'hub', id: sourceId })
+        const resource = await requireOrganizationResource(kind, sourceId)
+        const id = randomUUID()
+        const destination = newPrivateResourcePath(kind, id)
+        await cp(resource.path, destination, { recursive: true })
+        const meta = publicationMetadata(resource.meta)
+        const currentVersion = String(meta.installed_version || meta.version || '1.0.0')
+        const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(currentVersion)
+        const version = match ? `${match[1]}.${match[2]}.${Number(match[3]) + 1}` : `${currentVersion}.1`
+        const row = { id, name: resource.name, display_name: String(meta.display_name || resource.name), description: String(meta.description || ''), version,
+          author_id: auth.userId, author_name: author?.name, status: 'draft', org_id: auth.orgId, file_path: destination,
+          visible_to: JSON.stringify(await authService.defaultTenantVisibility(auth)) }
+        try {
+          if (kind === 'agent') await runtime.store.createTenantAssistant({ ...row, provider_type: 'local', skills: JSON.stringify(meta.skills || []), enabled_skills: JSON.stringify(meta.enabledSkills || []), agent_type: String(meta.agent_type || 'chat'), memory_mode: String(meta.memory_mode || 'session') })
+          else await runtime.store.createTenantSkill(row)
+          await updateOrganizationPrivateMetadata(kind, id, { ...meta, id, installed_version: version, expert_type: meta.expert_type || 'static', publication_hub_id: sourceId })
+        } catch (error) { await rm(destination, { recursive: true, force: true }); throw error }
+        writeJson(res, 200, { id, status: 'draft' })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/client/catalog/events') {
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
+        connectCatalogEvents(res, auth.orgId)
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/client/catalog/install') {
         authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const body = await readJsonBody(req)
@@ -9157,7 +9215,7 @@ export function startServer(
 
       const installedAgentRulesMatch = pathname.match(/^\/api\/v1\/agent-templates\/installed\/([^/]+)\/rules$/)
       if (req.method === 'GET' && installedAgentRulesMatch) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:read'])
         const assistantName = decodeURIComponent(installedAgentRulesMatch[1] || '')
         const rules = await getAssistantSystemPrompt(assistantName)
         if (rules === null) {
@@ -9197,7 +9255,7 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/agent-templates/create') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const body = await readJsonBody(req)
 
         const result = await createCustomAssistant({
@@ -9241,8 +9299,12 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/agent-templates/uninstall') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const body = await readJsonBody(req)
+        if (!isStoreAdmin(auth)) {
+          const resource = await requireOrganizationResource('agent', typeof body.assistantName === 'string' ? body.assistantName : '')
+          if (resource.sourceType !== 'custom' || resource.meta.ownerId !== auth.userId) throw new HttpError(403, 'Only your own working copies may be managed here')
+        }
         await uninstallAssistant({
           assistantName:
             typeof body.assistantName === 'string' ? body.assistantName : '',
@@ -9419,7 +9481,7 @@ export function startServer(
         const fileBase64 = typeof body.file === 'string' ? body.file : ''
         const fileBuffer = Buffer.from(fileBase64, 'base64')
         // Parse enabledSkills - can be array or JSON string
-        let enabledSkills: string[] = []
+        let enabledSkills: string[] | undefined
         if (Array.isArray(body.enabledSkills)) {
           enabledSkills = body.enabledSkills.filter((s: unknown) => typeof s === 'string')
         } else if (typeof body.enabledSkills === 'string') {
@@ -9440,11 +9502,12 @@ export function startServer(
           description: typeof body.description === 'string' ? body.description : undefined,
           version: typeof body.version === 'string' ? body.version : undefined,
           enabledSkills,
-          memoryMode: body.memoryMode === 'user' ? 'user' : 'session',
+          memoryMode: body.memoryMode === 'user' || body.memoryMode === 'session' ? body.memoryMode : undefined,
+          targetId: typeof body.targetId === 'string' ? body.targetId : undefined,
           userId: auth.userId,
         })
         console.log('[Upload Assistant] Upload result:', JSON.stringify(result))
-        writeJson(res, 200, result)
+        writeJson(res, 200, { ...result, status: 'private', ownerId: auth.userId, message: '已保存到当前账号的 Moss 私有资产' })
         return
       }
 
@@ -9469,7 +9532,7 @@ export function startServer(
           // even if visibility wouldn't otherwise match — the "or created by
           // himself/subtree" clause of the spec.
           const canManage = canManageByAuthor.get(row.author_id as string) ?? false
-          if (row.status === 'pending') return isAdmin || canManage
+          if (row.status === 'pending' || row.status === 'reviewed') return isAdmin || canManage
           if (row.status === 'approved') {
             if (canManage) return true
             const visibleTo = typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null
@@ -9497,6 +9560,8 @@ export function startServer(
           }
           return {
             ...row,
+            expert_type: JSON.parse(String(row.config_json || '{}')).expert_type || row.provider_type,
+            replaces_id: JSON.parse(String(row.config_json || '{}')).publication_hub_id,
             sourceType: 'tenant',
             catalogVersion: String(row.updated_at ?? ''),
             isAvailable: row.status === 'approved' && Number(row.enabled) === 1 && isVisibleTo(typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null, filter),
@@ -9511,7 +9576,7 @@ export function startServer(
             workflow: parseObject(row.workflow, null),
             visible_to: parseObject(row.visible_to, null),
             // Lets the frontend show edit/delete without re-deriving subtree math.
-            can_manage: isAdmin || (canManageByAuthor.get(row.author_id as string) ?? false),
+            can_manage: (row.status !== 'approved' || isStoreReviewer(auth)) && (isAdmin || (canManageByAuthor.get(row.author_id as string) ?? false)),
           }
         })
         writeJson(res, 200, rows)
@@ -9577,6 +9642,11 @@ export function startServer(
         const promptsI18n = parseTenantPrompts(body.promptsI18n ?? body.prompts_i18n)
         const categories = parseTenantStringArray(body.categories, 'categories')
         const defaultInitPrompt = typeof body.default_init_prompt === 'string' ? body.default_init_prompt : ''
+        const requestedProviderType = typeof body.provider_type === 'string' ? body.provider_type.trim().toLowerCase() : 'static'
+        if (['dify', 'custom_http', 'a2a'].includes(requestedProviderType)) throw new HttpError(400, '服务专家请通过服务接入流程创建并校验连接')
+        const providerType = ['local', 'moss_runtime', 'static'].includes(requestedProviderType)
+          ? requestedProviderType
+          : 'moss_runtime'
 
         // Validate required fields
         const name = typeof body.name === 'string' ? body.name.trim() : ''
@@ -9637,6 +9707,7 @@ export function startServer(
           categories,
           category: categories[0] ?? '',
           source_type: 'tenant',
+          provider_type: (providerType === 'static' ? 'local' : providerType) as AssistantStoreMeta['provider_type'],
           enabled: true,
           ruleFile: 'system.md',
           skills: Array.isArray(body.skills) ? body.skills : [],
@@ -9649,6 +9720,8 @@ export function startServer(
           visible_to: requestedVisibleTo,
           workflow: body.workflow || null,
         }
+
+        Object.assign(meta, { expert_type: providerType })
 
         // Create rules file
         const rulesContent = rules.trim()
@@ -9677,13 +9750,14 @@ export function startServer(
           emoji: meta.emoji,
           author_id: auth.userId,
           author_name: authorName,
-          status: storeAdmin ? 'approved' : 'pending',
+          status: 'draft',
           file_path: assistantDir,
           skills: meta.skills && meta.skills.length > 0 ? JSON.stringify(meta.skills) : null,
           enabled_skills: meta.enabledSkills && meta.enabledSkills.length > 0 ? JSON.stringify(meta.enabledSkills) : null,
           enabled_wikis: meta.enabledWikis && meta.enabledWikis.length > 0 ? JSON.stringify(meta.enabledWikis) : null,
           enabled_corp_apps: meta.enabledCorpApps && meta.enabledCorpApps.length > 0 ? JSON.stringify(meta.enabledCorpApps) : null,
           agent_type: meta.agent_type,
+          provider_type: meta.provider_type,
           memory_mode: meta.memory_mode,
           visible_to: meta.visible_to ? JSON.stringify(meta.visible_to) : null,
           workflow: meta.workflow ? JSON.stringify(meta.workflow) : null,
@@ -9696,6 +9770,7 @@ export function startServer(
           throw error
         }
 
+        await updateOrganizationPrivateMetadata('agent', assistantId, { expert_type: providerType })
         const result = await runtime.store.getTenantAssistant(assistantId, auth.orgId)
         writeJson(res, 200, {
           success: true,
@@ -9707,8 +9782,8 @@ export function startServer(
                 avatar: formatTenantAssistantAvatarUrl(result.avatar, config.publicBaseUrl),
               }
             : result,
-          status: storeAdmin ? 'approved' : 'pending',
-          message: storeAdmin ? undefined : '发布申请已提交，等待管理员审批',
+          status: 'draft',
+          message: '专家已提交审核，发布后对授权成员可见',
         })
         return
       }
@@ -9727,11 +9802,10 @@ export function startServer(
         if (!tenantAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
-
-        const rulesStoreAdmin = isStoreAdmin(auth)
-        if (!rulesStoreAdmin && tenantAssistant.org_id != null && tenantAssistant.org_id !== auth.orgId) {
+        if (!isStoreAdmin(auth) && tenantAssistant.org_id != null && tenantAssistant.org_id !== auth.orgId) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
+        const rulesStoreAdmin = isStoreAdmin(auth)
         const canEditRules =
           rulesStoreAdmin ||
           (await authService.isCreatorInScope(auth.orgId, tenantAssistant.author_id as string, auth))
@@ -9762,7 +9836,12 @@ export function startServer(
         const rulePath = await resolveTenantAssistantRulePath(assistantDir, meta?.ruleFile || 'system.md', false)
         const overlay = JSON.parse(String(tenantAssistant.config_json || '{}')) as Record<string, unknown>
         const rules = typeof overlay.rules === 'string' ? overlay.rules : await readFile(rulePath, 'utf8').catch(() => '')
-        writeJson(res, 200, { rules, can_edit: canEditRules })
+        writeJson(res, 200, { rules, can_edit: canEditRules && (tenantAssistant.status !== 'approved' || isStoreReviewer(auth)) })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/api/v1/agent-templates/tenant/publication-preview') {
+        writeJson(res, 200, await previewResourcePublication(runtime.store.driver, 'agent', url.searchParams.get('id') || '', auth.orgId, auth.userId))
         return
       }
 
@@ -9776,48 +9855,8 @@ export function startServer(
           throw new HttpError(400, `assistantId is required`)
         }
 
-        // Check if agent exists
-        const assistantResult = await findAssistantDir(assistantId)
-        if (!assistantResult) {
-          throw new HttpError(404, `Assistant not found: ${assistantId}`)
-        }
-
-        // Read agent metadata
-        const meta = await readAssistantMeta(assistantResult.dir)
-
-        // Use actual agent name from metadata or directory name
-        const actualAssistantName = typeof meta?.name === 'string' && meta.name.trim() ? meta.name.trim() : assistantId
-
-        // Get author name from user info
-        const authorUser = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
-        const authorName = authorUser?.name || undefined
-
-        // Stamp the publisher's default visibility (dept_admin → own department,
-        // user → self) so it survives approval instead of defaulting to global.
         const publishVisibility = await authService.defaultTenantVisibility(auth)
-        const publishedId = randomUUID()
-        const publishedPath = newPrivateResourcePath('agent', publishedId)
-        await cp(assistantResult.dir, publishedPath, { recursive: true })
-        // Create a separate publication, preserving the custom original.
-        await runtime.store.createTenantAssistant({
-          id: publishedId,
-          name: actualAssistantName,
-          display_name: meta?.display_name || actualAssistantName,
-          description: meta?.description || undefined,
-          version: meta?.installed_version || undefined,
-          skills: meta?.skills ? JSON.stringify(meta.skills) : null,
-          enabled_skills: meta?.enabledSkills ? JSON.stringify(meta.enabledSkills) : null,
-          memory_mode: meta?.memory_mode || 'session',
-          agent_type: meta?.agent_type || 'chat',
-          publish_note: publishNote,
-          author_id: auth.userId,
-          author_name: authorName,
-          status: 'pending',
-          visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
-          file_path: publishedPath,
-          org_id: auth.orgId,
-        })
-        await updateOrganizationPrivateMetadata('agent', publishedId, meta || {})
+        const publishedId = await submitResourcePublication(runtime.store.driver, 'agent', assistantId, auth.orgId, auth.userId, publishVisibility, publishNote, body.version)
         writeJson(res, 200, { id: publishedId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
         return
       }
@@ -9825,10 +9864,11 @@ export function startServer(
       // POST /api/v1/admin/agent-templates/tenant/:id/approve - Approve tenant agent
       const agentApproveMatch = pathname.match(/^\/api\/v1\/admin\/agent-templates\/tenant\/([^/]+)\/approve$/)
       if (req.method === 'POST' && agentApproveMatch) {
-        authService.requireScope(auth, 'admin:settings')
-        const tenantAssistantId = decodeURIComponent(agentApproveMatch[1] || '')
+        if (!isStoreReviewer(auth)) throw new HttpError(403, 'Only department or organization administrators may review experts')
+        let tenantAssistantId = decodeURIComponent(agentApproveMatch[1] || '')
         const body = await readJsonBody(req)
         const approved = body.approved === true
+        const publish = body.publish === true
         const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote : undefined
 
         const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
@@ -9836,11 +9876,17 @@ export function startServer(
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
         }
 
+        if (!isStoreAdmin(auth) && !(await authService.isCreatorInScope(auth.orgId, tenantAssistant.author_id as string, auth))) throw new HttpError(403, 'This expert is outside your department scope')
+
+        if (!['pending', 'reviewed'].includes(String(tenantAssistant.status))) throw new HttpError(409, '当前版本不可审核，请刷新后重试')
+
         if (approved && (typeof tenantAssistant.file_path !== 'string' || !existsSync(tenantAssistant.file_path))) throw new HttpError(404, 'Resource package not found')
 
         if (approved) {
-          // Update status to approved
-          await runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'approved', auth.userId, reviewNote)
+          // Department administrators can complete review, but publication is
+          // reserved for organization/super administrators.
+          if (publish && !isStoreAdmin(auth)) throw new HttpError(403, 'Only organization or super administrators may publish experts')
+          const nextStatus = isStoreAdmin(auth) ? 'approved' : 'reviewed'
           // Preserve the publisher's default visibility (dept/self) through
           // approval. An admin may override via visible_to in the approve body;
           // a legacy record without one falls back to global (null).
@@ -9851,13 +9897,17 @@ export function startServer(
           } else if (tenantAssistant.visible_to == null) {
             await runtime.store.updateTenantAssistantMeta(tenantAssistantId, { visible_to: null })
           }
+          if (nextStatus === 'approved') {
+            tenantAssistantId = await publishResourceRevision(runtime.store.driver, 'agent', tenantAssistantId, auth.orgId, auth.userId, reviewNote)
+          } else {
+            await runtime.store.updateTenantAssistantStatus(tenantAssistantId, nextStatus, auth.userId, reviewNote)
+          }
         } else {
           await runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'rejected', auth.userId, reviewNote)
-          await removeTenantAssistantAvatar(config.runtimeDir, tenantAssistant.avatar as string | null | undefined)
-
         }
 
-        writeJson(res, 200, { id: tenantAssistantId, status: approved ? 'approved' : 'rejected' })
+        if (approved && isStoreAdmin(auth)) notifyCatalogPublished(auth.orgId)
+        writeJson(res, 200, { id: tenantAssistantId, status: approved ? (isStoreAdmin(auth) ? 'approved' : 'reviewed') : 'rejected' })
         return
       }
 
@@ -9865,7 +9915,7 @@ export function startServer(
       const agentTenantPatchMatch = pathname.match(/^\/api\/v1\/agent-templates\/tenant\/([^/]+)$/)
       if (req.method === 'PATCH' && agentTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
-        const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
+        let tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
         const existingAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!existingAssistant) {
           throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
@@ -9873,6 +9923,7 @@ export function startServer(
         // Non-admins may only manage tenant assistants authored by someone
         // currently in their scope, within their own org.
         const agentStoreAdmin = isStoreAdmin(auth)
+        if (existingAssistant.status === 'approved' && !isStoreReviewer(auth)) throw new HttpError(403, 'Edit your working copy to submit a new version')
         if (!agentStoreAdmin) {
           if (existingAssistant.org_id != null && existingAssistant.org_id !== auth.orgId) {
             throw new HttpError(404, `Tenant assistant not found: ${tenantAssistantId}`)
@@ -9881,8 +9932,10 @@ export function startServer(
             throw new HttpError(403, 'You cannot manage this tenant assistant')
           }
         }
+        if (existingAssistant.status === 'superseded') throw new HttpError(409, '历史版本不可编辑，请基于当前发布版本编辑')
         const request = await readTenantAssistantRequest(req)
         const body = request.body
+        if (body.version !== undefined || body.publish_note !== undefined) throw new HttpError(400, '版本号和更新说明只能在提交审核时设置')
         const avatarFile = request.avatar
         for (const fieldName of ['skills', 'enabled_skills', 'enabled_wikis', 'enabled_corp_apps', 'enabledSkills', 'enabledWikis', 'enabledCorpApps']) {
           if (body[fieldName] !== undefined) body[fieldName] = parseTenantStringArray(body[fieldName], fieldName)
@@ -9987,6 +10040,13 @@ export function startServer(
           throw new HttpError(404, 'Tenant assistant rules not found')
         }
 
+        const contentUpdate = Object.keys(updates).some(key => key !== 'enabled') || body.enableCorpAuth !== undefined
+        const isNewRevision = existingAssistant.status === 'approved' && contentUpdate
+        if (isNewRevision) {
+          const draft = await forkResourceRevision(runtime.store.driver, 'agent', existingAssistant, { id: auth.userId })
+          tenantAssistantId = String(draft.id)
+        }
+
         try {
           await runtime.store.updateTenantAssistantMeta(tenantAssistantId, updates)
         } catch (error) {
@@ -9999,7 +10059,8 @@ export function startServer(
         if (tenantAssistant) {
           const assistantDir = tenantAssistant.file_path as string | undefined
           if (assistantDir && existsSync(assistantDir)) {
-            const meta = await readAssistantMeta(assistantDir)
+            const fileMeta = await readAssistantMeta(assistantDir)
+            const meta = fileMeta ? { ...fileMeta, ...JSON.parse(String(tenantAssistant.config_json || '{}')) } as AssistantStoreMeta : null
             if (meta) {
               if (updates.display_name !== undefined) meta.display_name = updates.display_name as string
               if (updates.description !== undefined) meta.description = updates.description as string
@@ -10029,9 +10090,11 @@ export function startServer(
             }
           }
         }
-        if (updates.avatar !== undefined) await removeTenantAssistantAvatar(config.runtimeDir, priorAvatar)
-
-        writeJson(res, 200, { ok: true })
+        if (!isNewRevision && updates.avatar !== undefined) await removeTenantAssistantAvatar(config.runtimeDir, priorAvatar)
+        if (!isNewRevision && contentUpdate && ['pending', 'reviewed', 'rejected'].includes(String(existingAssistant.status))) {
+          await runtime.store.updateTenantAssistantStatus(tenantAssistantId, 'draft', auth.userId)
+        }
+        writeJson(res, 200, { ok: true, id: tenantAssistantId, status: (isNewRevision || (contentUpdate && ['pending', 'reviewed', 'rejected'].includes(String(existingAssistant.status)))) ? 'draft' : existingAssistant.status })
         return
       }
 
@@ -10041,6 +10104,7 @@ export function startServer(
         const tenantAssistantId = decodeURIComponent(agentTenantPatchMatch[1] || '')
         const tenantAssistant = await runtime.store.getTenantAssistant(tenantAssistantId, auth.orgId)
         if (!tenantAssistant) throw new HttpError(404, 'Resource not found')
+        if (tenantAssistant.status === 'approved' && !isStoreReviewer(auth)) throw new HttpError(403, 'Only administrators may manage published resources')
         // Non-admins may only delete tenant assistants authored by someone
         // currently in their scope, within their own org.
         if (tenantAssistant && !isStoreAdmin(auth)) {
@@ -10052,8 +10116,6 @@ export function startServer(
           }
         }
         if (tenantAssistant) {
-          await removeTenantAssistantAvatar(config.runtimeDir, tenantAssistant.avatar as string | null | undefined)
-
         }
         await runtime.store.deleteTenantAssistant(tenantAssistantId)
         writeJson(res, 200, { ok: true })
@@ -10166,8 +10228,12 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/skills/uninstall') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const body = await readJsonBody(req)
+        if (!isStoreAdmin(auth)) {
+          const resource = await requireOrganizationResource('skill', typeof body.skillName === 'string' ? body.skillName : '')
+          if (resource.sourceType !== 'custom' || resource.meta.ownerId !== auth.userId) throw new HttpError(403, 'Only your own working copies may be managed here')
+        }
         await uninstallSkill({
           skillName: typeof body.skillName === 'string' ? body.skillName : '',
           sourcePath:
@@ -10178,8 +10244,12 @@ export function startServer(
       }
 
       if (req.method === 'PATCH' && pathname === '/api/v1/skills/enabled') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const body = await readJsonBody(req)
+        if (!isStoreAdmin(auth)) {
+          const resource = await requireOrganizationResource('skill', typeof body.skillName === 'string' ? body.skillName : '')
+          if (resource.sourceType !== 'custom' || resource.meta.ownerId !== auth.userId) throw new HttpError(403, 'Only your own working copies may be managed here')
+        }
         if (typeof body.enabled !== 'boolean') {
           throw new HttpError(400, 'enabled must be a boolean')
         }
@@ -10194,12 +10264,13 @@ export function startServer(
       }
 
       if (req.method === 'POST' && pathname === '/api/v1/skills/import/archive') {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const body = await readJsonBody(req)
         writeJson(
           res,
           200,
           await importLocalSkillArchive({
+            targetId: typeof body.targetId === 'string' ? body.targetId : undefined,
             fileName: typeof body.fileName === 'string' ? body.fileName : '',
             archiveBase64:
               typeof body.archiveBase64 === 'string' ? body.archiveBase64 : '',
@@ -10212,7 +10283,7 @@ export function startServer(
         req.method === 'POST' &&
         pathname === '/api/v1/skills/import/directory'
       ) {
-        authService.requireScope(auth, 'admin:settings')
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
         const body = await readJsonBody(req)
         const entries = Array.isArray(body.entries)
           ? body.entries
@@ -10323,6 +10394,26 @@ export function startServer(
       }
 
       // POST /api/v1/skills/custom - Upload custom skill
+      const privateSkillEdit = pathname.match(/^\/api\/v1\/skills\/custom\/([^/]+)$/)
+      if (privateSkillEdit && ['GET', 'PATCH'].includes(req.method || '')) {
+        authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
+        const resource = await requireOrganizationResource('skill', decodeURIComponent(privateSkillEdit[1]!))
+        if (resource.sourceType !== 'custom' || resource.meta.ownerId !== auth.userId) throw new HttpError(403, 'Only the owner may edit this working copy')
+        const entry = await resolveWorkspaceEntry(resource.path, 'SKILL.md')
+        if (req.method === 'GET') { writeJson(res, 200, { content: await readFile(entry.fullPath, 'utf8'), displayName: resource.meta.display_name || resource.name, description: resource.meta.description || '' }); return }
+        const body = await readJsonBody(req)
+        if (typeof body.content !== 'string' || !body.content.trim()) throw new HttpError(400, '技能内容不能为空')
+        const destination = newPrivateResourcePath('skill', randomUUID())
+        await cp(resource.path, destination, { recursive: true })
+        await writeFile(join(destination, 'SKILL.md'), body.content)
+        try {
+          const { registerOrganizationCustom } = await import('./catalog/organizationResources.js')
+          await registerOrganizationCustom('skill', destination, { ...resource.meta, display_name: typeof body.displayName === 'string' ? body.displayName : resource.meta.display_name, description: typeof body.description === 'string' ? body.description : resource.meta.description }, resource.id)
+        } catch (error) { await rm(destination, { recursive: true, force: true }); throw error }
+        writeJson(res, 200, { id: resource.id })
+        return
+      }
+
       if (req.method === 'POST' && pathname === '/api/v1/skills/custom') {
         const body = await readJsonBody(req)
         const fileBase64 = typeof body.file === 'string' ? body.file : ''
@@ -10333,9 +10424,10 @@ export function startServer(
           displayName: typeof body.displayName === 'string' ? body.displayName : '',
           description: typeof body.description === 'string' ? body.description : undefined,
           version: typeof body.version === 'string' ? body.version : undefined,
+          targetId: typeof body.targetId === 'string' ? body.targetId : undefined,
           userId: auth.userId,
         })
-        writeJson(res, 200, result)
+        writeJson(res, 200, { ...result, status: 'private', ownerId: auth.userId, message: '已保存到当前账号的 Moss 私有资产' })
         return
       }
 
@@ -10361,7 +10453,7 @@ export function startServer(
             // even if the item's visibility wouldn't otherwise match — this is
             // the "or created by himself/subtree" clause of the spec.
             const canManage = canManageByAuthor.get(row.author_id as string) ?? false
-            if (row.status === 'pending') return isAdmin || canManage
+            if (row.status === 'pending' || row.status === 'reviewed') return isAdmin || canManage
             if (row.status === 'approved') {
               if (canManage) return true
               const visibleTo = typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null
@@ -10371,6 +10463,7 @@ export function startServer(
           })
           .map((row: Record<string, unknown>) => ({
             ...row,
+            replaces_id: JSON.parse(String(row.config_json || '{}')).publication_hub_id,
             sourceType: 'tenant',
             catalogVersion: String(row.updated_at ?? ''),
             isAvailable: row.status === 'approved' && Number(row.enabled) === 1 && isVisibleTo(typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : null, filter),
@@ -10378,7 +10471,7 @@ export function startServer(
             // the /agents/tenant shape), not a raw JSON string.
             visible_to: typeof row.visible_to === 'string' ? JSON.parse(row.visible_to) : row.visible_to ?? null,
             // Lets the frontend show edit/delete without re-deriving subtree math.
-            can_manage: isAdmin || (canManageByAuthor.get(row.author_id as string) ?? false),
+            can_manage: (row.status !== 'approved' || isStoreReviewer(auth)) && (isAdmin || (canManageByAuthor.get(row.author_id as string) ?? false)),
           }))
         writeJson(res, 200, rows)
         return
@@ -10441,7 +10534,7 @@ export function startServer(
         // Visibility policy (same as agent create): admin as submitted;
         // dept_admin as submitted (default own dept when unset); normal user
         // ALWAYS self-only, enforced server-side (no picker; roster is admin-only).
-        const skillStatus = storeAdmin ? 'approved' : 'pending'
+        const skillStatus = 'draft'
         const requestedVisibleTo = storeAdmin
           ? (body.visible_to ?? null)
           : (await authService.isDeptAdmin(auth))
@@ -10449,10 +10542,7 @@ export function startServer(
                 ? body.visible_to
                 : ((await authService.defaultTenantVisibility(auth)) ?? null))
             : ((await authService.defaultTenantVisibility(auth)) ?? null)
-        const skillResponse = (result: unknown) =>
-          storeAdmin
-            ? result
-            : { ...(result as Record<string, unknown>), status: 'pending', message: '发布申请已提交，等待管理员审批' }
+        const skillResponse = (result: unknown) => ({ ...(result as Record<string, unknown>), status: 'draft', message: '已保存到我的技能，可编辑后提交审核' })
 
         // Handle ZIP archive upload
         if (typeof body.archiveBase64 === 'string' && body.archiveBase64) {
@@ -10522,6 +10612,11 @@ export function startServer(
         throw new HttpError(400, 'Missing archiveBase64 or entries')
       }
 
+      if (req.method === 'GET' && pathname === '/api/v1/skills/tenant/publication-preview') {
+        writeJson(res, 200, await previewResourcePublication(runtime.store.driver, 'skill', url.searchParams.get('id') || '', auth.orgId, auth.userId))
+        return
+      }
+
       // POST /api/v1/skills/tenant/publish - Publish tenant skill request
       if (req.method === 'POST' && pathname === '/api/v1/skills/tenant/publish') {
         const body = await readJsonBody(req)
@@ -10530,46 +10625,8 @@ export function startServer(
         const publishNote = typeof body.publishNote === 'string' ? body.publishNote : undefined
 
         // Check if skill exists in custom directory
-        const skillPath = await findInstalledSkillPath(skillId)
-        if (!skillPath) {
-          throw new HttpError(404, `Skill not found: ${skillId}`)
-        }
-
-        // Read skill metadata
-        const meta = await readSkillMeta(skillPath)
-        const version = await readSkillVersion(skillPath)
-        const dirName = basename(skillPath)
-
-        // Use actual skill name from metadata or directory name
-        const actualSkillName = typeof meta?.name === 'string' && meta.name.trim() ? meta.name.trim() : dirName
-
-        // Get author name from user info
-        const authorUser = await authService.getUserOrNull(auth.userId, auth.orgId, auth)
-        const authorName = authorUser?.name || undefined
-
-        // Create tenant skill record with metadata from source skill. Stamp the
-        // publisher's default visibility (dept_admin → own department, user →
-        // self) at publish time so it survives approval instead of defaulting to
-        // global. Admins get null (global), unchanged.
         const publishVisibility = await authService.defaultTenantVisibility(auth)
-        const id = randomUUID()
-        const publishedPath = newPrivateResourcePath('skill', id)
-        await cp(skillPath, publishedPath, { recursive: true })
-        await runtime.store.createTenantSkill({
-          id,
-          name: actualSkillName,
-          display_name: meta?.display_name || actualSkillName,
-          description: meta?.description || undefined,
-          version: version || meta?.installed_version || undefined,
-          publish_note: publishNote,
-          author_id: auth.userId,
-          author_name: authorName,
-          status: 'pending',
-          visible_to: publishVisibility ? JSON.stringify(publishVisibility) : null,
-          org_id: auth.orgId,
-          file_path: publishedPath,
-        })
-        await updateOrganizationPrivateMetadata('skill', id, meta || {})
+        const id = await submitResourcePublication(runtime.store.driver, 'skill', skillId, auth.orgId, auth.userId, publishVisibility, publishNote, body.version)
         writeJson(res, 200, { id, skillId, status: 'pending', message: '发布申请已提交，等待管理员审批' })
         return
       }
@@ -10577,22 +10634,28 @@ export function startServer(
       // POST /api/v1/admin/skills/tenant/:id/approve - Approve tenant skill
       const skillApproveMatch = pathname.match(/^\/api\/v1\/admin\/skills\/tenant\/([^/]+)\/approve$/)
       if (req.method === 'POST' && skillApproveMatch) {
-        authService.requireScope(auth, 'admin:settings')
-        const tenantSkillId = decodeURIComponent(skillApproveMatch[1] || '')
+        if (!isStoreReviewer(auth)) throw new HttpError(403, 'Only department or organization administrators may review skills')
+        let tenantSkillId = decodeURIComponent(skillApproveMatch[1] || '')
         const body = await readJsonBody(req)
         const approved = body.approved === true
+        const publish = body.publish === true
         const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote : undefined
 
         const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
         if (!tenantSkill) {
           throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
         }
+        if (!isStoreAdmin(auth) && !(await authService.isCreatorInScope(auth.orgId, tenantSkill.author_id as string, auth))) {
+          throw new HttpError(403, 'This skill is outside your department scope')
+        }
+
+        if (!['pending', 'reviewed'].includes(String(tenantSkill.status))) throw new HttpError(409, '当前版本不可审核，请刷新后重试')
 
         if (approved && (typeof tenantSkill.file_path !== 'string' || !existsSync(tenantSkill.file_path))) throw new HttpError(404, 'Resource package not found')
 
         if (approved) {
-          // Update status to approved
-          await runtime.store.updateTenantSkillStatus(tenantSkillId, 'approved', auth.userId, reviewNote)
+          if (publish && !isStoreAdmin(auth)) throw new HttpError(403, 'Only organization or super administrators may publish skills')
+          const nextStatus = isStoreAdmin(auth) ? 'approved' : 'reviewed'
           // Preserve the publisher's default visibility (dept/self) through
           // approval. An admin may still override it by passing visible_to in the
           // approve body; a record published before this change (no visible_to)
@@ -10604,12 +10667,18 @@ export function startServer(
           } else if (tenantSkill.visible_to == null) {
             await runtime.store.updateTenantSkillMeta(tenantSkillId, { visible_to: null })
           }
+          if (nextStatus === 'approved') {
+            tenantSkillId = await publishResourceRevision(runtime.store.driver, 'skill', tenantSkillId, auth.orgId, auth.userId, reviewNote)
+          } else {
+            await runtime.store.updateTenantSkillStatus(tenantSkillId, nextStatus, auth.userId, reviewNote)
+          }
         } else {
           await runtime.store.updateTenantSkillStatus(tenantSkillId, 'rejected', auth.userId, reviewNote)
 
         }
 
-        writeJson(res, 200, { id: tenantSkillId, status: approved ? 'approved' : 'rejected' })
+        if (approved && isStoreAdmin(auth)) notifyCatalogPublished(auth.orgId)
+        writeJson(res, 200, { id: tenantSkillId, status: approved ? (isStoreAdmin(auth) ? 'approved' : 'reviewed') : 'rejected' })
         return
       }
 
@@ -10617,7 +10686,7 @@ export function startServer(
       const skillTenantPatchMatch = pathname.match(/^\/api\/v1\/skills\/tenant\/([^/]+)$/)
       if (req.method === 'PATCH' && skillTenantPatchMatch) {
         authService.requireAnyScope(auth, ['admin:settings', 'store:tenant:write'])
-        const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
+        let tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
         const existing = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
         if (!existing) {
           throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
@@ -10626,6 +10695,7 @@ export function startServer(
         // in their scope (dept subtree for dept_admin, self for user), and only
         // within their own org.
         const skillStoreAdmin = isStoreAdmin(auth)
+        if (existing.status === 'approved' && !isStoreReviewer(auth)) throw new HttpError(403, 'Edit your working copy to submit a new version')
         if (!skillStoreAdmin) {
           if (existing.org_id != null && existing.org_id !== auth.orgId) {
             throw new HttpError(404, `Tenant skill not found: ${tenantSkillId}`)
@@ -10635,8 +10705,22 @@ export function startServer(
           }
         }
         const body = await readJsonBody(req)
+        if (body.version !== undefined || body.publish_note !== undefined) throw new HttpError(400, '版本号和更新说明只能在提交审核时设置')
 
-        const updates: { enabled?: number; visible_to?: string | null } = {}
+        const updates: { display_name?: string; description?: string; enabled?: number; visible_to?: string | null } = {}
+        if (typeof body.display_name === 'string') updates.display_name = body.display_name
+        if (typeof body.description === 'string') updates.description = body.description
+        if (body.content !== undefined && (typeof body.content !== 'string' || !body.content.trim())) throw new HttpError(400, '技能内容不能为空')
+        const contentUpdate = updates.display_name !== undefined || updates.description !== undefined || body.content !== undefined || body.visible_to !== undefined
+        let contentPath: string | undefined
+        if (body.content !== undefined) contentPath = (await resolveWorkspaceEntry(String(existing.file_path), 'SKILL.md')).fullPath
+        if (existing.status === 'superseded') throw new HttpError(409, '历史版本不可编辑，请基于当前发布版本编辑')
+        const isNewRevision = existing.status === 'approved' && contentUpdate
+        if (isNewRevision) {
+          const draft = await forkResourceRevision(runtime.store.driver, 'skill', existing, { id: auth.userId })
+          tenantSkillId = String(draft.id)
+          if (body.content !== undefined) contentPath = (await resolveWorkspaceEntry(String(draft.file_path), 'SKILL.md')).fullPath
+        }
         if (typeof body.enabled === 'boolean') {
           updates.enabled = body.enabled ? 1 : 0
         }
@@ -10653,7 +10737,12 @@ export function startServer(
 
         await runtime.store.updateTenantSkillMeta(tenantSkillId, updates)
 
-        writeJson(res, 200, { ok: true })
+        if (contentPath && typeof body.content === 'string') await writeFile(contentPath, body.content)
+        if (contentUpdate) {
+          await updateOrganizationPrivateMetadata('skill', tenantSkillId, { display_name: updates.display_name ?? existing.display_name, description: updates.description ?? existing.description })
+          if (!isNewRevision && ['pending', 'reviewed', 'rejected'].includes(String(existing.status))) await runtime.store.updateTenantSkillStatus(tenantSkillId, 'draft', auth.userId)
+        }
+        writeJson(res, 200, { ok: true, id: tenantSkillId, status: (isNewRevision || (contentUpdate && ['pending', 'reviewed', 'rejected'].includes(String(existing.status)))) ? 'draft' : existing.status })
         return
       }
 
@@ -10663,6 +10752,7 @@ export function startServer(
         const tenantSkillId = decodeURIComponent(skillTenantPatchMatch[1] || '')
         const tenantSkill = await runtime.store.getTenantSkill(tenantSkillId, auth.orgId)
         if (!tenantSkill) throw new HttpError(404, 'Resource not found')
+        if (tenantSkill.status === 'approved' && !isStoreReviewer(auth)) throw new HttpError(403, 'Only administrators may manage published resources')
         // Non-admins may only delete tenant skills authored by someone currently
         // in their scope, within their own org.
         if (tenantSkill && !isStoreAdmin(auth)) {

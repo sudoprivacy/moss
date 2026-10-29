@@ -18,6 +18,10 @@ export async function dispatchCatalogGovernance(
   );
   const { data } = governance;
   const read = new CatalogReadModel(governance);
+  const preview = /^sources\/([\w-]+)\/publication-preview$/.exec(path);
+  if (method === 'GET' && preview) return governance.publicationPreview(actor, preview[1]);
+  const working = /^agents\/([\w-]+)\/draft$/.exec(path);
+  if (method === 'POST' && working) return governance.forkWorkingSource(actor, working[1]);
   if (method === "GET" && path === "entries") {
     const filters = Object.fromEntries(
       [

@@ -2,18 +2,19 @@ import type { ExternalProviderService } from './service.js'
 import { dispatchCatalogGovernance } from '../agentFederation/catalogRoutes.js'
 import { ExternalProviderError } from './policy.js'
 import type { ExternalActor } from './store.js'
+import { authorizeLibraryCatalog, filterLibraryCatalogPage, type CatalogLibraryAccess } from '../agentFederation/catalogLibraryAccess.js'
 
 export function isExternalProviderRoute(path: string): boolean {
   return /^\/api\/v1\/(external-agents|external-sessions|tasks)(\/|$)/.test(path)
 }
 
-export async function dispatchExternalProvider(service: ExternalProviderService | null, actor: ExternalActor, method: string, url: URL, body: unknown, requireAdmin: () => void, requirePlatformAdmin: () => void = () => { throw new ExternalProviderError(403, 'PLATFORM_ADMIN_REQUIRED') }) {
+export async function dispatchExternalProvider(service: ExternalProviderService | null, actor: ExternalActor, method: string, url: URL, body: unknown, requireAdmin: () => void, requirePlatformAdmin: () => void = () => { throw new ExternalProviderError(403, 'PLATFORM_ADMIN_REQUIRED') }, library?: CatalogLibraryAccess) {
   try {
     if (url.pathname === '/api/v1/external-agents/access' && method === 'GET') {
       let can_manage = true, can_manage_policy = true
       try { requireAdmin() } catch { can_manage = false }
       try { requirePlatformAdmin() } catch { can_manage_policy = false }
-      return { status: 200, body: { success: true, data: { can_manage, can_manage_policy, credential_storage_available: service?.administration.credentialStorageAvailable ?? false } } }
+      return { status: 200, body: { success: true, data: { can_manage, can_manage_policy, can_create: library?.canCreate ?? can_manage, can_review: library?.canReview ?? can_manage, credential_storage_available: service?.administration.credentialStorageAvailable ?? false } } }
     }
     if (!service) throw new ExternalProviderError(503, 'EXTERNAL_PROVIDER_UNAVAILABLE')
     await service.authorize(actor)
@@ -23,13 +24,21 @@ export async function dispatchExternalProvider(service: ExternalProviderService 
     if (after.length > 200 || (after && !/^[\w.-]+$/.test(after))) throw new ExternalProviderError(400, 'INVALID_CURSOR')
     let data: unknown, status = 200
     if (path.startsWith(`${base}/external-agents/admin/catalog/`)) {
-      requireAdmin()
+      let administrator = true
+      try { requireAdmin() } catch { administrator = false }
+      if (!administrator) {
+        if (!library) requireAdmin()
+        await authorizeLibraryCatalog(service.governance, actor, library!, method, url, body)
+      }
       data = await dispatchCatalogGovernance(service.governance, actor, method, url, body)
+      if (!administrator) data = await filterLibraryCatalogPage(service.governance, actor, library!, data)
       return { status: 200, body: { success: true, data } }
     }
     if (path.startsWith(`${base}/external-agents/admin/`)) {
-      requireAdmin()
       const action = path.slice(`${base}/external-agents/admin/`.length)
+      const authoring = library?.canCreate && ((method === 'GET' && ['policy', 'members', 'members-page'].includes(action)) || (method === 'POST' && ['inspect', 'onboard', 'endpoint-requests'].includes(action)))
+      if (!authoring) requireAdmin()
+      if (action === 'onboard' && library?.canCreate) body = { ...(body as Record<string, unknown>), catalog_governance: true }
       const admin = service.administration
       if (action === 'policy' && method === 'GET') data = await admin.policy(actor)
       else if (action === 'policy' && method === 'POST') { requirePlatformAdmin(); data = await admin.setPolicy(actor, body) }

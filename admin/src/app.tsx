@@ -3,6 +3,8 @@ import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { DashboardShell } from './layouts/dashboard-shell'
 import { OPERATION_ROUTES } from './operations-navigation'
+import { useAuth } from '@/lib/hooks/use-auth'
+import { hasScope } from '@/lib/api/client'
 
 const LoginPage = lazy(() => import('./pages/login-page'))
 const DashboardPage = lazy(() => import('./pages/dashboard-page'))
@@ -22,6 +24,7 @@ const ChannelsPage = lazy(() => import('./pages/channels-page'))
 const CorpAppsPage = lazy(() => import('./pages/corp-apps-page'))
 const SkillStorePage = lazy(() => import('./pages/skill-store-page'))
 const AgentHubPage = lazy(() => import('./pages/agent-hub-page'))
+const AgentLedgerPage = lazy(() => import('./pages/agent-ledger-page'))
 const AgentManagerPage = lazy(() => import('./pages/agent-manager-page'))
 const MyMossPage = lazy(() => import('./pages/my-moss-page'))
 const AgentManagerDetailPage = lazy(() => import('./pages/agent-manager-page').then(module => ({ default: module.AgentManagerDetailPage })))
@@ -54,6 +57,18 @@ const SessionDetailPage = lazy(() =>
     default: module.SessionDetailPage,
   })),
 )
+
+function SecretsIndexRedirect() {
+  const { scopes } = useAuth()
+  const destination = hasScope(scopes, 'admin:secrets')
+    ? '/secrets/config-items'
+    : hasScope(scopes, 'secrets:department:read')
+      ? '/secrets/department'
+      : hasScope(scopes, 'secrets:user:write')
+        ? '/secrets/user-credentials'
+        : '/'
+  return <Navigate to={destination} replace />
+}
 
 function RouteLoader() {
   return (
@@ -225,6 +240,14 @@ export default function App() {
           }
         />
         <Route
+          path="/settings/agent-ledger"
+          element={
+            <SuspendedRoute>
+              <AgentLedgerPage />
+            </SuspendedRoute>
+          }
+        />
+        <Route
           path="/settings/enterprise"
           element={
             <SuspendedRoute>
@@ -266,6 +289,10 @@ export default function App() {
           }
         />
         {/* Secrets Management */}
+        <Route
+          path="/secrets"
+          element={<SecretsIndexRedirect />}
+        />
         <Route
           path="/secrets/config-items"
           element={
