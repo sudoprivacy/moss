@@ -55,6 +55,7 @@ async function main() {
     engineCommit: release.engine.commit, cohostVersion: release.cohost.version,
     nexusVersion: release.cohost.nexusVersion, imageDigest: release.image.digest,
     platformPolicyMutations: 0, policyRestored: false, sameOwnerPod: false,
+    nativeDefaultVerified: false, legacySessionCreationRejected: false,
     coldRestartTested: false, retainedRuntimeForExplicitCleanup: true,
     createdSessions: [] as string[], terminatedSessions: [] as string[],
     rows: [] as Array<Record<string, unknown>>, cleanupErrors: [] as string[], error: '' }
@@ -135,7 +136,7 @@ async function main() {
   }
   async function conversation(label: string, text: string, isDenied: boolean) {
     const created = await request<{ session_id: string; runtime: { type: string }; ws_url: string }>('/api/v1/sessions', 'POST',
-      { runtime: { type: 'cohost' }, title: `DLP acceptance ${label}` })
+      { ...(label === 'bootstrap' ? {} : { runtime: { type: 'cohost' } }), title: `DLP acceptance ${label}` })
     z.string().uuid().parse(created.session_id)
     proof.createdSessions.push(created.session_id); save()
     let stream: ReturnType<typeof productConversation> | undefined
@@ -161,6 +162,19 @@ async function main() {
     // The harmless bootstrap creates the real owner through the product entrypoint.
     await conversation('bootstrap', ordinaryPrompt, false)
     proof.realModel = true
+    proof.nativeDefaultVerified = true
+    const legacy = await fetch(`${origin.origin}/api/v1/sessions`, { method: 'POST', headers, redirect: 'error',
+      body: JSON.stringify({ runtime: { type: 'k8s' }, title: 'DLP acceptance rejected legacy placement' }),
+      signal: AbortSignal.timeout(180_000) })
+    if (legacy.ok) {
+      const unexpected = await legacy.json() as { session_id?: unknown }
+      if (typeof unexpected.session_id === 'string' && z.string().uuid().safeParse(unexpected.session_id).success) {
+        proof.createdSessions.push(unexpected.session_id); save()
+        await terminate(unexpected.session_id)
+      }
+    }
+    assert.equal(legacy.status, 403, 'New legacy sessions must not bypass the managed Cloud model gate')
+    proof.legacySessionCreationRejected = true
     const connection = await owners.find(input.ownerId)
     assert(connection, 'The product did not create the isolated owner runtime')
     observer = await connectSessionRuntime(connection, input.ownerId)
@@ -219,7 +233,8 @@ async function main() {
     } catch { proof.cleanupErrors.push('policy-restore') }
     observer?.client.close()
     await owners.close()
-    proof.passed = !proof.error && proof.policyRestored && proof.cleanupErrors.length === 0 && proof.rows.length === 7
+    proof.passed = !proof.error && proof.policyRestored && proof.nativeDefaultVerified && proof.legacySessionCreationRejected
+      && proof.cleanupErrors.length === 0 && proof.rows.length === 7
     save()
     console.log(JSON.stringify(proof))
   }
