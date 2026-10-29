@@ -45,6 +45,7 @@ const BUN = [
   // src/channels/__tests__
   'connectionScope.test.ts',
   'channelDefaultAgent.test.ts',
+  'mossToolApprovals.test.ts',
   'crashSeedRecovery.test.ts',
   'untrustedText.test.ts',
   // src/server/__tests__
