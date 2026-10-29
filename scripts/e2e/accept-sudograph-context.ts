@@ -9,6 +9,8 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { createAcpBridgeHandle } from '../../src/server/backends/acpBridge.js'
+import { DirectConnectStore } from '../../src/server/db.js'
+import type { OntologyContextPorts } from '../../src/server/ontology/projectRegistry.js'
 
 const { values } = parseArgs({ options: {
   engine: { type: 'string' }, 'engine-sha256': { type: 'string' },
@@ -74,6 +76,38 @@ function apply(operation: string): any {
 apply('revision-a')
 let isAllowed = true
 const contexts: any[] = [], requests: any[] = [], output: any[] = [], diagnostics: string[] = []
+let hostStore = new DirectConnectStore(join(root, 'host.db'))
+await hostStore.driver.run(`INSERT INTO sessions
+  (session_id, transcript_session_id, org_id, user_id, role, scopes_json, cwd,
+   runtime_type, status, desired_state, transcript_path, created_at, last_active_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+['fixture-moss-session', 'fixture-native-history', 'fixture-org', 'fixture-user', 'user', '[]', workspace,
+  'cohost', 'active', 'active', join(root, 'transcript.jsonl'), Date.now(), Date.now()])
+const project = await hostStore.ontologyProjects.register({ orgId: 'fixture-org', authorityRef: 'canonical-fixture',
+  workerRef: 'registered-fixture-worker', modelRef: 'fixture-model', sourceRefs: ['registered-fixture-source'] })
+const contextPorts: OntologyContextPorts = {
+  authorize: async binding => {
+    assert.equal(binding.orgId, 'fixture-org')
+    assert.equal(binding.userId, 'fixture-user')
+    if (!isAllowed) throw new Error('Fixture grant revoked')
+  },
+  readContext: async binding => {
+    assert.equal(binding.workerRef, 'registered-fixture-worker')
+    assert.equal(binding.modelRef, 'fixture-model')
+    const context = worker('compiler.workspace', { operation: 'read', product: 'context' })
+    contexts.push(context)
+    return context
+  },
+}
+const bound = await hostStore.ontologyProjects.bind({ sessionId: 'fixture-moss-session', projectId: project.projectId,
+  orgId: 'fixture-org', userId: 'fixture-user' }, contextPorts)
+// Recover the resolver from the actual host database, not a serialized callback.
+await hostStore.close()
+hostStore = new DirectConnectStore(join(root, 'host.db'))
+assert.deepEqual(await hostStore.ontologyProjects.resolveSession('fixture-moss-session'), bound)
+const resolveHostContext = await hostStore.ontologyProjects.runnerContext({ sessionId: 'fixture-moss-session',
+  orgId: 'fixture-org', userId: 'fixture-user' }, contextPorts)
+assert(resolveHostContext)
 const server = createServer((req, res) => {
   void (async () => {
     const chunks: Buffer[] = []
@@ -109,13 +143,7 @@ const child = spawn(engine, ['--auth', 'api-key', '--model', 'context-probe', '-
 const exited = new Promise<void>(resolve => child.once('close', () => resolve()))
 const handle = createAcpBridgeHandle({ child, cwd: workspace, sessionId: 'fixture-moss-session', model: 'context-probe',
   runtime: { type: 'cohost', engine: 'scode' }, transcriptPath: join(root, 'transcript.jsonl'),
-  resolveHostContext: async binding => {
-    assert.equal(binding.sessionId, 'fixture-moss-session')
-    if (!isAllowed) throw new Error('Fixture grant revoked')
-    const context = worker('compiler.workspace', { operation: 'read', product: 'context' })
-    contexts.push(context)
-    return context.text
-  },
+  resolveHostContext,
 })
 let wake: (() => void) | undefined
 handle.onStdoutLine(line => { output.push(JSON.parse(line)); wake?.() })
@@ -166,12 +194,14 @@ try {
   assert.equal(hash(await readFile(source)), sourceBefore)
   receipt = { format: 'moss-sudograph-context-acceptance/v1', passed: true, engine_sha256: values['engine-sha256'], compiler,
     canonical_revisions: contexts.map(context => context.revision), real_engine: true, installed_compiler: true,
-    moss_acp_bridge: true, exact_context_in_requests: true, history_preserved: true, context_not_in_user_history: true,
+    moss_acp_bridge: true, durable_project_binding_recovered: true,
+    exact_context_in_requests: true, history_preserved: true, context_not_in_user_history: true,
     denied_model_requests: 0, source_unchanged: true,
     scope: 'Real engine stdio, Moss ACP bridge and installed compiler; deterministic loopback provider. Not Nexus mailbox, tenant grants, cloud login, WebUI or ShareOne comments.' }
 } finally {
   await handle.destroy(true)
   await exited
+  await hostStore.close()
   server.closeAllConnections()
   await new Promise<void>(resolve => server.close(() => resolve()))
   await Promise.all([

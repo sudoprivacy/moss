@@ -58,11 +58,56 @@ directory retains captured requests, transcript, diagnostics and source/model
 fixtures. A failed run does not create a successful receipt.
 
 This port is not yet wired to a production cloud model registry. In particular,
-adding a callback field does not carry a function through a durable manifest:
-the owning runner must reconstruct it from a server-registered project and its
-current authorization. The real-engine acceptance uses stdio, not a managed
+adding a callback field does not carry a function through a durable manifest.
+The native session runner now reconstructs it from the durable project binding
+and trusted host ports, and refuses startup when a bound model has no worker or
+policy adapter. The real-engine acceptance uses stdio, not a managed
 Nexus mailbox, and its refusal is synthetic. Production tenant grants, worker
 placement and credentials, WebUI routes, authenticated review/comment delivery,
 published runtime adoption and the human journey remain separate acceptance.
 The WebUI must not store a second canonical model or reinterpret a Desktop
 SQLite path on its own host.
+
+## Durable project and conversation references
+
+The Moss database now has a project registry and immutable conversation
+bindings, shared by SQLite and PostgreSQL. It stores the tenant, authority,
+registered execution worker, model and source references. It stores no model
+YAML, credentials, database address or worker filesystem path. Re-registering
+the same authority is idempotent; another authority cannot create a second
+project identity for the same worker/model. Changing a registered binding needs
+an explicit migration rather than a prompt-selected target.
+
+`OntologyProjectRegistry.bind` checks the persisted conversation owner and
+tenant. Many conversations may reference the same project. Reopening a graph
+cannot silently retarget an existing conversation. Its context reader can be
+reconstructed after reopening the host database and reads the current binding
+and policy before and after worker I/O. Session deletion, ownership changes,
+project disable/re-enable and authorization refusal prevent disclosure; none
+may fall back to a cached model snapshot or ordinary legacy instructions.
+
+The authorization and worker ports are trusted host functions. Authorization
+must reuse current membership, source and resource policy; this registry does
+not create another grant system. A provider that cannot enforce a requested
+row/field scope must refuse it, rather than authorize an unrestricted context.
+The worker port must resolve the registered execution location and pinned
+compiler package. The source/model references in this table do not establish
+network reachability or production authorization.
+
+The maintained real-engine acceptance above now closes and reopens the actual
+Moss database before constructing its reader. Ordinary Node tests also check
+cross-tenant/owner rejection, duplicate registration, multi-session bindings,
+current reads and revocation during I/O. These are registry/reader acceptance,
+not production wiring: source intake routes and the production policy/worker
+factory still need to supply these ports before a cloud session can use the
+registry. The default CLI fails explicitly for a bound project until that factory
+is configured. No public API for arbitrary registration is exposed.
+
+`SessionRunnerDaemon` checks the persisted binding during startup and resume,
+compares its owner and tenant with the runner identity, and rechecks model access
+before spawning the existing native backend. It passes the same live resolver
+through the existing backend/ACP connection. There is no callback, worker path or
+business snapshot in the manifest. Ordinary conversations remain unchanged.
+Real database/daemon tests cover recovery, fresh context across turns, revoked
+access, missing adapters and forged manifest identities; existing cancellation,
+maintenance and exit lifecycle tests retain their assertions and deadlines.

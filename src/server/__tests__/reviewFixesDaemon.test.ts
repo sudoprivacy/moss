@@ -44,6 +44,7 @@ describe('Runner cancellation during recovery', () => {
       let reason: string | undefined;
       const events: string[] = [];
       const store = {
+        ontologyProjects: { runnerContext: async () => undefined },
         cohostSessions: { get: async () => undefined },
         updateAttemptRunner: async () => {}, touchAttemptHeartbeat: async () => true,
         isOpen: () => true,
@@ -113,6 +114,7 @@ describe('Cohost runner execution identity', () => {
     const bound = new Promise<void>(resolve => { onBound = resolve; });
     const bindingCommit = new Promise<void>(resolve => { releaseBinding = resolve; });
     const store = {
+      ontologyProjects: { runnerContext: async () => undefined },
       cohostSessions: { get: async () => binding,
       bind: async (_sid: string, _aid: string, candidate: unknown, owner: string) => {
         assert.deepEqual(candidate, binding);
@@ -208,6 +210,7 @@ describe('Cohost binding publication failures', () => {
       const events: string[] = [];
       let destroys = 0;
       const store = {
+        ontologyProjects: { runnerContext: async () => undefined },
         cohostSessions: { get: async () => undefined, bind: async () => {
           if (failure !== 'fenced') throw storeError;
           return false;
@@ -253,6 +256,7 @@ describe('Runner shutdown preserves conversation intent', () => {
       let lifecycle = { status: 'active', desiredState: 'active' };
       let stopReason: string | undefined;
       const store = {
+        ontologyProjects: { runnerContext: async () => undefined },
         updateAttemptRunner: async () => {},
         touchAttemptHeartbeat: async () => true,
         addEvent: async () => {},
