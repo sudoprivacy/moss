@@ -16,6 +16,7 @@ import {
 } from './agentIdentity.js'
 import { requirePersonalAgent } from './personalAgentAccess.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
+import { createModelSession, parseOntologyProjectId } from './ontology/sessionProjects.js'
 import { randomUUID } from 'crypto'
 import { accessSync, constants, existsSync } from 'fs'
 import { mkdir, readFile, writeFile, open } from 'fs/promises'
@@ -657,6 +658,7 @@ export class RuntimeService {
 
   private async createAdmittedSession(input: SessionCreateInput): Promise<SessionRecord> {
     if (this.draining) throw new ServerDrainingError()
+    parseOntologyProjectId(input.ontologyProjectId)
     if (this.upgradingOwners.has(input.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
     return withOrganizationResources(await this.resourceScope(input), async () => {
       // Every session belongs to an agent. Without one chosen, it belongs to the
@@ -1070,7 +1072,7 @@ export class RuntimeService {
       }
     }
 
-    const created = await this.store.createSession({
+    const persistSession = () => this.store.createSession({
       sessionId,
       transcriptSessionId: sessionId,
       transcriptPath,
@@ -1088,6 +1090,9 @@ export class RuntimeService {
       managementActorId: input.managementActorId,
       managementAgent: input.managementAgent,
     })
+    const created = input.ontologyProjectId
+      ? await createModelSession(this.store, { projectId: input.ontologyProjectId, sessionId, orgId: input.orgId, userId: input.userId }, persistSession)
+      : await persistSession()
 
     if (zoneResolution && zoneResolution.homeZoneId) {
       try {

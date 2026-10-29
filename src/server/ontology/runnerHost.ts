@@ -19,6 +19,11 @@ export interface SessionRunnerHost {
 /** Production composition. Only persisted model bindings activate host access. */
 export async function createSessionRunnerHost(store: DirectConnectStore, sessionId: string): Promise<SessionRunnerHost> {
   if (!await store.ontologyProjects.resolveSession(sessionId)) return {}
+  return createModelContextHost(store)
+}
+
+/** Shared trusted composition for project discovery, session creation and runner recovery. */
+export async function createModelContextHost(store: DirectConnectStore): Promise<{ ontologyContext: McpOntologyContextPorts; close(): Promise<void> }> {
   const auth = new AuthCenterDb(store)
   const mcp = new McpStore(store.driver)
   const reviews = new ToolGatewayStore(store.driver)

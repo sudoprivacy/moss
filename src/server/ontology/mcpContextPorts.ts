@@ -1,7 +1,7 @@
 import type { McpStore } from '../mcp/db.js'
 import { ReviewedMcpAccess } from '../mcp/reviewedAccess.js'
 import { ResourceAccessError } from '../catalog/resourceError.js'
-import { validateOntologyContext, type OntologyContextPorts, type OntologySessionBinding } from './projectRegistry.js'
+import { validateOntologyContext, type OntologyContextPorts, type OntologyProject, type OntologySessionBinding } from './projectRegistry.js'
 
 const tool = 'sudograph_context'
 const invalid = () => new ResourceAccessError(502, 'Registered model worker returned an incompatible identity or scope')
@@ -11,7 +11,11 @@ export class McpOntologyContextPorts implements OntologyContextPorts {
   constructor(private readonly access: ReviewedMcpAccess, private readonly audit: Pick<McpStore, 'insertAuditLog'>) {}
 
   async authorize(binding: OntologySessionBinding): Promise<void> {
-    await this.access.authorizeHostRead(binding.orgId, binding.userId, binding.workerRef, tool)
+    await this.authorizeProject(binding, binding.userId)
+  }
+
+  async authorizeProject(project: OntologyProject, userId: string): Promise<void> {
+    await this.access.authorizeHostRead(project.orgId, userId, project.workerRef, tool)
   }
 
   async readContext(binding: OntologySessionBinding) {

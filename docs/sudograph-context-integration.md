@@ -57,18 +57,43 @@ Use the checksum from the selected, verified engine artifact. The evidence
 directory retains captured requests, transcript, diagnostics and source/model
 fixtures. A failed run does not create a successful receipt.
 
-This port is not yet wired to a production cloud model registry. In particular,
-adding a callback field does not carry a function through a durable manifest.
-The native session runner now reconstructs it from the durable project binding
-and trusted host ports, and refuses startup when a bound model has no worker or
-policy adapter. The real-engine acceptance uses stdio, not a managed
-Nexus mailbox, and its refusal is synthetic. Production tenant grants, worker
-placement and credentials, WebUI routes, authenticated review/comment delivery,
-published runtime adoption and the human journey remain separate acceptance.
+The native session runner reconstructs this port from the durable project binding
+and shared production host factory, and refuses startup when a bound model has
+no authorized worker. No function is serialized through the durable manifest.
+The real-engine acceptance uses stdio and current database membership revocation,
+not a managed Nexus mailbox. Deployed tenant grants, worker placement and Vault
+connectivity, WebUI routes, authenticated review/comment delivery, supported
+official engine adoption and the human journey remain separate acceptance.
 The WebUI must not store a second canonical model or reinterpret a Desktop
 SQLite path on its own host.
 
 ## Durable project and conversation references
+
+Authenticated clients can list their current authorized projects with
+`GET /api/v1/ontology/projects` and pass one `project_id` as
+`ontology_project_id` to the ordinary `POST /api/v1/sessions` entry. Discovery
+uses the same current MCP membership, visibility, tool review and credential
+policy as runner execution. The response contains canonical references only,
+without worker addresses, secrets, context snapshots or counts of hidden models.
+`GET /api/v1/sessions/:id/ontology-project` recovers that conversation's binding
+for its actual current owner; administrative session attachment does not grant
+access to another owner's model.
+
+Creation authorizes the registered project before its SQL transaction, then
+persists the ordinary session, its creation event and immutable model binding
+together, before starting any attempt. Failed admission or persistence leaves no
+unbound ordinary session that could resume without model context. Disable/re-enable
+generations fence project changes during creation. The runner still rechecks
+current membership, worker policy and binding on startup and every actual turn.
+An unsupported engine refuses the bound session; it cannot fall back to legacy
+instructions. No model path, worker URL, credential, callback or business text is
+accepted from this field or stored in client metadata.
+
+These routes expose already registered canonical projects. They do not let a
+client register an arbitrary worker or declare a source scan complete. Source
+intake/worker provisioning, the WebUI project selector and end-user review/comment
+acceptance remain separate integration work. Ordinary sessions omit
+`ontology_project_id` and retain their existing path.
 
 The Moss database now has a project registry and immutable conversation
 bindings, shared by SQLite and PostgreSQL. It stores the tenant, authority,
@@ -97,11 +122,10 @@ network reachability or production authorization.
 The maintained real-engine acceptance above now closes and reopens the actual
 Moss database before constructing its reader. Ordinary Node tests also check
 cross-tenant/owner rejection, duplicate registration, multi-session bindings,
-current reads and revocation during I/O. These are registry/reader acceptance,
-not production wiring: source intake routes and the production policy/worker
-factory still need to supply these ports before a cloud session can use the
-registry. The default CLI fails explicitly for a bound project until that factory
-is configured. No public API for arbitrary registration is exposed.
+current reads and revocation during I/O. The production factory below supplies
+these ports from the existing MCP catalogue and current policy. A missing worker,
+review or credential fails explicitly. Source intake and deployed cloud journeys
+remain outstanding. No public API for arbitrary registration is exposed.
 
 `SessionRunnerDaemon` checks the persisted binding during startup and resume,
 compares its owner and tenant with the runner identity, and rechecks model access
@@ -149,9 +173,10 @@ revocation during I/O, changed tool definitions, identity/scope mismatches,
 network/output limits and worker input/error enforcement. The real-engine
 acceptance above now closes/reopens the actual Moss database and uses this MCP
 worker profile against the installed compiler before capturing model requests.
-Its membership/credential fixtures are synthetic: these checks do not establish
-production Nexus/Vault connectivity, source intake, a deployed worker, WebUI or
-ShareOne comment delivery. Those remain integration work.
+Its member revocation changes the actual host database. Nexus secret values in
+the credential checks remain synthetic; these checks do not establish production
+Nexus/Vault connectivity, source intake, a deployed worker, WebUI or ShareOne
+comment delivery. Those remain integration work.
 
 ## Production runner composition
 

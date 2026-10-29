@@ -14,6 +14,7 @@ import { NexusClient } from '../nexus/nexusClient.js'
 import { orgScopedNamespace, secretSubject } from '../secrets/secretSubject.js'
 import { registerModelContextTool } from './contextWorker.js'
 import { createSessionRunnerHost } from './runnerHost.js'
+import { createModelSession, getSessionProject, listSessionProjects, parseOntologyProjectId } from './sessionProjects.js'
 
 async function fixture(t: TestContext) {
   const store = new DirectConnectStore(':memory:')
@@ -73,8 +74,68 @@ async function fixture(t: TestContext) {
   const reader = await store.ontologyProjects.runnerContext({ sessionId: 'session', orgId: 'org', userId: 'alice' }, production.ontologyContext)
   assert(reader)
   t.after(() => production.close?.())
-  return { store, mcp, server, production, state, read: () => reader({ sessionId: 'session', nativeSessionId: 'native-history' }) }
+  return { store, mcp, server, project, production, state, read: () => reader({ sessionId: 'session', nativeSessionId: 'native-history' }) }
 }
+
+void test('project discovery returns only current authorized canonical references without reading business context', async t => {
+  const f = await fixture(t)
+  await f.store.ontologyProjects.register({ orgId: 'org', authorityRef: 'hidden', workerRef: 'unreviewed-worker', modelRef: 'hidden', sourceRefs: ['hidden-source'] })
+  await f.store.ontologyProjects.register({ orgId: 'other', authorityRef: 'foreign', workerRef: f.server.id, modelRef: 'foreign', sourceRefs: ['foreign-source'] })
+  assert.deepEqual(await listSessionProjects(f.store, { orgId: 'org', userId: 'alice' }), { projects: [{
+    project_id: f.project.projectId, authority_ref: 'authority', model_ref: 'model', source_refs: ['source'],
+  }] })
+  assert.equal(f.state.calls, 0)
+  await f.mcp.updateMcpServer('org', f.server.id, { visible_to: { user_ids: [] } }, 'manager')
+  assert.deepEqual(await listSessionProjects(f.store, { orgId: 'org', userId: 'alice' }), { projects: [] })
+})
+
+void test('a new canonical session is atomically bound before returning and can recover its owning project', async t => {
+  const f = await fixture(t)
+  const owner = { orgId: 'org', userId: 'alice' }
+  assert.equal(parseOntologyProjectId(f.project.projectId), f.project.projectId)
+  const input = { ...owner, sessionId: 'new-session', projectId: f.project.projectId }
+  const created = await createModelSession(f.store, input, () => f.store.createSession({
+    ...owner, sessionId: input.sessionId, transcriptSessionId: 'new-history', transcriptPath: '/unused/new-transcript',
+    role: 'admin', scopes: ['*'], cwd: '/unused', runtime: { type: 'cohost', engine: 'scode' }, status: 'creating', desiredState: 'active',
+  }))
+  assert.equal(created.currentAttemptId, null)
+  const bound = await f.store.ontologyProjects.resolveSession(created.sessionId)
+  assert.equal(bound?.projectId, f.project.projectId)
+  assert.equal(bound?.userId, owner.userId)
+  assert.deepEqual(await getSessionProject(f.store, created.sessionId, owner), { project: {
+    project_id: f.project.projectId, authority_ref: 'authority', model_ref: 'model', source_refs: ['source'],
+  } })
+  await assert.rejects(getSessionProject(f.store, created.sessionId, { ...owner, userId: 'bob' }), /unavailable/)
+  await f.store.driver.run("UPDATE users SET status = 'disabled' WHERE id = 'alice'")
+  await assert.rejects(getSessionProject(f.store, created.sessionId, owner), error =>
+    error instanceof Error && 'statusCode' in error && error.statusCode === 403)
+  assert.equal(f.state.calls, 0, 'entry does not load records or business context into client state')
+})
+
+void test('denied and interrupted canonical creation leave no ordinary session, creation event or binding', async t => {
+  const f = await fixture(t)
+  const owner = { orgId: 'org', userId: 'alice' }
+  const input = { ...owner, sessionId: 'failed-session', projectId: f.project.projectId }
+  const persist = () => f.store.createSession({ ...owner, sessionId: input.sessionId, transcriptSessionId: 'failed-history',
+    transcriptPath: '/unused/failed', role: 'admin', scopes: ['*'], cwd: '/unused', runtime: { type: 'cohost', engine: 'scode' },
+    status: 'creating', desiredState: 'active' })
+  await assert.rejects(createModelSession(f.store, input, async () => { await persist(); throw new Error('Interrupt after session insert') }), /Interrupt after session insert/)
+  assert.equal(await f.store.getSession(input.sessionId), null)
+  assert.equal(await f.store.latestEvent(input.sessionId, 'session_created'), null)
+  assert.equal(await f.store.ontologyProjects.resolveSession(input.sessionId), undefined)
+  await f.mcp.updateMcpServer('org', f.server.id, { visible_to: { user_ids: [] } }, 'manager')
+  let writes = 0
+  await assert.rejects(createModelSession(f.store, input, async () => { writes++; return persist() }), error =>
+    error instanceof Error && 'statusCode' in error && error.statusCode === 403)
+  await assert.rejects(createModelSession(f.store, { ...input, orgId: 'other' }, async () => { writes++; return persist() }), /unavailable/)
+  assert.equal(writes, 0)
+  assert.equal(await f.store.getSession(input.sessionId), null)
+  assert.equal(await f.store.ontologyProjects.resolveSession(input.sessionId), undefined)
+  for (const value of [null, '', {}, '/srv/source.db', 'https://worker.invalid', { projectId: f.project.projectId }]) {
+    assert.throws(() => parseOntologyProjectId(value), /Invalid ontology_project_id/)
+  }
+  assert.equal(parseOntologyProjectId(undefined), undefined)
+})
 
 void test('the production composition reads current DB policy and worker output without injected ports', async t => {
   const f = await fixture(t)
