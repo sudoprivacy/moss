@@ -119,6 +119,7 @@ WORKDIR /app
 COPY bin/scode bin/
 COPY bin/wiki bin/
 COPY bin/moss-server.mjs ./bin/
+COPY bin/moss-qualify-sqlite-upgrade.mjs bin/moss-inspect-existing-product.mjs ./bin/
 COPY bin/msgaudit-pull-child.js ./bin/
 COPY bin/direct-connect-session-runner.mjs ./bin/
 COPY bin/artifact-mcp.mjs ./bin/

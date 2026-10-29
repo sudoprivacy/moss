@@ -245,6 +245,7 @@ WORKDIR /app
 
 # Built JS/TS artifacts + admin frontend + assistants/skills (from js-builder).
 COPY --from=js-builder /src/bin/moss-server.mjs ./bin/
+COPY --from=js-builder /src/bin/moss-qualify-sqlite-upgrade.mjs /src/bin/moss-inspect-existing-product.mjs ./bin/
 COPY --from=js-builder /src/bin/direct-connect-session-runner.mjs ./bin/
 COPY --from=js-builder /src/bin/artifact-mcp.mjs ./bin/
 # 会话存档 pull child: forked by MsgAuditWorker so a crash inside the native
@@ -341,6 +342,7 @@ RUN apt-get update \
 WORKDIR /out/moss-server
 COPY --from=host-node-runtime /opt/node ./node
 COPY --from=js-builder /src/bin/moss-server.mjs /src/bin/direct-connect-session-runner.mjs ./app/bin/
+COPY --from=js-builder /src/bin/moss-qualify-sqlite-upgrade.mjs /src/bin/moss-inspect-existing-product.mjs ./app/bin/
 COPY --from=js-builder /src/bin/artifact-mcp.mjs ./app/bin/
 COPY --from=js-builder /src/admin/dist ./app/admin/dist
 COPY --from=js-builder /src/assistants ./app/assistants
