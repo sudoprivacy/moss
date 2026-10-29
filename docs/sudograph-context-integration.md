@@ -2,8 +2,9 @@
 
 The existing Moss ACP bridge supports Sudo Code's opt-in `hostContext` v1
 protocol. An authorized host supplies `resolveHostContext` as a function in
-`BackendSpawnOptions`; `CohostBackend` passes it into the same bridge used for
-ordinary conversations. The function is an internal runtime port. It is never
+`BackendSpawnOptions`; the cohost, local, Docker and legacy Kubernetes Sudo Code
+backends pass it into the same bridge used for ordinary conversations. The
+function is an internal runtime port. It is never
 accepted from a prompt, HTTP request, client metadata or serialized manifest.
 
 The closure binds one canonical project and rechecks current model access on
