@@ -10,8 +10,23 @@ import { dirname, join, resolve } from 'node:path'
 import { readEgressPolicyFile } from '@sudo/user-runtime'
 import { DirectConnectStore } from '../db.js'
 import { RuntimeService } from '../runtimeService.js'
-import { ResourceAccessError } from '../catalog/resourceError.js'
+import { EgressPolicyNotAppliedError, SessionStartupError } from '../sessionStartup.js'
 import type { ServerConfig } from '../types.js'
+
+function assertPolicyAdmissionFailure(error: unknown): true {
+  assert(error instanceof EgressPolicyNotAppliedError)
+  const attemptId = '00000000-0000-4000-8000-000000000001'
+  const startup = new SessionStartupError(error, 'policy-session', attemptId)
+  assert.equal(startup.statusCode, 503)
+  assert.equal(startup.failure.code, 'EGRESS_POLICY_NOT_APPLIED')
+  assert.equal(startup.failure.isRetryable, true)
+  assert.equal(startup.failure.sessionId, 'policy-session')
+  assert.equal(startup.failure.attemptId, attemptId)
+  assert.equal(startup.cause, error)
+  assert.match(startup.message, /Retry policy delivery or update the runtime/)
+  assert.doesNotMatch(JSON.stringify(startup.failure), /Assistant|skill|Invalid native policy|Policy RPC/)
+  return true
+}
 
 void test('controller restart restores the saved local policy and refuses model admission without an applied receipt', async t => {
   const root = await mkdtemp(join(tmpdir(), 'moss-egress-recovery-'))
@@ -40,7 +55,7 @@ void test('controller restart restores the saved local policy and refuses model 
   process.env.MOSS_COHOST_CONNECTION = '{"invalid":true}'
   t.after(() => { if (previous === undefined) delete process.env.MOSS_COHOST_CONNECTION; else process.env.MOSS_COHOST_CONNECTION = previous })
   await assert.rejects(restarted.resolveCohostConnection('owner-a', 'agent-a', { 'sudocode.json': '{}', 'backend-config.json': '{"mounts":[]}' }),
-    error => error instanceof ResourceAccessError && error.statusCode === 503 && /policy is not applied/.test(error.message))
+    assertPolicyAdmissionFailure)
 })
 
 void test('saved policy remains pending until the actual runtime reports its version', async (t) => {
@@ -116,7 +131,7 @@ for (const state of ['applied', 'stale', 'wrong-mode', 'native-error', 'unavaila
       })
     const configure = () => runtime.resolveCohostConnection('owner-a', 'agent-a', { 'sudocode.json': '{}', 'backend-config.json': '{"mounts":[]}' })
     if (state === 'applied' || state === 'disabled') assert.equal(await configure(), connection)
-    else await assert.rejects(configure(), error => error instanceof ResourceAccessError && error.statusCode === 503 && /policy is not applied/.test(error.message))
+    else await assert.rejects(configure(), assertPolicyAdmissionFailure)
     assert.equal(observations, state === 'disabled' ? 0 : 1)
     assert.equal(configurations[0]?.['egress-policy.json'], JSON.stringify(policy))
   })

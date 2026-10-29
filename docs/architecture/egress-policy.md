@@ -69,7 +69,10 @@ the policy file. New owner Pods receive the effective organization policy.
 When protection is enabled, model session startup checks that selected owner's
 native runtime receipt before handing off execution. An old, unavailable or
 pending native policy returns 503; a saved policy alone does not admit model
-work. Disabled Cloud deployments can complete their controlled runtime upgrade
+work. If session creation already committed its durable identity, the response
+contains the failed session and startup code `EGRESS_POLICY_NOT_APPLIED` instead
+of discarding that identity. Its message directs the caller to retry policy
+delivery or update the runtime. Disabled Cloud deployments can complete their controlled runtime upgrade
 before enabling protection. Existing in-flight work and policy propagation are
 still represented by the native applied status, rather than the saved revision.
 Local and external model routes must keep their separate provider credentials

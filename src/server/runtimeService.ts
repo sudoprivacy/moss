@@ -1,4 +1,4 @@
-import { SessionStartupError } from './sessionStartup.js'
+import { EgressPolicyNotAppliedError, SessionStartupError } from './sessionStartup.js'
 import type { ManagedControlActor } from './agentControl/contract.js'
 import { inspectManagedActor, assertManagedActorCurrent, type ManagedActorSource } from './agentControl/managedActor.js'
 import { probeAttachPath, probeRunnerActivity, probeRunnerReady, waitForBackendRunnerReady } from './runtime/runnerReadiness.js'
@@ -746,13 +746,13 @@ export class RuntimeService {
             const status = await this.readRuntimeEgressStatus(managedConnection, ownerId)
             if (policyApplicationStatus(policy, status).state !== 'applied') throw new Error('Policy delivery is pending')
           } catch {
-            throw new ResourceAccessError(503, 'Runtime egress policy is not applied; upgrade the runtime or retry delivery')
+            throw new EgressPolicyNotAppliedError()
           }
         }
         if (!this.ownerRuntime && this.options.config.egressGate?.localOrganizationId === organizationId) {
           const receipts = await this.observeEgressRuntime({ ownerId, organizationId }, policy)
           if (!receipts.length || receipts.some(receipt => receipt.error || policyApplicationStatus(policy, receipt.status).state !== 'applied')) {
-            throw new ResourceAccessError(503, 'Local runtime egress policy is not applied; upgrade the runtime or retry delivery')
+            throw new EgressPolicyNotAppliedError(true)
           }
         }
         if (managedConnection) return managedConnection
