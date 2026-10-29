@@ -1,4 +1,5 @@
 import { connectCatalogEvents, notifyCatalogPublished } from './catalog/catalogEvents.js'
+import { systemMcpAuthSecrets } from './mcp/systemAuthSecrets.js'
 import { dispatchToolManagement, toolInvocationRoute, toolManagementRoute } from './agentFederation/toolGatewayRoutes.js'
 import { dispatchModelInvocation, modelInvocationRoute, readExecutionJson, MODEL_BODY_LIMIT, TOOL_BODY_LIMIT } from './agentFederation/executionGatewayRoutes.js'
 import { dispatchHostedTask, isHostedTaskRoute } from './agentFederation/hostedTaskRoutes.js'
@@ -2220,15 +2221,9 @@ export function startServer(
       try { return (await authService.listDepartments(orgId)).departments } catch { return [] }
     },
   }) : null
-  const agentTools = authService.createAgentToolManagement(mcpStore, nexusClient ? org => ({
-    getConfigItemByPinyin: async pinyin => {
-      const row = await runtime.store.getConfigItemByPinyin(pinyin, org)
-      if (!row || row.scope !== 'system' || !['bearer', 'basic', 'header'].includes(String(row.scheme))) return null
-      return { pinyin: String(row.pinyin), scheme: row.scheme as 'bearer' | 'basic' | 'header', bearer_prefix: row.bearer_prefix == null ? null : String(row.bearer_prefix),
-        entries: (await runtime.store.getConfigEntries(Number(row.id))).map(entry => ({ config_key: String(entry.config_key) })) }
-    },
-    listSecrets: (namespace, subject) => nexusClient.listSecrets(namespace, subject),
-  }) : undefined)
+  const agentTools = authService.createAgentToolManagement(mcpStore, nexusClient
+    ? org => systemMcpAuthSecrets(runtime.store, (namespace, subject) => nexusClient.listSecrets(namespace, subject), org)
+    : undefined)
   void agentTools?.gateway.store.ready.catch(error => process.stderr.write(`[agent-tools] initialization failed: ${error instanceof Error ? error.name : 'error'}\n`))
   const mcpAdminApi = createMcpAdminApi({
     mcpStore,
