@@ -91,7 +91,7 @@ try {
   await old.vault.putSecret(namespace, 'fixture', `first-${nonce}`)
   assert.equal((await old.vault.getSecret(namespace, 'fixture')).value, `first-${nonce}`)
   await stop()
-  const caBefore = readFileSync(join(tls, 'ca.pem'))
+  const identityBefore = identitySnapshot()
 
   if (rejectionFlag) {
     let rejected = false
@@ -108,24 +108,33 @@ try {
   const next = await start(newBinary, 'new-read-update', plugins)
   assert.equal((await next.files.read(path, '')).toString(), initial)
   assert.deepEqual(await next.vault.getSecret(namespace, 'fixture'), { value: `first-${nonce}`, version: 1 })
-  assert.deepEqual(readFileSync(join(tls, 'ca.pem')), caBefore, 'upgrade must keep cluster CA')
+  assert.deepEqual(identitySnapshot(), identityBefore, 'upgrade must keep the persisted Node and TLS identity')
   await next.files.write(path, Buffer.from(updated), '')
   await next.vault.putSecret(namespace, 'fixture', `updated-${nonce}`)
   await stop()
 
   const rollback = await start(oldBinary, 'old-rollback-read', previousPlugins)
+  assert.deepEqual(identitySnapshot(), identityBefore, 'rollback must keep the persisted Node and TLS identity')
   assert.equal((await rollback.files.read(path, '')).toString(), updated)
   assert.deepEqual(await rollback.vault.getSecret(namespace, 'fixture'), { value: `updated-${nonce}`, version: 2 })
   await stop()
   const final = await start(newBinary, 'new-final-read', plugins)
+  assert.deepEqual(identitySnapshot(), identityBefore, 'repeat upgrade must keep the persisted Node and TLS identity')
   assert.equal((await final.files.read(path, '')).toString(), updated)
   assert.deepEqual(await final.vault.getSecret(namespace, 'fixture'), { value: `updated-${nonce}`, version: 2 })
   const digest = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex')
   writeFileSync(join(root, 'acceptance.json'), JSON.stringify({ oldVersion, newVersion, nonce, stages,
     oldPluginSha256: digest(join(previousPlugins, resolveVaultDylibName(process.platform))),
     newPluginSha256: digest(join(plugins, resolveVaultDylibName(process.platform))),
-    checks: ['old-write', 'TLS-preserved', 'VFS-preserved', 'Vault-preserved', 'new-write', 'rollback-read', 'upgrade-again-read'] }, null, 2))
+    identity: identityBefore,
+    checks: ['old-write', 'Node-identity-preserved', 'TLS-preserved', 'VFS-preserved', 'Vault-preserved', 'new-write', 'rollback-read', 'upgrade-again-read'] }, null, 2))
   console.log(`PASS real TLS/VFS/Vault upgrade and rollback: ${root}`)
 } finally {
   await stop()
+}
+
+function identitySnapshot() {
+  return Object.fromEntries(['.node_id', 'tls/ca.pem', 'tls/node.pem'].map(path => [
+    path, createHash('sha256').update(readFileSync(join(data, path))).digest('hex'),
+  ]))
 }
