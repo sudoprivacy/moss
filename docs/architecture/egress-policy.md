@@ -4,6 +4,11 @@ Moss manages policy; the existing Nexus `egress_gate` service enforces it.
 Shared policy validation, scoped persistence and runtime delivery live in
 `sudostack/packages/egress-policy` and `packages/user-runtime`. Deployment
 profiles belong in sudocloud, sudoprivate and sudoedge. Cloud starts disabled.
+Delivery may leave the platform default disabled. Acceptance must demonstrate
+that an administrator can enable protection in Moss, observe matching native
+application status, verify real model redaction and refusal, and disable it
+again without restarting the controller or runtime. Saving the switch alone
+does not establish enforcement.
 
 ## Management surface
 
