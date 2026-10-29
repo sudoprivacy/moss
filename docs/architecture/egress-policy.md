@@ -34,10 +34,15 @@ bootstrap policy. It seeds new policy storage; changing the file does not
 overwrite saved policy. No file means disabled defaults with no claimed mounts.
 
 Managed owner Pods use either `egressGate.analyzerRelay = { image, secretName }`
-for one analyzer per compute node, or an optional dedicated `analyzerImage`
-per Pod. These options are mutually exclusive. The node relay uses its actual
-Kubernetes node IP and an infrastructure-owned TLS/authentication Secret that
-is mounted only in the relay container. Tenant policy retains a loopback URL.
+for a shared analyzer host or one analyzer per compute node, or an optional
+dedicated `analyzerImage` per Pod. These options are mutually exclusive.
+SDK 0.2.2 supports both relay placements through the shared infrastructure
+preparer in `sudostack/security/egress-gate/node-analyzer/configure.mjs`.
+Its `relayMode: shared` fixes the verified analyzer host address in the Secret;
+node mode uses the Pod's actual Kubernetes node IP. Tenant policy cannot change
+that address. Both modes verify the analyzer's TLS name, CA and classifier
+authentication. The infrastructure-owned Secret is mounted only in the small
+relay container, and tenant policy retains a loopback URL.
 
 For an external host cohost, configure `localPolicyFile` and
 `localOrganizationId` together. Only that organization may deliver policy to
