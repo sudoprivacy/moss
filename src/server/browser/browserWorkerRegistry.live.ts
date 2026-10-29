@@ -239,6 +239,10 @@ try {
   assert.equal(back.state, 'human')
   assert.equal(back.browserSessionId, running.browserSessionId)
   await invoke(a, { kind: 'stop', controlEpoch: back.controlEpoch, targetEpoch: back.targetEpoch })
+  // The AI lease is required before an MCP launch can claim the stopped browser;
+  // return it the way a human handoff does instead of bypassing the fence.
+  const afterStop = (await invoke(a, { kind: 'state' })).session
+  await invoke(a, { kind: 'return', controlEpoch: afterStop.controlEpoch, targetEpoch: afterStop.targetEpoch })
   const launched = await tool(next, 'browser_launch', { isHeadless: true, transport: 'extension' })
   assert.notEqual(launched.isError, true, JSON.stringify(launched))
   const fresh = { orgId, userId: randomUUID(), sessionId: randomUUID() }
