@@ -150,5 +150,28 @@ network/output limits and worker input/error enforcement. The real-engine
 acceptance above now closes/reopens the actual Moss database and uses this MCP
 worker profile against the installed compiler before capturing model requests.
 Its membership/credential fixtures are synthetic: these checks do not establish
-production Nexus/Vault connectivity, source intake, a deployed worker, runner CLI
-composition, WebUI or ShareOne comment delivery. Those remain integration work.
+production Nexus/Vault connectivity, source intake, a deployed worker, WebUI or
+ShareOne comment delivery. Those remain integration work.
+
+## Production runner composition
+
+`sessionRunnerCli` builds `createSessionRunnerHost` from the opened Moss store.
+Ordinary conversations keep their existing backend. A persisted model binding
+activates the existing MCP catalogue and IT reviews on the same database driver;
+the factory does not construct another AuthService, policy database or Registry
+task grant. Both the agent tool gateway and model context reader use the shared
+current-member check, including organization membership, department visibility
+and global account lock/disable. A saved admin role does not bypass visibility.
+
+System credential definitions use the same organization-scoped resolver as the
+existing agent gateway. Values are read through the existing Nexus Vault client
+with `MOSS_NEXUS_MODE=external` and its deployment-owned endpoint, authentication
+and mTLS settings. The runner never starts an embedded Nexus daemon and never
+reads credential configuration from `manifest.session.env`. Missing external
+Nexus for a `secret_ref` fails explicitly; no-auth MCP servers need no Vault
+connection. Runner shutdown and failed startup release the owned client.
+
+HTTP/MCP tests exercise this production factory without injecting authorization
+or context ports, including live member/account/visibility/policy revocation and
+current credential resolution. Their Nexus values are synthetic; deployment
+connectivity and end-user journeys still require production acceptance.

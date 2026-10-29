@@ -2,6 +2,7 @@ import { readFile } from 'fs/promises'
 import { SessionRunnerDaemon } from './sessionRunnerDaemon.js'
 import { openStoreAsync } from './db.js'
 import type { RunnerManifest } from './types.js'
+import { createSessionRunnerHost } from './ontology/runnerHost.js'
 
 async function main(): Promise<void> {
   const manifestPath = process.argv[2]
@@ -13,8 +14,15 @@ async function main(): Promise<void> {
   // Store built here (async) so the postgres backend can pool a connection;
   // sqlite resolves synchronously under the hood (unchanged single-host path).
   const store = await openStoreAsync(manifest.config)
-  const daemon = new SessionRunnerDaemon(manifest, store)
-  await daemon.start()
+  try {
+    const host = await createSessionRunnerHost(store, manifest.session.sessionId)
+    const daemon = new SessionRunnerDaemon(manifest, store, host)
+    try { await daemon.start() }
+    catch (error) { await host.close?.(); throw error }
+  } catch (error) {
+    await store.close()
+    throw error
+  }
 }
 
 main().catch((error: unknown) => {

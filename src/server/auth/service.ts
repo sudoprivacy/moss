@@ -7,6 +7,7 @@ import { AgentControlStore } from '../agentControl/store.js'
 import { AGENT_CONTROL_AUDIENCE, AGENT_CONTROL_KEY_PREFIX, AGENT_CONTROL_SCOPE } from '../agentControl/contract.js'
 import { AgentUsageReports } from '../agentFederation/usageReport.js'
 import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
+import { currentMcpMember } from '../mcp/currentMember.js'
 import { AssetSuspensions } from '../agentFederation/assetSuspension.js'
 import type { ExecutionModelGateway } from '../agentFederation/executionModelGateway.js'
 import { HostedTaskService } from '../agentFederation/hostedTaskService.js'
@@ -723,12 +724,7 @@ export class AuthService {
     if (!registry) return undefined
     const gateway = new AgentToolGateway(new ToolGatewayStore(this.db.driver), {
       registry, mcp, secrets,
-      member: async (orgId, userId) => {
-        const user = await this.db.getUserByIdAndOrg(userId, orgId)
-        if (user?.status !== 'active') return null
-        const departments = await getUserAncestorIds(userId, orgId, (id, org) => this.db.getUserByIdAndOrg(id, org), org => this.db.listDepartmentsByOrg(org))
-        return { isAdmin: false, userId, role: user.role, departmentId: user.departmentId ?? null, visibleDepartmentIds: departments }
-      },
+      member: currentMcpMember(this.db),
     })
     return { gateway, authorize: async (actor: AuthContext) => {
       const user = await this.getUserPinnedOrSuperAdmin(actor.userId, actor.orgId)

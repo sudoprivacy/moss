@@ -56,6 +56,13 @@ export class NexusClient {
     this.tls = tls
   }
 
+  /** Release channels owned by a short-lived session runner. */
+  close(): void {
+    this.client?.close()
+    this.client = null
+    this.secretClient = null
+  }
+
   private getClient(): NexusVfsClient {
     if (!this.client) {
       // mTLS to an auth-on cluster vs. plaintext trusted-loopback serve-local.

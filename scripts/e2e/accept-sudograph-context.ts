@@ -12,6 +12,9 @@ import { ReviewedMcpAccess, mcpServerDigest } from '../../src/server/mcp/reviewe
 import { ToolGatewayStore } from '../../src/server/agentFederation/toolGatewayStore.js'
 import { registerModelContextTool } from '../../src/server/ontology/contextWorker.js'
 import { McpOntologyContextPorts } from '../../src/server/ontology/mcpContextPorts.js'
+import { createSessionRunnerHost } from '../../src/server/ontology/runnerHost.js'
+import { AuthCenterDb } from '../../src/server/authCenter/db.js'
+import { currentMcpMember } from '../../src/server/mcp/currentMember.js'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -80,9 +83,13 @@ function apply(operation: string): any {
   } })
 }
 apply('revision-a')
-let isAllowed = true
 const contexts: any[] = [], requests: any[] = [], output: any[] = [], diagnostics: string[] = []
 let hostStore = new DirectConnectStore(join(root, 'host.db'))
+const auth = new AuthCenterDb(hostStore)
+await auth.createOrganization('fixture-org', 'Fixture organization', Date.now())
+await auth.createUser({ id: 'fixture-user', orgId: 'fixture-org', name: 'fixture-user', email: 'fixture@example.invalid',
+  displayName: null, departmentId: null, role: 'user', status: 'active', localAuth: false, tokenLimit: null,
+  createdAt: Date.now(), passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null })
 await hostStore.driver.run(`INSERT INTO sessions
   (session_id, transcript_session_id, org_id, user_id, role, scopes_json, cwd,
    runtime_type, status, desired_state, transcript_path, created_at, last_active_at)
@@ -119,9 +126,7 @@ await mcpStore.upsertMcpPolicy('fixture-org', { allow_http_sse_mcp: true, allow_
 const reviews = new ToolGatewayStore(hostStore.driver)
 function accessFor(currentStore: DirectConnectStore) {
   return new ReviewedMcpAccess(new ToolGatewayStore(currentStore.driver), { mcp: new McpStore(currentStore.driver),
-    member: async (org, user) => isAllowed && org === 'fixture-org' && user === 'fixture-user'
-      ? { isAdmin: false, userId: user, departmentId: null, visibleDepartmentIds: null } : null,
-    addresses: () => ['127.0.0.1'],
+    member: currentMcpMember(new AuthCenterDb(currentStore)),
   })
 }
 const access = accessFor(hostStore)
@@ -133,16 +138,16 @@ await reviews.saveReview({ ...descriptor, orgId: 'fixture-org', serverId: regist
   resource: `mcp:${registeredWorker.id}/sudograph_context`, serverDigest: mcpServerDigest(registeredWorker), action: 'read', sensitive: true,
   outbound: false, enabled: true, revision: 'reviewed-context-v1', reviewedBy: 'fixture-manager', reviewedAt: Date.now() }, null)
 const project = await hostStore.ontologyProjects.register({ orgId: 'fixture-org', ...modelIdentity, workerRef: registeredWorker.id })
-let contextPorts = new McpOntologyContextPorts(access, mcpStore)
+const contextPorts = new McpOntologyContextPorts(access, mcpStore)
 const bound = await hostStore.ontologyProjects.bind({ sessionId: 'fixture-moss-session', projectId: project.projectId,
   orgId: 'fixture-org', userId: 'fixture-user' }, contextPorts)
 // Recover the resolver from the actual host database, not a serialized callback.
 await hostStore.close()
 hostStore = new DirectConnectStore(join(root, 'host.db'))
-contextPorts = new McpOntologyContextPorts(accessFor(hostStore), new McpStore(hostStore.driver))
+const host = await createSessionRunnerHost(hostStore, 'fixture-moss-session')
 assert.deepEqual(await hostStore.ontologyProjects.resolveSession('fixture-moss-session'), bound)
 const resolveHostContext = await hostStore.ontologyProjects.runnerContext({ sessionId: 'fixture-moss-session',
-  orgId: 'fixture-org', userId: 'fixture-user' }, contextPorts)
+  orgId: 'fixture-org', userId: 'fixture-user' }, host.ontologyContext)
 assert(resolveHostContext)
 const server = createServer((req, res) => {
   void (async () => {
@@ -223,20 +228,21 @@ try {
   assert(!history.includes('CONTEXT_A_USE_ORDER_DATE') && !history.includes('CONTEXT_B_USE_SHIPMENT_DATE'))
   const html = worker('compiler.workspace', { operation: 'read', product: 'html' })
   assert(html.includes(updated.revision) && html.includes('CONTEXT_B_USE_SHIPMENT_DATE'))
-  isAllowed = false
+  await hostStore.driver.run("UPDATE users SET status = 'disabled' WHERE id = 'fixture-user'")
   assert((await prompt('DENIED_TURN')).is_error)
   assert.equal(requests.length, 2, 'refusal must precede model work')
   assert.equal(contexts.length, 2)
   assert.equal(hash(await readFile(source)), sourceBefore)
   receipt = { format: 'moss-sudograph-context-acceptance/v1', passed: true, engine_sha256: values['engine-sha256'], compiler,
     canonical_revisions: contexts.map(context => context.revision), real_engine: true, installed_compiler: true,
-    moss_acp_bridge: true, durable_project_binding_recovered: true, registered_mcp_worker: true,
+    moss_acp_bridge: true, durable_project_binding_recovered: true, registered_mcp_worker: true, production_host_factory: true,
     exact_context_in_requests: true, history_preserved: true, context_not_in_user_history: true,
     denied_model_requests: 0, source_unchanged: true,
     scope: 'Real engine stdio, Moss ACP bridge, registered MCP worker and installed compiler; deterministic loopback provider. Not Nexus mailbox, tenant grants, cloud login, WebUI or ShareOne comments.' }
 } finally {
   await handle.destroy(true)
   await exited
+  await host.close?.()
   workerServer.closeAllConnections()
   await new Promise<void>(resolve => workerServer.close(() => resolve()))
   await hostStore.close()

@@ -14,7 +14,7 @@ import type { BackendHandle } from './sessionManager.js'
 import { isUninitializedCohostSession, removeCohostSessionState } from './backends/cohostSessionState.js'
 import type { SessionAttemptFence } from './storage/sessionAttemptFence.js'
 import { RunnerInputAdmission } from './runtime/runnerInputAdmission.js'
-import type { OntologyContextPorts } from './ontology/projectRegistry.js'
+import type { SessionRunnerHost } from './ontology/runnerHost.js'
 
 type SocketWithBuffer = net.Socket & {
   __buffer?: string
@@ -134,7 +134,7 @@ export class SessionRunnerDaemon {
   }
 
   constructor(private readonly manifest: RunnerManifest, store: DirectConnectStore,
-    private readonly host: { ontologyContext?: OntologyContextPorts } = {}) {
+    private readonly host: SessionRunnerHost = {}) {
     if (['external', 'hosted'].includes(manifest.session.runtime.type) || ['external_provider', 'hosted_artifact'].includes(manifest.session.runtime.engine)) throw new Error('Task-managed sessions cannot launch a native session runner')
     this.#store = store
     this.#inputAdmission = new RunnerInputAdmission({ clients: () => this.#clients,
@@ -484,7 +484,8 @@ export class SessionRunnerDaemon {
       this.#server = null
     }
     await safeUnlink(this.manifest.attempt.attachPath)
-    await this.#store.close()
+    try { await this.host.close?.() }
+    finally { await this.#store.close() }
   }
 
   #onClient(socket: SocketWithBuffer): void {
