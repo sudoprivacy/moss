@@ -10,8 +10,8 @@ import { McpStore } from '../../src/server/mcp/db.js'
 import { ReviewedMcpAccess, mcpServerDigest } from '../../src/server/mcp/reviewedAccess.js'
 import { ToolGatewayStore } from '../../src/server/agentFederation/toolGatewayStore.js'
 import { createCompilerContextWorker } from '../../src/server/ontology/compilerContextWorker.js'
-import { McpOntologyContextPorts } from '../../src/server/ontology/mcpContextPorts.js'
 import { createSessionRunnerHost } from '../../src/server/ontology/runnerHost.js'
+import { createModelSession, getSessionProject, listSessionProjects } from '../../src/server/ontology/sessionProjects.js'
 import { AuthCenterDb } from '../../src/server/authCenter/db.js'
 import { currentMcpMember } from '../../src/server/mcp/currentMember.js'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
@@ -86,12 +86,6 @@ await auth.createOrganization('fixture-org', 'Fixture organization', Date.now())
 await auth.createUser({ id: 'fixture-user', orgId: 'fixture-org', name: 'fixture-user', email: 'fixture@example.invalid',
   displayName: null, departmentId: null, role: 'user', status: 'active', localAuth: false, tokenLimit: null,
   createdAt: Date.now(), passwordHash: null, passwordUpdatedAt: null, lastLoginAt: null, extUserId: null })
-await hostStore.driver.run(`INSERT INTO sessions
-  (session_id, transcript_session_id, org_id, user_id, role, scopes_json, cwd,
-   runtime_type, status, desired_state, transcript_path, created_at, last_active_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-['fixture-moss-session', 'fixture-native-history', 'fixture-org', 'fixture-user', 'user', '[]', workspace,
-  'cohost', 'active', 'active', join(root, 'transcript.jsonl'), Date.now(), Date.now()])
 // The registered worker is a separate authenticated MCP endpoint, not a host path.
 const modelIdentity = { authorityRef: 'canonical-fixture', modelRef, sourceRefs: ['registered-fixture-source'] }
 const workerToken = 'fixture-worker-token-for-acceptance-only'
@@ -154,9 +148,15 @@ await reviews.saveReview({ ...descriptor, orgId: 'fixture-org', serverId: regist
   resource: `mcp:${registeredWorker.id}/sudograph_context`, serverDigest: mcpServerDigest(registeredWorker), action: 'read', sensitive: true,
   outbound: false, enabled: true, revision: 'reviewed-context-v1', reviewedBy: 'fixture-manager', reviewedAt: Date.now() }, null)
 const project = await hostStore.ontologyProjects.register({ orgId: 'fixture-org', ...modelIdentity, workerRef: registeredWorker.id })
-const contextPorts = new McpOntologyContextPorts(access, mcpStore)
-const bound = await hostStore.ontologyProjects.bind({ sessionId: 'fixture-moss-session', projectId: project.projectId,
-  orgId: 'fixture-org', userId: 'fixture-user' }, contextPorts)
+const owner = { orgId: 'fixture-org', userId: 'fixture-user' }
+assert.equal((await listSessionProjects(hostStore, owner)).projects[0]?.project_id, project.projectId)
+await createModelSession(hostStore, { ...owner, sessionId: 'fixture-moss-session', projectId: project.projectId },
+  () => hostStore.createSession({ ...owner, sessionId: 'fixture-moss-session', transcriptSessionId: 'fixture-native-history',
+    transcriptPath: join(root, 'transcript.jsonl'), role: 'user', scopes: [], cwd: workspace,
+    runtime: { type: 'cohost', engine: 'scode' }, status: 'active', desiredState: 'active' }))
+const bound = await hostStore.ontologyProjects.resolveSession('fixture-moss-session')
+assert(bound)
+assert.equal((await getSessionProject(hostStore, bound.sessionId, owner)).project?.project_id, project.projectId)
 // Recover the resolver from the actual host database, not a serialized callback.
 await hostStore.close()
 hostStore = new DirectConnectStore(join(root, 'host.db'))
@@ -254,7 +254,7 @@ try {
   receipt = { format: 'moss-sudograph-context-acceptance/v1', passed: true, engine_sha256: values['engine-sha256'], compiler,
     canonical_revisions: contexts.map(context => context.revision), real_engine: true, installed_compiler: true,
     moss_acp_bridge: true, durable_project_binding_recovered: true, registered_mcp_worker: true, production_host_factory: true,
-    published_host_sdk: true, compiler_worker_endpoint: true, packaged_worker: Boolean(values.worker),
+    published_host_sdk: true, compiler_worker_endpoint: true, packaged_worker: Boolean(values.worker), atomic_session_binding: true,
     exact_context_in_requests: true, history_preserved: true, context_not_in_user_history: true,
     denied_model_requests: 0, source_unchanged: true,
     scope: 'Real engine stdio, Moss ACP bridge, registered MCP worker and installed compiler; deterministic loopback provider. Not Nexus mailbox, tenant grants, cloud login, WebUI or ShareOne comments.' }

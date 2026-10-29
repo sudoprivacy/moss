@@ -974,6 +974,8 @@ export type SessionSummary = {
 }
 
 export type SessionCreateInput = {
+  /** Canonical registered model; persisted atomically before any runner starts. */
+  ontologyProjectId?: string
   /** Installed task template; independent of the durable personal Agent. */
   templateRef?: string
   /** Verified management actor; never accepted from a session request body. */

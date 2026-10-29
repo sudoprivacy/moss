@@ -88,6 +88,26 @@ void test('recovered readers load current context each turn and recheck policy b
   assert.equal(await reader(request), 'Revision two business knowledge')
 })
 
+void test('disable/re-enable during admission invalidates creation before any session is committed', async t => {
+  const f = await fixture(t)
+  let creations = 0
+  await assert.rejects(f.registry.createBoundSession({ ...f.binding, sessionId: 'new' }, async () => {
+    await f.registry.setEnabled('org', f.project.projectId, false)
+    await f.registry.setEnabled('org', f.project.projectId, true)
+  }, async () => {
+    creations++
+    f.db.prepare("INSERT INTO sessions VALUES ('new','org','alice',NULL)").run()
+  }), /unavailable/)
+  assert.equal(creations, 0)
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM sessions WHERE session_id = 'new'").get()?.n, 0)
+  await assert.rejects(f.registry.createBoundSession({ ...f.binding, sessionId: 'new' }, async () => {}, async () => {
+    f.db.prepare("INSERT INTO sessions VALUES ('new','org','alice',NULL)").run()
+    await f.registry.setEnabled('org', f.project.projectId, false)
+    await f.registry.setEnabled('org', f.project.projectId, true)
+  }), /unavailable/)
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM sessions WHERE session_id = 'new'").get()?.n, 0)
+})
+
 void test('revocation during a read refuses disclosure and never returns the preceding snapshot', async t => {
   const f = await fixture(t)
   await f.registry.bind(f.binding, f.ports)
@@ -180,7 +200,25 @@ void test('PostgreSQL registry upgrades and concurrent host bindings preserve on
     const reader = await stores[0].ontologyProjects.contextReader('shared-session', ports)
     assert.ok(reader)
     assert.equal(await reader({ sessionId: 'shared-session', nativeSessionId: 'native' }), 'Current knowledge')
+    const newBinding = { sessionId: 'new-session', projectId: selected.projectId, orgId: 'org', userId: 'alice' }
+    const persist = () => stores[0].createSession({ ...newBinding, transcriptSessionId: 'new-history',
+      transcriptPath: '/fixture/new-transcript', role: 'member', scopes: [], cwd: '/fixture',
+      runtime: { type: 'cohost', engine: 'scode' }, status: 'creating', desiredState: 'active' })
+    await stores[0].ontologyProjects.createBoundSession(newBinding, async () => {}, async () => {
+      const session = await persist()
+      assert.equal(await stores[1].getSession(newBinding.sessionId), null, 'a peer must not observe an unbound session')
+      return session
+    })
+    assert.equal((await stores[1].ontologyProjects.resolveSession(newBinding.sessionId))?.projectId, selected.projectId)
+    const failedBinding = { ...newBinding, sessionId: 'rolled-back-session' }
+    await assert.rejects(stores[0].ontologyProjects.createBoundSession(failedBinding, async () => {}, async () => {
+      await stores[0].createSession({ ...failedBinding, transcriptSessionId: 'failed-history', transcriptPath: '/fixture/failed',
+        role: 'member', scopes: [], cwd: '/fixture', runtime: { type: 'cohost', engine: 'scode' }, status: 'creating', desiredState: 'active' })
+      throw new Error('Interrupted creation')
+    }), /Interrupted creation/)
+    assert.equal(await stores[1].getSession(failedBinding.sessionId), null)
+    assert.equal(await stores[1].latestEvent(failedBinding.sessionId, 'session_created'), null)
     await stores[1].ontologyProjects.setEnabled('org', selected.projectId, false)
     await assert.rejects(reader({ sessionId: 'shared-session', nativeSessionId: 'native' }), /unavailable/)
-    assert.equal(Number((await drivers[0].get('SELECT count(*) AS n FROM ontology_session_bindings'))?.n), 1)
+    assert.equal(Number((await drivers[0].get('SELECT count(*) AS n FROM ontology_session_bindings'))?.n), 2)
   })

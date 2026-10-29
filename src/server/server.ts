@@ -42,6 +42,7 @@ import { attachSessionSocketAuthorization } from './sessionSocketAuthorization.j
 import { RuntimeInputBarrier } from './runtime/runtimeInputBarrier.js'
 import { RuntimeAdmissionPauses } from './runtime/runtimeAdmissionPauses.js'
 import { dispatchRuntimeAdmission, isRuntimeAdmissionRoute } from './api/runtimeAdmission.js'
+import { getSessionProject, listSessionProjects, parseOntologyProjectId } from './ontology/sessionProjects.js'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
@@ -4083,6 +4084,22 @@ export function startServer(
           { authService, instanceId: runtime.serverInstanceId, pauses: runtimePauses,
             countLiveOtherInstances: () => runtime.countLiveOtherInstances() })
         writeJson(res, result.status, result.body)
+        return
+      }
+
+      if (pathname === '/api/v1/ontology/projects') {
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed')
+        authService.requireScope(auth, 'sessions:create')
+        writeJson(res, 200, await listSessionProjects(runtime.store, auth))
+        return
+      }
+
+      const sessionProjectMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/ontology-project$/)
+      if (sessionProjectMatch) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed')
+        writeJson(res, 200, await getSessionProject(runtime.store, sessionProjectMatch[1]!, auth))
         return
       }
 
@@ -11387,6 +11404,7 @@ export function startServer(
           : rawAssistantName
 
         const created = await runtime.createSession({
+          ontologyProjectId: parseOntologyProjectId(body.ontology_project_id),
           cwd,
           dangerouslySkipPermissions,
           userId: auth.userId,

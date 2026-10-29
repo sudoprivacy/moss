@@ -67,6 +67,18 @@ function project(row: SqlRow): OntologyProject {
 export class OntologyProjectRegistry {
   constructor(private readonly driver: DbDriver) {}
 
+  /** Internal inventory. Public callers must filter each project through current access. */
+  async list(orgId: string): Promise<OntologyProject[]> {
+    const rows = await this.driver.all('SELECT * FROM ontology_projects WHERE org_id = ? AND enabled = 1 ORDER BY project_id', [orgId])
+    return rows.map(project)
+  }
+
+  async get(orgId: string, projectId: string): Promise<OntologyProject> {
+    const row = await this.driver.get('SELECT * FROM ontology_projects WHERE org_id = ? AND project_id = ? AND enabled = 1', [orgId, projectId])
+    if (!row) throw unavailable()
+    return project(row)
+  }
+
   /** Only the trusted source/project registrar may call this operation. */
   async register(input: Omit<OntologyProject, 'projectId' | 'generation'>): Promise<OntologyProject> {
     const orgId = reference(input.orgId)
@@ -102,19 +114,37 @@ export class OntologyProjectRegistry {
   async bind(input: { sessionId: string; projectId: string; orgId: string; userId: string }, ports: Pick<OntologyContextPorts, 'authorize'>): Promise<OntologySessionBinding> {
     const pending = await this.candidate(input)
     await ports.authorize(pending)
+    return this.driver.transaction(() => this.commitBinding(input, pending))
+  }
+
+  /** Authorize before the SQL transaction; commit the new session and its binding together. */
+  async createBoundSession<T>(input: { sessionId: string; projectId: string; orgId: string; userId: string },
+    authorize: (project: OntologyProject) => Promise<void>, create: () => Promise<T>): Promise<T> {
+    const pending = await this.get(input.orgId, input.projectId)
+    await authorize(pending)
     return this.driver.transaction(async () => {
-      const current = await this.candidate(input)
-      if (current.generation !== pending.generation) throw unavailable()
-      await this.driver.run(`INSERT INTO ontology_session_bindings
+      const current = await this.get(input.orgId, input.projectId)
+      if (JSON.stringify(current) !== JSON.stringify(pending)) throw unavailable()
+      const created = await create()
+      const binding = await this.candidate(input)
+      if (binding.generation !== pending.generation) throw unavailable()
+      await this.commitBinding(input, binding)
+      return created
+    })
+  }
+
+  private async commitBinding(input: { sessionId: string; projectId: string; orgId: string; userId: string }, pending: OntologySessionBinding): Promise<OntologySessionBinding> {
+    const current = await this.candidate(input)
+    if (current.generation !== pending.generation) throw unavailable()
+    await this.driver.run(`INSERT INTO ontology_session_bindings
         (session_id, project_id, org_id, user_id, binding_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (session_id) DO NOTHING`,
-      [input.sessionId, input.projectId, input.orgId, input.userId, pending.bindingId, Date.now()])
-      const bound = await this.resolveSession(input.sessionId)
-      if (!bound || bound.projectId !== input.projectId || bound.orgId !== input.orgId || bound.userId !== input.userId) {
-        throw new ResourceAccessError(409, 'Conversation already belongs to another canonical project')
-      }
-      return bound
-    })
+    [input.sessionId, input.projectId, input.orgId, input.userId, pending.bindingId, Date.now()])
+    const bound = await this.resolveSession(input.sessionId)
+    if (!bound || bound.projectId !== input.projectId || bound.orgId !== input.orgId || bound.userId !== input.userId || bound.generation !== pending.generation) {
+      throw new ResourceAccessError(409, 'Conversation already belongs to another canonical project')
+    }
+    return bound
   }
 
   private async candidate(input: { sessionId: string; projectId: string; orgId: string; userId: string }): Promise<OntologySessionBinding> {
