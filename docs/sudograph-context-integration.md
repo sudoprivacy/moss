@@ -111,3 +111,44 @@ business snapshot in the manifest. Ordinary conversations remain unchanged.
 Real database/daemon tests cover recovery, fresh context across turns, revoked
 access, missing adapters and forged manifest identities; existing cancellation,
 maintenance and exit lifecycle tests retain their assertions and deadlines.
+
+## Registered MCP worker profile
+
+`ReviewedMcpAccess` now shares the existing MCP network, credential, current-member
+and IT tool-review checks with `AgentToolGateway`. Agent execution retains its
+separate Registry task/grant and asset checks. A trusted host may read an explicitly
+reviewed read operation; this is not a public route for an agent to avoid those
+execution gates. Agent- or skill-bound MCP endpoints are refused for this host
+profile until the host can prove the corresponding asset identity.
+
+`McpOntologyContextPorts` resolves the worker reference through that same MCP
+catalogue. Each endpoint serves one complete registered model with the fixed
+`sudograph_context` tool and an empty argument object. `registerModelContextTool`
+implements that profile on the deployment's authenticated MCP server. It invokes
+the supplied canonical reader on every call, validates the returned context, and
+never accepts a path, model, source, actor or authorization policy from tool input.
+Provider/compiler failures are sanitized before leaving the worker.
+
+The wire envelope is `sudograph-worker-context/v1`, with exact `authority_ref`,
+`model_ref`, sorted unique `source_refs`, `scope: full-registered-model`, and the
+compiler context. The host compares every identity with its persisted binding.
+This profile grants the complete registered model only. It does not implement
+row/field filtering; a restricted projection or another scope needs its own
+explicit supported contract and must not silently return the full model.
+
+Reads recheck current membership, endpoint policy, reviewed descriptor and
+credentials before dispatch and after worker I/O. Revocation or changes discard
+the result. The existing network pins, deadlines, scalar schema and 128,000-byte
+MCP result limit remain unchanged. An oversized context fails explicitly; it is
+not silently truncated or retried through a different transport. MCP audit records
+contain actor/session/tool/status metadata, without the context, source records,
+provider errors or credentials. No task grant or model snapshot is fabricated.
+
+The ordinary Node runner includes real HTTP/MCP tests for current reads,
+revocation during I/O, changed tool definitions, identity/scope mismatches,
+network/output limits and worker input/error enforcement. The real-engine
+acceptance above now closes/reopens the actual Moss database and uses this MCP
+worker profile against the installed compiler before capturing model requests.
+Its membership/credential fixtures are synthetic: these checks do not establish
+production Nexus/Vault connectivity, source intake, a deployed worker, runner CLI
+composition, WebUI or ShareOne comment delivery. Those remain integration work.
