@@ -5,6 +5,7 @@ import { ACCOUNT_MEMBERSHIP_SCHEMA, ACCOUNT_MEMBERSHIP_BACKFILL } from '../ident
 import { ORGANIZATION_RESOURCE_PG_SCHEMA } from '../catalog/organizationResourceSchema.js'
 import { COHOST_SESSION_SCHEMA } from '../storage/cohostSessionSchema.js'
 import { COHOST_AGENT_HOME_SCHEMA } from '../storage/cohostAgentHomeSchema.js'
+import { ONTOLOGY_PROJECT_SCHEMA } from '../ontology/projectSchema.js'
 /**
  * PostgreSQL schema for moss (HA P1-2e).
  *
@@ -2036,6 +2037,7 @@ export const MIGRATIONS: PgMigration[] = [
   { version: 22, name: 'moss-member-access', sql: MOSS_MEMBER_ACCESS_SCHEMA },
   { version: 23, name: 'moss-im-human-identity', sql: MOSS_IM_IDENTITY_SCHEMA },
   { version: 24, name: 'human-account-memberships', sql: ACCOUNT_MEMBERSHIP_SCHEMA + ACCOUNT_MEMBERSHIP_BACKFILL },
+  { version: 25, name: 'canonical-ontology-project-bindings', sql: ONTOLOGY_PROJECT_SCHEMA },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

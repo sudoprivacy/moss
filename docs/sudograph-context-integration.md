@@ -66,3 +66,37 @@ placement and credentials, WebUI routes, authenticated review/comment delivery,
 published runtime adoption and the human journey remain separate acceptance.
 The WebUI must not store a second canonical model or reinterpret a Desktop
 SQLite path on its own host.
+
+## Durable project and conversation references
+
+The Moss database now has a project registry and immutable conversation
+bindings, shared by SQLite and PostgreSQL. It stores the tenant, authority,
+registered execution worker, model and source references. It stores no model
+YAML, credentials, database address or worker filesystem path. Re-registering
+the same authority is idempotent; another authority cannot create a second
+project identity for the same worker/model. Changing a registered binding needs
+an explicit migration rather than a prompt-selected target.
+
+`OntologyProjectRegistry.bind` checks the persisted conversation owner and
+tenant. Many conversations may reference the same project. Reopening a graph
+cannot silently retarget an existing conversation. Its context reader can be
+reconstructed after reopening the host database and reads the current binding
+and policy before and after worker I/O. Session deletion, ownership changes,
+project disable/re-enable and authorization refusal prevent disclosure; none
+may fall back to a cached model snapshot or ordinary legacy instructions.
+
+The authorization and worker ports are trusted host functions. Authorization
+must reuse current membership, source and resource policy; this registry does
+not create another grant system. A provider that cannot enforce a requested
+row/field scope must refuse it, rather than authorize an unrestricted context.
+The worker port must resolve the registered execution location and pinned
+compiler package. The source/model references in this table do not establish
+network reachability or production authorization.
+
+The maintained real-engine acceptance above now closes and reopens the actual
+Moss database before constructing its reader. Ordinary Node tests also check
+cross-tenant/owner rejection, duplicate registration, multi-session bindings,
+current reads and revocation during I/O. These are registry/reader acceptance,
+not production wiring: source intake routes, the policy/worker adapters and
+runner construction still need to connect these ports before a cloud session
+can use the registry. No public API for arbitrary registration is exposed.

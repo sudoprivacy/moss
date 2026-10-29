@@ -1,6 +1,8 @@
 import { SESSION_SCHEMA } from './storage/sessionSchema.js'
 import { isManagedHosted } from './catalog/executionMode.js'
 import { ensureOrganizationResourceSchema } from './catalog/organizationResourceSchema.js'
+import { ONTOLOGY_PROJECT_SCHEMA } from './ontology/projectSchema.js'
+import { OntologyProjectRegistry } from './ontology/projectRegistry.js'
 import { randomUUID } from 'crypto'
 import { mkdirSync } from 'fs'
 import { dirname } from 'path'
@@ -726,6 +728,7 @@ export class DirectConnectStore {
     }
 
     ensureOrganizationResourceSchema(this.db)
+    this.db.exec(ONTOLOGY_PROJECT_SCHEMA)
 
     // Secrets base table must exist before column migrations below. On a fresh
     // DB, PRAGMA table_info(nonexistent) returns an empty list, and ALTER TABLE
@@ -1941,6 +1944,10 @@ export class DirectConnectStore {
 
   get cohostSessions(): CohostSessionRepository {
     return new CohostSessionRepository(this.driver)
+  }
+
+  get ontologyProjects(): OntologyProjectRegistry {
+    return new OntologyProjectRegistry(this.driver)
   }
 
   get cohostAgentHomes(): CohostAgentHomeRepository {
