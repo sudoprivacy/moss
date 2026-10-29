@@ -128,6 +128,7 @@ export class CohostBackend implements SessionBackend {
       assistantDisplayName: options.assistantDisplayName,
       enabledSkillNames: enabledSkills,
       instructions: options.agentInstructions ?? undefined,
+      resolveHostContext: options.resolveHostContext,
       workspaceSkills: availableSkills,
       availableWikis: options.availableWikis,
       availableCorpApps: options.availableCorpApps,

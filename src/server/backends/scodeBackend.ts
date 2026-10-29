@@ -199,6 +199,7 @@ export class ScodeBackend implements SessionBackend {
       availableWikis: options.availableWikis,
       availableCorpApps: options.availableCorpApps,
       sharedMemory: options.sharedMemory,
+      resolveHostContext: options.resolveHostContext,
       runtime: {
         type: 'host',
         engine: 'scode',

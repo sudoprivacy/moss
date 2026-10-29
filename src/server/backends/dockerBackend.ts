@@ -401,6 +401,7 @@ export class DockerBackend implements SessionBackend {
       availableWikis: options.availableWikis,
       availableCorpApps: options.availableCorpApps,
       sharedMemory: options.sharedMemory,
+      resolveHostContext: options.resolveHostContext,
       runtime: runtimeInfo,
     })
     handle.availableSkills = availableSkills
