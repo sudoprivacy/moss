@@ -103,7 +103,7 @@ try {
 
   delete process.env.MOSS_BROWSER_OWNER_IMAGES
   const unpinned = new BrowserWorkerRegistry(lookup)
-  await assert.rejects(state(unpinned, a), /Managed browser upgrade requires a drained profile/)
+  await assert.rejects(state(unpinned, a), /managed_browser_upgrade_requires_drain/)
   const after = await inspect(a)
   assert.equal(after.Id, before.Id)
   assert.equal(after.State.StartedAt, before.State.StartedAt)
