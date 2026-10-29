@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { latestPublicationVersion, nextPublicationVersion, publicationVersionError } from '../catalog/publicationVersions.js'
 import type { AgentVersionDecision, AgentVersionManifest } from '../../../contracts/agent-federation/v1alpha1/contract.js'
 import type {
   ExternalTask,
@@ -278,6 +279,27 @@ export class AgentCatalogGovernance {
       return view
     })
   }
+  /** A different editor owns a separate proposed version of the same service. */
+  async forkWorkingSource(actor: ExternalActor, catalogId: string): Promise<CatalogSource> {
+    await this.service.authorize(actor)
+    return this.db.transaction(async () => {
+      await this.data.lock(actor, catalogId)
+      const source = await this.data.managed(actor, catalogId)
+      if (!source) fail('CATALOG_SOURCE_NOT_FOUND', 404)
+      if (source!.view.owner_id === actor.userId) return source!.view
+      const prior = await this.db.get('SELECT document FROM agent_catalog_working_sources WHERE org_id = ? AND catalog_id = ? AND owner_id = ?', [actor.orgId, catalogId, actor.userId])
+      if (prior) return (JSON.parse(String(prior.document)) as SourceRecord).view
+      const binding = await this.service.store.binding(actor, catalogId)
+      const at = Date.now(), id = randomUUID()
+      const copy: SourceRecord = structuredClone(source!)
+      copy.proposed = { name: binding.name, endpoint: binding.endpoint, allowed_user_ids: binding.allowed_user_ids, review_note: binding.review_note }
+      Object.assign(copy.view, copy.proposed, { id, owner_id: actor.userId, revision: 1, created_at: at, updated_at: at, last_sync_at: null, last_sync_status: 'never', last_error: null })
+      await this.db.run('INSERT INTO agent_catalog_working_sources(id, org_id, catalog_id, owner_id, document) VALUES (?, ?, ?, ?, ?)', [id, actor.orgId, catalogId, actor.userId, JSON.stringify(copy)])
+      await this.data.audit(actor, 'source.working_copy_created', catalogId, { source_id: id })
+      return copy.view
+    })
+  }
+
   async updateSource(
     actor: ExternalActor,
     id: string,
@@ -377,9 +399,9 @@ export class AgentCatalogGovernance {
       if (typeof body.enabled === 'boolean') current.view.enabled = body.enabled
       current.view.availability = 'unknown'
       if (executionChanged) {
-        const frozen = await this.data.deprecatePublishedVersions(actor, binding.id)
+        // Editing a proposed version must not withdraw the immutable live release.
+        // Revocation/disable and observed provider drift remain explicit governance paths.
         current.view.last_error = 'SOURCE_REVALIDATION_REQUIRED'
-        current.view.warning_count += frozen.length > 0 ? 1 : 0
       }
       await this.data.saveSource(current)
       await this.data.audit(
@@ -393,7 +415,7 @@ export class AgentCatalogGovernance {
         { source_id: id },
       )
       if (executionChanged)
-        await this.data.audit(actor, 'source.versions_frozen', binding.id, {
+        await this.data.audit(actor, 'source.draft_updated', binding.id, {
           source_id: id,
           reason: 'SOURCE_REVALIDATION_REQUIRED',
         })
@@ -688,15 +710,37 @@ export class AgentCatalogGovernance {
         fail('INVALID_MEMBER', 400)
     return current
   }
+  private async publicationVersions(actor: ExternalActor, catalogId: string, excludeCandidate?: string) {
+    const rows = await this.db.all('SELECT version FROM agent_catalog_versions WHERE org_id = ? AND catalog_id = ?', [actor.orgId, catalogId])
+    const legacy = await this.db.all('SELECT v.version FROM agent_versions v JOIN agent_principals p ON p.catalog_id = v.catalog_id WHERE p.org_id = ? AND v.catalog_id = ?', [actor.orgId, catalogId])
+    const candidates = await this.db.all('SELECT c.document FROM agent_import_candidates c JOIN agent_catalog_sources s ON s.id = c.source_id AND s.org_id = c.org_id WHERE c.org_id = ? AND s.catalog_id = ?', [actor.orgId, catalogId])
+    const released = [...rows, ...legacy].map(row => String(row.version))
+    const reserved = candidates.map(row => JSON.parse(String(row.document)) as CandidateRecord)
+      .filter(row => row.view.id !== excludeCandidate && ['pending_approval', 'approved', 'publishing', 'publication_unknown'].includes(row.view.status))
+      .map(row => row.view.requested_version || row.view.published_version || '').filter(Boolean)
+    return { released, reserved }
+  }
+  async publicationPreview(actor: ExternalActor, sourceId: string) {
+    const source = await this.data.source(actor, sourceId)
+    const { released } = await this.publicationVersions(actor, source.view.catalog_id)
+    const currentVersion = latestPublicationVersion(released)
+    return { currentVersion, nextVersion: nextPublicationVersion(currentVersion), publishNote: '' }
+  }
+  private async assertPublicationVersion(actor: ExternalActor, catalogId: string, candidateId: string, version: unknown) {
+    const { released, reserved } = await this.publicationVersions(actor, catalogId, candidateId)
+    const error = publicationVersionError(version, released, reserved)
+    if (error) throw new ExternalProviderError(409, error)
+  }
   async decide(
     actor: ExternalActor,
     id: string,
     input: unknown,
   ): Promise<ImportCandidate> {
-    const body = object(input, ['revision', 'action', 'note', 'review_days'])
+    const body = object(input, ['revision', 'action', 'note', 'review_days', 'version'])
     const action = String(body.action),
       reason = note(body.note),
       initial = await this.data.candidate(actor, id)
+    if (action !== 'submit' && body.version !== undefined) fail('PUBLISHED_VERSION_IMMUTABLE', 400)
     if (!['submit', 'approve', 'reject', 'archive', 'abandon'].includes(action))
       return fail('INVALID_CANDIDATE_ACTION', 400)
     return this.db.transaction(async () => {
@@ -748,6 +792,13 @@ export class AgentCatalogGovernance {
         fail('CANDIDATE_STATE_CONFLICT')
       if (action === 'submit' || action === 'approve')
         await this.assertCandidateCurrent(actor, candidate)
+      if (action === 'submit') {
+        const preview = await this.publicationPreview(actor, view.source_id)
+        const version = body.version === undefined ? preview.nextVersion : body.version
+        await this.assertPublicationVersion(actor, view.catalog_id, id, version)
+        view.requested_version = version as string
+        view.release_note = reason
+      }
       if (action === 'approve') {
         if (![1, 3, 7].includes(Number(body.review_days)))
           return fail('INVALID_REVIEW_DAYS', 400)
@@ -835,7 +886,10 @@ export class AgentCatalogGovernance {
       candidate.view.status = 'publishing'
       candidate.view.publication_started_at = Date.now()
       candidate.view.revision++
-      candidate.view.published_version = `candidate-${candidate.view.id}`
+      const releaseVersion = candidate.view.requested_version || (await this.publicationPreview(actor, candidate.view.source_id)).nextVersion
+      await this.assertPublicationVersion(actor, candidate.view.catalog_id, id, releaseVersion)
+      candidate.view.published_version = releaseVersion
+      if (candidate.view.release_note) candidate.binding.review_note = candidate.view.release_note
       candidate.binding.approved = true
       candidate.binding.review_expires_at = candidate.approved_until!
       candidate.binding.reviewedBy = actor.userId

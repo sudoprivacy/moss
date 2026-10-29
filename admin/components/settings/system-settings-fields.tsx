@@ -158,8 +158,8 @@ export function SystemSettingsFields({ scope, settings, draft, errors, update }:
         {toggle('clientShowToolCalls', '默认在对话流中展示工具调用；用户可在客户端覆盖此偏好。')}
         {textField('uploadLimitMiB', '单文件大小上限，最多 1024 MiB。1 MiB = 1,048,576 字节，超限由服务端拒绝。', { number: true, min: 1 / (1024 * 1024), max: 1024, step: 'any' })}
       </Section>
-      <Section icon={Building2} title="专属资产" description="配置技能商店专属资产关联的租户标识。">
-        {textField('tenantId', '这是服务器级技能商店配置，不等同于侧栏当前选中的组织。', { placeholder: '输入专属资产租户 ID' })}
+      <Section icon={Building2} title="组织技能资产" description="配置组织技能资产关联的租户标识。">
+        {textField('tenantId', '这是服务器级技能库配置，不等同于侧栏当前选中的组织。', { placeholder: '输入组织技能租户 ID' })}
       </Section>
       <Section icon={KeyRound} title="OAuth2 登录" description="允许 SudoWork 用户通过外部身份提供方登录。">
         {toggle('oauthEnabled', '配置完成后，在客户端启用浏览器跳转登录。')}

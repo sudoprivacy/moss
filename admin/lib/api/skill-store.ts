@@ -1,7 +1,7 @@
 import { authClient } from './client'
 import type { VisibleTo } from './agent-hub'
 
-export type SkillStoreTab = 'store' | 'exclusive' | 'custom'
+export type SkillStoreTab = 'available' | 'mine' | 'review'
 
 export interface SkillHubVersion {
   version: string
@@ -98,7 +98,7 @@ export function resolveSkillTenantId(
   tenantId?: string,
 ): string | undefined {
   const normalized = tenantId?.trim()
-  if (tab !== 'exclusive' || !normalized) {
+  if (tab !== 'review' || !normalized) {
     return undefined
   }
   return normalized
@@ -230,7 +230,8 @@ export interface TenantSkillInfo {
   version?: string
   author_id: string
   author_name?: string
-  status: 'pending' | 'approved' | 'rejected'
+  replaces_id?: string
+  status: 'draft' | 'pending' | 'reviewed' | 'approved' | 'rejected' | 'superseded'
   source_url?: string
   checksum?: string
   file_path?: string
@@ -239,6 +240,8 @@ export interface TenantSkillInfo {
   reviewed_by?: string
   reviewed_at?: number
   enabled: number
+  /** Server-computed availability for the current viewer. */
+  isAvailable?: boolean
   visible_to?: VisibleTo | null
   /** Server-computed: whether the current viewer may edit/delete this tenant
    *  skill (admin, or the author is in the viewer's scope). Drives button
@@ -267,8 +270,15 @@ export function approveTenantSkill(
   )
 }
 
+export function getTenantSkillContent(id: string): Promise<{ content: string }> {
+  return authClient.get(`/api/v1/skills/tenant/${encodeURIComponent(id)}/content`)
+}
+
 export function updateTenantSkillMeta(params: {
   id: string
+  display_name?: string
+  description?: string
+  content?: string
   enabled?: boolean
   visible_to?: VisibleTo | null
 }): Promise<{ ok: boolean }> {

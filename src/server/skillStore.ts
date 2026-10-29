@@ -112,6 +112,7 @@ export type FetchSkillHubSkillsParams = {
 }
 
 export type ImportSkillArchivePayload = {
+  targetId?: string
   fileName: string
   archiveBase64: string
 }
@@ -556,6 +557,7 @@ function normalizeImportedSkillName(name: string): string {
 async function installImportedSkillFromTemp(
   tempDir: string,
   preferredName?: string,
+  targetId?: string,
 ): Promise<{ skillName: string; installedVersion: string }> {
   const skillDir = await findSkillDirWithSkillMd(tempDir)
   if (!skillDir) {
@@ -567,7 +569,8 @@ async function installImportedSkillFromTemp(
     throw new Error('SKILL.md 读取失败')
   }
 
-  // Determine skill name with priority: preferredName > frontmatter.name > frontmatter.displayName > directory name
+  // A filename is only a fallback: renaming a ZIP must not change dependency identity.
+  const portableMeta = await readSkillMeta(skillDir)
   const normalizedPreferredName = normalizeImportedSkillName(preferredName || '')
   const frontmatterName = typeof frontmatter.name === 'string' && frontmatter.name.trim()
     ? normalizeImportedSkillName(frontmatter.name.trim())
@@ -577,10 +580,10 @@ async function installImportedSkillFromTemp(
     : ''
 
   let skillName: string
-  if (normalizedPreferredName) {
-    skillName = normalizedPreferredName
-  } else if (frontmatterName) {
+  if (frontmatterName) {
     skillName = frontmatterName
+  } else if (normalizedPreferredName) {
+    skillName = normalizedPreferredName
   } else if (frontmatterDisplayName) {
     skillName = frontmatterDisplayName
   } else if (skillDir !== tempDir) {
@@ -599,13 +602,17 @@ async function installImportedSkillFromTemp(
     source_type: 'upload',
     is_builtin: false,
   })
+  if (portableMeta && 'transfer_asset_key' in portableMeta) (meta as Record<string, unknown>).transfer_asset_key = portableMeta.transfer_asset_key
+  if (typeof portableMeta?.display_name === 'string') meta.display_name = portableMeta.display_name
+  if (typeof portableMeta?.description === 'string') meta.description = portableMeta.description
+  if (typeof portableMeta?.installed_version === 'string') meta.installed_version = portableMeta.installed_version
   if (getOrganizationResourceScope()) {
     meta.id = resourceId
     meta.source_type = 'custom'
     meta.visible_to = { user_ids: [getOrganizationResourceScope()!.userId], department_ids: null }
   }
   await writeSkillMeta(targetDir, meta)
-  if (getOrganizationResourceScope()) await registerOrganizationCustom('skill', targetDir, meta)
+  if (getOrganizationResourceScope()) await registerOrganizationCustom('skill', targetDir, meta, targetId)
 
   return {
     skillName,
@@ -847,7 +854,7 @@ export async function importLocalSkillArchive(
   const tempDir = await mkdtemp(path.join(tmpdir(), 'moss-skill-import-'))
   try {
     await extractSkillZip(Buffer.from(payload.archiveBase64, 'base64'), tempDir)
-    const result = await installImportedSkillFromTemp(tempDir, payload.fileName)
+    const result = await installImportedSkillFromTemp(tempDir, payload.fileName, payload.targetId)
 
     // Note: 在新方案中，技能通过工作空间符号链接和首次消息注入，不再需要 bridge 同步
 
@@ -1022,6 +1029,7 @@ export async function uploadCustomSkill(params: {
   displayName: string
   description?: string
   version?: string
+  targetId?: string
   userId: string
 }): Promise<{ id: string; name: string; version: string }> {
   const skillName = params.name.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '-')
@@ -1030,7 +1038,7 @@ export async function uploadCustomSkill(params: {
   }
 
   // Check if skill already exists
-  const existingPath = await findInstalledSkillPath(skillName)
+  const existingPath = getOrganizationResourceScope() ? null : await findInstalledSkillPath(skillName)
   if (existingPath) {
     throw new Error(`Skill already exists: ${skillName}`)
   }
@@ -1060,8 +1068,10 @@ export async function uploadCustomSkill(params: {
     await copyResourceDirectory(skillDir, targetDir)
 
     // Create metadata with visibility set to uploader only
-    const version = params.version || frontmatter.version || '1.0.0'
+    const portable = await readSkillMeta(skillDir)
+    const version = params.version || portable?.installed_version || frontmatter.version || '1.0.0'
     const meta: SkillStoreMeta = {
+      transfer_asset_key: (portable as Record<string, unknown> | null)?.transfer_asset_key,
       id: resourceId,
       name: skillName,
       display_name: params.displayName || frontmatter.name || frontmatter.displayName || skillName,
@@ -1081,10 +1091,10 @@ export async function uploadCustomSkill(params: {
       },
     }
     await writeSkillMeta(targetDir, meta)
-    if (getOrganizationResourceScope()) await registerOrganizationCustom('skill', targetDir, meta)
+    if (getOrganizationResourceScope()) await registerOrganizationCustom('skill', targetDir, meta, params.targetId)
 
     return {
-      id: resourceId,
+      id: String(meta.id),
       name: skillName,
       version,
     }

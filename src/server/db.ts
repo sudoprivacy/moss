@@ -689,6 +689,9 @@ export class DirectConnectStore {
     if (!assistantColumns.some(col => col.name === 'avatar')) {
       this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN avatar TEXT`)
     }
+    if (!assistantColumns.some(col => col.name === 'provider_type')) {
+      this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN provider_type TEXT DEFAULT 'moss_runtime'`)
+    }
     if (!assistantColumns.some(col => col.name === 'emoji')) {
       this.db.exec(`ALTER TABLE tenant_assistants ADD COLUMN emoji TEXT`)
     }
@@ -3049,6 +3052,7 @@ export class DirectConnectStore {
     skills?: string | null
     memory_mode?: string
     agent_type?: string
+    provider_type?: string
     publish_note?: string | null
     enabled?: number
     visible_to?: string | null
@@ -3059,8 +3063,8 @@ export class DirectConnectStore {
     await this.driver.run(`
       INSERT INTO tenant_assistants (
         id, name, display_name, description, default_init_prompt, prompts_i18n, categories, avatar, emoji, version, author_id, author_name, status,
-        source_url, checksum, file_path, enabled_skills, skills, memory_mode, agent_type, publish_note, enabled, visible_to, enabled_wikis, enabled_corp_apps, workflow, org_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_url, checksum, file_path, enabled_skills, skills, memory_mode, agent_type, provider_type, publish_note, enabled, visible_to, enabled_wikis, enabled_corp_apps, workflow, org_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       row.id,
       row.name,
@@ -3082,6 +3086,7 @@ export class DirectConnectStore {
       row.skills ?? null,
       row.memory_mode ?? 'session',
       row.agent_type ?? 'chat',
+      row.provider_type ?? 'moss_runtime',
       row.publish_note ?? null,
       row.enabled ?? 1,
       row.visible_to ?? null,

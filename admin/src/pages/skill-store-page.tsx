@@ -1,3 +1,6 @@
+import { AssetVisibilityEditor } from "../../components/asset-visibility-editor"
+import { PrivateAssetActions, EditPublishedAsset } from '@/components/private-asset-actions'
+import { Textarea } from '@/components/ui/textarea'
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -46,7 +49,7 @@ import {
 import type { AuthUser } from '@/lib/api/types'
 import type { AuthDepartment } from '@/lib/api/types'
 import { getDepartments, getUsers } from '@/lib/api/auth'
-import { updateSkillVisibility, approveTenantSkill, deleteTenantSkill, updateTenantSkillMeta } from '@/lib/api/skill-store'
+import { updateSkillVisibility, approveTenantSkill, deleteTenantSkill, updateTenantSkillMeta, getTenantSkillContent } from '@/lib/api/skill-store'
 import type { VisibleTo } from '@/lib/api/agent-hub'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { hasScope } from '@/lib/api/client'
@@ -182,17 +185,7 @@ type SkillCardProps = {
   installedSkill?: InstalledSkillInfo | null
   hasUpdate: boolean
   latestVersion?: SkillHubVersion
-  busy: boolean
-  toggling?: boolean
-  uninstalling?: boolean
-  /** Whether the viewer may install/update hub skills (store admins only). */
-  canInstall?: boolean
-  onInstall: (skillId: string) => void
-  onUpdate: (skillId: string) => void
   onOpen: (skill: SkillHubSkill) => void
-  onToggleEnabled?: (skill: InstalledSkillInfo, enabled: boolean) => void
-  onEditVisibility?: (skill: InstalledSkillInfo) => void
-  onRequestUninstall?: (skill: InstalledSkillInfo) => void
 }
 
 function SkillCard({
@@ -201,19 +194,8 @@ function SkillCard({
   installedSkill,
   hasUpdate,
   latestVersion,
-  busy,
-  toggling,
-  uninstalling,
-  canInstall = true,
-  onInstall,
-  onUpdate,
   onOpen,
-  onToggleEnabled,
-  onEditVisibility,
-  onRequestUninstall,
 }: SkillCardProps) {
-  const canManage = installedSkill && !installedSkill.isBuiltin
-
   return (
     <div
       role="button"
@@ -242,28 +224,11 @@ function SkillCard({
             <span>{skill.emoji || '📦'}</span>
           )}
         </div>
-        {installed ? (
-          <span
-            className={cn(
-              'rounded-full px-2 py-0.5 text-[11px] font-medium',
-              hasUpdate
-                ? 'bg-amber-500/15 text-amber-700'
-                : 'bg-primary/10 text-primary',
-            )}
-          >
-            {hasUpdate ? '可更新' : '已安装'}
-          </span>
-        ) : null}
       </div>
 
       <div className="min-w-0 flex-1 pr-28">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{skill.display_name}</span>
-          {hasUpdate ? (
-            <Badge variant="outline" className="text-[11px]">
-              可更新
-            </Badge>
-          ) : null}
         </div>
         <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">
           {skill.description || '暂无描述'}
@@ -275,76 +240,7 @@ function SkillCard({
         ) : null}
       </div>
 
-      <div
-        className="absolute top-4 right-4 flex items-center gap-2"
-        onClick={event => event.stopPropagation()}
-      >
-        {busy ? (
-          <div className="w-20">
-            <Progress value={85} />
-          </div>
-        ) : installed && canManage ? (
-          <>
-            {/* Hub/system skills are org-wide installs with no per-user creator;
-                only a store admin may change their visibility. canInstall === isStoreAdmin. */}
-            {onEditVisibility && canInstall && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => onEditVisibility(installedSkill!)}
-              >
-                <Shield className="size-4" />
-              </Button>
-            )}
-            {onToggleEnabled && (
-              <Switch
-                checked={installedSkill!.enabled}
-                disabled={toggling}
-                onCheckedChange={checked => onToggleEnabled(installedSkill!, checked)}
-              />
-            )}
-            {hasUpdate && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onUpdate(skill.id)}
-              >
-                更新
-              </Button>
-            )}
-            {onRequestUninstall && (
-              <Button
-                size="icon"
-                variant="ghost"
-                disabled={uninstalling}
-                onClick={() => onRequestUninstall(installedSkill!)}
-              >
-                {uninstalling ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Trash2 className="size-4" />
-                )}
-              </Button>
-            )}
-          </>
-        ) : installed && hasUpdate && canInstall ? (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => onUpdate(skill.id)}
-          >
-            更新
-          </Button>
-        ) : !installed && canInstall ? (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => onInstall(skill.id)}
-          >
-            安装
-          </Button>
-        ) : null}
-      </div>
+      <div className="absolute top-4 right-4 flex items-center gap-2" onClick={event => event.stopPropagation()} />
     </div>
   )
 }
@@ -436,11 +332,6 @@ function InstalledSkillCard({
       <div className="min-w-0 flex-1 pr-28">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{skill.displayName}</span>
-          {hasUpdate ? (
-            <Badge variant="outline" className="text-[11px]">
-              可更新
-            </Badge>
-          ) : null}
         </div>
         <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">
           {skill.description || '暂无描述'}
@@ -489,16 +380,6 @@ function InstalledSkillCard({
             disabled={toggling}
             onCheckedChange={checked => onToggleEnabled(skill, checked)}
           />
-        ) : null}
-        {hasUpdate ? (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={updating}
-            onClick={() => onUpdate(skill)}
-          >
-            {updating ? <Loader2 className="size-4 animate-spin" /> : '更新'}
-          </Button>
         ) : null}
         {canManage ? (
           <Button
@@ -559,10 +440,11 @@ export default function SkillStorePage() {
   // A dept_admin/user (store:read + store:tenant:write) sees the store read-only
   // for hub and manages only tenant/custom skills they own or are in scope for.
   const isStoreAdmin = hasScope(scopes, 'admin:settings')
+  const canReview = isStoreAdmin || user?.role === 'dept_admin'
   const [settings, setSettings] = useState<StoreConfig | null>(null)
   const [pageLoading, setPageLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
-  const [activeTab, setActiveTab] = useState<SkillStoreTab>('store')
+  const [activeTab, setActiveTab] = useState<SkillStoreTab>('available')
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('')
   const [categories, setCategories] = useState<string[]>([])
@@ -618,6 +500,38 @@ export default function SkillStorePage() {
   const [editTenantVisibleTo, setEditTenantVisibleTo] = useState<string[]>([])
   const [editTenantVisibleUserIds, setEditTenantVisibleUserIds] = useState<string[]>([])
   const [savingTenantVisibility, setSavingTenantVisibility] = useState(false)
+  const [versionEdit, setVersionEdit] = useState<{ skill: TenantSkillInfo; name: string; description: string; content: string; visibleTo: VisibleTo | null } | null>(null)
+  const [versionSaving, setVersionSaving] = useState(false)
+  const [versionLoading, setVersionLoading] = useState(false)
+  const openVersionEdit = async (skill: TenantSkillInfo) => {
+    setVersionLoading(true)
+    try {
+      const { content } = await getTenantSkillContent(skill.id)
+      setVersionEdit({ skill, name: skill.display_name || skill.name, description: skill.description || '', content, visibleTo: skill.visible_to ?? null })
+      setTenantSkillDetail(null)
+    } catch (error) { toast.error(error instanceof Error ? error.message : '读取技能失败') }
+    finally { setVersionLoading(false) }
+  }
+  const openCatalogSkillDraft = async (id: string) => {
+    const rows = await getTenantSkills()
+    setTenantSkills(rows)
+    const draft = rows.find(item => item.id === id)
+    if (!draft) throw new Error('草稿不存在')
+    setDetailOpen(false)
+    await openVersionEdit(draft)
+  }
+  const saveVersionEdit = async () => {
+    if (!versionEdit) return
+    setVersionSaving(true)
+    try {
+      await updateTenantSkillMeta({ id: versionEdit.skill.id, display_name: versionEdit.name, description: versionEdit.description, content: versionEdit.content, ...(versionEdit.visibleTo !== (versionEdit.skill.visible_to ?? null) ? { visible_to: versionEdit.visibleTo } : {}) })
+      toast.success('已保存到我的技能，可继续编辑或提交审核；原发布版本保持不变')
+      setActiveTab('mine')
+      setVersionEdit(null)
+      await fetchTenantSkills()
+    } catch (error) { toast.error(error instanceof Error ? error.message : '保存失败') }
+    finally { setVersionSaving(false) }
+  }
   const [tenantSkillDetail, setTenantSkillDetail] = useState<TenantSkillInfo | null>(null)
   // Read-only visibility viewer for a non-admin's own PENDING submission (they
   // have no 审批 dialog to see the requested visibility in).
@@ -789,10 +703,9 @@ export default function SkillStorePage() {
     )
   }, [tenantSkills, searchQuery])
 
-  // 专属 badge counts only approved tenant skills (the tab still renders
-  // pending/rejected ones, but the badge reflects what's actually active).
-  const approvedTenantSkillCount = useMemo(
-    () => filteredTenantSkills.filter(skill => skill.status === 'approved').length,
+  // The governance tab badge reflects work awaiting review/publication.
+  const pendingTenantSkillCount = useMemo(
+    () => filteredTenantSkills.filter(skill => skill.status === 'pending' || skill.status === 'reviewed').length,
     [filteredTenantSkills],
   )
 
@@ -813,7 +726,7 @@ export default function SkillStorePage() {
       setInstalledList(response)
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : '读取已安装技能失败',
+        error instanceof Error ? error.message : '读取技能列表失败',
       )
     } finally {
       setInstalledLoading(false)
@@ -827,7 +740,7 @@ export default function SkillStorePage() {
       setTenantSkills(response)
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : '读取专属技能失败',
+        error instanceof Error ? error.message : '读取技能失败',
       )
     } finally {
       setTenantSkillsLoading(false)
@@ -923,7 +836,7 @@ export default function SkillStorePage() {
       toast.error(
         installedResult.reason instanceof Error
           ? installedResult.reason.message
-          : '读取已安装技能失败',
+          : '读取技能列表失败',
       )
     }
 
@@ -933,7 +846,7 @@ export default function SkillStorePage() {
       toast.error(
         tenantSkillsResult.reason instanceof Error
           ? tenantSkillsResult.reason.message
-          : '读取专属技能失败',
+          : '读取技能失败',
       )
     }
 
@@ -1018,7 +931,7 @@ export default function SkillStorePage() {
   )
 
   useEffect(() => {
-    if (!settings || activeTab === 'custom') {
+    if (!settings || activeTab === 'mine') {
       return
     }
 
@@ -1029,8 +942,8 @@ export default function SkillStorePage() {
     setNextCursor(null)
     setHasMore(false)
 
-    // 专属技能页签不再从 Hub 获取数据，改为从后端获取
-    if (activeTab === 'exclusive') {
+    // 技能库页签不再从 Hub 获取数据，改为从后端获取
+    if (activeTab === 'review') {
       setLoading(false)
       setLoadingMore(false)
       setStoreError('')
@@ -1070,7 +983,7 @@ export default function SkillStorePage() {
       loadingMore ||
       !hasMore ||
       !nextCursor ||
-      activeTab === 'custom'
+      activeTab === 'mine'
     ) {
       return
     }
@@ -1098,7 +1011,7 @@ export default function SkillStorePage() {
 
   useEffect(() => {
     const sentinel = sentinelRef.current
-    if (!sentinel || !hasMore || activeTab === 'custom') {
+    if (!sentinel || !hasMore || activeTab === 'mine') {
       return
     }
 
@@ -1131,7 +1044,7 @@ export default function SkillStorePage() {
             setSyncing(false)
             if (status.status === 'done') {
               const parts: string[] = []
-              if (status.installed > 0) parts.push(`新安装 ${status.installed} 个`)
+              if (status.installed > 0) parts.push(`新准备 ${status.installed} 个`)
               if (status.updated > 0) parts.push(`更新 ${status.updated} 个`)
               if (status.failed > 0) parts.push(`${status.failed} 个失败`)
               if (parts.length === 0) {
@@ -1206,7 +1119,7 @@ export default function SkillStorePage() {
       const skill = skills.find(item => item.id === skillId)
       const latestVersion = latestVersions.get(skillId)
       if (!skill || !latestVersion) {
-        toast.error('未获取到技能安装包信息')
+        toast.error('未获取到技能资源信息')
         return
       }
 
@@ -1219,10 +1132,10 @@ export default function SkillStorePage() {
           checksum: latestVersion.checksum,
           skillMeta: skill,
         })
-        toast.success(`已安装 ${skill.display_name}`)
+        toast.success(`已准备 ${skill.display_name}，可以使用`)
         await fetchInstalledList()
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : '安装技能失败')
+        toast.error(error instanceof Error ? error.message : '准备技能失败')
       } finally {
         setInstallingSkillId(null)
       }
@@ -1276,13 +1189,13 @@ export default function SkillStorePage() {
         skillName: skill.id,
         sourcePath: skill.source,
       })
-      toast.success(`已卸载 ${skill.displayName}`)
+      toast.success(`已删除 ${skill.displayName}`)
       await fetchInstalledList()
       if (detailResolvedInstalledSkill?.name === skill.name) {
         setDetailOpen(false)
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '卸载技能失败')
+      toast.error(error instanceof Error ? error.message : '删除技能失败')
     } finally {
       setPendingUninstallSkill(null)
     }
@@ -1317,7 +1230,7 @@ export default function SkillStorePage() {
       try {
         const archiveBase64 = await fileToBase64(file)
 
-        if (activeTab === 'exclusive') {
+        if (activeTab === 'review') {
           // Admin → live tenant skill; non-admin → pending approval request.
           const result = await uploadTenantSkillArchive({
             fileName: file.name,
@@ -1327,7 +1240,7 @@ export default function SkillStorePage() {
           toast.success(
             result.status === 'pending'
               ? (result.message || '发布申请已提交，等待管理员审批')
-              : `已上传专属技能 ${result.skillName}`,
+              : `已上传技能 ${result.skillName}`,
           )
           await fetchTenantSkills()
         } else {
@@ -1366,13 +1279,13 @@ export default function SkillStorePage() {
           }),
         )
 
-        if (activeTab === 'exclusive') {
+        if (activeTab === 'review') {
           // Admin → live tenant skill; non-admin → pending approval request.
           const result = await uploadTenantSkillDirectory({ entries, visible_to: buildUploadVisibleTo() })
           toast.success(
             result.status === 'pending'
               ? (result.message || '发布申请已提交，等待管理员审批')
-              : `已上传专属技能 ${result.skillName}`,
+              : `已上传技能 ${result.skillName}`,
           )
           await fetchTenantSkills()
         } else {
@@ -1646,8 +1559,8 @@ export default function SkillStorePage() {
   if (pageLoading) {
     return (
       <DashboardLayout
-        title="技能商店"
-        description="浏览、安装和管理 Hub 技能，专属技能租户 ID 来自系统设置。"
+        title="技能库"
+        description="统一管理可用技能、本人添加的技能，以及组织审核与发布流程。"
       >
         <div className="space-y-6">
           <Skeleton className="h-10 w-64" />
@@ -1660,12 +1573,12 @@ export default function SkillStorePage() {
   if (!settings) {
     return (
       <DashboardLayout
-        title="技能商店"
-        description="浏览、安装和管理 Hub 技能，专属技能租户 ID 来自系统设置。"
+        title="技能库"
+        description="统一管理可用技能、本人添加的技能，以及组织审核与发布流程。"
       >
         <Alert variant="destructive" className="max-w-3xl">
           <TriangleAlert className="size-4" />
-          <AlertTitle>读取技能商店配置失败</AlertTitle>
+          <AlertTitle>读取技能库配置失败</AlertTitle>
           <AlertDescription>{loadError || '未获取到系统设置。'}</AlertDescription>
         </Alert>
       </DashboardLayout>
@@ -1691,8 +1604,8 @@ export default function SkillStorePage() {
 
   return (
     <DashboardLayout
-      title="技能商店"
-      description="浏览、安装和管理 Hub 技能，专属技能租户 ID 来自系统设置。"
+      title="技能库"
+      description="统一管理可用技能、本人添加的技能，以及组织审核与发布流程。"
     >
       <div className="space-y-6">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -1701,16 +1614,10 @@ export default function SkillStorePage() {
               {tenantId ? `专属租户: ${tenantId}` : '未配置专属租户 ID'}
             </Badge> */}
             <Badge variant="secondary">
-              已安装 {hubInstalledCount + approvedTenantSkillCount + filteredCustomSkills.length} 个技能
+              已发布技能 · 按当前账号权限展示
             </Badge>
           </div>
           <div className="flex items-center gap-2">
-            {isStoreAdmin ? (
-              <Button variant="outline" onClick={() => void handleSync()} disabled={syncing}>
-                {syncing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
-                批量同步
-              </Button>
-            ) : null}
             <Button variant="outline" onClick={() => void handleRefresh()}>
               <RefreshCw className="mr-2 size-4" />
               刷新
@@ -1735,30 +1642,30 @@ export default function SkillStorePage() {
                 className="gap-0"
               >
                 <TabsList>
-                  <TabsTrigger value="store">
-                    技能库
+                  <TabsTrigger value="available">
+                    可用技能
                     {hubInstalledCount > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
                         {hubInstalledCount}
                       </span>
                     ) : null}
                   </TabsTrigger>
-                  <TabsTrigger value="exclusive">
-                    专属技能
-                    {approvedTenantSkillCount > 0 ? (
-                      <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
-                        {approvedTenantSkillCount}
-                      </span>
-                    ) : null}
-                  </TabsTrigger>
-                  <TabsTrigger value="custom">
-                    自定义技能
+                  <TabsTrigger value="mine">
+                    我的技能
                     {filteredCustomSkills.length > 0 ? (
                       <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
                         {filteredCustomSkills.length}
                       </span>
                     ) : null}
                   </TabsTrigger>
+                  {canReview ? <TabsTrigger value="review">
+                    审核与发布
+                    {pendingTenantSkillCount > 0 ? (
+                      <span className="rounded-full bg-primary px-1.5 py-0 text-[10px] leading-4 text-primary-foreground">
+                        {pendingTenantSkillCount}
+                      </span>
+                    ) : null}
+                  </TabsTrigger> : null}
                 </TabsList>
               </Tabs>
 
@@ -1774,15 +1681,15 @@ export default function SkillStorePage() {
                 </div>
               </div>
 
-              {activeTab === 'exclusive' ? (
+              {activeTab === 'mine' ? (
                 <Button onClick={() => { applyDefaultUploadVisibility(); setImportDialogOpen(true) }}>
                   <Upload className="mr-2 size-4" />
-                  上传专属技能
+                  导入技能
                 </Button>
               ) : null}
             </div>
 
-            {activeTab !== 'custom' && activeTab !== 'exclusive' ? (
+            {activeTab !== 'mine' && activeTab !== 'review' ? (
               <div className="flex flex-wrap gap-2">
                 {[{ key: 'all', label: '全部' }, ...categories.map(item => ({ key: item, label: item }))].map(item => (
                   <button
@@ -1805,7 +1712,7 @@ export default function SkillStorePage() {
 
           <CardContent className="pt-6">
             <Tabs value={activeTab} className="gap-0">
-              <TabsContent value="store" className="space-y-4">
+              <TabsContent value="available" className="space-y-4">
                 {storeError ? (
                   <Alert variant="destructive">
                     <TriangleAlert className="size-4" />
@@ -1815,14 +1722,14 @@ export default function SkillStorePage() {
                 ) : null}
                 {loading ? (
                   <LoadingSkeleton />
-                ) : skills.length === 0 ? (
+                ) : skills.length === 0 && !filteredTenantSkills.some(skill => skill.status === 'approved' && skill.isAvailable !== false) ? (
                   <div className="rounded-xl border border-dashed bg-muted/30 px-6 py-12 text-center text-muted-foreground">
                     <Sparkles className="mx-auto mb-3 size-8 opacity-50" />
                     暂无技能
                   </div>
                 ) : (
                   <div className="grid gap-4 md:grid-cols-2">
-                    {skills.map(skill => {
+                    {skills.filter(skill => !tenantSkills.some(row => row.status === 'approved' && row.isAvailable !== false && row.replaces_id === skill.id)).map(skill => {
                       const installedVersion =
                         installedVersionLookup.get(skill.id) ||
                         ''
@@ -1843,46 +1750,57 @@ export default function SkillStorePage() {
                         : null
 
                       return (
-                        <SkillCard
+                        <div key={skill.id} className="space-y-2"><SkillCard
                           key={skill.id}
                           skill={skill}
                           installed={installed}
                           installedSkill={installedSkillInfo}
                           hasUpdate={hasUpdate}
                           latestVersion={latestVersion}
-                          busy={
-                            installingSkillId === skill.id ||
-                            updatingSkillId === skill.id
-                          }
-                          toggling={installedSkillInfo ? togglingSkillName === installedSkillInfo.name : false}
-                          uninstalling={installedSkillInfo ? pendingUninstallSkill?.name === installedSkillInfo.name : false}
-                          canInstall={isStoreAdmin}
-                          onInstall={handleInstall}
-                          onUpdate={skillId => void handleUpdate(skillId)}
                           onOpen={item => void openSkillDetail(item)}
-                          onToggleEnabled={handleToggleEnabled}
-                          onEditVisibility={handleOpenVisibilityEdit}
-                          onRequestUninstall={setPendingUninstallSkill}
-                        />
+                        />{canReview ? <div className="flex justify-end"><EditPublishedAsset kind="skills" id={skill.id} onDraft={openCatalogSkillDraft} /></div> : null}</div>
                       )
                     })}
                   </div>
                 )}
                 {loadingMore ? <LoadingSkeleton /> : null}
                 {hasMore ? <div ref={sentinelRef} className="h-1" /> : null}
+                {filteredTenantSkills.filter(skill => skill.status === 'approved' && skill.isAvailable !== false).length > 0 ? (
+                  <section className="space-y-3">
+                    <div className="grid gap-4 md:grid-cols-2">
+                      {filteredTenantSkills.filter(skill => skill.status === 'approved' && skill.isAvailable !== false).map(skill => (
+                        <button key={`available:${skill.id}`} type="button" className="rounded-xl border bg-card p-4 text-left transition-colors hover:bg-accent/30" onClick={() => setTenantSkillDetail(skill)}>
+                          <div className="flex items-start gap-3">
+                            <div className="flex size-10 items-center justify-center rounded-lg bg-muted text-lg">📦</div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="font-medium">{skill.display_name || skill.name}</div>
+                                <Badge variant="outline" className="text-[10px]">组织发布</Badge>
+                                {skill.version ? <Badge variant="outline" className="text-[10px]">v{skill.version}</Badge> : null}
+                              </div>
+                              <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{skill.description || '暂无描述'}</p>
+                              <span className="mt-2 inline-block text-xs text-muted-foreground">已发布 · 当前账号可见</span>
+                              <span className="mt-2 block text-sm text-primary">{canReview && skill.can_manage ? '编辑' : '查看详情'}</span>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
               </TabsContent>
 
-              <TabsContent value="exclusive" className="space-y-4">
+              <TabsContent value="review" className="space-y-4">
                 {tenantSkillsLoading ? (
                   <LoadingSkeleton />
-                ) : filteredTenantSkills.length === 0 ? (
+                ) : filteredTenantSkills.filter(skill => skill.status === 'pending' || skill.status === 'reviewed').length === 0 ? (
                   <div className="rounded-xl border border-dashed bg-muted/30 px-6 py-12 text-center text-muted-foreground">
                     <Shield className="mx-auto mb-3 size-8 opacity-50" />
-                    {searchQuery.trim() ? '未找到匹配的专属技能' : '暂无专属技能'}
+                    {searchQuery.trim() ? '未找到匹配的技能' : '暂无技能'}
                   </div>
                 ) : (
                   <div className="grid gap-4 md:grid-cols-2">
-                    {filteredTenantSkills.map(skill => (
+                    {filteredTenantSkills.filter(skill => skill.status === 'pending' || skill.status === 'reviewed').map(skill => (
                       <div
                         key={skill.id}
                         role="button"
@@ -1917,6 +1835,8 @@ export default function SkillStorePage() {
                               >
                                 {skill.status === 'approved'
                                   ? '已通过'
+                                  : skill.status === 'reviewed'
+                                    ? '部门已审核，待发布'
                                   : skill.status === 'pending'
                                     ? '待审批'
                                     : '已拒绝'}
@@ -1961,9 +1881,9 @@ export default function SkillStorePage() {
                             {/* Edit/delete follow the server's can_manage flag
                                 (author in the viewer's scope); approval is a
                                 store-admin-only action. */}
-                            {skill.status === 'pending' ? (
+                            {skill.status === 'pending' || skill.status === 'reviewed' ? (
                               <>
-                                {isStoreAdmin ? (
+                                {isStoreAdmin || user?.role === 'dept_admin' ? (
                                   <Button
                                     size="sm"
                                     variant="outline"
@@ -1973,7 +1893,7 @@ export default function SkillStorePage() {
                                       setApprovalDialogOpen(true)
                                     }}
                                   >
-                                    审批
+                                    {skill.status === 'reviewed' && isStoreAdmin ? '发布' : '审核'}
                                   </Button>
                                 ) : (
                                   // Non-admin: no 审批 modal, so surface a read-only
@@ -2055,17 +1975,26 @@ export default function SkillStorePage() {
                 )}
               </TabsContent>
 
-              <TabsContent value="custom" className="space-y-6">
+              <TabsContent value="mine" className="space-y-6">
+                <div className="rounded-lg border p-4 text-sm text-muted-foreground">
+                  创建、导入、编辑和本地调试技能，完成后可提交到 Moss 审核；发布后的技能会进入可用技能。
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  {filteredTenantSkills.filter(skill => skill.author_id === user?.id && skill.status !== 'superseded').map(skill => <div key={skill.id}><button type="button" className="rounded-xl border bg-card p-4 text-left hover:bg-accent/30" onClick={() => setTenantSkillDetail(skill)}>
+                    <div className="flex items-center gap-2"><span className="font-medium">{skill.display_name || skill.name}</span><Badge variant="outline">{skill.status === 'approved' ? '已发布' : skill.status === 'reviewed' ? '待发布' : skill.status === 'pending' ? '待审核' : skill.status === 'draft' ? '草稿' : '已拒绝'}</Badge>{skill.version ? <Badge variant="outline">v{skill.version}</Badge> : null}</div>
+                    <p className="mt-2 text-sm text-muted-foreground">{skill.description || '暂无描述'}</p>
+                  </button><PrivateAssetActions kind="skill" version={skill.version} id={skill.id} name={skill.name} source="tenant" canSubmit={['draft', 'rejected'].includes(skill.status)} onSubmitted={async () => { await Promise.all([fetchTenantSkills(), fetchInstalledList()]) }} /></div>)}
+                </div>
                 {installedLoading ? (
                   <LoadingSkeleton />
-                ) : filteredCustomSkills.length === 0 ? (
+                ) : filteredCustomSkills.length === 0 && !filteredTenantSkills.some(skill => skill.author_id === user?.id && skill.status !== 'superseded') ? (
                   <div className="rounded-xl border border-dashed bg-muted/30 px-6 py-12 text-center text-muted-foreground">
                     <Package className="mx-auto mb-3 size-8 opacity-50" />
                     {searchQuery.trim() ? '未找到匹配的自定义技能' : '暂无自定义技能'}
                   </div>
                 ) : (
                   <div className="grid gap-4 md:grid-cols-2">
-                    {filteredCustomSkills.map(renderInstalledCard)}
+                    {filteredCustomSkills.map(skill => <div key={skill.id}>{renderInstalledCard(skill)}<PrivateAssetActions kind="skill" version={skill.version} id={skill.id} name={skill.name} onSubmitted={async () => { await Promise.all([fetchTenantSkills(), fetchInstalledList()]) }} /></div>)}
                   </div>
                 )}
               </TabsContent>
@@ -2075,11 +2004,11 @@ export default function SkillStorePage() {
       </div>
 
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{detailSkillName || '技能详情'}</DialogTitle>
             <DialogDescription>
-              查看技能说明、版本信息和安装状态。
+              查看技能说明、版本信息和使用状态。
             </DialogDescription>
           </DialogHeader>
 
@@ -2097,10 +2026,10 @@ export default function SkillStorePage() {
                     <div className="flex flex-wrap items-center gap-2">
                       {detailResolvedInstalledSkill ? (
                         <Badge variant="secondary">
-                          {detailHasUpdate ? '已安装，可更新' : '已安装'}
+                          已准备
                         </Badge>
                       ) : (
-                        <Badge variant="outline">未安装</Badge>
+                        <Badge variant="outline">按需准备</Badge>
                       )}
                       {detailResolvedInstalledSkill?.enabled ? (
                         <Badge variant="outline">已启用</Badge>
@@ -2125,12 +2054,12 @@ export default function SkillStorePage() {
                     <Card>
                       <CardHeader>
                         <CardTitle className="text-base">版本信息</CardTitle>
-                        <CardDescription>当前安装版本与 Hub 最新版本。</CardDescription>
+                        <CardDescription>系统会在使用时按执行模式自动准备资源。</CardDescription>
                       </CardHeader>
                       <CardContent className="space-y-3 text-sm">
                         <div className="flex items-center justify-between">
-                          <span className="text-muted-foreground">当前安装</span>
-                          <span>{detailInstalledVersion || '未安装'}</span>
+                          <span className="text-muted-foreground">当前版本</span>
+                          <span>{detailInstalledVersion || '按需准备'}</span>
                         </div>
                         <div className="flex items-center justify-between">
                           <span className="text-muted-foreground">最新版本</span>
@@ -2216,55 +2145,11 @@ export default function SkillStorePage() {
                 <CheckCircle2 className="size-4 text-primary" />
               ) : null}
               {detailResolvedInstalledSkill
-                ? `安装路径：${detailResolvedInstalledSkill.source}`
-                : '该技能尚未安装'}
+                ? '系统会在使用时按执行模式自动准备该技能。'
+                : '使用时会自动准备该技能。'}
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {detailResolvedInstalledSkill && !detailResolvedInstalledSkill.isBuiltin ? (
-                <>
-                  {/* Hub/system skills: only a store admin manages visibility.
-                      Custom skills are creator-only (client-managed) — never here. */}
-                  {isStoreAdmin
-                    && !(detailResolvedInstalledSkill.isUploaded || detailResolvedInstalledSkill.meta?.source_type === 'custom') ? (
-                    <Button
-                      variant="outline"
-                      onClick={() => handleOpenVisibilityEdit(detailResolvedInstalledSkill)}
-                    >
-                      <Shield className="mr-2 size-4" />
-                      编辑可见性
-                    </Button>
-                  ) : null}
-                  <Button
-                    variant="outline"
-                    onClick={() => setPendingUninstallSkill(detailResolvedInstalledSkill)}
-                  >
-                    卸载
-                  </Button>
-                </>
-              ) : null}
-              {detailHasUpdate && detailSkill ? (
-                <Button
-                  onClick={() =>
-                    void handleUpdate(detailSkill.id, detailResolvedInstalledSkill)
-                  }
-                  disabled={updatingSkillId === detailSkill.id}
-                >
-                  {updatingSkillId === detailSkill.id ? (
-                    <Loader2 className="mr-2 size-4 animate-spin" />
-                  ) : null}
-                  更新
-                </Button>
-              ) : !detailResolvedInstalledSkill && detailSkill ? (
-                <Button
-                  onClick={() => void handleInstall(detailSkill.id)}
-                  disabled={installingSkillId === detailSkill.id}
-                >
-                  {installingSkillId === detailSkill.id ? (
-                    <Loader2 className="mr-2 size-4 animate-spin" />
-                  ) : null}
-                  安装
-                </Button>
-              ) : null}
+              {detailSkill ? <EditPublishedAsset kind="skills" id={detailSkill.id} onDraft={openCatalogSkillDraft} /> : null}
             </div>
           </DialogFooter>
         </DialogContent>
@@ -2273,90 +2158,16 @@ export default function SkillStorePage() {
       <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>{activeTab === 'exclusive' && !isStoreAdmin ? '提交专属技能发布申请' : '上传专属技能'}</DialogTitle>
+            <DialogTitle>导入技能</DialogTitle>
             <DialogDescription>
-              {activeTab === 'exclusive'
-                ? (isStoreAdmin
-                    ? '上传技能到专属技能，自动审批通过后按可见范围可见。支持 ZIP 压缩包或本地技能目录。'
-                    : '提交一个专属技能发布申请。提交后需管理员审批，审批通过后才会对组织成员可见；可见范围默认限定为你所在部门/本人。支持 ZIP 压缩包或本地技能目录。')
-                : '支持导入 ZIP 压缩包，或直接上传本地技能目录。'}
+              支持导入 ZIP 压缩包，或直接上传本地技能目录。导入后可继续调试并提交审核。
             </DialogDescription>
           </DialogHeader>
-          {activeTab === 'exclusive' && (isStoreAdmin || user?.role === 'dept_admin') ? (
-            <div className="space-y-3 border-b pb-4">
-              <label className="text-sm font-medium">可见范围</label>
-              <RadioGroup
-                value={uploadVisibilityMode}
-                onValueChange={value => setUploadVisibilityMode(value as 'all' | 'departments' | 'users' | 'admin')}
-              >
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="all" />
-                  <label className="text-sm cursor-pointer">全员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="departments" />
-                  <label className="text-sm cursor-pointer">指定部门可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="users" />
-                  <label className="text-sm cursor-pointer">指定人员可见</label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <RadioGroupItem value="admin" />
-                  <label className="text-sm cursor-pointer">仅管理员可见</label>
-                </div>
-              </RadioGroup>
-              {uploadVisibilityMode === 'departments' ? (
-                departmentOptions.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无部门数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {departmentOptions.map(dept => (
-                      <label key={dept.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={uploadVisibleDeptIds.includes(dept.id)}
-                          onCheckedChange={checked =>
-                            setUploadVisibleDeptIds(
-                              checked === true
-                                ? [...uploadVisibleDeptIds, dept.id]
-                                : uploadVisibleDeptIds.filter(id => id !== dept.id),
-                            )
-                          }
-                        />
-                        <span>{'— '.repeat(dept.depth)}{dept.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : uploadVisibilityMode === 'users' ? (
-                users.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无用户数据</p>
-                ) : (
-                  <div className="grid gap-2 rounded-lg border p-3 sm:grid-cols-2 max-h-40 overflow-y-auto">
-                    {users.map(u => (
-                      <label key={u.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={uploadVisibleUserIds.includes(u.id)}
-                          onCheckedChange={checked =>
-                            setUploadVisibleUserIds(
-                              checked === true
-                                ? [...uploadVisibleUserIds, u.id]
-                                : uploadVisibleUserIds.filter(id => id !== u.id),
-                            )
-                          }
-                        />
-                        <span>{u.displayName || u.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                )
-              ) : null}
-            </div>
-          ) : activeTab === 'exclusive' ? (
+          {activeTab === 'review' ? (
             <div className="space-y-2 border-b pb-4">
               <label className="text-sm font-medium">可见范围</label>
               <p className="rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
-                该专属技能将提交给管理员审批，默认仅你本人可见。如需扩大可见范围，请由管理员在审批时调整。
+                该技能发布申请将提交给管理员审批，默认仅你本人可见。如需扩大可见范围，请由管理员在审批时调整。
               </p>
             </div>
           ) : null}
@@ -2405,7 +2216,7 @@ export default function SkillStorePage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认卸载技能</AlertDialogTitle>
+            <AlertDialogTitle>确认删除技能</AlertDialogTitle>
             <AlertDialogDescription>
               {pendingUninstallSkill
                 ? `将从本机删除技能'${pendingUninstallSkill.displayName}'。`
@@ -2415,7 +2226,7 @@ export default function SkillStorePage() {
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction onClick={() => void handleConfirmUninstall()}>
-              确认卸载
+              确认删除
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -2619,7 +2430,7 @@ export default function SkillStorePage() {
                 />
               </div>
               <div className="grid grid-cols-2 gap-2 text-sm">
-                <div>新安装: <span className="font-medium">{skillSyncProgress.installed}</span></div>
+                <div>新准备: <span className="font-medium">{skillSyncProgress.installed}</span></div>
                 <div>更新: <span className="font-medium">{skillSyncProgress.updated}</span></div>
                 <div>跳过: <span className="font-medium">{skillSyncProgress.skipped}</span></div>
                 <div>失败: <span className="font-medium text-destructive">{skillSyncProgress.failed}</span></div>
@@ -2648,14 +2459,15 @@ export default function SkillStorePage() {
       <Dialog open={approvalDialogOpen} onOpenChange={open => { if (!open) setApprovalDialogOpen(false) }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>审批专属技能</DialogTitle>
+            <DialogTitle>审批技能库</DialogTitle>
             <DialogDescription>
-              {approvingSkill ? `审批技能: ${approvingSkill.display_name || approvingSkill.name}` : '审批专属技能发布申请'}
+              {approvingSkill ? `审批技能: ${approvingSkill.display_name || approvingSkill.name}` : '审批技能库发布申请'}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div className="text-sm">
               <p className="font-medium">发布说明</p>
+              <p className="text-sm">提交版本：{approvingSkill?.version || "未设置"}</p>
               <p className="mt-1 text-muted-foreground">{approvingSkill?.publish_note || '无发布说明'}</p>
             </div>
             <div className="space-y-2">
@@ -2854,9 +2666,9 @@ export default function SkillStorePage() {
       <Dialog open={tenantVisibilityOpen} onOpenChange={open => { if (!open) setTenantVisibilityOpen(false) }}>
         <DialogContent className='max-w-lg'>
           <DialogHeader>
-            <DialogTitle>编辑专属技能可见性</DialogTitle>
+            <DialogTitle>编辑技能库可见性</DialogTitle>
             <DialogDescription>
-              {editingTenantSkill ? `设置 ${editingTenantSkill.display_name || editingTenantSkill.name} 的可见范围` : '设置专属技能的可见范围'}
+              {editingTenantSkill ? `设置 ${editingTenantSkill.display_name || editingTenantSkill.name} 的可见范围` : '设置技能库的可见范围'}
             </DialogDescription>
           </DialogHeader>
           <div className='space-y-3'>
@@ -2963,13 +2775,33 @@ export default function SkillStorePage() {
         </DialogContent>
       </Dialog>
 
-      {/* 专属技能详情对话框 */}
+      <Dialog open={versionEdit !== null} onOpenChange={open => { if (!open && !versionSaving) setVersionEdit(null) }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader><DialogTitle>编辑技能版本</DialogTitle><DialogDescription>保存为我的技能草稿，提交审核并发布后客户端才会看到新版本。</DialogDescription></DialogHeader>
+          {versionEdit ? <div className="space-y-4">
+            {versionEdit.skill.version ? <p className="text-sm text-muted-foreground">当前版本：{versionEdit.skill.version}</p> : null}
+            <label className="grid gap-2 text-sm">显示名称<Input value={versionEdit.name} onChange={event => setVersionEdit({ ...versionEdit, name: event.target.value })} /></label>
+            <label className="grid gap-2 text-sm">描述<Textarea value={versionEdit.description} onChange={event => setVersionEdit({ ...versionEdit, description: event.target.value })} /></label>
+            <label className="grid gap-2 text-sm">技能内容<Textarea className="max-h-[45vh] font-mono" rows={14} value={versionEdit.content} onChange={event => setVersionEdit({ ...versionEdit, content: event.target.value })} /></label>
+            <AssetVisibilityEditor
+              value={versionEdit.visibleTo}
+              onChange={visibleTo => setVersionEdit({ ...versionEdit, visibleTo })}
+              departments={departmentOptions}
+              users={users}
+              canChooseDepartments={isStoreAdmin || user?.role === 'dept_admin'}
+              isScoped={!isStoreAdmin}
+            />
+          </div> : null}
+          <DialogFooter><Button variant="outline" disabled={versionSaving} onClick={() => setVersionEdit(null)}>取消</Button><Button disabled={versionSaving || !versionEdit?.name.trim() || !versionEdit?.content.trim()} onClick={() => void saveVersionEdit()}>{versionSaving ? '保存中' : '保存到我的技能'}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {/* 技能库详情对话框 */}
       <Dialog open={tenantSkillDetail !== null} onOpenChange={open => { if (!open) setTenantSkillDetail(null) }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{tenantSkillDetail?.display_name || tenantSkillDetail?.name || '专属技能详情'}</DialogTitle>
+            <DialogTitle>{tenantSkillDetail?.display_name || tenantSkillDetail?.name || '技能库详情'}</DialogTitle>
             <DialogDescription>
-              查看专属技能详细信息。
+              查看技能库详细信息。
             </DialogDescription>
           </DialogHeader>
           {tenantSkillDetail && (
@@ -3065,6 +2897,7 @@ export default function SkillStorePage() {
             </div>
           )}
           <DialogFooter>
+            {tenantSkillDetail?.can_manage && tenantSkillDetail.status !== 'superseded' && (tenantSkillDetail.status !== 'approved' || canReview) ? <Button disabled={versionLoading} onClick={() => void openVersionEdit(tenantSkillDetail)}>编辑版本</Button> : null}
             <Button variant="outline" onClick={() => setTenantSkillDetail(null)}>
               关闭
             </Button>

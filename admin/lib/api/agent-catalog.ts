@@ -127,6 +127,7 @@ export function createAgentCatalogApi(signal?: () => AbortSignal) {
       request<CatalogSource>("POST", "/sources", { catalog_id, revision }),
     source: (id: string) =>
       request<CatalogSource>("GET", `/sources/${encodeURIComponent(id)}`),
+    draft: (id: string) => request<CatalogSource>("POST", `/agents/${encodeURIComponent(id)}/draft`, {}),
     agent: (id: string) =>
       request<{
         agent: ExternalAgentAdmin;
@@ -163,16 +164,18 @@ export function createAgentCatalogApi(signal?: () => AbortSignal) {
         `/sources/${encodeURIComponent(source.id)}/sync`,
         { revision: source.revision, renew, note },
       ),
+    publicationPreview: (sourceId: string) => request<{ currentVersion: string | null; nextVersion: string; publishNote: string }>('GET', `/sources/${encodeURIComponent(sourceId)}/publication-preview`),
     decide: (
       candidate: ImportCandidate,
       action: string,
       note: string,
       review_days = 7,
+      version?: string,
     ) =>
       request<ImportCandidate>(
         "POST",
         `/candidates/${encodeURIComponent(candidate.id)}/decide`,
-        { revision: candidate.revision, action, note, review_days },
+        { revision: candidate.revision, action, note, review_days, ...(version !== undefined ? { version } : {}) },
       ),
     publish: (candidate: ImportCandidate) =>
       request<ImportCandidate>(

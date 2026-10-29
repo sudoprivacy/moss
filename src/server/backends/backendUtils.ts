@@ -1,4 +1,5 @@
 import { getOrganizationResourceScope, listOrganizationResources, requireOrganizationResource } from '../catalog/organizationResources.js'
+import { resolveWorkspaceSkillSources } from '../../utils/scodeBridge.js'
 import { ResourceAccessError } from '../catalog/resourceError.js'
 import { spawn, type ChildProcess } from 'child_process'
 import { createInterface } from 'readline'
@@ -332,16 +333,16 @@ export async function getAssistantRuntimeConfig(
     // narrowed its skills — it gets what an unattributed session used to get,
     // plus the cross-session memory that only `user` mode turns on.
     if (isUserOwnedAgentName(assistantName)) {
-      return { memoryMode: 'user', enabledSkills: skills.map(skill => skill.name) }
+      return { memoryMode: 'user', enabledSkills: skills.map(skill => skill.id) }
     }
-    if (!assistantName) return { memoryMode: 'session', enabledSkills: skills.map(skill => skill.name) }
+    if (!assistantName) return { memoryMode: 'session', enabledSkills: skills.map(skill => skill.id) }
     const agent = await requireOrganizationResource('agent', assistantName)
     if (agent.meta.enabled === false) throw new ResourceAccessError(404, 'Assistant not available')
     const selected = Array.isArray(agent.meta.enabledSkills) ? agent.meta.enabledSkills as string[] : skills.map(skill => skill.id)
     const enabledSkills = selected.map(ref => {
       const matches = skills.filter(skill => skill.id === ref || skill.name === ref)
       if (matches.length !== 1) throw new ResourceAccessError(404, 'Bound skill not available')
-      return matches[0]!.name
+      return matches[0]!.id
     })
     return { memoryMode: agent.meta.memory_mode === 'user' ? 'user' : 'session', enabledSkills }
   }
@@ -477,10 +478,8 @@ export async function createSkillSymlinks(
     const { rm } = await import('node:fs/promises')
     await rm(commandsDir, { recursive: true, force: true })
     await mkdir(commandsDir, { recursive: true })
-    for (const reference of enabledSkills) {
-      const skill = await requireOrganizationResource('skill', reference)
-      if (skill.name !== path.basename(skill.name) || skill.name === '..') throw new ResourceAccessError(400, 'Invalid skill name')
-      await symlink(path.join(skill.path, 'SKILL.md'), path.join(commandsDir, `${skill.name}.md`))
+    for (const skill of await resolveWorkspaceSkillSources(enabledSkills)) {
+      await symlink(path.join(skill.sourcePath, 'SKILL.md'), path.join(commandsDir, `${skill.name}.md`))
     }
     return
   }

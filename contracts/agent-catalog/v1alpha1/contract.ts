@@ -38,6 +38,8 @@ export interface ImportCandidate {
   status: 'draft' | 'pending_approval' | 'approved' | 'rejected' | 'publishing' | 'publication_unknown' | 'published' | 'archived'
   snapshot: CatalogSnapshot; validation: CatalogValidationReport; changes: CatalogChange[]
   decisions: CatalogDecision[]; created_at: number; published_version: string | null
+  /** Requested product version and changelog frozen when submitted for review. */
+  requested_version?: string; release_note?: string
   publication_error: string | null; publication_started_at: number | null
 }
 export interface SourceSyncResult {

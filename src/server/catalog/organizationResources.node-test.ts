@@ -95,7 +95,7 @@ void test('private and custom resources require org ownership before admin ACL b
     const resource = await withOrganizationResources(a, () => requireOrganizationResource('agent', 'custom-a'))
     assert.equal(resource.meta.rules, 'private rules')
     assert.equal(resource.meta.display_name, 'updated')
-    assert.deepEqual(resource.meta.visible_to, { user_ids: ['a-user'] })
+    assert.deepEqual(resource.meta.visible_to, { user_ids: ['a-user'], department_ids: null })
   } finally { db.close(); await rm(root, { recursive: true, force: true }) }
 })
 
@@ -112,7 +112,7 @@ void test('runner snapshot resolves only authorized resources and clears skills 
   const workspace = join(root, 'workspace')
   try {
     await withOrganizationResources({ orgId: 'a', userId: 'a-user', snapshot: a }, async () => {
-      assert.deepEqual((await getAssistantRuntimeConfig('a')).enabledSkills, ['skill'])
+      assert.deepEqual((await getAssistantRuntimeConfig('a')).enabledSkills, ['s'])
       assert.deepEqual(await resolveWorkspaceSkillSources(['s']), [{ name: 'skill', sourcePath: skillPath }])
       const links = await syncWorkspaceSkills(workspace, ['s'])
       assert.equal(links.length, 1)
@@ -219,7 +219,7 @@ void test('prepared catalogs freeze agent dependencies, materialize later skills
         const skill = await requireOrganizationResource('skill', oldSkill.runtimeRef)
         assert.equal(await readFile(join(skill.path, 'SKILL.md'), 'utf8'), 's1 original')
         const config = await getAssistantRuntimeConfig('a1')
-        assert.deepEqual(config.enabledSkills, [skill.name])
+        assert.deepEqual(config.enabledSkills, [skill.id])
         await syncWorkspaceSkills(join(root, 'workspace'), config.enabledSkills)
       })
     })
@@ -242,4 +242,26 @@ void test('prepared catalogs freeze agent dependencies, materialize later skills
     db.close()
     await rm(root, { recursive: true, force: true })
   }
+})
+
+void test('private and published skills with the same name remain independently executable by ID', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-versions-'))
+  try {
+    const resources = await Promise.all(['published', 'draft'].map(async id => {
+      const path = join(root, id)
+      await mkdir(path)
+      await writeFile(join(path, 'SKILL.md'), id)
+      return { kind: 'skill' as const, id, name: 'same-skill', path, sourceType: 'tenant', meta: { enabled: true } }
+    }))
+    await withOrganizationResources({ orgId: 'org', userId: 'owner', snapshot: { orgId: 'org', resources } }, async () => {
+      const config = await getAssistantRuntimeConfig()
+      assert.deepEqual(config.enabledSkills, ['published', 'draft'])
+      const links = await syncWorkspaceSkills(join(root, 'workspace'), config.enabledSkills)
+      assert.equal(new Set(links.map(link => link.name)).size, 2)
+      assert.deepEqual(await Promise.all(links.map(link => readFile(join(link.workspacePath, 'SKILL.md'), 'utf8'))), ['published', 'draft'])
+      await createSkillSymlinks(join(root, 'config'), config.enabledSkills)
+      assert.equal((await readdir(join(root, 'config', '.claude', 'commands'))).length, 2)
+      await assert.rejects(resolveWorkspaceSkillSources(['same-skill']), /Ambiguous/)
+    })
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

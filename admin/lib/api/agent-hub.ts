@@ -57,6 +57,7 @@ export interface InstalledAgentMeta {
   /** 企业应用管理: Corp App instance IDs this assistant may use via the corpapp CLI. */
   enabledCorpApps?: string[]
   agent_type?: 'chat' | 'workflow'
+  provider_type?: 'static' | 'local' | 'moss_runtime' | 'dify' | 'custom_http' | string
   memory_mode?: 'session' | 'user'
   visible_to?: VisibleTo | null
   workflow?: {
@@ -257,7 +258,8 @@ export interface TenantAssistantInfo {
   version?: string
   author_id: string
   author_name?: string
-  status: 'pending' | 'approved' | 'rejected'
+  replaces_id?: string
+  status: 'draft' | 'pending' | 'reviewed' | 'approved' | 'rejected' | 'superseded'
   source_url?: string
   checksum?: string
   file_path?: string
@@ -267,11 +269,16 @@ export interface TenantAssistantInfo {
   enabled_corp_apps?: string[]
   memory_mode?: 'session' | 'user'
   agent_type?: 'chat' | 'workflow'
+  provider_type?: 'static' | 'local' | 'moss_runtime' | 'dify' | 'custom_http' | string
+  source_type?: string
+  expert_type?: string
   publish_note?: string
   review_note?: string
   reviewed_by?: string
   reviewed_at?: number
   enabled: number
+  /** Server-computed availability for the current viewer. */
+  isAvailable?: boolean
   visible_to?: VisibleTo | null
   rules?: string
   workflow?: {
@@ -293,6 +300,28 @@ export interface TenantAssistantInfo {
 export function getTenantAssistants(status?: string): Promise<TenantAssistantInfo[]> {
   const queryString = status ? `?status=${encodeURIComponent(status)}` : ''
   return authClient.get<TenantAssistantInfo[]>(`/api/v1/agent-templates/tenant${queryString}`)
+}
+
+/** Import a SudoWork expert archive into the caller's private Moss assets. */
+export function importAgentArchive(data: {
+  fileName: string
+  archiveBase64: string
+}): Promise<{ id: string; name: string; status: string }> {
+  const displayName = data.fileName.replace(/\.zip$/i, '').trim() || '导入专家'
+  return authClient.post<{ id: string; name: string; status: string }>(
+    '/api/v1/agent-templates/custom',
+    {
+      file: data.archiveBase64,
+      name: displayName,
+    },
+  )
+}
+
+export function submitImportedAssistantForReview(data: { assistantId: string; publishNote?: string }): Promise<{ id: string; status: string; message?: string }> {
+  return authClient.post<{ id: string; status: string; message?: string }>(
+    '/api/v1/agent-templates/tenant/publish',
+    data,
+  )
 }
 
 export function approveTenantAssistant(
@@ -324,6 +353,7 @@ export interface CreateTenantAssistantRequest {
   enabled_wikis?: string[]
   enabled_corp_apps?: string[]
   agent_type?: 'chat' | 'workflow'
+  provider_type?: 'static' | 'local' | 'moss_runtime' | 'dify' | 'custom_http'
   memory_mode?: 'session' | 'user'
   visible_to?: VisibleTo | null
   workflow?: TenantAssistantInfo['workflow']
@@ -342,6 +372,7 @@ function appendTenantAssistantFormData(form: FormData, data: Omit<CreateTenantAs
   if (data.enabled_wikis !== undefined) form.set('enabled_wikis', JSON.stringify(data.enabled_wikis))
   if (data.enabled_corp_apps !== undefined) form.set('enabled_corp_apps', JSON.stringify(data.enabled_corp_apps))
   if (data.agent_type !== undefined) form.set('agent_type', data.agent_type)
+  if (data.provider_type !== undefined) form.set('provider_type', data.provider_type)
   if (data.memory_mode !== undefined) form.set('memory_mode', data.memory_mode)
   if (data.visible_to !== undefined) form.set('visible_to', JSON.stringify(data.visible_to))
   if (data.workflow !== undefined) form.set('workflow', JSON.stringify(data.workflow))
@@ -349,12 +380,12 @@ function appendTenantAssistantFormData(form: FormData, data: Omit<CreateTenantAs
 
 export function createTenantAssistant(
   data: CreateTenantAssistantRequest,
-): Promise<{ success: boolean; data: TenantAssistantInfo; status?: 'approved' | 'pending'; message?: string }> {
+): Promise<{ success: boolean; data: TenantAssistantInfo; status?: 'draft' | 'approved' | 'reviewed' | 'pending'; message?: string }> {
   const form = new FormData()
   form.set('name', data.name)
   form.set('display_name', data.display_name)
   appendTenantAssistantFormData(form, data)
-  return authClient.post<{ success: boolean; data: TenantAssistantInfo; status?: 'approved' | 'pending'; message?: string }>(
+  return authClient.post<{ success: boolean; data: TenantAssistantInfo; status?: 'draft' | 'approved' | 'reviewed' | 'pending'; message?: string }>(
     '/api/v1/agent-templates/tenant/create',
     form,
   )

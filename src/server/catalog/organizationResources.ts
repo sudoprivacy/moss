@@ -60,14 +60,14 @@ async function privateResource(kind: ResourceKind, row: SqlRow): Promise<Organiz
   const path = String(row.file_path)
   const raw = await readFile(join(path, '_moss_meta.json'), 'utf8').catch(() => '{}')
   const meta: ResourceMetadata = { ...json(raw), ...json(row.config_json), id: String(row.id), name: String(row.name),
-    catalogVersion: String(row.updated_at ?? ''), source_type: row.source_type || 'tenant', enabled: Number(row.enabled) === 1, visible_to: parsed(row.visible_to, null) }
+    catalogVersion: String(row.updated_at ?? ''), ownerId: row.author_id, source_type: row.source_type || 'tenant', enabled: Number(row.enabled) === 1, visible_to: parsed(row.visible_to, null) }
   for (const key of ['display_name', 'description', 'avatar', 'emoji', 'memory_mode', 'agent_type']) {
     if (row[key] != null) meta[key] = row[key]
   }
   for (const [column, key] of [['enabled_skills', 'enabledSkills'], ['enabled_wikis', 'enabledWikis'], ['enabled_corp_apps', 'enabledCorpApps'], ['skills', 'skills'], ['workflow', 'workflow'], ['categories', 'categories']]) {
     if (row[column!] != null) meta[key!] = parsed(row[column!], [])
   }
-  Object.assign(meta, json(row.config_json), { id: String(row.id), name: String(row.name), source_type: row.source_type || 'tenant', enabled: Number(row.enabled) === 1, visible_to: parsed(row.visible_to, null) })
+  Object.assign(meta, json(row.config_json), { id: String(row.id), name: String(row.name), ownerId: row.author_id, catalogVersion: String(row.updated_at ?? ''), source_type: row.source_type || 'tenant', enabled: Number(row.enabled) === 1, visible_to: parsed(row.visible_to, null) })
   return { kind, id: String(row.id), name: String(row.name), path, sourceType: String(meta.source_type), meta }
 }
 
@@ -81,7 +81,7 @@ export async function listOrganizationResources(kind: ResourceKind): Promise<Org
     if (!scope.driver) throw new HttpError(403, 'Missing organization resource repository')
     const [installed, owned] = await Promise.all([
       scope.driver.all(`SELECT * FROM org_resource_installations WHERE org_id = ? AND resource_type = ?`, [scope.orgId, kind]),
-      scope.driver.all(`SELECT * FROM ${tableFor(kind)} WHERE org_id = ? AND status = 'approved' AND source_type IN ('tenant', 'custom')`, [scope.orgId]),
+      scope.driver.all(`SELECT * FROM ${tableFor(kind)} WHERE org_id = ? AND (status = 'approved' OR (author_id = ? AND status IN ('draft', 'pending', 'reviewed', 'rejected'))) AND source_type IN ('tenant', 'custom')`, [scope.orgId, scope.userId]),
     ])
     resources = installed.filter(row => !String(row.source_provider).startsWith('user:') || row.installed_by === scope.userId).map(row => {
       const meta = { ...json(row.manifest_json), ...json(row.config_json), id: String(row.source_resource_id), name: String(row.name), source_type: 'hub', installation_id: String(row.id) }
@@ -92,7 +92,11 @@ export async function listOrganizationResources(kind: ResourceKind): Promise<Org
     resources = resources.filter((resource, index, all) => all.findIndex(candidate => candidate.id === resource.id) === index)
     resources.push(...(await Promise.all(owned.map(row => privateResource(kind, row)))).filter((r): r is OrganizationResource => r !== null))
   }
-  return resources.filter(r => !scope.visibility || isVisibleTo(r.meta.visible_to as VisibleTo, scope.visibility))
+  return resources.filter(r => {
+    // Custom working copies belong to their author; review happens on tenant copies.
+    if (r.sourceType === 'custom') return r.meta.ownerId === scope.userId
+    return r.meta.ownerId === scope.userId || !scope.visibility || isVisibleTo(r.meta.visible_to as VisibleTo, scope.visibility)
+  })
 }
 
 export async function findOrganizationResource(kind: ResourceKind, reference: string): Promise<OrganizationResource | null> {
@@ -135,14 +139,39 @@ export async function saveOrganizationInstallation(kind: ResourceKind, path: str
   [randomUUID(), scope.orgId, kind, provider, String(meta.id), String(meta.name), path, JSON.stringify(meta), scope.userId, now, now])
 }
 
-export async function registerOrganizationCustom(kind: ResourceKind, path: string, meta: ResourceMetadata): Promise<void> {
+export async function registerOrganizationCustom(kind: ResourceKind, path: string, meta: ResourceMetadata, targetId?: string): Promise<void> {
   const scope = writableScope()
-  const now = Date.now()
-  await scope.driver.run(`INSERT INTO ${tableFor(kind)}
-    (id, org_id, name, display_name, description, author_id, status, file_path, source_type, config_json, visible_to, enabled, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, 'custom', ?, ?, ?, ?, ?)`,
-  [String(meta.id), scope.orgId, String(meta.name), String(meta.display_name ?? meta.name), String(meta.description ?? ''), scope.userId, path,
-    JSON.stringify(meta), meta.visible_to == null ? null : JSON.stringify(meta.visible_to), meta.enabled === false ? 0 : 1, now, now])
+  const table = tableFor(kind)
+  const key = typeof meta.transfer_asset_key === 'string' && /^[a-f0-9-]{36}$/i.test(meta.transfer_asset_key) ? meta.transfer_asset_key : undefined
+  // Package provenance is a matching hint inside this owner's workspace only.
+  // It is never authority to replace another author's or a published resource.
+  for (const name of Object.keys(meta)) if (name.startsWith('publication_')) delete meta[name]
+  await scope.driver.transaction(async () => {
+    if (scope.driver.kind === 'postgres') await scope.driver.get('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', [scope.orgId, scope.userId])
+    const own = await scope.driver.all(`SELECT * FROM ${table} WHERE org_id = ? AND author_id = ? AND source_type = 'custom'`, [scope.orgId, scope.userId])
+    const matches = targetId ? own.filter(row => row.id === targetId) : key ? own.filter(row => json(row.config_json).transfer_asset_key === key) : []
+    if (targetId && !matches.length) throw new HttpError(403, '只能更新自己的工作稿')
+    if (matches.length > 1) throw new HttpError(409, '存在多个关联工作稿，请明确选择更新目标')
+    const existing = matches[0]
+    const now = existing ? Math.max(Date.now(), Number(existing.updated_at) + 1) : Date.now()
+    if (existing) meta.id = String(existing.id)
+    meta.ownerId = scope.userId
+    meta.visible_to = { user_ids: [scope.userId], department_ids: null }
+    meta.source_type = 'custom'
+    if (key) meta.transfer_asset_key = key
+    else delete meta.transfer_asset_key
+    await writeFile(join(path, '_moss_meta.json'), JSON.stringify(meta, null, 2))
+    if (existing) {
+      await scope.driver.run(`UPDATE ${table} SET name = ?, display_name = ?, description = ?, file_path = ?, config_json = ?, updated_at = ? WHERE id = ? AND org_id = ? AND author_id = ?`,
+        [String(meta.name), String(meta.display_name ?? meta.name), String(meta.description ?? ''), path, JSON.stringify(meta), now, String(existing.id), scope.orgId, scope.userId])
+      return
+    }
+    await scope.driver.run(`INSERT INTO ${table}
+      (id, org_id, name, display_name, description, author_id, status, file_path, source_type, config_json, visible_to, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, 'custom', ?, ?, ?, ?, ?)`,
+      [String(meta.id), scope.orgId, String(meta.name), String(meta.display_name ?? meta.name), String(meta.description ?? ''), scope.userId, path,
+        JSON.stringify(meta), JSON.stringify(meta.visible_to), meta.enabled === false ? 0 : 1, now, now])
+  })
 }
 
 export async function updateOrganizationResource(kind: ResourceKind, reference: string, patch: ResourceMetadata): Promise<void> {
@@ -174,7 +203,16 @@ export async function updateOrganizationResource(kind: ResourceKind, reference: 
   })
 }
 export async function resolveOrganizationSkillIds(references: string[]): Promise<string[]> {
-  return Promise.all(references.map(async ref => (await requireOrganizationResource('skill', ref)).id))
+  const resources = await listOrganizationResources('skill')
+  return Promise.all(references.map(async ref => {
+    const exact = resources?.find(resource => resource.id === ref)
+    if (exact) return exact.id
+    // Authoring references prefer this account's working copy. Runtime lookup
+    // still rejects ambiguous names and uses published IDs after submission.
+    const owned = resources?.filter(resource => resource.sourceType === 'custom' && (resource.name === ref || resource.meta.display_name === ref)) ?? []
+    if (owned.length === 1) return owned[0]!.id
+    return (await requireOrganizationResource('skill', ref)).id
+  }))
 }
 // The native tenant routes authorize creator/department management before this
 // call. Pending submissions also need overlays, without becoming installed.

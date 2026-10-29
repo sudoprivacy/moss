@@ -38,9 +38,12 @@ export function definitionDigest(source: unknown): string {
   if (root.dependencies !== undefined) {
     if (!Array.isArray(root.dependencies)) return reject()
     for (const dependency of root.dependencies) {
-      const item = record(dependency, ['type', 'value'])
+      const item = record(dependency, ['type', 'value', 'current_identifier'])
       if (item.type !== 'marketplace') reject()
-      record(item.value, ['marketplace_plugin_unique_identifier', 'current_identifier'])
+      const value = record(item.value, ['marketplace_plugin_unique_identifier', 'current_identifier', 'version'])
+      for (const metadata of [item.current_identifier, value.current_identifier, value.version]) {
+        if (metadata !== undefined && metadata !== null && typeof metadata !== 'string') reject()
+      }
     }
   }
   const workflow = record(root.workflow, ['graph', 'features', 'environment_variables', 'conversation_variables', 'rag_pipeline_variables'])
