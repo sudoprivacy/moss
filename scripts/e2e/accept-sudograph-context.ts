@@ -5,12 +5,18 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { McpStore } from '../../src/server/mcp/db.js'
+import { ReviewedMcpAccess, mcpServerDigest } from '../../src/server/mcp/reviewedAccess.js'
+import { ToolGatewayStore } from '../../src/server/agentFederation/toolGatewayStore.js'
+import { registerModelContextTool } from '../../src/server/ontology/contextWorker.js'
+import { McpOntologyContextPorts } from '../../src/server/ontology/mcpContextPorts.js'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { createAcpBridgeHandle } from '../../src/server/backends/acpBridge.js'
 import { DirectConnectStore } from '../../src/server/db.js'
-import type { OntologyContextPorts } from '../../src/server/ontology/projectRegistry.js'
 
 const { values } = parseArgs({ options: {
   engine: { type: 'string' }, 'engine-sha256': { type: 'string' },
@@ -83,27 +89,57 @@ await hostStore.driver.run(`INSERT INTO sessions
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 ['fixture-moss-session', 'fixture-native-history', 'fixture-org', 'fixture-user', 'user', '[]', workspace,
   'cohost', 'active', 'active', join(root, 'transcript.jsonl'), Date.now(), Date.now()])
-const project = await hostStore.ontologyProjects.register({ orgId: 'fixture-org', authorityRef: 'canonical-fixture',
-  workerRef: 'registered-fixture-worker', modelRef: 'fixture-model', sourceRefs: ['registered-fixture-source'] })
-const contextPorts: OntologyContextPorts = {
-  authorize: async binding => {
-    assert.equal(binding.orgId, 'fixture-org')
-    assert.equal(binding.userId, 'fixture-user')
-    if (!isAllowed) throw new Error('Fixture grant revoked')
-  },
-  readContext: async binding => {
-    assert.equal(binding.workerRef, 'registered-fixture-worker')
-    assert.equal(binding.modelRef, 'fixture-model')
-    const context = worker('compiler.workspace', { operation: 'read', product: 'context' })
-    contexts.push(context)
-    return context
-  },
+// The registered worker is a separate authenticated MCP endpoint, not a host path.
+const modelIdentity = { authorityRef: 'canonical-fixture', modelRef: 'fixture-model', sourceRefs: ['registered-fixture-source'] }
+const workerServer = createServer((req, res) => {
+  void (async () => {
+    if (req.headers.authorization !== 'Bearer fixture-worker-only') { res.writeHead(401); res.end(); return }
+    const sdk = new McpServer({ name: 'registered-compiler-worker', version: '1.0.0' })
+    registerModelContextTool(sdk, modelIdentity, async () => {
+      const context = worker('compiler.workspace', { operation: 'read', product: 'context' })
+      contexts.push(context)
+      return context
+    })
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
+    res.once('close', () => { void sdk.close() })
+    await sdk.connect(transport)
+    await transport.handleRequest(req, res)
+  })().catch(() => res.destroy())
+})
+await new Promise<void>(resolve => workerServer.listen(0, '127.0.0.1', resolve))
+const workerAddress = workerServer.address()
+assert(workerAddress && typeof workerAddress !== 'string')
+const mcpStore = new McpStore(hostStore.driver)
+const registeredWorker = await mcpStore.createMcpServer('fixture-org', { name: 'Compiler worker', scope: 'org', owner_type: 'system', owner_id: 'fixture-org',
+  mcp_type: 'http', url: `http://127.0.0.1:${workerAddress.port}/mcp`, auth_type: 'bearer',
+  auth_config_json: JSON.stringify({ header_name: 'Authorization', prefix: 'Bearer', token: 'fixture-worker-only' }),
+  allow_read: true, allow_read_sensitive_fields: true, allow_write: false }, 'fixture-manager')
+await mcpStore.setMcpServerStatus('fixture-org', registeredWorker.id, 'enabled', 'fixture-manager')
+await mcpStore.upsertMcpPolicy('fixture-org', { allow_http_sse_mcp: true, allow_external_network: true, domain_whitelist_json: ['127.0.0.1'] }, 'fixture-manager')
+const reviews = new ToolGatewayStore(hostStore.driver)
+function accessFor(currentStore: DirectConnectStore) {
+  return new ReviewedMcpAccess(new ToolGatewayStore(currentStore.driver), { mcp: new McpStore(currentStore.driver),
+    member: async (org, user) => isAllowed && org === 'fixture-org' && user === 'fixture-user'
+      ? { isAdmin: false, userId: user, departmentId: null, visibleDepartmentIds: null } : null,
+    addresses: () => ['127.0.0.1'],
+  })
 }
+const access = accessFor(hostStore)
+const protocol = access.protocol((await access.connection('fixture-org', registeredWorker.id)).config, AbortSignal.timeout(10000))
+let descriptor
+try { await protocol.connect(); descriptor = (await protocol.descriptors())[0] } finally { await protocol.close() }
+assert(descriptor)
+await reviews.saveReview({ ...descriptor, orgId: 'fixture-org', serverId: registeredWorker.id,
+  resource: `mcp:${registeredWorker.id}/sudograph_context`, serverDigest: mcpServerDigest(registeredWorker), action: 'read', sensitive: true,
+  outbound: false, enabled: true, revision: 'reviewed-context-v1', reviewedBy: 'fixture-manager', reviewedAt: Date.now() }, null)
+const project = await hostStore.ontologyProjects.register({ orgId: 'fixture-org', ...modelIdentity, workerRef: registeredWorker.id })
+let contextPorts = new McpOntologyContextPorts(access, mcpStore)
 const bound = await hostStore.ontologyProjects.bind({ sessionId: 'fixture-moss-session', projectId: project.projectId,
   orgId: 'fixture-org', userId: 'fixture-user' }, contextPorts)
 // Recover the resolver from the actual host database, not a serialized callback.
 await hostStore.close()
 hostStore = new DirectConnectStore(join(root, 'host.db'))
+contextPorts = new McpOntologyContextPorts(accessFor(hostStore), new McpStore(hostStore.driver))
 assert.deepEqual(await hostStore.ontologyProjects.resolveSession('fixture-moss-session'), bound)
 const resolveHostContext = await hostStore.ontologyProjects.runnerContext({ sessionId: 'fixture-moss-session',
   orgId: 'fixture-org', userId: 'fixture-user' }, contextPorts)
@@ -194,13 +230,15 @@ try {
   assert.equal(hash(await readFile(source)), sourceBefore)
   receipt = { format: 'moss-sudograph-context-acceptance/v1', passed: true, engine_sha256: values['engine-sha256'], compiler,
     canonical_revisions: contexts.map(context => context.revision), real_engine: true, installed_compiler: true,
-    moss_acp_bridge: true, durable_project_binding_recovered: true,
+    moss_acp_bridge: true, durable_project_binding_recovered: true, registered_mcp_worker: true,
     exact_context_in_requests: true, history_preserved: true, context_not_in_user_history: true,
     denied_model_requests: 0, source_unchanged: true,
-    scope: 'Real engine stdio, Moss ACP bridge and installed compiler; deterministic loopback provider. Not Nexus mailbox, tenant grants, cloud login, WebUI or ShareOne comments.' }
+    scope: 'Real engine stdio, Moss ACP bridge, registered MCP worker and installed compiler; deterministic loopback provider. Not Nexus mailbox, tenant grants, cloud login, WebUI or ShareOne comments.' }
 } finally {
   await handle.destroy(true)
   await exited
+  workerServer.closeAllConnections()
+  await new Promise<void>(resolve => workerServer.close(() => resolve()))
   await hostStore.close()
   server.closeAllConnections()
   await new Promise<void>(resolve => server.close(() => resolve()))

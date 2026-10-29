@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { ExecutionGrant } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import type { McpStore } from '../mcp/db.js'
-import type { McpServer } from '../mcp/types.js'
-import { resolveAuthHeaders, resolveSecretRefHeaders, type McpAuthSecretsApi } from '../mcp/authResolver.js'
-import { isVisibleTo, type VisibilityFilter } from '../visibilityFilter.js'
+import type { McpAuthSecretsApi } from '../mcp/authResolver.js'
+import { ReviewedMcpAccess, mcpServerDigest } from '../mcp/reviewedAccess.js'
+import type { VisibilityFilter } from '../visibilityFilter.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import type { ProductRegistryClient } from './registryClient.js'
 import { assertAssetOpen } from './assetControlStore.js'
@@ -18,12 +18,10 @@ function record(value: unknown, fields: string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !fields.includes(k))) toolFailure('INVALID_TOOL_REQUEST', 400)
   return value as Record<string, unknown>
 }
-function serverDigest(server: McpServer) {
-  return contentDigest({ id: server.id, org: server.org_id, type: server.mcp_type, endpoint: server.url, scope: server.scope, owner: server.owner_id })
-}
 
 /** Existing MCP catalog routes; Registry/IAM stays authoritative for each task and tool. */
 export class AgentToolGateway {
+  private readonly access: ReviewedMcpAccess
   constructor(readonly store: ToolGatewayStore, private readonly deps: {
     registry: Pick<ProductRegistryClient, 'scope' | 'executionAuthorize' | 'inventoryGet' | 'catalogId'>
     mcp: Pick<McpStore, 'getMcpServer' | 'getMcpPolicy'>
@@ -32,22 +30,9 @@ export class AgentToolGateway {
     /** Deployment network exceptions, never browser/invocation input. */
     addresses?(org: string, server: string): readonly string[] | undefined
     protocol?(connection: ToolConnection, signal: AbortSignal): ToolProtocol
-  }) {}
-  private async connection(org: string, id: string) {
-    const server = await this.deps.mcp.getMcpServer(org, id), policy = await this.deps.mcp.getMcpPolicy(org)
-    if (!server || server.org_id !== org || server.status !== 'enabled' || !server.enabled || server.scope === 'user'
-      || server.mcp_type !== 'http' || !server.url || server.use_proxy || !policy.allow_http_sse_mcp) toolFailure('TOOL_SERVER_UNAVAILABLE', 403)
-    const target = new URL(server.url)
-    if (!policy.allow_external_network || !policy.domain_whitelist_json?.includes(target.hostname)) toolFailure('TOOL_DESTINATION_DENIED', 403)
-    if (server.auth_type === 'oauth') toolFailure('TOOL_AUTH_UNSUPPORTED')
-    const secrets = this.deps.secrets?.(org)
-    const headers = server.auth_type === 'secret_ref' && server.secret_ref && secrets
-      ? await resolveSecretRefHeaders(server.secret_ref, p => secrets!.getConfigItemByPinyin(p), (ns, subject) => secrets!.listSecrets(ns, subject), org)
-      : resolveAuthHeaders(server.auth_type, server.auth_config_json)
-    if (server.auth_type !== 'none' && !Object.keys(headers).length) toolFailure('TOOL_CREDENTIAL_UNAVAILABLE', 503)
-    return { server, policy, config: { endpoint: server.url, headers, timeoutMs: Math.min(Math.max(server.timeout_ms, 1000), 15000), allowedAddresses: this.deps.addresses?.(org, id) } satisfies ToolConnection }
-  }
-  private protocol(config: ToolConnection, signal: AbortSignal) { return this.deps.protocol?.(config, signal) ?? new ToolProtocol(config, signal) }
+  }) { this.access = new ReviewedMcpAccess(store, deps) }
+  private connection(org: string, id: string) { return this.access.connection(org, id) }
+  private protocol(config: ToolConnection, signal: AbortSignal) { return this.access.protocol(config, signal) }
   async discover(org: string, serverId: string): Promise<ToolDescriptor[]> {
     this.deps.registry.scope(org)
     const { config } = await this.connection(org, serverId), protocol = this.protocol(config, AbortSignal.timeout(30000))
@@ -63,8 +48,8 @@ export class AgentToolGateway {
     if (!descriptor || descriptor.digest !== body.digest) toolFailure('TOOL_DESCRIPTOR_CHANGED')
     validateToolArguments(descriptor.tool.inputSchema)
     const currentServer = (await this.connection(org, serverId)).server
-    if (serverDigest(server) !== serverDigest(currentServer)) toolFailure('TOOL_SERVER_CHANGED')
-    const valueToSave: ReviewedTool = { ...descriptor, orgId: org, serverId, serverDigest: serverDigest(server), resource: resourceFor(serverId, descriptor.tool.name),
+    if (mcpServerDigest(server) !== mcpServerDigest(currentServer)) toolFailure('TOOL_SERVER_CHANGED')
+    const valueToSave: ReviewedTool = { ...descriptor, orgId: org, serverId, serverDigest: mcpServerDigest(server), resource: resourceFor(serverId, descriptor.tool.name),
       action: body.action as 'read' | 'write', sensitive: body.sensitive as boolean, outbound: body.outbound as boolean,
       enabled: body.enabled as boolean, revision: randomUUID(), reviewedBy: user, reviewedAt: Date.now() }
     return this.store.saveReview(valueToSave, body.expected_revision as string | null)
@@ -77,22 +62,13 @@ export class AgentToolGateway {
     return this.store.saveReview({ ...review, enabled: false, reviewedBy: user, reviewedAt: Date.now(), revision: randomUUID() }, body.expected_revision)
   }
   private async allowed(org: string, grant: ExecutionGrant, review: ReviewedTool) {
-    const { server, policy, config } = await this.connection(org, review.serverId)
-    if (!review.enabled || serverDigest(server) !== review.serverDigest) toolFailure('TOOL_REVIEW_REQUIRED', 403)
-    // These permissions come from the IT review, never remote readOnlyHint/destructiveHint.
-    if ((review.action === 'read' && !server.allow_read) || (review.action === 'write' && !server.allow_write)
-      || (review.sensitive && !server.allow_read_sensitive_fields) || (review.outbound && !server.allow_outbound_network)) toolFailure('TOOL_POLICY_DENIED', 403)
-    if ((review.action === 'write' && (server.require_confirmation_for_write || policy.require_confirmation_for_write))
-      || (server.risk_level === 'high' && policy.require_confirmation_for_high_risk)) toolFailure('TOOL_CONFIRMATION_REQUIRED', 403)
-    const user = await this.deps.member(org, grant.request.initiated_by)
-    if (!user || user.userId !== grant.request.initiated_by || (server.scope === 'department' && server.owner_id !== user.departmentId)
-      || !isVisibleTo(server.visible_to, { ...user, isAdmin: false })) toolFailure('TOOL_USER_DENIED', 403)
+    const { server, config, policyDigest } = await this.access.authorize(org, grant.request.initiated_by, review)
     if (server.bound_assistants) {
       const asset = await this.deps.registry.inventoryGet(org, grant.request.asset_id)
       if (!asset.principal || !server.bound_assistants.includes(this.deps.registry.catalogId(org, asset.principal))) toolFailure('TOOL_AGENT_DENIED', 403)
     }
     await assertAssetOpen(this.store.db, org, grant.request.asset_id)
-    return { config, policyDigest: contentDigest({ server, policy }) }
+    return { config, policyDigest }
   }
   async invoke(org: string, value: unknown, token: string, cancellation?: AbortSignal) {
     await this.store.ready

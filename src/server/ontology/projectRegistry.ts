@@ -32,6 +32,18 @@ export interface OntologyContextPorts {
   }>
 }
 
+/** Shared worker contract check; semantic input identity is not a rendered-text hash. */
+export function validateOntologyContext(value: unknown): Awaited<ReturnType<OntologyContextPorts['readContext']>> {
+  const context = value as Awaited<ReturnType<OntologyContextPorts['readContext']>> | null
+  if (!context || context.format !== 'sudograph-agent-context/v1'
+    || typeof context.revision !== 'string' || !/^[a-f0-9]{64}$/.test(context.revision)
+    || typeof context.context_digest !== 'string' || !/^[a-f0-9]{64}$/.test(context.context_digest)
+    || typeof context.text !== 'string' || !context.text.trim() || Buffer.byteLength(context.text) > 4 * 1024 * 1024) {
+    throw new ResourceAccessError(502, 'Registered worker returned invalid canonical context')
+  }
+  return { format: context.format, revision: context.revision, context_digest: context.context_digest, text: context.text }
+}
+
 const unavailable = () => new ResourceAccessError(403, 'Canonical model binding is unavailable')
 function reference(value: string): string {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(value)) {
@@ -154,14 +166,7 @@ export class OntologyProjectRegistry {
       const after = await this.resolveSession(sessionId)
       if (!after || JSON.stringify(before) !== JSON.stringify(after)) throw unavailable()
       await ports.authorize(after)
-      // context_digest identifies semantic inputs; it is not the hash of rendered text.
-      if (!context || context.format !== 'sudograph-agent-context/v1'
-        || typeof context.revision !== 'string' || !/^[a-f0-9]{64}$/.test(context.revision)
-        || typeof context.context_digest !== 'string' || !/^[a-f0-9]{64}$/.test(context.context_digest)
-        || typeof context.text !== 'string' || !context.text.trim() || Buffer.byteLength(context.text) > 4 * 1024 * 1024) {
-        throw new ResourceAccessError(502, 'Registered worker returned invalid canonical context')
-      }
-      return context.text
+      return validateOntologyContext(context).text
     }
   }
 }
