@@ -22,6 +22,7 @@ import { buildTranscriptSeed } from './transcriptSeed.js';
 import { getSystemSettings } from '../../server/systemSettings.js';
 import { verifyMossLarkMessage, type MossImConnection, type MossImIdentity, type MossImRoute } from '../../server/mossImIdentity.js';
 import { ResourceAccessError } from '../../server/catalog/resourceError.js';
+import { MossToolApprovals, mossToolApprovalNotice, type MossToolPermission } from './MossToolApprovals.js';
 
 type Platform = 'telegram' | 'lark' | 'dingtalk' | 'wechat' | 'wecom';
 
@@ -34,6 +35,7 @@ interface ChannelSessionState {
   responseText: string;
   lastMsgId: string | null;
   isProcessing: boolean;
+  onToolPermission?: (event: MossToolPermission) => void;
 }
 
 /**
@@ -56,6 +58,7 @@ export class MossActionExecutor {
 
   /** Cache: channelUserKey -> session state */
   private channelSessions: Map<string, ChannelSessionState> = new Map();
+  private readonly toolApprovals = new MossToolApprovals();
 
   /** Per-conversation mutex to serialize message processing */
   private conversationLocks: Map<string, Promise<void>> = new Map();
@@ -252,6 +255,28 @@ export class MossActionExecutor {
       }
       const verifiedRoute = route;
       const key = identity.conversationKey(route, event.chatId);
+      const text = message.content.text?.trim() || '';
+      const confirmation = text.match(/^\/(approve|deny)\s+([a-zA-Z0-9_-]{1,128})\s*$/i);
+      if (confirmation) {
+        // A confirmation must bypass the turn's mutex: that turn is waiting for it.
+        // It still uses the current bound human and rechecks the original conversation.
+        const raw = message.raw as { event?: { message?: { chat_type?: string } } };
+        if (raw.event?.message?.chat_type !== 'p2p') {
+          throw new ResourceAccessError(403, 'Tool confirmations must be sent in the bot private chat');
+        }
+        await identity.assertRoute(verifiedRoute);
+        const pending = this.toolApprovals.consume(verifiedRoute, confirmation[2]!);
+        if (!pending) throw new ResourceAccessError(409, 'Tool confirmation expired or unavailable');
+        sessionId = pending.sessionId;
+        const assertCurrent = () => this.requireMossToolConversation(verifiedRoute, pending.chatId, pending.sessionId, plugin);
+        const option = pending.event.request.options.find(item => item.kind ===
+          (confirmation[1]!.toLowerCase() === 'approve' ? 'allow_once' : 'reject_once'));
+        await this.sendMossToolResponse(pending.sessionId, pending.event.request_id, option?.optionId, assertCurrent,
+          () => { isDispatching = true; });
+        await identity.delivery(connection, event.messageId, 'completed', verifiedRoute, sessionId);
+        await sendFn({ type: 'text', text: '已提交这一次工具确认；执行结果会回到原会话。', parseMode: 'HTML' });
+        return;
+      }
       await this.withConversationLock(key, async () => {
         await this.pluginManager.requireCurrentReceiver(plugin);
         await identity.assertRoute(verifiedRoute);
@@ -289,6 +314,12 @@ export class MossActionExecutor {
         // the same durable Session; never retry an input after dispatch.
         this.channelSessions.get(key)?.socket?.destroy();
         const state = await this.reconnectRuntimeSession(key, sessionId);
+        state.onToolPermission = permission => {
+          void this.notifyMossToolPermission(verifiedRoute, event.chatId, plugin, state, permission)
+            .catch(error => console.error('[MossActionExecutor] Tool confirmation delivery unavailable', {
+              sessionId: state.sessionId, error: error instanceof ResourceAccessError ? error.statusCode : 'unavailable',
+            }));
+        };
         const isKnown = await this.sendRuntimeMessage('lark', key, state, neutralizeUntrustedMarkup(text), sendFn, editFn, async () => {
           await this.pluginManager.requireCurrentReceiver(plugin);
           await identity.assertRoute(verifiedRoute);
@@ -318,6 +349,91 @@ export class MossActionExecutor {
         ? MEMBER_DELIVERY_UNCONFIRMED
         : '身份、权限或会话暂时不可用；本条消息未送入模型。请在 Moss 中核对绑定、使用权和会话后再发送。' });
     }
+  }
+
+  private async notifyMossToolPermission(
+    route: MossImRoute, chatId: string, plugin: BasePlugin, state: ChannelSessionState, event: MossToolPermission,
+  ): Promise<void> {
+    const assertCurrent = () => this.requireMossToolConversation(route, chatId, state.sessionId, plugin);
+    await assertCurrent();
+    if (!state.isProcessing) return;
+    const item = this.toolApprovals.offer(route, chatId, state.sessionId, event, () => {
+      if (!state.isProcessing) return;
+      void this.sendMossToolResponse(state.sessionId, event.request_id, undefined, assertCurrent)
+        .then(() => { state.responseText += '\n工具确认已过期，本次工具未获授权。'; })
+        .catch(() => console.error('[MossActionExecutor] Expired tool cancellation unconfirmed', { sessionId: state.sessionId }));
+    });
+    if (!item) {
+      if (this.toolApprovals.has(event.request_id)) return;
+      // A request that cannot be reviewed in full must not leave an invisible prompt.
+      await this.sendMossToolResponse(state.sessionId, event.request_id, undefined, assertCurrent);
+      state.responseText += '\n这次工具请求无法在私聊中完整展示，已取消授权。请到 Moss 对话工作台核对。';
+      return;
+    }
+    // Arguments can contain private data. Send the concrete request only to its owner.
+    try {
+      const delivered = await plugin.sendMessage(route.senderId, { type: 'text', parseMode: 'HTML',
+        text: mossToolApprovalNotice(item) });
+      if (!delivered) throw new Error('Private tool confirmation was not delivered');
+    } catch {
+      if (this.toolApprovals.consume(route, event.request_id)) {
+        await this.sendMossToolResponse(state.sessionId, event.request_id, undefined, assertCurrent);
+      }
+      state.responseText += '\n私聊工具确认未送达，本次工具未获授权。请到 Moss 对话工作台核对。';
+      return;
+    }
+    state.responseText += '\n工具需要本人确认，请在 Moss 私聊中查看参数并回复。';
+  }
+
+  private async requireMossToolConversation(route: MossImRoute, chatId: string, sessionId: string, plugin: BasePlugin): Promise<void> {
+    await this.pluginManager.requireCurrentReceiver(plugin);
+    await this.mossIm!.assertRoute(route);
+    await this.requireMossSession(route, sessionId);
+    if (await this.mossIm!.pointer(route, chatId) !== sessionId) {
+      throw new ResourceAccessError(409, 'Moss conversation changed before tool confirmation');
+    }
+  }
+
+  private async sendMossToolResponse(
+    sessionId: string, requestId: string, optionId: string | undefined, assertCurrent: () => Promise<void>,
+    beforeWrite?: () => void,
+  ): Promise<void> {
+    await assertCurrent();
+    // Refresh short-lived internal credentials without replacing the turn's output listener.
+    const channel = await this.runtime.connectInternalChannel(sessionId);
+    try {
+      await assertCurrent();
+      await new Promise<void>((resolve, reject) => {
+        let buffer = '';
+        const timeout = setTimeout(() => finish(new Error('Tool confirmation receipt timed out')), 5000);
+        const onError = () => finish(new Error('Tool confirmation channel unavailable'));
+        const onData = (chunk: Buffer) => {
+          buffer += chunk.toString('utf8');
+          while (buffer.includes('\n')) {
+            const index = buffer.indexOf('\n'), line = buffer.slice(0, index);
+            buffer = buffer.slice(index + 1);
+            try {
+              const message = JSON.parse(line);
+              if (message.type === 'stdin_ack') finish();
+              else if (message.type === 'error') finish(new Error('Tool confirmation refused'));
+            } catch { /* Ignore unrelated output while waiting for the input receipt. */ }
+          }
+        };
+        function finish(error?: Error) {
+          clearTimeout(timeout);
+          channel.off('data', onData); channel.off('error', onError); channel.off('close', onError);
+          if (error) reject(error); else resolve();
+        }
+        channel.on('data', onData); channel.on('error', onError); channel.on('close', onError);
+        const response = { type: 'control_response', response: {
+          subtype: optionId === undefined ? 'error' : 'success', request_id: requestId,
+          response: { behavior: optionId },
+        } };
+        beforeWrite?.();
+        channel.write(`${JSON.stringify({ type: 'stdin', data: `${JSON.stringify(response)}\n` })}\n`,
+          error => { if (error) onError(); });
+      });
+    } finally { channel.destroy(); }
   }
 
   private async newMossSession(route: MossImRoute, key: string): Promise<string> {
@@ -512,6 +628,7 @@ export class MossActionExecutor {
     }, MossActionExecutor.EDIT_THROTTLE_MS);
 
     const finalText = await responsePromise;
+    this.toolApprovals.clearSession(channelState.sessionId);
     clearInterval(editInterval);
 
     // Send final response
@@ -983,6 +1100,12 @@ export class MossActionExecutor {
   private handleRunnerMessage(state: ChannelSessionState, line: string): void {
     try {
       const msg = JSON.parse(line);
+
+      if (msg.type === 'control_request' && msg.session_id === state.sessionId &&
+          msg.request?.subtype === 'can_use_tool') {
+        state.onToolPermission?.(msg);
+        return;
+      }
 
       let text = '';
 
