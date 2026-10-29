@@ -58,9 +58,10 @@ directory retains captured requests, transcript, diagnostics and source/model
 fixtures. A failed run does not create a successful receipt.
 
 This port is not yet wired to a production cloud model registry. In particular,
-adding a callback field does not carry a function through a durable manifest:
-the owning runner must reconstruct it from a server-registered project and its
-current authorization. The real-engine acceptance uses stdio, not a managed
+adding a callback field does not carry a function through a durable manifest.
+The native session runner now reconstructs it from the durable project binding
+and trusted host ports, and refuses startup when a bound model has no worker or
+policy adapter. The real-engine acceptance uses stdio, not a managed
 Nexus mailbox, and its refusal is synthetic. Production tenant grants, worker
 placement and credentials, WebUI routes, authenticated review/comment delivery,
 published runtime adoption and the human journey remain separate acceptance.
@@ -97,6 +98,16 @@ The maintained real-engine acceptance above now closes and reopens the actual
 Moss database before constructing its reader. Ordinary Node tests also check
 cross-tenant/owner rejection, duplicate registration, multi-session bindings,
 current reads and revocation during I/O. These are registry/reader acceptance,
-not production wiring: source intake routes, the policy/worker adapters and
-runner construction still need to connect these ports before a cloud session
-can use the registry. No public API for arbitrary registration is exposed.
+not production wiring: source intake routes and the production policy/worker
+factory still need to supply these ports before a cloud session can use the
+registry. The default CLI fails explicitly for a bound project until that factory
+is configured. No public API for arbitrary registration is exposed.
+
+`SessionRunnerDaemon` checks the persisted binding during startup and resume,
+compares its owner and tenant with the runner identity, and rechecks model access
+before spawning the existing native backend. It passes the same live resolver
+through the existing backend/ACP connection. There is no callback, worker path or
+business snapshot in the manifest. Ordinary conversations remain unchanged.
+Real database/daemon tests cover recovery, fresh context across turns, revoked
+access, missing adapters and forged manifest identities; existing cancellation,
+maintenance and exit lifecycle tests retain their assertions and deadlines.

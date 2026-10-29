@@ -14,6 +14,7 @@ import type { BackendHandle } from './sessionManager.js'
 import { isUninitializedCohostSession, removeCohostSessionState } from './backends/cohostSessionState.js'
 import type { SessionAttemptFence } from './storage/sessionAttemptFence.js'
 import { RunnerInputAdmission } from './runtime/runnerInputAdmission.js'
+import type { OntologyContextPorts } from './ontology/projectRegistry.js'
 
 type SocketWithBuffer = net.Socket & {
   __buffer?: string
@@ -132,7 +133,8 @@ export class SessionRunnerDaemon {
     void Promise.resolve(this.#handle?.destroy(true)).catch(() => {})
   }
 
-  constructor(private readonly manifest: RunnerManifest, store: DirectConnectStore) {
+  constructor(private readonly manifest: RunnerManifest, store: DirectConnectStore,
+    private readonly host: { ontologyContext?: OntologyContextPorts } = {}) {
     if (['external', 'hosted'].includes(manifest.session.runtime.type) || ['external_provider', 'hosted_artifact'].includes(manifest.session.runtime.engine)) throw new Error('Task-managed sessions cannot launch a native session runner')
     this.#store = store
     this.#inputAdmission = new RunnerInputAdmission({ clients: () => this.#clients,
@@ -199,6 +201,12 @@ export class SessionRunnerDaemon {
       await this.#store.updateAttemptRunner(this.manifest.attempt.attemptId, process.pid)
       const cohostSessionBinding = this.manifest.session.runtime.type === 'cohost'
         ? await this.#store.cohostSessions.get(this.manifest.session.sessionId) : undefined
+      const resolveHostContext = await this.#store.ontologyProjects.runnerContext({
+        sessionId: this.manifest.session.sessionId,
+        orgId: this.manifest.session.orgId,
+        userId: this.manifest.session.userId,
+      }, this.host.ontologyContext)
+      this.#spawnController.signal.throwIfAborted()
 
       const handle = await withOrganizationResources({
         orgId: this.manifest.session.orgId, userId: this.manifest.session.userId,
@@ -228,6 +236,7 @@ export class SessionRunnerDaemon {
         availableCorpApps: this.manifest.session.availableCorpApps,
         sharedMemory: this.manifest.session.sharedMemory,
         agentInstructions: this.manifest.session.agentInstructions,
+        resolveHostContext,
         enabledSkillNames: this.manifest.session.enabledSkills,
         visibilityFilter: this.manifest.session.visibilityFilter ? {
           isAdmin: this.manifest.session.visibilityFilter.isAdmin,

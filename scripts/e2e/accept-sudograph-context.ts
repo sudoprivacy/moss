@@ -105,7 +105,8 @@ const bound = await hostStore.ontologyProjects.bind({ sessionId: 'fixture-moss-s
 await hostStore.close()
 hostStore = new DirectConnectStore(join(root, 'host.db'))
 assert.deepEqual(await hostStore.ontologyProjects.resolveSession('fixture-moss-session'), bound)
-const resolveHostContext = await hostStore.ontologyProjects.contextReader('fixture-moss-session', contextPorts)
+const resolveHostContext = await hostStore.ontologyProjects.runnerContext({ sessionId: 'fixture-moss-session',
+  orgId: 'fixture-org', userId: 'fixture-user' }, contextPorts)
 assert(resolveHostContext)
 const server = createServer((req, res) => {
   void (async () => {

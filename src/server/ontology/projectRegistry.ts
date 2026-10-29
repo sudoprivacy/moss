@@ -126,6 +126,22 @@ export class OntologyProjectRegistry {
     return { ...project(row), sessionId, userId: String(binding.user_id), bindingId: String(binding.binding_id) }
   }
 
+  /** Every runner recovers authority from the database, never from manifest context text. */
+  async runnerContext(owner: { sessionId: string; orgId: string; userId: string }, ports?: OntologyContextPorts): Promise<BackendHostContextResolver | undefined> {
+    const current = await this.resolveSession(owner.sessionId)
+    if (!current) return undefined
+    const assertOwner = (binding: OntologySessionBinding) => {
+      if (binding.orgId !== owner.orgId || binding.userId !== owner.userId) throw unavailable()
+    }
+    assertOwner(current)
+    if (!ports) throw new ResourceAccessError(503, 'Canonical model worker and policy are not configured for this runner')
+    await ports.authorize(current)
+    return this.contextReader(owner.sessionId, {
+      authorize: async binding => { assertOwner(binding); await ports.authorize(binding) },
+      readContext: binding => ports.readContext(binding),
+    })
+  }
+
   /** Reconstruct from durable references, including on runner recovery; cache no business text. */
   async contextReader(sessionId: string, ports: OntologyContextPorts): Promise<BackendHostContextResolver | undefined> {
     if (!await this.resolveSession(sessionId)) return undefined
