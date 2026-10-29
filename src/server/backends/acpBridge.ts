@@ -1,7 +1,7 @@
 import { appendFile, mkdir, rm, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
-import type { BackendAvailableSkill, BackendHandle, SessionRuntimeInfo } from '../sessionManager.js'
+import type { BackendAvailableSkill, BackendHandle, BackendHostContextResolver, SessionRuntimeInfo } from '../sessionManager.js'
 import type { ChildProcess } from 'node:child_process'
 import type { SessionRpcMessage } from '@nexus-ai-fs/vfs-client'
 import { acpInstructionsMetadata, StdioAcpTransport, type AcpMessageTransport } from './acpTransport.js'
@@ -58,6 +58,10 @@ type AcpBridgeOptions = {
   mcpServers?: any[]
   agents?: any[]
   instructions?: string
+  /** Trusted host callback, resolved at execution by a hostContext v1 engine.
+   * The closure owns model authorization; no request may select its binding.
+   */
+  resolveHostContext?: BackendHostContextResolver
 }
 
 export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle {
@@ -123,6 +127,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const handshakeReady = new Promise<boolean>((resolve) => { resolveHandshake = resolve })
   let inputPreparation: Promise<void> = Promise.resolve()
   let inputEpoch = 0
+  let isContextClosed = false
   let currentTurnAssistantUuid: string | null = null
   let currentTurnUsedSendUserMessage = false
   let currentModel = model  // Track current model for dynamic switching
@@ -337,6 +342,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   }
 
   const failPendingRequests = (failure: Error): void => {
+    isContextClosed = true
     const requests = [...pendingRpcRequests.values()]
     pendingRpcRequests.clear()
     for (const pending of requests) clearTimeout(pending.timeoutId)
@@ -368,10 +374,42 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       cwd,
       // Scode ACP requires mcpServers even when no MCP servers are configured.
       mcpServers: options.mcpServers ?? [],
-      ...acpInstructionsMetadata(options.instructions),
+      ...sessionContextMetadata(),
     }
     process.stderr.write(`[AcpBridge] session/new params: cwd=${cwd}, mcpServers=${options.mcpServers?.length ?? 0}\n`)
     sendRpc('session/new', sessionParams, 'm-session-new')
+  }
+
+  const sessionContextMetadata = () => {
+    if (!options.resolveHostContext) return acpInstructionsMetadata(options.instructions)
+    // No mutable snapshot is placed in the initial session or user history.
+    return { _meta: { sudocode: { hostContext: { version: 1 } } } }
+  }
+
+  const replyHostContext = async (message: SessionRpcMessage): Promise<void> => {
+    const nativeSessionId = acpSessionId
+    const epoch = inputEpoch
+    const params = message.params as { sessionId?: unknown } | undefined
+    let result: { appendSystemPrompt: string } | undefined
+    try {
+      if (!options.resolveHostContext || !isHandshakeComplete || !nativeSessionId ||
+        params?.sessionId !== nativeSessionId || isContextClosed || terminalExit || !transport.connected) {
+        throw new Error('Host context is not bound to this execution')
+      }
+      const text = await options.resolveHostContext({ sessionId, nativeSessionId })
+      if (isContextClosed || terminalExit || !transport.connected || acpSessionId !== nativeSessionId || epoch !== inputEpoch) {
+        throw new Error('Host context execution changed while reading')
+      }
+      if (typeof text !== 'string' || !text.trim()) throw new Error('Host context is empty')
+      result = { appendSystemPrompt: options.instructions?.trim() ? `${text}\n\n${options.instructions}` : text }
+    } catch {
+      // The resolver may expose source credentials in its errors. Return an
+      // explicit refusal without forwarding secrets or an older snapshot.
+    }
+    if (isContextClosed || terminalExit || !transport.connected) return
+    sendMessage({ jsonrpc: '2.0', id: message.id,
+      ...(result ? { result } : { error: { code: -32603, message: 'Current host context is unavailable for this execution. No cached context was used.' } }),
+    })
   }
 
   const completeHandshake = (): void => {
@@ -749,6 +787,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       try {
         if (parsed.id === 'm-init') {
           if (parsed.error) throw new Error(`ACP initialization failed: ${parsed.error.message}`)
+          if (options.resolveHostContext && parsed.result?._meta?.sudocode?.hostContext?.version !== 1) {
+            throw new Error('This execution requires hostContext v1; update the pinned engine before retrying')
+          }
           isInputDeliverySupported = parsed.result?._meta?.sudocode?.inputDelivery?.version === 1
           if (options.resumeSessionId) {
             process.stderr.write(`[AcpBridge] Initialization complete, loading session ${options.resumeSessionId}...\n`)
@@ -757,12 +798,20 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               cwd,
               // Scode ACP LoadSessionRequest also requires mcpServers.
               mcpServers: options.mcpServers ?? [],
-              ...acpInstructionsMetadata(options.instructions),
+              ...sessionContextMetadata(),
             }, 'm-session-load')
           } else {
             process.stderr.write(`[AcpBridge] Initialization complete, creating session...\n`)
             sendNewSession()
           }
+          return
+        }
+
+        if (parsed.method === '_sudocode/session/host_context') {
+          if (typeof parsed.id !== 'string' && typeof parsed.id !== 'number') {
+            throw new Error('Host context requires an RPC request ID')
+          }
+          void replyHostContext(parsed)
           return
         }
 
@@ -1263,6 +1312,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           }
         }
       } catch (error) {
+        isContextClosed = true
         for (const listener of stderrListeners) listener(`ACP message handling failed: ${String(error)}\n`)
         void transport.close()
       }
@@ -1554,6 +1604,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       }
     },
     async destroy(force = false) {
+      isContextClosed = true
       try { await transport.close(force) }
       finally {
         // Closing a live stream can precede its prompt response. Keep the text
