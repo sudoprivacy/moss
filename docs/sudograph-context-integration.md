@@ -258,7 +258,7 @@ node bin/sudograph-context-worker.mjs /etc/sudograph/worker.json
 ```
 
 Register its exact `/mcp` endpoint in the existing Moss MCP catalogue, approve its
-read-only descriptor through the existing IT tool review, and reference the same
+read-only descriptors through the existing IT tool review, and reference the same
 credential using an organization-scoped system `secret_ref`. Remote deployment
 owns the authenticated network route/TLS and Nexus secret injection. The worker
 does not start Nexus or publish itself into the catalogue. Default binding is
@@ -266,10 +266,23 @@ loopback; a zero port is available for isolated acceptance. Readiness reports th
 listening port only; it does not claim source registration or complete coverage.
 
 The endpoint requires authentication before MCP handling, rejects browser origins
-and alternate paths, and exposes only the empty-argument context tool. Model,
-actor, paths and policy cannot be selected by a request. Canonical reads execute
-through the published client on every call; compiler errors are sanitized by the
-shared worker contract. Configuration is copied at server creation.
+and alternate paths. `sudograph_context` accepts no arguments;
+`sudograph_context_read` accepts only a compiler-issued revision, context digest
+and stable identity, with bounded pagination or a checked subgraph selection.
+Model, actor, source connections, paths and policy cannot be selected by a
+request. Canonical reads execute through the published client on every call;
+stale digests produce `CONTEXT_STALE` and a refresh instruction. Other failures
+return a safe read-unavailable result without compiler paths or credentials.
+Configuration is copied at server creation. Host context authorization does not
+grant agent tool access: exact reads retain the existing task/tool review gates.
+
+The server CI installs `sudograph-compiler==0.1.0` and requires its interpreter
+before running the live worker scenario. It registers an unrelated SQLite
+source through the published SDK, reads the actual authenticated MCP context and
+catalogue, follows version-bound pointers across two live pages, compares them
+with an independent source query and verifies that the source bytes did not
+change. That journey also rejects stale digests; ordinary protocol coverage
+rejects caller-selected execution options and unbounded record requests.
 
 The maintained acceptance driver accepts `--worker bin/sudograph-context-worker.mjs`
 to launch that actual packaged process with an isolated deployment file and

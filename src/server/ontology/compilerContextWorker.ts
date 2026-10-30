@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { SudographModelClient, type ISudographContext, type ISudographRuntime } from '@sudowork/sudograph-runtime'
 import type { OntologyProject } from './projectRegistry.js'
-import { registerModelContextTool } from './contextWorker.js'
+import { registerModelContextReadTool, registerModelContextTool } from './contextWorker.js'
 
 export interface CompilerContextWorkerConfig {
   binding: Pick<OntologyProject, 'authorityRef' | 'modelRef' | 'sourceRefs'>
@@ -30,6 +30,8 @@ export function createCompilerContextWorker(config: CompilerContextWorkerConfig)
       const sdk = new McpServer({ name: 'sudograph-compiler-worker', version: '1.0.0' })
       registerModelContextTool(sdk, binding, () => client.invoke<ISudographContext>(
         binding.modelRef, actor, { operation: 'read', product: 'context' }))
+      registerModelContextReadTool(sdk, request => client.invoke(
+        binding.modelRef, actor, { operation: 'context_read', request }))
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
       res.once('close', () => { void sdk.close() })
       try { await sdk.connect(transport); await transport.handleRequest(req, res) }

@@ -63,6 +63,17 @@ jobs:
       - name: Require real PostgreSQL for the server suite
         run: test -n "$MOSS_PG_TEST_URL"
 
+      - name: Install the published Sudograph compiler for worker acceptance
+        run: |
+          python3 -m venv "$RUNNER_TEMP/moss-sudograph-compiler"
+          "$RUNNER_TEMP/moss-sudograph-compiler/bin/python" -m pip install sudograph-compiler==0.1.0
+          echo "MOSS_SUDOGRAPH_COMPILER_PYTHON=$RUNNER_TEMP/moss-sudograph-compiler/bin/python" >> "$GITHUB_ENV"
+
+      - name: Require the installed compiler for the live worker test
+        run: |
+          test -n "$MOSS_SUDOGRAPH_COMPILER_PYTHON"
+          "$MOSS_SUDOGRAPH_COMPILER_PYTHON" -c 'from importlib.metadata import version; assert version("sudograph-compiler") == "0.1.0"'
+
       - name: Run server tests
         run: bun run test
 
