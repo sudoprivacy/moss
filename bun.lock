@@ -42,7 +42,7 @@
         "@sudo/egress-policy": "https://github.com/sudoprivacy/sudostack/releases/download/egress-policy-v0.1.0/sudo-egress-policy-0.1.0.tgz",
         "@sudo/resource-files": "https://github.com/sudoprivacy/sudostack/releases/download/resource-files-v0.1.0/sudo-resource-files-0.1.0.tgz",
         "@sudo/user-runtime": "https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.2.3/sudo-user-runtime-0.2.3.tgz",
-        "@sudowork/sudograph-runtime": "https://github.com/sudoprivacy/sudowork/releases/download/sudograph-runtime-v0.1.0/sudowork-sudograph-runtime-0.1.0.tgz",
+        "@sudowork/sudograph-runtime": "https://github.com/sudoprivacy/sudowork/releases/download/sudograph-runtime-v0.1.1/sudowork-sudograph-runtime-0.1.1.tgz",
         "@xenova/transformers": "^2.17.2",
         "@xmldom/xmldom": "^0.9.9",
         "ajv": "^8.18.0",
@@ -527,7 +527,7 @@
 
     "@sudo/user-runtime": ["@sudo/user-runtime@https://github.com/sudoprivacy/sudostack/releases/download/user-runtime-v0.2.3/sudo-user-runtime-0.2.3.tgz", { "dependencies": { "@nexus-ai-fs/vfs-client": "https://sudowork-runtime-1309794936.cos.accelerate.myqcloud.com/nexus-vfs/clients/node/0.7.3/nexus-ai-fs-vfs-client-0.7.3.tgz", "@sudo/egress-policy": "https://github.com/sudoprivacy/sudostack/releases/download/egress-policy-v0.1.0/sudo-egress-policy-0.1.0.tgz", "zod": "4.6.7" } }, "sha512-Z15o0lgyrBvfqjTegajFny6Khtsyqdve08gkJKQO3SqnT8DLcCIANCs20qJuYqQ0g8tqGcpkMQRlX+BortLimQ=="],
 
-    "@sudowork/sudograph-runtime": ["@sudowork/sudograph-runtime@https://github.com/sudoprivacy/sudowork/releases/download/sudograph-runtime-v0.1.0/sudowork-sudograph-runtime-0.1.0.tgz", { "dependencies": { "mysql2": "3.24.4", "pg": "8.23.0" } }, "sha512-jeG4zB0bSAUPzUOSfzoTMmxPm9U7uKI3RzNauYsD1YCt3toCfN22SM7AVZSlXQWXckZAHH/OSTHvtASr9IX/PQ=="],
+    "@sudowork/sudograph-runtime": ["@sudowork/sudograph-runtime@https://github.com/sudoprivacy/sudowork/releases/download/sudograph-runtime-v0.1.1/sudowork-sudograph-runtime-0.1.1.tgz", { "dependencies": { "mysql2": "3.24.4", "pg": "8.23.0" } }, "sha512-9q7+AM3u5LcbSHpCg+p2Rbtma1Cb3NeIFxUhediyPb7Mj68yI8vAH52L3cufVPBWmOf7v7bemECNTHCtUOdmVg=="],
 
     "@types/esrecurse": ["@types/esrecurse@4.3.1", "", {}, "sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw=="],
 

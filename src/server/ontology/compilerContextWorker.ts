@@ -20,6 +20,7 @@ export interface CompilerContextWorkerConfig {
 export function createCompilerContextWorker(config: CompilerContextWorkerConfig): Server {
   if (!/^[\x21-\x7e]{32,512}$/.test(config.token)) throw new Error('A deployment-owned worker token of 32-512 ASCII characters is required')
   const binding = structuredClone(config.binding), actor = config.actor
+  binding.sourceRefs = [...new Set(binding.sourceRefs)].sort()
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(binding.modelRef) || !actor.trim()) throw new Error('Invalid compiler worker binding')
   const client = new SudographModelClient(structuredClone(config.runtime))
   const privateValues = [resolve(config.runtime.compilerRoot), resolve(config.runtime.modelDirectory),
@@ -42,12 +43,47 @@ export function createCompilerContextWorker(config: CompilerContextWorkerConfig)
     }
   }
   const expected = Buffer.from(`Bearer ${config.token}`)
+  const reviewRequest = z.union([
+    z.object({ operation: z.enum(['html', 'document']), endpoint: z.string().regex(/^\/review\/[a-f0-9]{32}\/v1$/) }).strict(),
+    z.object({ operation: z.enum(['head', 'graph', 'context', 'page']), params: z.record(z.string(), z.unknown()).optional() }).strict(),
+  ])
   return createServer((req, res) => {
     void (async () => {
       res.setHeader('Cache-Control', 'no-store')
-      if (req.url !== '/mcp' || req.method !== 'POST' || req.headers.origin) { res.writeHead(403).end(); return }
+      if (!['/mcp', '/review'].includes(req.url ?? '') || req.method !== 'POST' || req.headers.origin) { res.writeHead(403).end(); return }
       const supplied = Buffer.from(req.headers.authorization ?? '')
       if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) { res.writeHead(401).end(); return }
+      if (req.url === '/review') {
+        res.setHeader('Content-Type', 'application/json; charset=utf-8')
+        let request: z.infer<typeof reviewRequest>
+        try {
+          if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') throw new Error()
+          const chunks: Buffer[] = []
+          let size = 0
+          for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+            size += chunk.length
+            if (size > 65536) throw new Error()
+            chunks.push(Buffer.from(chunk))
+          }
+          request = reviewRequest.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+        } catch { req.resume(); res.writeHead(400).end(JSON.stringify({ error: 'READ_CONTRACT' })); return }
+        try {
+          // Host transport only. The resource, actor and source are deployment
+          // bindings; HTML never travels through the agent's bounded MCP result.
+          const result = await client.review(binding.modelRef, actor, binding.modelRef, request)
+          res.end(JSON.stringify({ format: 'sudograph-worker-review/v1', authority_ref: binding.authorityRef,
+            model_ref: binding.modelRef, source_refs: binding.sourceRefs, scope: 'full-registered-model', result }))
+        } catch (error) {
+          const code = error instanceof SudographCompilerError ? error.code : 'VIEW_UNAVAILABLE'
+          const status = code === 'ACCESS_DENIED' ? 403 : ['CONTEXT_STALE', 'REVISION_UNKNOWN', 'SOURCE_SCHEMA_CHANGED'].includes(code) ? 409
+            : ['READ_CONTRACT', 'TARGET_UNKNOWN', 'CONTEXT_TARGET_UNKNOWN'].includes(code) ? 400 : 503
+          const diagnostic = error instanceof SudographCompilerError
+            ? redact({ error: code, reason: error.message, recovery: error.recovery })
+            : { error: code, recovery: 'Ask the host operator to check this registered review worker.' }
+          res.writeHead(status).end(JSON.stringify(diagnostic))
+        }
+        return
+      }
       const sdk = new McpServer({ name: 'sudograph-compiler-worker', version: '1.0.0' })
       registerModelContextTool(sdk, binding, () => client.invoke<ISudographContext>(
         binding.modelRef, actor, { operation: 'read', product: 'context' }))

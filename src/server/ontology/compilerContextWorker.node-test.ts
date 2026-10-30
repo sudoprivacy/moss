@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { SudographModelClient } from '@sudowork/sudograph-runtime'
+import { SudographModelClient, SudographReviewHost } from '@sudowork/sudograph-runtime'
 import { stringify } from 'yaml'
 import { ToolProtocol, validateReviewedToolArguments } from '../agentFederation/toolProtocol.js'
 import { createCompilerContextWorker } from './compilerContextWorker.js'
@@ -25,6 +25,21 @@ void test('the production worker enforces endpoint authentication and fixed tool
   assert.equal((await fetch(endpoint, { method: 'POST', headers: { authorization: 'Bearer wrong' }, body: '{}' })).status, 401)
   assert.equal((await fetch(endpoint, { method: 'POST', headers: { authorization: `Bearer ${token}`, origin: 'https://foreign.invalid' }, body: '{}' })).status, 403)
   assert.equal((await fetch(endpoint + '/foreign-model', { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: '{}' })).status, 403)
+  const reviewEndpoint = new URL('/review', endpoint)
+  const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
+  assert.equal((await fetch(reviewEndpoint, { method: 'POST', body: '{}' })).status, 401)
+  assert.equal((await fetch(reviewEndpoint, { method: 'GET', headers })).status, 403)
+  assert.equal((await fetch(reviewEndpoint, { method: 'POST', headers: { ...headers, origin: 'https://foreign.invalid' }, body: '{}' })).status, 403)
+  for (const body of [{ operation: 'head', model_ref: 'foreign' }, { operation: 'head', actor: 'foreign' },
+    { operation: 'head', path: '/private-other' }, { operation: 'apply', model: 'foreign' }, { operation: 'export' },
+    { operation: 'html', endpoint: 'https://foreign.invalid/steal' }]) {
+    assert.equal((await fetch(reviewEndpoint, { method: 'POST', headers, body: JSON.stringify(body) })).status, 400)
+  }
+  assert.equal((await fetch(reviewEndpoint, { method: 'POST', headers, body: ' '.repeat(65536) + '{"operation":"head"}' })).status, 400)
+  const unavailable = await fetch(reviewEndpoint, { method: 'POST', headers, body: '{"operation":"head"}' })
+  assert.equal(unavailable.status, 503)
+  const diagnostic = await unavailable.text()
+  assert.ok(diagnostic.includes('VIEW_UNAVAILABLE') && !diagnostic.includes('/private-') && !diagnostic.includes(token))
   const protocol = new ToolProtocol({ endpoint, headers: { Authorization: `Bearer ${token}` }, timeoutMs: 5000 }, AbortSignal.timeout(10000))
   try {
     await protocol.connect()
@@ -91,7 +106,7 @@ void test('the production worker reads pointers and atomically compiles edits th
     namespace: 'worker-acceptance', operationId: randomUUID(), language: 'en' })
   const token = 'fixture-worker-token-for-live-acceptance'
   const server = createCompilerContextWorker({ token, runtime, actor: 'worker',
-    binding: { authorityRef: 'authority', modelRef: 'model', sourceRefs: ['source'] } })
+    binding: { authorityRef: 'authority', modelRef: 'model', sourceRefs: ['source-z', 'source', 'source-z'] } })
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) })
   const address = server.address()
@@ -108,6 +123,7 @@ void test('the production worker reads pointers and atomically compiles edits th
       return JSON.parse(content.text) as Record<string, unknown>
     }
     const packet = await call('sudograph_context', {})
+    assert.deepEqual(packet.source_refs, ['source', 'source-z'])
     const context = packet.context as { revision: string; context_digest: string; text: string }
     assert.ok(!context.text.includes('row-only-sentinel'), 'records must not be preloaded into context')
     const pointer = { revision: context.revision, context_digest: context.context_digest }
@@ -115,6 +131,46 @@ void test('the production worker reads pointers and atomically compiles edits th
     const sources = catalog.sources as { objects: { id: string; name: string }[] }[]
     const object = sources.flatMap(item => item.objects).find(item => item.name === 'widgets')
     assert.ok(object)
+    const review = async (input: Record<string, unknown>, status = 200) => {
+      const response = await fetch(`http://127.0.0.1:${address.port}/review`, { method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
+      assert.equal(response.status, status)
+      return response.json() as Promise<Record<string, unknown>>
+    }
+    const head = await review({ operation: 'head' })
+    assert.deepEqual({ ...head, result: undefined }, { format: 'sudograph-worker-review/v1', authority_ref: 'authority',
+      model_ref: 'model', source_refs: ['source', 'source-z'], scope: 'full-registered-model', result: undefined })
+    assert.equal((head.result as { revision: string }).revision, context.revision)
+    const document = (await review({ operation: 'document', endpoint: `/review/${'a'.repeat(32)}/v1` })).result as { revision: string; html: string }
+    assert.equal(document.revision, context.revision)
+    assert.ok(document.html.includes(object.id) && !document.html.includes('row-only-sentinel'), 'review HTML retains stable identities without embedding source rows')
+    const reviewedPage = await review({ operation: 'page', params: { ...pointer, id: object.id, limit: 2 } })
+    assert.deepEqual((reviewedPage.result as { rows: unknown[][] }).rows, expected.slice(0, 2))
+    let canReview = true
+    const viewer = new SudographReviewHost({
+      authorize: async binding => {
+        assert.deepEqual({ workspaceId: binding.workspaceId, conversationId: binding.conversationId }, { workspaceId: 'model', conversationId: 'review-conversation' })
+        if (!canReview) throw new Error('Review access revoked')
+      },
+      read: async (_model, request) => (await review(request)).result,
+    })
+    t.after(() => viewer.close())
+    const launch = await viewer.createSession({ workspaceId: 'model', conversationId: 'review-conversation' })
+    const cookie = { Cookie: launch.cookie.name + '=' + launch.cookie.value }
+    assert.equal((await fetch(launch.url)).status, 403)
+    const rendered = await fetch(launch.url, { headers: cookie })
+    assert.equal(rendered.status, 200)
+    assert.ok((await rendered.text()).includes(object.id), 'the installed shared host serves the actual worker-compiled graph')
+    const browserRead = async (operation: string, params?: Record<string, unknown>) => {
+      const response = await fetch(launch.url + 'v1', { method: 'POST', headers: { ...cookie, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ view: 'model', operation, ...(params ? { params } : {}) }) })
+      assert.equal(response.status, 200)
+      return (await response.json() as { result: Record<string, unknown> }).result
+    }
+    assert.deepEqual((await browserRead('page', { ...pointer, id: object.id, limit: 2 })).rows, expected.slice(0, 2))
+    const staleReview = await review({ operation: 'page', params: { ...pointer, context_digest: '0'.repeat(64), id: object.id } }, 409)
+    assert.equal(staleReview.error, 'CONTEXT_STALE')
+    assert.ok(!JSON.stringify(staleReview).includes(root) && !JSON.stringify(staleReview).includes(token))
     const first = await call('sudograph_context_read', { ...pointer, id: object.id, records: true, limit: 2 })
     const last = await call('sudograph_context_read', { ...pointer, id: object.id, records: true, offset: 2, limit: 2 })
     assert.equal(first.data_kind, 'live_source_page')
@@ -147,6 +203,10 @@ void test('the production worker reads pointers and atomically compiles edits th
     assert.equal((await call('sudograph_model_contract', {})).revision, receipt.revision)
     const changed = (await call('sudograph_context', {})).context as { revision: string; context_digest: string }
     assert.equal(changed.revision, receipt.revision)
+    assert.equal(((await review({ operation: 'head' })).result as { revision: string }).revision, receipt.revision, 'review and agent context follow the same atomic commit')
+    assert.equal((await browserRead('head')).revision, receipt.revision)
+    canReview = false
+    assert.equal((await fetch(launch.url, { headers: cookie })).status, 403, 'revocation prevents another compiler read')
     const model = await client.invoke<{ projection: { model_revision: string }; business: { definitions: Record<string, { review_status: string }> } }>('model', 'worker', { operation: 'read', product: 'model' })
     assert.equal(model.projection.model_revision, receipt.revision, 'graph and context share the committed model revision')
     assert.equal(Object.keys(model.business.definitions).length, Object.keys(example.definitions).length)
