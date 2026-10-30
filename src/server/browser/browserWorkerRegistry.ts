@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { HttpError } from '../httpError.js'
 import { PerKeyMutex } from '../runtime/perKeyMutex.js'
 import { runDocker } from '../runtime/dockerCommand.js'
-import { HttpBrowserWorker, browserController, type BrowserBinding, type BrowserWorkerPort } from './browserGateway.js'
+import { HttpBrowserWorker, browserController, type AuthorizedBrowserPage, type BrowserBinding, type BrowserEpochs, type BrowserWorkerPort } from './browserGateway.js'
 import browserTools from '../../../deploy/browser/mcp-tools.json' with { type: 'json' }
 import { browserAllowedOwners, browserOwnerAllowed, browserOwnerImages, isDigestPinnedBrowserImage } from './browserDeploymentPolicy.js'
 import { browserConversationGuidance, changeBrowserConversationControl } from './browserConversation.js'
@@ -169,6 +169,17 @@ export class BrowserWorkerRegistry implements BrowserWorkerPort {
       }
       throw error
     }
+  }
+
+  /** A trusted host may open a review in the conversation's existing browser. */
+  async openAuthorizedPage(binding: BrowserBinding, controller: string, page: AuthorizedBrowserPage, epochs: BrowserEpochs): Promise<unknown> {
+    if (!browserOwnerAllowed(binding)) throw new HttpError(403, 'browser_not_enabled_for_owner')
+    const worker = await this.mutex.run(this.ownerKey(binding), () => this.resolve(binding, true))
+    if (!worker) throw new HttpError(409, 'browser_not_started')
+    // The SDK verifies the current control/target epochs and human ownership.
+    // A review cannot provision a profile, take it from another conversation,
+    // or fall back to public navigation without its private credential.
+    return worker.openAuthorizedPage(binding, controller, page, epochs)
   }
 
   /** Read who holds the profile without creating a worker or claiming it. */

@@ -10,8 +10,16 @@ import type WebSocket from 'ws'
 
 export interface BrowserPrincipal { orgId: string; userId: string }
 export interface BrowserBinding extends BrowserPrincipal { sessionId: string }
+/** Host-owned navigation credential. Never accept this object from HTTP or MCP. */
+export interface AuthorizedBrowserPage {
+  url: string
+  cookie: { name: string; value: string; url: string; path: string; httpOnly: true; sameSite: 'Strict'; expires: number }
+  revoke(): void
+}
+export interface BrowserEpochs { controlEpoch: number; targetEpoch: number }
 export interface BrowserWorkerPort {
   invoke(binding: BrowserBinding, controller: string, action: Record<string, unknown>): Promise<unknown>
+  openAuthorizedPage?(binding: BrowserBinding, controller: string, page: AuthorizedBrowserPage, epochs: BrowserEpochs): Promise<unknown>
   upload?(binding: BrowserBinding, controller: string, name: string, data: Uint8Array, epochs: { controlEpoch: number; targetEpoch: number }): Promise<unknown>
   download?(binding: BrowserBinding, controller: string, fileId: string): Promise<Uint8Array>
 }
@@ -92,6 +100,30 @@ export async function authorizeSessionBrowser(
   return binding
 }
 
+/** Trusted review composition only; the ordinary browser action parser excludes it. */
+export async function openSessionAuthorizedPage(
+  deps: {
+    getSession: (id: string) => Promise<BrowserBinding | null>
+    isUserActive: (principal: BrowserPrincipal) => Promise<boolean>
+    worker: BrowserWorkerPort
+  },
+  principal: BrowserPrincipal, sessionId: string, page: AuthorizedBrowserPage, epochs: BrowserEpochs,
+): Promise<unknown> {
+  try {
+    const binding = await authorizeSessionBrowser(deps, principal, sessionId)
+    if (!deps.worker.openAuthorizedPage) throw new HttpError(409, 'browser_authorized_page_not_supported')
+    const result = await deps.worker.openAuthorizedPage(binding, browserController(principal), page, epochs)
+    const current = await authorizeSessionBrowser(deps, principal, sessionId)
+    if (JSON.stringify(current) !== JSON.stringify(binding)) throw new HttpError(403, 'session_forbidden')
+    return result
+  } catch (error) {
+    // An uncertain navigation is not replayed. Revoke just this review grant;
+    // the shared browser, its profile and other tabs retain their ownership.
+    page.revoke()
+    throw error
+  }
+}
+
 export class HttpBrowserWorker implements BrowserWorkerPort {
   constructor(
     private readonly endpoint: string,
@@ -126,6 +158,13 @@ export class HttpBrowserWorker implements BrowserWorkerPort {
       throw new HttpError([400, 403, 409, 503].includes(response.status) ? response.status : 502, code)
     }
     return response.json()
+  }
+
+  async openAuthorizedPage(binding: BrowserBinding, controller: string, page: AuthorizedBrowserPage, epochs: BrowserEpochs): Promise<unknown> {
+    return this.invoke(binding, controller, {
+      kind: 'open-authorized-page', url: page.url, cookie: page.cookie,
+      controlEpoch: epochs.controlEpoch, targetEpoch: epochs.targetEpoch,
+    })
   }
 
   async mcp(binding: BrowserBinding, message: unknown): Promise<unknown | null> {

@@ -344,3 +344,26 @@ process-owned credential. It registers and modifies the canonical model through
 the published SDK, then verifies the production runner/HTTP/MCP/engine chain.
 This remains fixture acceptance, not production worker rollout, source intake,
 Nexus mailbox transport or ShareOne comment delivery.
+
+## Private browser review handoff
+
+Trusted host composition can pass a shared review host's private launch object to
+`openSessionAuthorizedPage`. It checks the current conversation owner and active
+account before and after navigation, and uses the existing managed-browser
+registry with its host credential. The operation requires the conversation's
+already running browser; it cannot allocate a profile or take another
+conversation's browser. The browser SDK enforces the current control and target
+epochs and its authorized-page capability for managed CDP or extension transport.
+
+The launch cookie is read explicitly by this host-only method. It remains absent
+from ordinary JSON serialization and the browser action catalogue. Neither human
+HTTP actions nor agent MCP tools gain a cookie-setting operation. Failed,
+uncertain or newly unauthorized launches revoke just their review grant and are
+never retried through public navigation. Review content still needs the shared
+review host's own current model authorization on every request.
+
+HTTP acceptance verifies this production host transport, owner isolation,
+revocation and single-send behavior. It does not establish actual Chrome
+navigation or complete cloud review: compiler-to-browser network routing, review
+authorization and ShareOne comment providers still need to be composed and
+accepted together before enabling a WebUI review entry.

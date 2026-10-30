@@ -135,6 +135,7 @@ const nodeTestFiles = [
   'src/server/backends/acpHostContext.node-test.ts',
   'src/server/backends/acpModelChange.node-test.ts',
   'src/server/browser/browserGateway.node-test.ts',
+  'src/server/browser/browserAuthorizedPage.node-test.ts',
   'src/server/browser/browserConversation.node-test.ts',
   'src/server/browser/browserAgentCapability.node-test.ts',
   'src/server/browser/browserDeploymentPolicy.node-test.ts',
