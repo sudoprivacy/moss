@@ -6,10 +6,15 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { DatabaseSync } from 'node:sqlite'
 import { SudographModelClient, SudographReviewHost } from '@sudowork/sudograph-runtime'
 import { stringify } from 'yaml'
 import { ToolProtocol, validateReviewedToolArguments } from '../agentFederation/toolProtocol.js'
 import { createCompilerContextWorker } from './compilerContextWorker.js'
+import { SqliteDriver } from '../db/driver.js'
+import { McpStore } from '../mcp/db.js'
+import { ReviewedMcpAccess, mcpServerDigest } from '../mcp/reviewedAccess.js'
+import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
 
 void test('the production worker enforces endpoint authentication and fixed tool inputs before reading a model', async t => {
   const token = 'fixture-worker-token-for-acceptance-only'
@@ -131,6 +136,32 @@ void test('the production worker reads pointers and atomically compiles edits th
     const sources = catalog.sources as { objects: { id: string; name: string }[] }[]
     const object = sources.flatMap(item => item.objects).find(item => item.name === 'widgets')
     assert.ok(object)
+    const sqlite = new DatabaseSync(':memory:')
+    McpStore.ensureTables(sqlite)
+    const driver = new SqliteDriver(sqlite), mcp = new McpStore(driver), reviews = new ToolGatewayStore(driver)
+    t.after(() => driver.close())
+    const registered = await mcp.createMcpServer('org', { name: 'Compiler worker', scope: 'org', owner_type: 'system', owner_id: 'org',
+      mcp_type: 'http', url: `http://127.0.0.1:${address.port}/mcp`, auth_type: 'bearer',
+      auth_config_json: JSON.stringify({ header_name: 'Authorization', prefix: 'Bearer', token }),
+      allow_read: true, allow_read_sensitive_fields: true, allow_write: false }, 'manager')
+    await mcp.setMcpServerStatus('org', registered.id, 'enabled', 'manager')
+    await mcp.upsertMcpPolicy('org', { allow_http_sse_mcp: true, allow_external_network: true, domain_whitelist_json: ['127.0.0.1'] }, 'manager')
+    let isMember = true
+    const access = new ReviewedMcpAccess(reviews, { mcp, addresses: () => ['127.0.0.1'],
+      member: async (_org, userId) => isMember && userId === 'alice'
+        ? { isAdmin: false, userId, departmentId: null, visibleDepartmentIds: null } : null })
+    const exact = (await protocol.descriptors()).find(item => item.tool.name === 'sudograph_context_read')!
+    await reviews.saveReview({ ...exact, orgId: 'org', serverId: registered.id,
+      resource: `mcp:${registered.id}/sudograph_context_read`, serverDigest: mcpServerDigest(registered),
+      action: 'read', sensitive: true, outbound: false, enabled: true, revision: 'exact-1', reviewedBy: 'manager', reviewedAt: Date.now() }, null)
+    const hostRead = () => access.readForHost('org', 'alice', registered.id, 'sudograph_context_read',
+      { arguments: { ...pointer, id: object.id, records: true, limit: 2 } })
+    const hostResult = await hostRead()
+    assert.equal(hostResult.content[0]?.type, 'text')
+    assert.deepEqual(JSON.parse((hostResult.content[0] as { text: string }).text).rows, expected.slice(0, 2),
+      'the reviewed host read reaches the published compiler and the real SQLite source')
+    isMember = false
+    await assert.rejects(hostRead(), { code: 'TOOL_USER_DENIED' })
     const review = async (input: Record<string, unknown>, status = 200) => {
       const response = await fetch(`http://127.0.0.1:${address.port}/review`, { method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(input) })

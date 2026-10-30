@@ -41,6 +41,41 @@ export function validateToolArguments(schema: Tool['inputSchema'], value?: unkno
   }
 }
 
+function jsonObject(item: unknown): item is Record<string, unknown> {
+  return !!item && typeof item === 'object' && !Array.isArray(item)
+    && [Object.prototype, null].includes(Object.getPrototypeOf(item))
+}
+
+function validateBoundedJson(value: unknown): asserts value is Record<string, unknown> {
+  let nodes = 0
+  const visit = (item: unknown, depth: number): void => {
+    if (++nodes > 256 || depth > 6) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+    if (item === null || typeof item === 'boolean') return
+    if (typeof item === 'string' && item.length <= 8192) return
+    if (typeof item === 'number' && Number.isFinite(item)) return
+    if (Array.isArray(item)) {
+      if (item.length > 100) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+      for (const child of item) visit(child, depth + 1)
+      return
+    }
+    if (!jsonObject(item) || Object.keys(item).length > 32) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+    for (const [key, child] of Object.entries(item)) {
+      if (!key.length || key.length > 128 || /[\u0000-\u001f\u007f]/.test(key)
+        || ['__proto__', 'prototype', 'constructor'].includes(key)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+      visit(child, depth + 1)
+    }
+  }
+  if (!jsonObject(value)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+  visit(value, 0)
+  if (Buffer.byteLength(JSON.stringify(value)) > 32000) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+}
+
+/** Validate before copying so cloning cannot erase invalid class identities. */
+export function snapshotToolArguments(value: unknown = {}): Record<string, unknown> {
+  validateBoundedJson(value)
+  try { return structuredClone(value) } catch { toolFailure('INVALID_TOOL_ARGUMENTS', 400) }
+}
+
 /** Explicit descriptor profile; its metadata is covered by the reviewed digest. */
 export function validateReviewedToolArguments(tool: Tool, value?: unknown): void {
   const profile = tool._meta?.['moss/input-profile']
@@ -66,33 +101,11 @@ export function validateReviewedToolArguments(tool: Tool, value?: unknown): void
   const surrogate = { ...schema, properties }
   validateToolArguments(surrogate)
   if (value === undefined) return
-  const object = (item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item)
-    && [Object.prototype, null].includes(Object.getPrototypeOf(item))
-  let nodes = 0
-  const visit = (item: unknown, depth: number): void => {
-    if (++nodes > 256 || depth > 6) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
-    if (item === null || typeof item === 'boolean') return
-    if (typeof item === 'string' && item.length <= 8192) return
-    if (typeof item === 'number' && Number.isFinite(item)) return
-    if (Array.isArray(item)) {
-      if (item.length > 100) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
-      for (const child of item) visit(child, depth + 1)
-      return
-    }
-    if (!object(item) || Object.keys(item).length > 32) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
-    for (const [key, child] of Object.entries(item)) {
-      if (!key.length || key.length > 128 || /[\u0000-\u001f\u007f]/.test(key)
-        || ['__proto__', 'prototype', 'constructor'].includes(key)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
-      visit(child, depth + 1)
-    }
-  }
-  if (!object(value)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
-  visit(value, 0)
-  if (Buffer.byteLength(JSON.stringify(value)) > 32000) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+  validateBoundedJson(value)
   const scalar: Record<string, unknown> = {}
   for (const [key, item] of Object.entries(value)) {
     if (records.has(key)) {
-      if (!object(item)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+      if (!jsonObject(item)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
       scalar[key] = true
     } else scalar[key] = item
   }
