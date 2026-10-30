@@ -103,6 +103,22 @@ checks the selected analyzer placement, and verifies the running image and
 binary before accepting policy application. A canary profile can therefore use
 a different verified release from the default retained by other owners.
 
+The production journey keeps its bootstrap and six policy cases, and adds
+positive and negative synthetic examples for both business families: a public
+company name and a public source example must reach the model unchanged;
+marked customer records and internal technical records must lose every
+synthetic field in the native outbound body. A marked customer record includes
+the same public company, so explicit record protection must override that
+exception. Every case preserves the exact original in local session history
+and requires the same Pod identity and restart count after hot policy updates.
+The public cases and existing successful cases still require the fresh model
+reply marker. Whole-record protection removes prose instructions too, so those
+two cases instead require a nonempty real model reply, the native
+`PROTECTED_RECORD` replacement and absence of every protected field. Statistical
+NER quality remains covered separately by the shared analyzer benchmarks.
+These are deployment acceptance cases; compiling the script does not establish
+that production has passed them.
+
 `egressPolicyService.node-test.ts` covers desired-versus-applied state and
 propagation that preserves organization overrides. The real Node server
 journey in `lbLifecycleE2e.test.ts` exercises authentication, role boundaries,
