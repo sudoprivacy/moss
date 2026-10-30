@@ -210,6 +210,10 @@ void test('PostgreSQL registry upgrades and concurrent host bindings preserve on
       return session
     })
     assert.equal((await stores[1].ontologyProjects.resolveSession(newBinding.sessionId))?.projectId, selected.projectId)
+    assert.deepEqual((await stores[1].listSessions({ orgId: 'org', userId: 'alice', ontologyProjectId: selected.projectId }))
+      .map(session => session.sessionId).sort(), ['new-session', 'shared-session'])
+    assert.equal((await stores[1].listSessions({ orgId: 'org', userId: 'other-owner', ontologyProjectId: selected.projectId })).length, 0)
+    assert.equal((await stores[1].listSessions({ orgId: 'other-org', ontologyProjectId: selected.projectId })).length, 0)
     const failedBinding = { ...newBinding, sessionId: 'rolled-back-session' }
     await assert.rejects(stores[0].ontologyProjects.createBoundSession(failedBinding, async () => {}, async () => {
       await stores[0].createSession({ ...failedBinding, transcriptSessionId: 'failed-history', transcriptPath: '/fixture/failed',
@@ -219,6 +223,7 @@ void test('PostgreSQL registry upgrades and concurrent host bindings preserve on
     assert.equal(await stores[1].getSession(failedBinding.sessionId), null)
     assert.equal(await stores[1].latestEvent(failedBinding.sessionId, 'session_created'), null)
     await stores[1].ontologyProjects.setEnabled('org', selected.projectId, false)
+    assert.equal((await stores[1].listSessions({ orgId: 'org', ontologyProjectId: selected.projectId })).length, 0)
     await assert.rejects(reader({ sessionId: 'shared-session', nativeSessionId: 'native' }), /unavailable/)
     assert.equal(Number((await drivers[0].get('SELECT count(*) AS n FROM ontology_session_bindings'))?.n), 2)
   })

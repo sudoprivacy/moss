@@ -201,6 +201,21 @@ or context ports, including live member/account/visibility/policy revocation and
 current credential resolution. Their Nexus values are synthetic; deployment
 connectivity and end-user journeys still require production acceptance.
 
+## Project-scoped conversation discovery
+
+The existing `GET /api/v1/sessions` accepts optional `ontology_project_id` with
+the same opaque UUID used at creation. The database filters through the canonical
+binding before returning sessions; ordinary owner, department, organization,
+active-only and source filters still apply. An unbound, deleted or reassigned
+session cannot acquire project membership through client metadata.
+
+Project discovery rechecks current MCP/source access before and after the read
+and rejects project lifecycle changes during it. A denied project is an error,
+not an empty list or fallback to ordinary sessions. No context text, records or
+parallel project/session registry is loaded to construct the result. Calls that
+omit the project keep the ordinary session-list behavior. This API supports the
+shared workbench; it does not establish its UI or cloud review/comment journey.
+
 ## Compiler worker executable
 
 `bun run build:node` also builds `bin/sudograph-context-worker.mjs`. It uses the
