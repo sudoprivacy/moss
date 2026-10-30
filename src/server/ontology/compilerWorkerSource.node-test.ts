@@ -102,10 +102,21 @@ void test('the worker CLI uses the shared provider and injected secret for an au
     const catalog = await call('sudograph_context_read', { ...pointer, id: 'catalog' })
     const objects = catalog.sources.flatMap((item: { objects: { id: string; name: string }[] }) => item.objects) as { id: string; name: string }[]
     assert.deepEqual(objects.map(item => item.name).sort(), ['widget_names', 'widgets'])
+    const review = async (request: Record<string, unknown>) => {
+      const response = await fetch(`http://127.0.0.1:${port}/review`, { method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
+      assert.equal(response.status, 200)
+      const body = await response.json() as { result: Record<string, unknown> }
+      assert.ok(!JSON.stringify(body).includes(password) && !JSON.stringify(body).includes(token) && !JSON.stringify(body).includes('concealed'))
+      return body.result
+    }
+    assert.equal((await review({ operation: 'head' })).revision, packet.context.revision)
     for (const object of objects) {
       const page = await call('sudograph_context_read', { ...pointer, id: object.id, records: true, limit: 10 })
       assert.equal(page.data_kind, 'live_source_page')
       assert.deepEqual(page.rows, expected.map(row => [row.id, row.label]))
+      const reviewed = await review({ operation: 'page', params: { ...pointer, id: object.id, limit: 10 } })
+      assert.deepEqual(reviewed.rows, page.rows, 'the human review retains the same restricted source scope and live values')
     }
     assert.deepEqual((await admin.query(`SELECT id,label FROM ${schema}.widgets ORDER BY id`)).rows, expected)
     assert.ok(!diagnostics.join('').includes(password) && !diagnostics.join('').includes(token))

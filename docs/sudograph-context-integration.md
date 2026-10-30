@@ -367,3 +367,20 @@ revocation and single-send behavior. It does not establish actual Chrome
 navigation or complete cloud review: compiler-to-browser network routing, review
 authorization and ShareOne comment providers still need to be composed and
 accepted together before enabling a WebUI review entry.
+
+The compiler worker also has a private `POST /review` read profile, protected by
+the same deployment-owned bearer credential and browser-Origin refusal. It uses
+the published SDK's existing `review` method; the compiler owns the read contract,
+stable identities, revision checks and live pagination. The worker fixes the actor,
+model, source scope and execution-local review resource (`modelRef`). Requests
+cannot select these bindings, paths or grants. HTML/document endpoints must match
+the shared review host's relative `/review/<session>/v1` route. The profile rejects
+writes and exports, bounds request bytes and redacts private deployment details.
+
+Replies identify the same registered authority, model, sources and
+`full-registered-model` scope as context reads. A host must validate those bindings
+and enforce the current user/project policy before and after calling this private
+profile. It is not an agent tool or a browser endpoint. Review HTML therefore does
+not pass through, or increase, the agent gateway's 128 KB MCP output limit. A
+future browser-facing host still needs its own authenticated route and comment
+providers; registering a worker alone does not enable a WebUI review button.
