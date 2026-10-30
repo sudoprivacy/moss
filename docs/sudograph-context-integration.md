@@ -257,8 +257,8 @@ configuration. Start the worker with:
 node bin/sudograph-context-worker.mjs /etc/sudograph/worker.json
 ```
 
-Register its exact `/mcp` endpoint in the existing Moss MCP catalogue, approve its
-read-only descriptors through the existing IT tool review, and reference the same
+Register its exact `/mcp` endpoint in the existing Moss MCP catalogue, classify its
+descriptors through the existing IT tool review, and reference the same
 credential using an organization-scoped system `secret_ref`. Remote deployment
 owns the authenticated network route/TLS and Nexus secret injection. The worker
 does not start Nexus or publish itself into the catalogue. Default binding is
@@ -276,13 +276,30 @@ return a safe read-unavailable result without compiler paths or credentials.
 Configuration is copied at server creation. Host context authorization does not
 grant agent tool access: exact reads retain the existing task/tool review gates.
 
+The same endpoint also exposes `sudograph_model_contract` and
+`sudograph_model_apply`, matching the native authoring tool names. The contract
+contains current YAML and the compiler's checked document schema; apply accepts
+only `base_revision`, `operation_id` and `model`. The published SDK and compiler
+own validation, compatible merge, conflict handling, idempotency and the atomic
+model/graph/context commit. Caller-selected actors and models are rejected.
+Typed compiler rejections retain their reason and recovery details after private
+deployment paths and credentials are redacted. Unknown failures return a safe
+retry instruction. These tools do not confirm business definitions or modify
+source data. Model edits use the existing write review, task grant and configured
+MCP policy; a context read review does not grant model writes. No new approval
+mechanism or alternate authoring store is introduced.
+
 The server CI installs the SHA-256-checked wheel from Sudograph's `v0.1.0`
 GitHub Release and requires its interpreter
 before running the live worker scenario. It registers an unrelated SQLite
 source through the published SDK, reads the actual authenticated MCP context and
 catalogue, follows version-bound pointers across two live pages, compares them
 with an independent source query and verifies that the source bytes did not
-change. That journey also rejects stale digests; ordinary protocol coverage
+change. It additionally rejects an invalid model with recovery details, verifies
+that rejection leaves the revision unchanged, commits a valid compiler-provided
+example and replays its operation without another commit. Model, graph and
+context retain one revision and source identities survive the business edit.
+That journey also rejects stale digests; ordinary protocol coverage
 rejects caller-selected execution options and unbounded record requests.
 
 The maintained acceptance driver accepts `--worker bin/sudograph-context-worker.mjs`
