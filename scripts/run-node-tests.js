@@ -15,6 +15,7 @@ const nodeTestFiles = [
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',
   'src/server/runtime/cohostOwnerRuntime.node-test.ts',
   'src/server/ontology/projectRegistry.node-test.ts',
+  'src/server/ontology/reviewStore.node-test.ts',
   'src/server/ontology/runnerContext.node-test.ts',
   'src/server/ontology/runnerHost.node-test.ts',
   'src/server/ontology/compilerContextWorker.node-test.ts',
