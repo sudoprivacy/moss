@@ -7,7 +7,7 @@ import type { VisibilityFilter } from '../visibilityFilter.js'
 import { ExternalProviderError } from '../externalProviders/policy.js'
 import type { ProductRegistryClient } from './registryClient.js'
 import { assertAssetOpen } from './assetControlStore.js'
-import { ToolProtocol, toolFailure, validateToolArguments, type ToolConnection, type ToolDescriptor } from './toolProtocol.js'
+import { ToolProtocol, toolFailure, validateReviewedToolArguments, type ToolConnection, type ToolDescriptor } from './toolProtocol.js'
 import { ToolGatewayStore, type ReviewedTool } from './toolGatewayStore.js'
 import { contentDigest } from './provider/protocol.js'
 
@@ -46,7 +46,7 @@ export class AgentToolGateway {
     const { server } = await this.connection(org, serverId)
     const descriptor = (await this.discover(org, serverId)).find(d => d.tool.name === body.tool)
     if (!descriptor || descriptor.digest !== body.digest) toolFailure('TOOL_DESCRIPTOR_CHANGED')
-    validateToolArguments(descriptor.tool.inputSchema)
+    validateReviewedToolArguments(descriptor.tool)
     const currentServer = (await this.connection(org, serverId)).server
     if (mcpServerDigest(server) !== mcpServerDigest(currentServer)) toolFailure('TOOL_SERVER_CHANGED')
     const valueToSave: ReviewedTool = { ...descriptor, orgId: org, serverId, serverDigest: mcpServerDigest(server), resource: resourceFor(serverId, descriptor.tool.name),
@@ -93,7 +93,7 @@ export class AgentToolGateway {
     let protocol: ToolProtocol | undefined
     try {
       if (!input.arguments || typeof input.arguments !== 'object' || Array.isArray(input.arguments)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
-      validateToolArguments(review.tool.inputSchema, input.arguments)
+      validateReviewedToolArguments(review.tool, input.arguments)
       const { config, policyDigest } = await this.allowed(org, grant, review)
       const signal = AbortSignal.any([...(cancellation ? [cancellation] : []), AbortSignal.timeout(Math.max(1, call.deadline - Date.now()))])
       signal.throwIfAborted()

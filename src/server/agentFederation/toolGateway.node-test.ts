@@ -11,10 +11,10 @@ import { ExternalProviderError } from '../externalProviders/policy.js'
 import type { ExecutionGrant, CheckExecutionGrant } from '../../../contracts/agent-registry/v1alpha1/contract.gen.js'
 import { AgentToolGateway } from './toolGateway.js'
 import { ToolGatewayStore } from './toolGatewayStore.js'
-import { ToolProtocol, validateToolArguments } from './toolProtocol.js'
+import { ToolProtocol, validateToolArguments, validateReviewedToolArguments } from './toolProtocol.js'
 
-async function fixture(t: TestContext) {
-  const state = { calls: 0, checks: 0, description: 'Synthetic arithmetic tool', fail: false, deny: false, suspendOnCheck: 0, member: true, headers: [] as string[], hold: undefined as (() => Promise<void>) | undefined }
+async function fixture(t: TestContext, hasRecordTool = false) {
+  const state = { calls: 0, recordCalls: 0, recordProfile: 'bounded-record-v1' as string | undefined, checks: 0, description: 'Synthetic arithmetic tool', fail: false, deny: false, suspendOnCheck: 0, member: true, headers: [] as string[], hold: undefined as (() => Promise<void>) | undefined }
   const http = createServer((req, res) => {
     void (async () => {
       state.headers.push(String(req.headers.authorization ?? ''))
@@ -25,6 +25,10 @@ async function fixture(t: TestContext) {
         if (state.fail) { res.destroy(); return { content: [] } }
         return { content: [{ type: 'text', text: String(a + b) }] }
       })
+      if (hasRecordTool) sdk.registerTool('read_selection', {
+        inputSchema: z.object({ id: z.string().min(1), selection: z.record(z.string(), z.unknown()).optional() }).strict(),
+        _meta: state.recordProfile ? { 'moss/input-profile': state.recordProfile } : {}, annotations: { readOnlyHint: true },
+      }, async input => { state.recordCalls++; return { content: [{ type: 'text', text: JSON.stringify(input) }] } })
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
       res.on('close', () => { void sdk.close() })
       await sdk.connect(transport)
@@ -125,6 +129,49 @@ void test('schema profile rejects references, nested/unbounded fields and undecl
   for (const schema of [ { type: 'object', $ref: 'http://bad/schema', additionalProperties: false }, { type: 'object', properties: { nested: { type: 'object' } }, additionalProperties: false }, { type: 'object', properties: {}, additionalProperties: true } ]) {
     assert.throws(() => validateToolArguments(schema as Parameters<typeof validateToolArguments>[0]), { code: 'TOOL_SCHEMA_UNSUPPORTED' })
   }
+})
+void test('a reviewed record profile can dispatch bounded nested selections without changing the scalar default', async t => {
+  const f = await fixture(t, true)
+  const descriptor = (await f.gateway.discover('org-a', f.server.id)).find(item => item.tool.name === 'read_selection')!
+  assert.equal(descriptor.tool._meta?.['moss/input-profile'], 'bounded-record-v1')
+  assert.throws(() => validateToolArguments(descriptor.tool.inputSchema), { code: 'TOOL_SCHEMA_UNSUPPORTED' })
+  const review = await f.gateway.approve('org-a', f.server.id, 'manager', { tool: 'read_selection', digest: descriptor.digest,
+    action: 'read', sensitive: false, outbound: false, enabled: true, expected_revision: null })
+  f.grant.request.permissions.push({ operation: 'tool.invoke', resource: review.resource })
+  const input = { ...f.input, call_id: 'read-record', resource: review.resource,
+    arguments: { id: 'catalog', selection: { kind: 'connected', roots: ['stable-object'], max_nodes: 20 } } }
+  const result = await f.invoke(input)
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(result.result?.content, [{ type: 'text', text: JSON.stringify(input.arguments) }])
+  assert.equal((await f.invoke(input)).id, result.id)
+  assert.equal(f.state.recordCalls, 1)
+  for (const [index, selection] of ['invalid', { key: 'x'.repeat(8193) }, { items: Array.from({ length: 101 }, () => 1) },
+    { a: { b: { c: { d: { e: { f: { g: 1 } } } } } } }, JSON.parse('{"__proto__":{"polluted":true}}')].entries()) {
+    const rejected = await f.invoke({ ...input, call_id: 'invalid-record-' + index, arguments: { id: 'catalog', selection } })
+    assert.equal(rejected.errorCode, 'INVALID_TOOL_ARGUMENTS')
+  }
+  assert.equal(f.state.recordCalls, 1, 'invalid records never reach the remote tool')
+  f.state.recordProfile = undefined
+  assert.equal((await f.invoke({ ...input, call_id: 'profile-changed' })).errorCode, 'TOOL_DESCRIPTOR_CHANGED')
+  assert.equal(f.state.recordCalls, 1, 'a remote profile change needs a new reviewed descriptor')
+})
+void test('record profiles retain JSON bounds and refuse unsupported schemas or undeclared versions', () => {
+  const tool = { name: 'record', _meta: { 'moss/input-profile': 'bounded-record-v1' }, inputSchema: {
+    type: 'object' as const, properties: { options: { type: 'object', additionalProperties: {} } }, required: ['options'], additionalProperties: false,
+  } }
+  validateReviewedToolArguments(tool, { options: { values: [null, true, 3, 'text'] } })
+  const cycle: Record<string, unknown> = {}; cycle.self = cycle
+  for (const options of [Object.fromEntries(Array.from({ length: 33 }, (_, i) => ['key' + i, i])),
+    { a: Array(100).fill(1), b: Array(100).fill(1), c: Array(100).fill(1) },
+    { a: 'a'.repeat(8192), b: 'b'.repeat(8192), c: 'c'.repeat(8192), d: 'd'.repeat(8192) },
+    { value: undefined }, { value: Number.POSITIVE_INFINITY }, { value: new Date() }, cycle]) {
+    assert.throws(() => validateReviewedToolArguments(tool, { options }), { code: 'INVALID_TOOL_ARGUMENTS' })
+  }
+  for (const field of [{ type: 'object', additionalProperties: true }, { type: 'object', properties: {}, additionalProperties: false },
+    { type: 'array', items: {} }, { $ref: 'https://foreign.invalid/schema' }]) {
+    assert.throws(() => validateReviewedToolArguments({ ...tool, inputSchema: { ...tool.inputSchema, properties: { options: field } } }), { code: 'TOOL_SCHEMA_UNSUPPORTED' })
+  }
+  assert.throws(() => validateReviewedToolArguments({ ...tool, _meta: { 'moss/input-profile': 'unknown-version' } }), { code: 'TOOL_INPUT_PROFILE_UNSUPPORTED' })
 })
 void test('JSON transport denies redirects and SSE without following them', async t => {
   const server = createServer((_req, res) => { res.writeHead(302, { location: 'http://127.0.0.1:1/leak' }); res.end() })

@@ -3,7 +3,7 @@ import { resolveAuthHeaders, resolveSecretRefHeaders, type McpAuthSecretsApi } f
 import type { McpServer } from './types.js'
 import { isVisibleTo, type VisibilityFilter } from '../visibilityFilter.js'
 import type { ReviewedTool, ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
-import { ToolProtocol, toolFailure, validateToolArguments, type ToolConnection } from '../agentFederation/toolProtocol.js'
+import { ToolProtocol, toolFailure, validateReviewedToolArguments, type ToolConnection } from '../agentFederation/toolProtocol.js'
 import { contentDigest } from '../agentFederation/provider/protocol.js'
 
 export interface ReviewedMcpDependencies {
@@ -57,7 +57,7 @@ export class ReviewedMcpAccess {
     const resource = `mcp:${serverId}/${tool}`
     const review = await this.store.review(org, resource)
     if (!review || review.serverId !== serverId || review.tool.name !== tool || review.action !== 'read') toolFailure('HOST_READ_REVIEW_REQUIRED', 403)
-    validateToolArguments(review.tool.inputSchema, {})
+    validateReviewedToolArguments(review.tool, {})
     const initial = await this.authorize(org, userId, review)
     // A host context read has no task asset identity. Never ignore an agent/skill restriction.
     if (initial.server.bound_assistants !== null || initial.server.bound_skills !== null) toolFailure('HOST_READ_AGENT_BINDING_UNSUPPORTED', 403)

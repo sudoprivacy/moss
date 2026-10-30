@@ -41,6 +41,64 @@ export function validateToolArguments(schema: Tool['inputSchema'], value?: unkno
   }
 }
 
+/** Explicit descriptor profile; its metadata is covered by the reviewed digest. */
+export function validateReviewedToolArguments(tool: Tool, value?: unknown): void {
+  const profile = tool._meta?.['moss/input-profile']
+  if (profile === undefined) return validateToolArguments(tool.inputSchema, value)
+  if (profile !== 'bounded-record-v1') toolFailure('TOOL_INPUT_PROFILE_UNSUPPORTED')
+  const schema = tool.inputSchema
+  if (!schema.properties || typeof schema.properties !== 'object' || Array.isArray(schema.properties)) toolFailure('TOOL_SCHEMA_UNSUPPORTED')
+  const properties: NonNullable<Tool['inputSchema']['properties']> = Object.create(null), records = new Set<string>()
+  for (const [key, raw] of Object.entries(schema.properties)) {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw) && (raw as Record<string, unknown>).type === 'object') {
+      const field = raw as Record<string, unknown>
+      if (Object.keys(field).some(name => !['type', 'description', 'title', 'additionalProperties', 'propertyNames'].includes(name))
+        || !field.additionalProperties || typeof field.additionalProperties !== 'object' || Array.isArray(field.additionalProperties)
+        || Object.keys(field.additionalProperties).length !== 0) toolFailure('TOOL_SCHEMA_UNSUPPORTED')
+      if (field.propertyNames !== undefined && (!field.propertyNames || typeof field.propertyNames !== 'object'
+        || Array.isArray(field.propertyNames) || Object.keys(field.propertyNames).length !== 1
+        || (field.propertyNames as Record<string, unknown>).type !== 'string')) toolFailure('TOOL_SCHEMA_UNSUPPORTED')
+      records.add(key)
+      properties[key] = { type: 'boolean' }
+    } else properties[key] = raw
+  }
+  // Retain the exact scalar schema rules, required keys and closed root object.
+  const surrogate = { ...schema, properties }
+  validateToolArguments(surrogate)
+  if (value === undefined) return
+  const object = (item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item)
+    && [Object.prototype, null].includes(Object.getPrototypeOf(item))
+  let nodes = 0
+  const visit = (item: unknown, depth: number): void => {
+    if (++nodes > 256 || depth > 6) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+    if (item === null || typeof item === 'boolean') return
+    if (typeof item === 'string' && item.length <= 8192) return
+    if (typeof item === 'number' && Number.isFinite(item)) return
+    if (Array.isArray(item)) {
+      if (item.length > 100) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+      for (const child of item) visit(child, depth + 1)
+      return
+    }
+    if (!object(item) || Object.keys(item).length > 32) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+    for (const [key, child] of Object.entries(item)) {
+      if (!key.length || key.length > 128 || /[\u0000-\u001f\u007f]/.test(key)
+        || ['__proto__', 'prototype', 'constructor'].includes(key)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+      visit(child, depth + 1)
+    }
+  }
+  if (!object(value)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+  visit(value, 0)
+  if (Buffer.byteLength(JSON.stringify(value)) > 32000) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+  const scalar: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (records.has(key)) {
+      if (!object(item)) toolFailure('INVALID_TOOL_ARGUMENTS', 400)
+      scalar[key] = true
+    } else scalar[key] = item
+  }
+  validateToolArguments(surrogate, scalar)
+}
+
 /** Official SDK with a pinned JSON HTTP transport. No downstream execution credentials. */
 export class ToolProtocol {
   readonly client = new Client({ name: 'moss-task-tool-gateway', version: '1.0.0' })
