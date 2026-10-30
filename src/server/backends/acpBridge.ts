@@ -719,7 +719,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     // 系统提示词是给 agent 的，不应该出现在用户可见的历史记录中
     // displayText is written only when it differs from the original after stripping the client-injected
     // [User Request]/cron preamble (for the render layer); raw content keeps the full text for resume fidelity.
-    const displayText = extractDisplayUserText(trimmedText)
+    const displayText = typeof nativeInput?.action.display === 'string'
+      ? nativeInput.action.display
+      : extractDisplayUserText(trimmedText)
     const userEvent: Record<string, unknown> = {
       type: 'user',
       sessionId,
