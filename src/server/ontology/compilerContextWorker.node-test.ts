@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { SudographModelClient } from '@sudowork/sudograph-runtime'
+import { stringify } from 'yaml'
 import { ToolProtocol } from '../agentFederation/toolProtocol.js'
 import { createCompilerContextWorker } from './compilerContextWorker.js'
 
@@ -28,7 +29,7 @@ void test('the production worker enforces endpoint authentication and fixed tool
   try {
     await protocol.connect()
     const descriptors = await protocol.descriptors()
-    assert.deepEqual(descriptors.map(item => item.tool.name).sort(), ['sudograph_context', 'sudograph_context_read'])
+    assert.deepEqual(descriptors.map(item => item.tool.name).sort(), ['sudograph_context', 'sudograph_context_read', 'sudograph_model_apply', 'sudograph_model_contract'])
     assert.equal((await protocol.call('sudograph_context', { model_ref: 'foreign', path: '/foreign-model' })).isError, true)
     const failure = await protocol.call('sudograph_context', {})
     assert.equal(failure.isError, true)
@@ -43,6 +44,16 @@ void test('the production worker enforces endpoint authentication and fixed tool
     assert.equal(readFailure.isError, true)
     assert.ok(!JSON.stringify(readFailure).includes('/private-') && !JSON.stringify(readFailure).includes(token))
     assert.ok(JSON.stringify(readFailure).includes('MODEL_READ_UNAVAILABLE'))
+    assert.equal((await protocol.call('sudograph_model_contract', { model_ref: 'foreign' })).isError, true)
+    assert.equal((await protocol.call('sudograph_model_apply', {
+      base_revision: 'revision', operation_id: 'operation', model: '', actor: 'foreign',
+    })).isError, true)
+    const writeFailure = await protocol.call('sudograph_model_apply', {
+      base_revision: 'revision', operation_id: 'operation', model: '',
+    })
+    assert.equal(writeFailure.isError, true)
+    assert.ok(JSON.stringify(writeFailure).includes('MODEL_OPERATION_UNAVAILABLE'))
+    assert.ok(!JSON.stringify(writeFailure).includes('/private-') && !JSON.stringify(writeFailure).includes(token))
   } finally { await protocol.close() }
 })
 
@@ -54,7 +65,7 @@ void test('a worker cannot start with a missing or weak deployment credential', 
   }
 })
 
-void test('the production worker reads exact pointers and live pages through the published compiler', {
+void test('the production worker reads pointers and atomically compiles edits through the published compiler', {
   skip: !process.env.MOSS_SUDOGRAPH_COMPILER_PYTHON, timeout: 60000,
 }, async t => {
   const python = process.env.MOSS_SUDOGRAPH_COMPILER_PYTHON
@@ -108,6 +119,36 @@ void test('the production worker reads exact pointers and live pages through the
     assert.equal(stale.isError, true)
     assert.ok(JSON.stringify(stale).includes('CONTEXT_STALE') && JSON.stringify(stale).includes('sudograph_context'))
     assert.ok(!JSON.stringify(stale).includes(root) && !JSON.stringify(stale).includes(token))
-    assert.equal(await digest(), initial, 'all reads preserve the source database')
+    const contract = await call('sudograph_model_contract', {}) as {
+      revision: string; write: { document_schema: { examples: { definitions: Record<string, { origin: string }> }[] } }
+    }
+    const example = structuredClone(contract.write.document_schema.examples[0])
+    const invalid = structuredClone(example)
+    Object.values(invalid.definitions)[0].origin = 'invented-origin'
+    const refused = await protocol.call('sudograph_model_apply', {
+      base_revision: contract.revision, operation_id: randomUUID(), model: stringify(invalid),
+    })
+    assert.equal(refused.isError, true)
+    assert.ok(JSON.stringify(refused).includes('origin') && JSON.stringify(refused).includes('recovery'))
+    assert.equal((await call('sudograph_model_contract', {})).revision, contract.revision, 'rejected writes cannot advance the model')
+    const malformed = await protocol.call('sudograph_model_apply', {
+      base_revision: contract.revision, operation_id: randomUUID(), model: `private-path: [${root}, ${token}\n`,
+    })
+    assert.equal(malformed.isError, true)
+    assert.ok(!JSON.stringify(malformed).includes(root) && !JSON.stringify(malformed).includes(token))
+    const edit = { base_revision: contract.revision, operation_id: randomUUID(), model: stringify(example) }
+    const receipt = await call('sudograph_model_apply', edit)
+    assert.notEqual(receipt.revision, contract.revision)
+    assert.deepEqual(await call('sudograph_model_apply', edit), receipt, 'retry returns the same committed receipt')
+    assert.equal((await call('sudograph_model_contract', {})).revision, receipt.revision)
+    const changed = (await call('sudograph_context', {})).context as { revision: string; context_digest: string }
+    assert.equal(changed.revision, receipt.revision)
+    const model = await client.invoke<{ projection: { model_revision: string }; business: { definitions: Record<string, { review_status: string }> } }>('model', 'worker', { operation: 'read', product: 'model' })
+    assert.equal(model.projection.model_revision, receipt.revision, 'graph and context share the committed model revision')
+    assert.equal(Object.keys(model.business.definitions).length, Object.keys(example.definitions).length)
+    assert.ok(Object.values(model.business.definitions).every(definition => definition.review_status === 'unreviewed'), 'compiling does not confirm business definitions')
+    const retained = await call('sudograph_context_read', { revision: changed.revision, context_digest: changed.context_digest, id: object.id })
+    assert.equal(retained.id, object.id, 'business edits retain canonical source identities')
+    assert.equal(await digest(), initial, 'model authoring and reads preserve the source database')
   } finally { await protocol.close() }
 })
