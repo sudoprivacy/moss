@@ -54,6 +54,13 @@ export async function withSessionProjectAccess<T>(store: DirectConnectStore,
   } finally { await host.close() }
 }
 
+/** Confirm the applied scope only after current authorization and lifecycle checks succeed. */
+export async function listProjectSessions<T>(store: DirectConnectStore,
+  owner: { orgId: string; userId: string }, projectId: string | undefined, read: () => Promise<T[]>) {
+  const sessions = await withSessionProjectAccess(store, owner, projectId, read)
+  return { sessions, ...(projectId === undefined ? {} : { ontology_project_id: projectId }) }
+}
+
 export async function createModelSession<T>(store: DirectConnectStore,
   binding: { projectId: string; sessionId: string; orgId: string; userId: string }, create: () => Promise<T>): Promise<T> {
   const host = await createModelContextHost(store)

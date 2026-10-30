@@ -42,7 +42,7 @@ import { attachSessionSocketAuthorization } from './sessionSocketAuthorization.j
 import { RuntimeInputBarrier } from './runtime/runtimeInputBarrier.js'
 import { RuntimeAdmissionPauses } from './runtime/runtimeAdmissionPauses.js'
 import { dispatchRuntimeAdmission, isRuntimeAdmissionRoute } from './api/runtimeAdmission.js'
-import { getSessionProject, listSessionProjects, parseOntologyProjectId, withSessionProjectAccess } from './ontology/sessionProjects.js'
+import { getSessionProject, listProjectSessions, listSessionProjects, parseOntologyProjectId } from './ontology/sessionProjects.js'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
@@ -10972,7 +10972,7 @@ export function startServer(
         const ontologyProjectId = parseOntologyProjectId(url.searchParams.get('ontology_project_id') ?? undefined)
         if (ontologyProjectId !== undefined) res.setHeader('Cache-Control', 'no-store')
         const owner = auth
-        const response = await withSessionProjectAccess(runtime.store, owner, ontologyProjectId, async () => {
+        const response = await listProjectSessions(runtime.store, owner, ontologyProjectId, async () => {
           const activeOnly = url.searchParams.get('active_only') === 'true'
           const source = url.searchParams.get('source') || undefined
           // Visibility tiers: sessions:list:any → whole org; a dept_admin →
@@ -11012,7 +11012,7 @@ export function startServer(
             ...session,
             userName: await resolveName(session.userId),
           })))
-          return { sessions: sessionsWithOwner }
+          return sessionsWithOwner
         })
         writeJson(res, 200, response)
         return

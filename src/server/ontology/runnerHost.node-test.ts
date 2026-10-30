@@ -15,7 +15,7 @@ import { NexusClient } from '../nexus/nexusClient.js'
 import { orgScopedNamespace, secretSubject } from '../secrets/secretSubject.js'
 import { registerModelContextTool } from './contextWorker.js'
 import { createSessionRunnerHost } from './runnerHost.js'
-import { createModelSession, getSessionProject, listSessionProjects, parseOntologyProjectId, withSessionProjectAccess } from './sessionProjects.js'
+import { createModelSession, getSessionProject, listProjectSessions, listSessionProjects, parseOntologyProjectId, withSessionProjectAccess } from './sessionProjects.js'
 
 async function fixture(t: TestContext) {
   const store = new DirectConnectStore(':memory:')
@@ -111,8 +111,12 @@ void test('project filtering narrows existing session ownership and excludes unb
   // Exercise the runtime's forwarding method against real SQL without starting agent backends.
   const runtime = Object.assign(Object.create(RuntimeService.prototype) as RuntimeService, { store: f.store })
   const read = () => runtime.listSessions({ ...owner, ontologyProjectId: f.project.projectId })
-  const result = await withSessionProjectAccess(f.store, owner, f.project.projectId, read)
-  assert.deepEqual(result.map(item => item.sessionId), ['session'])
+  const result = await listProjectSessions(f.store, owner, f.project.projectId, read)
+  assert.equal(result.ontology_project_id, f.project.projectId)
+  assert.deepEqual(result.sessions.map(item => item.sessionId), ['session'])
+  const ordinary = await listProjectSessions(f.store, owner, undefined, () => runtime.listSessions(owner))
+  assert.equal('ontology_project_id' in ordinary, false)
+  assert.equal(ordinary.sessions.length, 3)
   assert.equal((await f.store.listSessions(owner)).length, 3, 'ordinary discovery retains its existing scope')
   assert.deepEqual((await f.store.listSessions({ ...owner, ontologyProjectId: other.projectId })).map(item => item.sessionId), ['different-project'])
   assert.equal((await f.store.listSessions({ ...owner, orgId: 'foreign', ontologyProjectId: f.project.projectId })).length, 0)
@@ -134,7 +138,7 @@ void test('project session discovery refuses revoked access before and after lis
   assert.deepEqual(await withSessionProjectAccess(f.store, owner, undefined, read), ['private-session'])
   assert.equal(reads, 1)
   await f.mcp.updateMcpServer('org', f.server.id, { visible_to: { user_ids: ['alice'] } }, 'manager')
-  await assert.rejects(withSessionProjectAccess(f.store, owner, f.project.projectId, async () => {
+  await assert.rejects(listProjectSessions(f.store, owner, f.project.projectId, async () => {
     await f.mcp.updateMcpServer('org', f.server.id, { visible_to: { user_ids: [] } }, 'manager')
     return ['must-not-be-returned']
   }), error => error instanceof Error && 'statusCode' in error && error.statusCode === 403)

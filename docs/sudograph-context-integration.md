@@ -209,6 +209,11 @@ binding before returning sessions; ordinary owner, department, organization,
 active-only and source filters still apply. An unbound, deleted or reassigned
 session cannot acquire project membership through client metadata.
 
+Successful scoped replies include `ontology_project_id` after the current access
+and lifecycle checks. Consumers must match that acknowledgement against their
+request before using the list. An older server that ignores the query cannot be
+treated as returning project-scoped history. Ordinary replies remain unchanged.
+
 Project discovery rechecks current MCP/source access before and after the read
 and rejects project lifecycle changes during it. A denied project is an error,
 not an empty list or fallback to ordinary sessions. No context text, records or
