@@ -3985,6 +3985,13 @@ export function startServer(
           try {
             const configuredNs = await nexusClient.listConfiguredNamespaces()
             const orgPrefix = `org:${auth.orgId}:`
+            // Department items resolve through the caller's department chain
+            // (self-first) plus the legacy org-wide namespace — identical to
+            // /api/v1/me/authorized-system-configs below, so the two endpoints
+            // agree on which department items are configured.
+            const user = await authService.getUserById(auth.userId)
+            const deptId = user?.departmentId ?? null
+            const deptChain = deptId ? await authService.getDepartmentAncestorChain(auth.orgId, deptId) : []
             result.data = result.data.filter((item: { scope: string; pinyin: string }) => {
               // User-scope items are populated per-user *from the client*, so they
               // must be returned even when no value exists yet — otherwise the end
@@ -3995,10 +4002,12 @@ export function startServer(
               // Enterprise (system) / department (role) namespaces are org-scoped
               // in Nexus. Match each scope explicitly; any unknown future scope is
               // hidden until it has an explicit handler (safe default).
-              const ns = item.scope === 'system' ? `${orgPrefix}system:${item.pinyin}`
-                : item.scope === 'department' ? `${orgPrefix}role:${item.pinyin}`
-                : null
-              return ns !== null && configuredNs.has(ns)
+              if (item.scope === 'system') return configuredNs.has(`${orgPrefix}system:${item.pinyin}`)
+              if (item.scope === 'department') {
+                if (configuredNs.has(`${orgPrefix}role:${item.pinyin}`)) return true
+                return deptChain.some(d => configuredNs.has(`${orgPrefix}${deptSecretNamespace(d, item.pinyin)}`))
+              }
+              return false
             })
           } catch { /* nexus unavailable — return unfiltered */ }
         }
