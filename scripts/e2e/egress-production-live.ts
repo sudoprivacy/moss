@@ -118,6 +118,29 @@ async function main() {
   const answer = `DLP_MODEL_OK_${nonce()}`
   const userPrompt = `Synthetic acceptance record ${sensitive}. Reply only ${answer}. Do not use tools.`
   const ordinaryPrompt = `Reply only ${answer}. Do not use tools.`
+  const publicCompany = '北京星河科技有限公司'
+  const publicSource = 'const count = 1;'
+  const contact = `SyntheticContact${nonce()}`
+  const contract = `SyntheticContract${nonce()}`
+  const internalSource = `const privateAlgorithm${nonce()} = "synthetic-only";`
+  const internalDesign = `SyntheticInternalDesign${nonce()}`
+  const businessScenarios: Record<string, {
+    family: 'customer_contract' | 'source_technical'
+    text: string
+    protectedMarker?: string
+    preserved: string[]
+    removed: string[]
+  }> = {
+    'public-company': { family: 'customer_contract', text: `Public synthetic company: ${publicCompany}. ${ordinaryPrompt}`,
+      preserved: [publicCompany], removed: [] },
+    'public-technical': { family: 'source_technical', text: `Public source example: ${publicSource} ${ordinaryPrompt}`,
+      preserved: [publicSource], removed: [] },
+    'customer-record': { family: 'customer_contract', text: `客户名单：${publicCompany}\n联系人：${contact}\n合成合同：${contract}`,
+      protectedMarker: '客户名单：', preserved: [], removed: [publicCompany, contact, contract] },
+    'technical-record': { family: 'source_technical', text: `内部技术文档：${internalDesign}\n${internalSource}`,
+      protectedMarker: '内部技术文档：', preserved: [], removed: [internalDesign, internalSource] },
+  }
+  const scenarioNames = ['disabled-before', 'allow', 'redact', 'deny', 'outage', 'disabled-after', ...Object.keys(businessScenarios)]
   const base = buildKubectlBaseArgs(input.userPod.namespace, input.userPod.kubeconfig)
   const name = userPodName(input.ownerId, input.userPod.allocationId)
   const podSchema = z.object({ metadata: z.object({ uid: z.string().min(1) }), status: z.object({
@@ -149,7 +172,7 @@ async function main() {
     await request(`/api/v1/sessions/${sessionId}/terminate`, 'POST', {})
     proof.terminatedSessions.push(sessionId); save()
   }
-  async function conversation(label: string, text: string, isDenied: boolean) {
+  async function conversation(label: string, text: string, isDenied: boolean, isWholeRecord = false) {
     const created = await request<{ session_id: string; runtime: { type: string }; ws_url: string }>('/api/v1/sessions', 'POST',
       { ...(label === 'bootstrap' ? {} : { runtime: { type: 'cohost' } }), title: `DLP acceptance ${label}` })
     z.string().uuid().parse(created.session_id)
@@ -161,9 +184,15 @@ async function main() {
       stream = productConversation(created.ws_url, input.accessToken, input.outputDirectory, label)
       await stream.ready()
       if (isDenied) await assert.rejects(stream.turn(text))
-      else assert.equal((await stream.turn(text)).trim(), answer, 'The real model must return the fresh requested marker')
+      else {
+        const reply = (await stream.turn(text)).trim()
+        // Whole-record protection also removes prose instructions from the
+        // outbound request. Verify a real reply without requesting hidden text.
+        if (isWholeRecord) assert(reply.length > 0, 'The real model must answer the redacted record')
+        else assert.equal(reply, answer, 'The real model must return the fresh requested marker')
+      }
       const context = await request<{ context: { messages: unknown[] } }>(`/api/v1/sessions/${created.session_id}/context`)
-      assert(JSON.stringify(context.context.messages).includes(text), 'The local original must remain in persisted HTTP context')
+      assert(JSON.stringify(context.context.messages).includes(JSON.stringify(text).slice(1, -1)), 'The local original must remain in persisted HTTP context')
     } finally {
       try { stream?.close() } finally { await terminate(created.session_id) }
     }
@@ -198,8 +227,10 @@ async function main() {
     await applied(original.policy)
     const initialPod = await snapshot()
     proof.rows.push({ scenario: 'bootstrap', realModelAnswered: true, podUid: initialPod.uid })
-    for (const scenario of ['disabled-before', 'allow', 'redact', 'deny', 'outage', 'disabled-after']) {
+    for (const scenario of scenarioNames) {
       const isDenied = scenario === 'deny' || scenario === 'outage'
+      const business = businessScenarios[scenario]
+      const isWholeRecord = Boolean(business?.protectedMarker)
       const desired: EgressPolicy = { ...original.policy,
         enabled: !scenario.startsWith('disabled-'), mode: scenario === 'deny' ? 'deny' : 'redact',
         modelMounts: [input.modelMount], a2aMounts: [],
@@ -207,13 +238,14 @@ async function main() {
         // Public-corpus NER quality is measured by the shared analyzer benchmarks.
         analyzer: { ...original.policy.analyzer!, entities: ['PERSON'], scoreThreshold: 1,
           ...(scenario === 'outage' ? { url: 'http://127.0.0.1:1', timeoutMs: 1000 } : {}) },
-        businessPolicy: { version: 1, public_organizations: [], protected_terms: [sensitive], protected_markers: [] } }
+        businessPolicy: { version: 1, public_organizations: business ? [publicCompany] : [],
+          protected_terms: [sensitive], protected_markers: business?.protectedMarker ? [business.protectedMarker] : [] } }
       ownPolicies.add(fingerprint(desired))
       current = await request<PolicyView>(policyPath, 'PUT', { policy: desired, expectedRevision: current.policy.revision })
       await applied(current.policy)
       const before = await prompts()
-      const text = scenario === 'allow' ? ordinaryPrompt : userPrompt
-      await conversation(scenario, text, isDenied)
+      const text = business?.text ?? (scenario === 'allow' ? ordinaryPrompt : userPrompt)
+      await conversation(scenario, text, isDenied, isWholeRecord)
       const added = [...await prompts()].filter(value => !before.has(value))
       assert.equal(added.length, isDenied ? 0 : 1, 'Native model cache must agree with the allowed or denied call')
       const requestDigests: string[] = []
@@ -224,11 +256,16 @@ async function main() {
         assert.equal(sent.includes(sensitive), scenario.startsWith('disabled-'))
         if (scenario === 'redact') assert(sent.includes('[REDACTED:'))
         if (scenario === 'allow') assert(sent.includes(ordinaryPrompt))
+        if (isWholeRecord) assert(sent.includes('[REDACTED:PROTECTED_RECORD]'), 'The native outbound body must carry whole-record redaction')
+        for (const value of business?.removed ?? []) assert(!sent.includes(JSON.stringify(value).slice(1, -1)), 'Every protected record field must be removed before the model call')
+        for (const value of business?.preserved ?? []) assert(sent.includes(JSON.stringify(value).slice(1, -1)), 'Ordinary public business content must remain in the model request')
       }
       assert.deepEqual(await snapshot(), initialPod, 'A hot policy update must not replace or restart the owner runtime')
       proof.rows.push({ scenario, revision: current.policy.revision, nativeApplied: true,
         modelRequests: added.length, requestDigests, realModelAnswered: !isDenied, callerGateFailure: isDenied,
-        originalRetained: true, sameOwnerPod: true })
+        originalRetained: true, sameOwnerPod: true, freshReplyMarkerRequired: !isDenied && !isWholeRecord,
+        ...(business ? { businessFamily: business.family, wholeRecordRedacted: isWholeRecord,
+          publicContentPreserved: business.preserved.length > 0 } : {}) })
       save()
     }
     proof.sameOwnerPod = true
@@ -251,7 +288,7 @@ async function main() {
     observer?.client.close()
     await owners.close()
     proof.passed = !proof.error && proof.policyRestored && proof.nativeDefaultVerified && proof.legacySessionCreationRejected && proof.runtimeProvenanceVerified
-      && proof.cleanupErrors.length === 0 && proof.rows.length === 7
+      && proof.cleanupErrors.length === 0 && proof.rows.length === 1 + scenarioNames.length
     save()
     console.log(JSON.stringify(proof))
   }
