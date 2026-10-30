@@ -102,7 +102,7 @@ void test('the production worker reads pointers and atomically compiles edits th
     namespace: 'worker-acceptance', operationId: randomUUID(), language: 'en' })
   const token = 'fixture-worker-token-for-live-acceptance'
   const server = createCompilerContextWorker({ token, runtime, actor: 'worker',
-    binding: { authorityRef: 'authority', modelRef: 'model', sourceRefs: ['source'] } })
+    binding: { authorityRef: 'authority', modelRef: 'model', sourceRefs: ['source-z', 'source', 'source-z'] } })
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) })
   const address = server.address()
@@ -119,6 +119,7 @@ void test('the production worker reads pointers and atomically compiles edits th
       return JSON.parse(content.text) as Record<string, unknown>
     }
     const packet = await call('sudograph_context', {})
+    assert.deepEqual(packet.source_refs, ['source', 'source-z'])
     const context = packet.context as { revision: string; context_digest: string; text: string }
     assert.ok(!context.text.includes('row-only-sentinel'), 'records must not be preloaded into context')
     const pointer = { revision: context.revision, context_digest: context.context_digest }
@@ -134,7 +135,7 @@ void test('the production worker reads pointers and atomically compiles edits th
     }
     const head = await review({ operation: 'head' })
     assert.deepEqual({ ...head, result: undefined }, { format: 'sudograph-worker-review/v1', authority_ref: 'authority',
-      model_ref: 'model', source_refs: ['source'], scope: 'full-registered-model', result: undefined })
+      model_ref: 'model', source_refs: ['source', 'source-z'], scope: 'full-registered-model', result: undefined })
     assert.equal((head.result as { revision: string }).revision, context.revision)
     const document = (await review({ operation: 'document', endpoint: `/review/${'a'.repeat(32)}/v1` })).result as { revision: string; html: string }
     assert.equal(document.revision, context.revision)

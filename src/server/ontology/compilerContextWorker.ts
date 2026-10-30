@@ -20,6 +20,7 @@ export interface CompilerContextWorkerConfig {
 export function createCompilerContextWorker(config: CompilerContextWorkerConfig): Server {
   if (!/^[\x21-\x7e]{32,512}$/.test(config.token)) throw new Error('A deployment-owned worker token of 32-512 ASCII characters is required')
   const binding = structuredClone(config.binding), actor = config.actor
+  binding.sourceRefs = [...new Set(binding.sourceRefs)].sort()
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(binding.modelRef) || !actor.trim()) throw new Error('Invalid compiler worker binding')
   const client = new SudographModelClient(structuredClone(config.runtime))
   const privateValues = [resolve(config.runtime.compilerRoot), resolve(config.runtime.modelDirectory),
