@@ -276,7 +276,8 @@ return a safe read-unavailable result without compiler paths or credentials.
 Configuration is copied at server creation. Host context authorization does not
 grant agent tool access: exact reads retain the existing task/tool review gates.
 
-The server CI installs `sudograph-compiler==0.1.0` and requires its interpreter
+The server CI installs the SHA-256-checked wheel from Sudograph's `v0.1.0`
+GitHub Release and requires its interpreter
 before running the live worker scenario. It registers an unrelated SQLite
 source through the published SDK, reads the actual authenticated MCP context and
 catalogue, follows version-bound pointers across two live pages, compares them

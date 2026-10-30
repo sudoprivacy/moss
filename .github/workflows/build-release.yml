@@ -66,7 +66,10 @@ jobs:
       - name: Install the published Sudograph compiler for worker acceptance
         run: |
           python3 -m venv "$RUNNER_TEMP/moss-sudograph-compiler"
-          "$RUNNER_TEMP/moss-sudograph-compiler/bin/python" -m pip install sudograph-compiler==0.1.0
+          wheel="$RUNNER_TEMP/sudograph_compiler-0.1.0-py3-none-any.whl"
+          curl --fail --location --silent --show-error https://github.com/sudoprivacy/sudograph/releases/download/v0.1.0/sudograph_compiler-0.1.0-py3-none-any.whl --output "$wheel"
+          echo "b0fcd5b257b995f9764081968f4c797f00d5a70f1d04b771c11818f5204e6ef2  $wheel" | sha256sum --check
+          "$RUNNER_TEMP/moss-sudograph-compiler/bin/python" -m pip install "$wheel"
           echo "MOSS_SUDOGRAPH_COMPILER_PYTHON=$RUNNER_TEMP/moss-sudograph-compiler/bin/python" >> "$GITHUB_ENV"
 
       - name: Require the installed compiler for the live worker test
