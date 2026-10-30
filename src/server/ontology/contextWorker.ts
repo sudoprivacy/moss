@@ -29,6 +29,7 @@ export function registerModelContextReadTool(server: McpServer,
   read: (request: Record<string, unknown>) => Promise<unknown>) {
   server.registerTool('sudograph_context_read', {
     description: 'Read a source object, field, definition, evidence item, catalogue, subgraph or bounded live record page using the revision and digest from sudograph_context.',
+    _meta: { 'moss/input-profile': 'bounded-record-v1' },
     inputSchema: z.object({
       revision: z.string().min(1), context_digest: z.string().min(1), id: z.string().min(1),
       records: z.boolean().optional(), offset: z.number().int().min(0).optional(),

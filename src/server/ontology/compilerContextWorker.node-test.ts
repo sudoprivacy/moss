@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { SudographModelClient } from '@sudowork/sudograph-runtime'
 import { stringify } from 'yaml'
-import { ToolProtocol } from '../agentFederation/toolProtocol.js'
+import { ToolProtocol, validateReviewedToolArguments } from '../agentFederation/toolProtocol.js'
 import { createCompilerContextWorker } from './compilerContextWorker.js'
 
 void test('the production worker enforces endpoint authentication and fixed tool inputs before reading a model', async t => {
@@ -30,6 +30,10 @@ void test('the production worker enforces endpoint authentication and fixed tool
     await protocol.connect()
     const descriptors = await protocol.descriptors()
     assert.deepEqual(descriptors.map(item => item.tool.name).sort(), ['sudograph_context', 'sudograph_context_read', 'sudograph_model_apply', 'sudograph_model_contract'])
+    const reader = descriptors.find(item => item.tool.name === 'sudograph_context_read')!.tool
+    validateReviewedToolArguments(reader)
+    validateReviewedToolArguments(reader, { revision: 'revision', context_digest: 'digest', id: 'catalog',
+      selection: { kind: 'connected', roots: ['stable-object'] } })
     assert.equal((await protocol.call('sudograph_context', { model_ref: 'foreign', path: '/foreign-model' })).isError, true)
     const failure = await protocol.call('sudograph_context', {})
     assert.equal(failure.isError, true)
