@@ -53,7 +53,7 @@ export class ReviewedMcpAccess {
     return { server, config, policyDigest: contentDigest({ server, policy }) }
   }
 
-  async authorizeHostRead(org: string, userId: string, serverId: string, tool: string, args: Record<string, unknown> = {}) {
+  async authorizeHostRead(org: string, userId: string, serverId: string, tool: string, args?: Record<string, unknown>) {
     const resource = `mcp:${serverId}/${tool}`
     const review = await this.store.review(org, resource)
     if (!review || review.serverId !== serverId || review.tool.name !== tool || review.action !== 'read') toolFailure('HOST_READ_REVIEW_REQUIRED', 403)
@@ -67,9 +67,20 @@ export class ReviewedMcpAccess {
   /** Trusted host reads only. Agent calls retain the separate task/grant/asset gate. */
   async readForHost(org: string, userId: string, serverId: string, tool: string,
     options: { arguments?: Record<string, unknown>; signal?: AbortSignal } = {}) {
+    const result = await this.withHostRead(org, userId, serverId, tool, { ...options, arguments: options.arguments ?? {} },
+      ({ protocol, args }) => protocol.call(tool, args!))
+    if (result.isError) toolFailure('HOST_READ_FAILED', 502)
+    return result
+  }
+
+  /** Server-only operation scope, never an agent callback. Undefined arguments authorize a schema without invoking it. */
+  async withHostRead<T>(org: string, userId: string, serverId: string, tool: string,
+    options: { arguments?: Record<string, unknown>; signal?: AbortSignal },
+    read: (scope: { protocol: ToolProtocol; args: Record<string, unknown> | undefined; review: ReviewedTool; config: ToolConnection; signal: AbortSignal }) => Promise<T>): Promise<T> {
     // Snapshot caller-owned selections before the first asynchronous policy lookup.
     // Validation below still enforces the exact independently reviewed descriptor.
-    const args = snapshotToolArguments(options.arguments ?? {})
+    const args = options.arguments === undefined ? undefined : snapshotToolArguments(options.arguments)
+    const cancellation = options.signal
     const resource = `mcp:${serverId}/${tool}`
     const initial = await this.authorizeHostRead(org, userId, serverId, tool, args)
     const { review } = initial
@@ -80,7 +91,7 @@ export class ReviewedMcpAccess {
       const allowed = await this.authorize(org, userId, latest)
       if (contentDigest({ policy: allowed.policyDigest, config: allowed.config }) !== identity) toolFailure('TOOL_POLICY_CHANGED', 403)
     }
-    const signal = AbortSignal.any([AbortSignal.timeout(30000), ...(options.signal ? [options.signal] : [])])
+    const signal = AbortSignal.any([AbortSignal.timeout(30000), ...(cancellation ? [cancellation] : [])])
     signal.throwIfAborted()
     const protocol = this.protocol(initial.config, signal)
     try {
@@ -89,10 +100,9 @@ export class ReviewedMcpAccess {
       if (descriptor?.digest !== review.digest) toolFailure('TOOL_DESCRIPTOR_CHANGED')
       await current()
       signal.throwIfAborted()
-      const result = await protocol.call(tool, args)
+      const result = await read({ protocol, args, review, config: initial.config, signal })
       await current()
       signal.throwIfAborted()
-      if (result.isError) toolFailure('HOST_READ_FAILED', 502)
       return result
     } finally { await protocol.close() }
   }

@@ -168,6 +168,12 @@ export class OntologyProjectRegistry {
     return { ...project(row), sessionId, userId: String(binding.user_id), bindingId: String(binding.binding_id) }
   }
 
+  /** Reuse the durable binding fence for agent context and human review reads. */
+  async assertCurrentBinding(binding: OntologySessionBinding): Promise<void> {
+    const current = await this.resolveSession(binding.sessionId)
+    if (!current || JSON.stringify(current) !== JSON.stringify(binding)) throw unavailable()
+  }
+
   /** Every runner recovers authority from the database, never from manifest context text. */
   async runnerContext(owner: { sessionId: string; orgId: string; userId: string }, ports?: OntologyContextPorts): Promise<BackendHostContextResolver | undefined> {
     const current = await this.resolveSession(owner.sessionId)
@@ -193,9 +199,8 @@ export class OntologyProjectRegistry {
       if (!before) throw unavailable()
       await ports.authorize(before)
       const context = await ports.readContext(before)
-      const after = await this.resolveSession(sessionId)
-      if (!after || JSON.stringify(before) !== JSON.stringify(after)) throw unavailable()
-      await ports.authorize(after)
+      await this.assertCurrentBinding(before)
+      await ports.authorize(before)
       return validateOntologyContext(context).text
     }
   }

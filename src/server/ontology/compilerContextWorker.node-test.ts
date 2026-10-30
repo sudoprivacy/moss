@@ -15,6 +15,10 @@ import { SqliteDriver } from '../db/driver.js'
 import { McpStore } from '../mcp/db.js'
 import { ReviewedMcpAccess, mcpServerDigest } from '../mcp/reviewedAccess.js'
 import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
+import { ONTOLOGY_PROJECT_SCHEMA } from './projectSchema.js'
+import { OntologyProjectRegistry } from './projectRegistry.js'
+import { McpOntologyContextPorts } from './mcpContextPorts.js'
+import { McpOntologyReviewPorts } from './mcpReviewPorts.js'
 
 void test('the production worker enforces endpoint authentication and fixed tool inputs before reading a model', async t => {
   const token = 'fixture-worker-token-for-acceptance-only'
@@ -150,10 +154,13 @@ void test('the production worker reads pointers and atomically compiles edits th
     const access = new ReviewedMcpAccess(reviews, { mcp, addresses: () => ['127.0.0.1'],
       member: async (_org, userId) => isMember && userId === 'alice'
         ? { isAdmin: false, userId, departmentId: null, visibleDepartmentIds: null } : null })
-    const exact = (await protocol.descriptors()).find(item => item.tool.name === 'sudograph_context_read')!
-    await reviews.saveReview({ ...exact, orgId: 'org', serverId: registered.id,
-      resource: `mcp:${registered.id}/sudograph_context_read`, serverDigest: mcpServerDigest(registered),
-      action: 'read', sensitive: true, outbound: false, enabled: true, revision: 'exact-1', reviewedBy: 'manager', reviewedAt: Date.now() }, null)
+    const descriptors = await protocol.descriptors()
+    for (const name of ['sudograph_context', 'sudograph_context_read']) {
+      const descriptor = descriptors.find(item => item.tool.name === name)!
+      await reviews.saveReview({ ...descriptor, orgId: 'org', serverId: registered.id,
+        resource: `mcp:${registered.id}/${name}`, serverDigest: mcpServerDigest(registered),
+        action: 'read', sensitive: true, outbound: false, enabled: true, revision: name + '-1', reviewedBy: 'manager', reviewedAt: Date.now() }, null)
+    }
     const hostRead = () => access.readForHost('org', 'alice', registered.id, 'sudograph_context_read',
       { arguments: { ...pointer, id: object.id, records: true, limit: 2 } })
     const hostResult = await hostRead()
@@ -162,6 +169,18 @@ void test('the production worker reads pointers and atomically compiles edits th
       'the reviewed host read reaches the published compiler and the real SQLite source')
     isMember = false
     await assert.rejects(hostRead(), { code: 'TOOL_USER_DENIED' })
+    isMember = true
+    sqlite.exec(`CREATE TABLE sessions(session_id TEXT PRIMARY KEY,org_id TEXT,user_id TEXT,deleted_at BIGINT);
+      INSERT INTO sessions VALUES ('review-conversation','org','alice',NULL); ${ONTOLOGY_PROJECT_SCHEMA}`)
+    const registry = new OntologyProjectRegistry(driver), contextPorts = new McpOntologyContextPorts(access, mcp)
+    const project = await registry.register({ orgId: 'org', authorityRef: 'authority', workerRef: registered.id,
+      modelRef: 'model', sourceRefs: ['source', 'source-z'] })
+    const binding = await registry.bind({ sessionId: 'review-conversation', projectId: project.projectId, orgId: 'org', userId: 'alice' }, contextPorts)
+    const reviewPorts = new McpOntologyReviewPorts(access, mcp, async current => {
+      await registry.assertCurrentBinding(current)
+      await contextPorts.authorize(current)
+      await registry.assertCurrentBinding(current)
+    })
     const review = async (input: Record<string, unknown>, status = 200) => {
       const response = await fetch(`http://127.0.0.1:${address.port}/review`, { method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
@@ -169,8 +188,8 @@ void test('the production worker reads pointers and atomically compiles edits th
       return response.json() as Promise<Record<string, unknown>>
     }
     const head = await review({ operation: 'head' })
-    assert.deepEqual({ ...head, result: undefined }, { format: 'sudograph-worker-review/v1', authority_ref: 'authority',
-      model_ref: 'model', source_refs: ['source', 'source-z'], scope: 'full-registered-model', result: undefined })
+    assert.deepEqual({ ...head, result: undefined }, { format: 'sudograph-worker-review/v2', authority_ref: 'authority',
+      model_ref: 'model', resource_ref: 'model', source_refs: ['source', 'source-z'], scope: 'full-registered-model', result: undefined })
     assert.equal((head.result as { revision: string }).revision, context.revision)
     const document = (await review({ operation: 'document', endpoint: `/review/${'a'.repeat(32)}/v1` })).result as { revision: string; html: string }
     assert.equal(document.revision, context.revision)
@@ -179,22 +198,25 @@ void test('the production worker reads pointers and atomically compiles edits th
     assert.deepEqual((reviewedPage.result as { rows: unknown[][] }).rows, expected.slice(0, 2))
     let canReview = true
     const viewer = new SudographReviewHost({
-      authorize: async binding => {
-        assert.deepEqual({ workspaceId: binding.workspaceId, conversationId: binding.conversationId }, { workspaceId: 'model', conversationId: 'review-conversation' })
+      authorize: async browserBinding => {
+        assert.deepEqual({ workspaceId: browserBinding.workspaceId, conversationId: browserBinding.conversationId }, { workspaceId: project.projectId, conversationId: 'review-conversation' })
         if (!canReview) throw new Error('Review access revoked')
+        await reviewPorts.authorize(binding)
       },
-      read: async (_model, request) => (await review(request)).result,
+      read: (_project, request) => reviewPorts.read(binding, request),
     })
     t.after(() => viewer.close())
-    const launch = await viewer.createSession({ workspaceId: 'model', conversationId: 'review-conversation' })
+    const launch = await viewer.createSession({ workspaceId: project.projectId, conversationId: 'review-conversation' })
     const cookie = { Cookie: launch.cookie.name + '=' + launch.cookie.value }
     assert.equal((await fetch(launch.url)).status, 403)
     const rendered = await fetch(launch.url, { headers: cookie })
     assert.equal(rendered.status, 200)
-    assert.ok((await rendered.text()).includes(object.id), 'the installed shared host serves the actual worker-compiled graph')
+    const renderedHtml = await rendered.text()
+    assert.ok(renderedHtml.includes(object.id), 'the installed shared host serves the actual worker-compiled graph')
+    assert.ok(renderedHtml.includes(project.projectId), 'compiled reads use the registered project ID rather than the worker model name')
     const browserRead = async (operation: string, params?: Record<string, unknown>) => {
       const response = await fetch(launch.url + 'v1', { method: 'POST', headers: { ...cookie, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ view: 'model', operation, ...(params ? { params } : {}) }) })
+        body: JSON.stringify({ view: project.projectId, operation, ...(params ? { params } : {}) }) })
       assert.equal(response.status, 200)
       return (await response.json() as { result: Record<string, unknown> }).result
     }
