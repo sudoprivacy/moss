@@ -276,6 +276,42 @@ return a safe read-unavailable result without compiler paths or credentials.
 Configuration is copied at server creation. Host context authorization does not
 grant agent tool access: exact reads retain the existing task/tool review gates.
 
+For an existing registered PostgreSQL or MySQL source, the deployment may supply
+`runtime.source` using the published SDK's provider configuration:
+
+```json
+{
+  "dsn": "registered://sales-source",
+  "connector": {
+    "sourceType": "postgresql",
+    "host": "sales-db.internal",
+    "port": 5432,
+    "database": "sales",
+    "username": "sales_reader",
+    "params": { "schema": "public" }
+  }
+}
+```
+
+Inject `SUDOGRAPH_SOURCE_PASSWORD` through the existing deployment secret manager
+alongside the worker token. Configuration files reject embedded passwords; missing
+source credentials refuse startup instead of using an ambient database login.
+For MySQL, set `sourceType` to `mysql`, select its database and port, and omit
+`params`: PostgreSQL schema settings are rejected rather than silently ignored.
+The worker does not create a new Vault or credential registry. Rotated injected
+credentials require the ordinary worker restart. Omitting `runtime.source`
+retains the existing SQLite path; a remote SQLite file is never interpreted on
+the WebUI host. The worker still requires an already registered model: connection
+intake, source identity and execution placement remain host responsibilities.
+
+These providers are the published shared SDK implementation, including its
+read-only observation transaction and explicit source scope. The ordinary server
+CI exercises the actual CLI against PostgreSQL with an independent restricted
+database role, a table, a database view and an inaccessible table. It checks
+complete authorized inventory, live records against an independent query, NULL
+values and unchanged source rows. MySQL uses the same published provider but
+does not acquire a new cloud acceptance claim from that PostgreSQL journey.
+
 The same endpoint also exposes `sudograph_model_contract` and
 `sudograph_model_apply`, matching the native authoring tool names. The contract
 contains current YAML and the compiler's checked document schema; apply accepts
