@@ -2,6 +2,7 @@ import { z } from 'zod/v4'
 import { lazySchema } from '../utils/lazySchema.js'
 import type { SessionRuntimeInfo, SessionRuntimeOptions, SessionRuntimeType } from './sessionManager.js'
 import type { QmsRuntimeConfig } from './qms/config.js'
+import { analyzerRelaySchema, ownerRuntimeOverridesSchema, type OwnerRuntimeOverrides } from './configuration/ownerRuntimeProfileSchema.js'
 
 export const runtimeInfoSchema = lazySchema(() =>
   z.object({
@@ -176,7 +177,7 @@ export const serverFileConfigSchema = lazySchema(() =>
     egressGate: z.object({
       defaultPolicyFile: z.string().min(1).optional(),
       analyzerImage: z.string().min(1).optional(),
-      analyzerRelay: z.object({ image: z.string().min(1), secretName: z.string().regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/) }).optional(),
+      analyzerRelay: analyzerRelaySchema.optional(),
       localPolicyFile: z.string().min(1).optional(),
       localOrganizationId: z.string().min(1).optional(),
     }).refine(value => Boolean(value.localPolicyFile) === Boolean(value.localOrganizationId),
@@ -188,6 +189,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       userRuntimeImage: z.string().min(1).optional(),
       userRuntimeHost: z.string().min(1).optional(),
       userRuntimeAgentsPerAllocation: z.number().int().positive().optional(),
+      ownerRuntimeOverrides: ownerRuntimeOverridesSchema.optional(),
       namespace: z.string().default('moss-sessions'),
       // Empty string → omit runtimeClassName (customer cluster without gvisor).
       runtimeClassName: z.string().default('gvisor'),
@@ -724,6 +726,7 @@ export type ServerConfig = {
     userRuntimeImage?: string
     userRuntimeHost?: string
     userRuntimeAgentsPerAllocation?: number
+    ownerRuntimeOverrides?: OwnerRuntimeOverrides
     namespace: string
     runtimeClassName: string
     kubeconfig?: string

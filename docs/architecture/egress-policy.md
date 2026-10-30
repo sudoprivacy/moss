@@ -90,6 +90,19 @@ requires a new session. Existing single-provider deployments omit this setting.
 
 ## Evidence
 
+Managed deployments use [owner runtime profiles](../shared-agent-runtime.md#shared-release-and-upgrades)
+to stage a verified release and analyzer placement for an acceptance owner.
+Changing the global relay configuration also changes the desired Pod
+specification. A disabled content policy does not bypass an explicit runtime
+upgrade, so retain the existing configuration for owners outside the rollout.
+
+The real production qualifier `scripts/e2e/egress-production-live.ts` reads the
+deployed `MOSS_SERVER_CONFIG` and default `MOSS_RUNTIME_MANIFEST_PATH`. It uses
+the same profile loader as the controller, records the configuration hash,
+checks the selected analyzer placement, and verifies the running image and
+binary before accepting policy application. A canary profile can therefore use
+a different verified release from the default retained by other owners.
+
 `egressPolicyService.node-test.ts` covers desired-versus-applied state and
 propagation that preserves organization overrides. The real Node server
 journey in `lbLifecycleE2e.test.ts` exercises authentication, role boundaries,

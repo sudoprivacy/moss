@@ -129,6 +129,16 @@ binary digest and build provenance. Inspection reports retained runtime drift.
 Existing Pods require an explicit upgrade; discovery never silently replaces
 them.
 
+For a phased rollout, `k8s.ownerRuntimeOverrides` selects trusted release
+manifests and optional analyzer configuration by owner UUID. Each entry contains
+an absolute `runtimeManifestPath` and optionally `analyzerImage` or
+`analyzerRelay: { image, secretName }`. Other owners retain the default release
+and analyzer configuration. Moss passes this selection to the shared SDK;
+inspection, model startup, policy delivery and explicit upgrades use the same
+profile across that owner's allocations. Persist the selection in deployment
+configuration across controller restarts until the rollout is complete. Tenant
+policy cannot select a profile, change the issuer or change retained storage.
+
 An upgrade obtains an owner lock, refuses active work and untracked native
 controllers, stops tracked native sessions and replaces the exact observed
 Pod UID. The PVC and private Service remain. Moss resumes durable session IDs

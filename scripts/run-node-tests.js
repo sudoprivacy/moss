@@ -38,6 +38,7 @@ const nodeTestFiles = [
   'src/server/nexus/agentNamespace.node-test.ts',
   'src/server/backends/scodeProxyConfig.node-test.ts',
   'src/server/configuration/egressPolicyService.node-test.ts',
+  'src/server/configuration/ownerRuntimeProfiles.node-test.ts',
   'src/server/externalProviders/externalProviders.node-test.ts',
   'src/server/agentFederation/agentFederation.node-test.ts',
   'src/server/agentFederation/standardHttpAdapter.node-test.ts',
