@@ -14,6 +14,8 @@ import { connectSessionRuntime, waitForSessionRuntime } from '../../src/server/n
 import { productConversation } from './productConversation.js'
 import { assertProductConversationUrl } from './productConversationUrl.js'
 import type { EgressPolicyService } from '../../src/server/configuration/egressPolicyService.js'
+import { readOwnerRuntimeOverrides } from '../../src/server/configuration/ownerRuntimeProfiles.js'
+import { analyzerRelaySchema, ownerRuntimeOverridesSchema } from '../../src/server/configuration/ownerRuntimeProfileSchema.js'
 
 type PolicyView = Awaited<ReturnType<EgressPolicyService['view']>>
 const fixtureSchema = z.object({
@@ -44,9 +46,20 @@ async function main() {
   assert(origin.protocol === 'https:' || (origin.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(origin.hostname)))
   const issuer = resolveCohostNexusConfig()
   assert(issuer.mode === 'external' && issuer.tls, 'Use the deployed mTLS issuer')
+  const configPath = process.env.MOSS_SERVER_CONFIG
+  assert(configPath && isAbsolute(configPath), 'Use the deployed absolute Moss configuration path')
+  const deploymentBytes = readFileSync(configPath)
+  const deployment = z.object({
+    k8s: z.object({ ownerRuntimeOverrides: ownerRuntimeOverridesSchema.optional() }).optional(),
+    egressGate: z.object({ analyzerRelay: analyzerRelaySchema.optional() }).optional(),
+  }).parse(JSON.parse(deploymentBytes.toString('utf8')))
+  const selected = readOwnerRuntimeOverrides(deployment.k8s?.ownerRuntimeOverrides)?.[input.ownerId]
   const manifestPath = process.env.MOSS_RUNTIME_MANIFEST_PATH
-  assert(manifestPath && isAbsolute(manifestPath), 'Use the deployed absolute runtime manifest path')
-  const release = readRuntimeRelease(manifestPath)
+  assert(manifestPath && isAbsolute(manifestPath), 'Use the deployed absolute default runtime manifest path')
+  const release = selected?.release ?? readRuntimeRelease(manifestPath)
+  assert.deepEqual(input.userPod.egressAnalyzerRelay,
+    selected ? selected.egressAnalyzerRelay : deployment.egressGate?.analyzerRelay,
+    'Observe the analyzer placement actually selected by Moss for this owner')
   assert.equal(input.userPod.image, release.image.reference)
   // Refuse reused evidence before creating sessions or changing a saved policy.
   mkdirSync(input.outputDirectory, { mode: 0o700 })
@@ -54,6 +67,8 @@ async function main() {
     ownerId: input.ownerId, organizationId: input.organizationId, releaseId: release.releaseId,
     engineCommit: release.engine.commit, cohostVersion: release.cohost.version,
     nexusVersion: release.cohost.nexusVersion, imageDigest: release.image.digest,
+    deploymentConfigSha256: createHash('sha256').update(deploymentBytes).digest('hex'),
+    ownerScopedRuntime: Boolean(selected), runtimeProvenanceVerified: false,
     platformPolicyMutations: 0, policyRestored: false, sameOwnerPod: false,
     nativeDefaultVerified: false, legacySessionCreationRejected: false,
     coldRestartTested: false, retainedRuntimeForExplicitCleanup: true,
@@ -177,7 +192,9 @@ async function main() {
     proof.legacySessionCreationRejected = true
     const connection = await owners.find(input.ownerId)
     assert(connection, 'The product did not create the isolated owner runtime')
-    observer = await connectSessionRuntime(connection, input.ownerId)
+    const verified = await owners.resolve(input.ownerId)
+    proof.runtimeProvenanceVerified = true
+    observer = await connectSessionRuntime(verified, input.ownerId)
     await applied(original.policy)
     const initialPod = await snapshot()
     proof.rows.push({ scenario: 'bootstrap', realModelAnswered: true, podUid: initialPod.uid })
@@ -233,7 +250,7 @@ async function main() {
     } catch { proof.cleanupErrors.push('policy-restore') }
     observer?.client.close()
     await owners.close()
-    proof.passed = !proof.error && proof.policyRestored && proof.nativeDefaultVerified && proof.legacySessionCreationRejected
+    proof.passed = !proof.error && proof.policyRestored && proof.nativeDefaultVerified && proof.legacySessionCreationRejected && proof.runtimeProvenanceVerified
       && proof.cleanupErrors.length === 0 && proof.rows.length === 7
     save()
     console.log(JSON.stringify(proof))

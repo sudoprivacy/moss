@@ -341,6 +341,10 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       userRuntimeImage: process.env.MOSS_USER_RUNTIME_IMAGE || raw.k8s.userRuntimeImage,
       userRuntimeHost: process.env.MOSS_USER_RUNTIME_HOST || raw.k8s.userRuntimeHost,
       userRuntimeAgentsPerAllocation: readIntEnv('MOSS_USER_RUNTIME_AGENTS_PER_ALLOCATION', raw.k8s.userRuntimeAgentsPerAllocation),
+      ownerRuntimeOverrides: raw.k8s.ownerRuntimeOverrides
+        ? Object.fromEntries(Object.entries(raw.k8s.ownerRuntimeOverrides).map(([ownerId, profile]) =>
+          [ownerId, { ...profile, runtimeManifestPath: normalizePath(profile.runtimeManifestPath) }]))
+        : undefined,
       namespace: process.env.MOSS_K8S_NAMESPACE || raw.k8s.namespace,
       // `??` (not `||`): an explicit empty override means "omit runtimeClassName"
       // (customer cluster without a gvisor RuntimeClass), so don't fall back.

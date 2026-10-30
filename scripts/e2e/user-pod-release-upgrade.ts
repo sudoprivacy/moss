@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { z } from 'zod'
 import { UserPodService, userPodName, type UserPodOptions } from '@sudo/user-runtime'
 import { RuntimeReleaseSchema } from '@sudo/user-runtime/release'
+import { buildKubectlBaseArgs, readK8sResource } from '@sudo/user-runtime/kubernetes'
 import { connectSessionRuntime, waitForSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
 import { ManagedAgentClient } from '../../src/server/nexus/managedAgentClient.js'
 import { connectController } from './cohost-controller-live.js'
@@ -16,12 +17,13 @@ assert.equal(process.env.MOSS_USER_POD_E2E, '1')
 const options = JSON.parse(await readFile(optionsFile, 'utf8')) as UserPodOptions
 const release = RuntimeReleaseSchema.parse(options.release)
 const model = z.object({ model: z.string().min(1) }).parse(JSON.parse(await readFile(modelFile, 'utf8')))
-const fixture = z.object({ owner: z.string().startsWith('user-pod-e2e-'), agentId: z.string(),
+const fixture = z.object({ owner: z.string().startsWith('user-pod-e2e-'), otherOwner: z.string().startsWith('user-pod-e2e-'), agentId: z.string(),
   image: z.string(), pods: z.array(z.string()) }).parse(JSON.parse(await readFile(join(previousEvidence, 'fixture.json'), 'utf8')))
 const previous = z.object({ success: z.literal(true), durableSessionIds: z.array(z.string()).length(2) })
   .parse(JSON.parse(await readFile(join(previousEvidence, 'user-pod-result.json'), 'utf8')))
 assert.equal(fixture.image, options.image)
 assert.equal(fixture.pods[0], userPodName(fixture.owner))
+assert.equal(fixture.pods[1], userPodName(fixture.otherOwner))
 const paths = [`/agents/${fixture.agentId}/memory/MEMORY.md`,
   ...previous.durableSessionIds.map(sid => `/sessions/${sid}/transcript.jsonl`)]
 const original = new UserPodService(options, undefined, waitForSessionRuntime)
@@ -61,13 +63,35 @@ try {
 } finally { await restored.close() }
 
 const targetRelease = { ...release, releaseId: `${release.releaseId}-accepted` }
-const target = new UserPodService({ ...options, release: targetRelease }, undefined, waitForSessionRuntime)
+const target = new UserPodService({ ...options,
+  ownerRuntimeOverrides: { [fixture.owner]: { release: targetRelease,
+    ...(options.egressAnalyzer ? { egressAnalyzer: options.egressAnalyzer } : {}),
+    ...(options.egressAnalyzerRelay ? { egressAnalyzerRelay: options.egressAnalyzerRelay } : {}),
+  } },
+}, undefined, waitForSessionRuntime)
+const base = buildKubectlBaseArgs(options.namespace, options.kubeconfig)
+const otherSnapshot = async () => {
+  const pod = await readK8sResource(base, 'pod', userPodName(fixture.otherOwner))
+  assert(pod?.metadata.uid)
+  return { uid: pod.metadata.uid }
+}
+let otherBefore: Awaited<ReturnType<typeof otherSnapshot>>
+const verifyOtherOwner = async () => {
+  assert.equal((await target.inspect(fixture.otherOwner)).isDrifted, false)
+  const connection = await connectSessionRuntime(await target.resolve(fixture.otherOwner), fixture.otherOwner)
+  try { assert.equal(await connection.client.stat(paths[0]!, ''), null, 'The other owner cannot see the upgraded owner memory') }
+  finally { connection.client.close() }
+  assert.deepEqual(await otherSnapshot(), otherBefore, 'The other owner keeps its running Pod through this rollout')
+}
 let agent: ManagedAgentClient | undefined
 const sessions: Awaited<ReturnType<ManagedAgentClient['startSession']>>[] = []
 const controllers: ReturnType<typeof connectController>[] = []
 try {
+  otherBefore = await otherSnapshot()
   assert.equal((await target.inspect(fixture.owner)).isDrifted, true)
+  await verifyOtherOwner()
   await target.upgrade(fixture.owner, drain)
+  await verifyOtherOwner()
   assert.equal((await target.inspect(fixture.owner)).isDrifted, false)
   const connection = await connectSessionRuntime(await target.resolve(fixture.owner), fixture.owner)
   agent = new ManagedAgentClient(connection.client, connection.authToken)
@@ -99,6 +123,7 @@ try {
     pod: userPodName(fixture.owner), rejectedBinaryRolledBack: true, releaseId: targetRelease.releaseId,
     imageDigestVerified: release.image.digest, engineCommit: release.engine.commit,
     durableSessionIds: previous.durableSessionIds, resumedReplies: sessions.length,
+    ownerScopedRollout: true, otherOwnerPodPreserved: true, otherOwnerAuthenticatedRpcPassed: true,
     preserved: paths.map((path, index) => ({ path, sha256: createHash('sha256').update(snapshots[index]!).digest('hex') })),
   }, null, 2))
   process.stdout.write('Real owner runtime release verification, rollback and two durable resumed replies passed\n')

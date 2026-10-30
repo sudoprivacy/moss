@@ -85,6 +85,7 @@ import type { NexusSessionEndpoint } from '@nexus-ai-fs/vfs-client'
 import { assertRuntimePlacement } from './runtime/runtimePlacementPolicy.js'
 import { readRuntimeRelease } from '@sudo/user-runtime/release'
 import { resolveCohostNexusConfig } from './nexus/nexusEnvConfig.js'
+import { readOwnerRuntimeOverrides } from './configuration/ownerRuntimeProfiles.js'
 import { resolveCohostConnection as externalCohostConnection, encodeCohostConnection } from './nexus/cohostConnection.js'
 import { connectSessionRuntime, waitForSessionRuntime, type SessionConnectionConfig } from './nexus/sessionConnection.js'
 import { buildCohostProxyConfig, cohostModelName } from './backends/scodeProxyConfig.js'
@@ -427,6 +428,7 @@ export class RuntimeService {
     const release = process.env.MOSS_RUNTIME_MANIFEST_PATH ? readRuntimeRelease(process.env.MOSS_RUNTIME_MANIFEST_PATH) : undefined
     if (release && !k8s) throw new Error('A shared runtime release requires Kubernetes placement')
     const userRuntimeImage = release?.image.reference ?? k8s?.userRuntimeImage
+    if (Object.keys(k8s?.ownerRuntimeOverrides ?? {}).length && !userRuntimeImage) throw new Error('Owner runtime profiles require managed owner Pods')
     if (release && k8s?.userRuntimeImage && k8s.userRuntimeImage !== userRuntimeImage) throw new Error('Configured user image differs from the runtime release manifest')
     if (!this.userPods && k8s && userRuntimeImage) {
       const issuer = resolveCohostNexusConfig()
@@ -441,6 +443,7 @@ export class RuntimeService {
         issuer: { endpoint: issuer.endpoint, tls: issuer.tls },
         ...(options.config.egressGate?.analyzerImage ? { egressAnalyzer: { image: options.config.egressGate.analyzerImage } } : {}),
         ...(options.config.egressGate?.analyzerRelay ? { egressAnalyzerRelay: options.config.egressGate.analyzerRelay } : {}),
+        ...(k8s.ownerRuntimeOverrides ? { ownerRuntimeOverrides: readOwnerRuntimeOverrides(k8s.ownerRuntimeOverrides) } : {}),
       }, undefined, waitForSessionRuntime)
     }
     if (this.userPods) {
