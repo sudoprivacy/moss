@@ -59,6 +59,7 @@ describe('workspace access during runtime startup', () => {
       config,
       {
         connectInternalChannel: async () => { throw new Error('Kubernetes workspace must not open a cohost channel') },
+        connectCohostRuntime: async () => { throw new Error('Kubernetes workspace must not allocate an owner cohost') },
         ensureSessionReady: async (id) => {
           expect(id).toBe(session.sessionId)
           onStartupJoined()
@@ -104,6 +105,7 @@ describe('workspace access during runtime startup', () => {
       config,
       {
         connectInternalChannel: async () => { throw new Error('Kubernetes workspace must not open a cohost channel') },
+        connectCohostRuntime: async () => { throw new Error('Kubernetes workspace must not allocate an owner cohost') },
         ensureSessionReady: async () => {
           restores++
           return { session, attempt: {} } as never
