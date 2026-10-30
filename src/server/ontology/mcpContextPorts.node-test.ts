@@ -16,7 +16,7 @@ import { McpOntologyContextPorts } from './mcpContextPorts.js'
 import { registerModelContextTool } from './contextWorker.js'
 
 async function fixture(t: TestContext, isWorkerImplementation = false) {
-  const state = { calls: 0, member: true, secret: 'fixture-worker-secret' as string | null,
+  const state = { calls: 0, exactCalls: [] as Record<string, unknown>[], member: true, secret: 'fixture-worker-secret' as string | null,
     workerFailure: false,
     description: 'Read the current complete registered model context', headers: [] as string[],
     beforeReply: undefined as (() => Promise<void>) | undefined,
@@ -38,6 +38,13 @@ async function fixture(t: TestContext, isWorkerImplementation = false) {
         state.calls++
         await state.beforeReply?.()
         return { content: [{ type: 'text', text: JSON.stringify(state.response) }] }
+      })
+      sdk.registerTool('sudograph_context_read', { description: 'Read an exact registered model pointer',
+        inputSchema: z.object({ revision: z.string().min(1), id: z.string().min(1), selection: z.record(z.string(), z.unknown()).optional() }).strict(),
+        _meta: { 'moss/input-profile': 'bounded-record-v1' }, annotations: { readOnlyHint: true } }, async args => {
+        state.exactCalls.push(args)
+        await state.beforeReply?.()
+        return { content: [{ type: 'text', text: JSON.stringify({ pointer: args.id, selection: args.selection }) }] }
       })
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
       res.once('close', () => { void sdk.close() })
@@ -74,8 +81,9 @@ async function fixture(t: TestContext, isWorkerImplementation = false) {
     } }),
   })
   const protocol = access.protocol((await access.connection('org', server.id)).config, AbortSignal.timeout(10000))
-  let descriptor
-  try { await protocol.connect(); descriptor = (await protocol.descriptors())[0] } finally { await protocol.close() }
+  let descriptors
+  try { await protocol.connect(); descriptors = await protocol.descriptors() } finally { await protocol.close() }
+  const descriptor = descriptors.find(item => item.tool.name === 'sudograph_context')
   assert(descriptor)
   const review = await reviews.saveReview({ ...descriptor, orgId: 'org', serverId: server.id,
     resource: `mcp:${server.id}/sudograph_context`, serverDigest: mcpServerDigest(server), action: 'read', sensitive: true,
@@ -87,8 +95,69 @@ async function fixture(t: TestContext, isWorkerImplementation = false) {
   const reader = await registry.runnerContext({ sessionId: 'session', orgId: 'org', userId: 'alice' }, ports)
   assert(reader)
   const read = () => reader({ sessionId: 'session', nativeSessionId: 'native' })
-  return { state, driver, mcp, reviews, server, review, ports, registry, binding, read, access }
+  const reviewExact = async () => {
+    const exact = descriptors.find(item => item.tool.name === 'sudograph_context_read')!
+    return reviews.saveReview({ ...review, ...exact, resource: `mcp:${server.id}/sudograph_context_read`, revision: 'exact-review-1' }, null)
+  }
+  return { state, driver, mcp, reviews, server, review, ports, registry, binding, read, access, reviewExact }
 }
+
+void test('host exact reads require their own review and preserve a selection snapshot across the actual MCP transport', async t => {
+  const f = await fixture(t)
+  const args = { revision: 'a'.repeat(64), id: 'field:order-date', selection: { offset: 0, roots: ['object:orders'] } }
+  const read = () => f.access.readForHost('org', 'alice', f.server.id, 'sudograph_context_read', { arguments: args })
+  await assert.rejects(read(), { code: 'HOST_READ_REVIEW_REQUIRED' })
+  assert.equal(await f.read(), 'Current policy A', 'context access does not imply an exact-read grant')
+  await f.reviewExact()
+  const pending = read()
+  args.selection.offset = 99
+  args.selection.roots.push('object:foreign')
+  const result = await pending
+  assert.deepEqual(f.state.exactCalls, [{ ...args, selection: { offset: 0, roots: ['object:orders'] } }])
+  assert.ok(JSON.stringify(result).includes('object:orders'))
+  assert.ok(!JSON.stringify(result).includes('object:foreign'))
+  await assert.rejects(f.access.readForHost('org', 'alice', f.server.id, 'sudograph_context_read',
+    { arguments: { ...args, path: '/foreign/source.db' } }), { code: 'INVALID_TOOL_ARGUMENTS' })
+  assert.equal(f.state.exactCalls.length, 1)
+})
+
+for (const change of ['membership', 'credential', 'review'] as const) {
+  void test(`host exact reads discard data after in-flight ${change} revocation`, async t => {
+    const f = await fixture(t)
+    const review = await f.reviewExact()
+    f.state.beforeReply = async () => {
+      if (change === 'membership') f.state.member = false
+      if (change === 'credential') f.state.secret = null
+      if (change === 'review') await f.reviews.saveReview({ ...review, enabled: false, revision: 'revoked' }, review.revision)
+    }
+    await assert.rejects(f.access.readForHost('org', 'alice', f.server.id, 'sudograph_context_read',
+      { arguments: { revision: 'a'.repeat(64), id: 'object:orders' } }))
+    assert.equal(f.state.exactCalls.length, 1)
+  })
+}
+
+void test('host read snapshots reject non-JSON values without normalizing them into approved records', async t => {
+  const f = await fixture(t)
+  await f.reviewExact()
+  class Selection { roots = ['object:orders'] }
+  const cyclic: Record<string, unknown> = {}
+  cyclic.self = cyclic
+  for (const selection of [new Selection(), cyclic, { roots: new Date() }, { roots: 'x'.repeat(32001) }]) {
+    await assert.rejects(f.access.readForHost('org', 'alice', f.server.id, 'sudograph_context_read',
+      { arguments: { revision: 'a'.repeat(64), id: 'object:orders', selection } }), { code: 'INVALID_TOOL_ARGUMENTS' })
+  }
+  assert.equal(f.state.exactCalls.length, 0)
+})
+
+void test('host exact reads preserve cancellation before dispatch', async t => {
+  const f = await fixture(t)
+  await f.reviewExact()
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(f.access.readForHost('org', 'alice', f.server.id, 'sudograph_context_read',
+    { arguments: { revision: 'a'.repeat(64), id: 'object:orders' }, signal: controller.signal }))
+  assert.equal(f.state.exactCalls.length, 0)
+})
 
 void test('actual MCP transport reads the current canonical context and records metadata without content or credentials', async t => {
   const f = await fixture(t)

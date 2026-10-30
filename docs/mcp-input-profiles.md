@@ -32,3 +32,13 @@ is validated in worker acceptance; the ordinary gateway HTTP/MCP acceptance
 checks review, dispatch, rejection before dispatch and descriptor changes with
 an unrelated record-reading tool. No model prompt or dataset-specific rule
 selects the profile.
+
+Trusted host readers use the same descriptor review and argument checks as
+other MCP dispatch. An argument-bearing read requires its own approved read
+descriptor; approval of a context-only tool does not approve record access.
+The host snapshots the selection before asynchronous authorization, then
+rechecks current membership, credentials, server policy and the reviewed
+descriptor before dispatch and after receiving data. Caller cancellation also
+prevents dispatch or delivery. This host interface does not replace the task
+grant gate for agent calls, add row/field permissions, or enable a public
+review page by itself.

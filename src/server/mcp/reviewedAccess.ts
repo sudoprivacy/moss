@@ -3,7 +3,7 @@ import { resolveAuthHeaders, resolveSecretRefHeaders, type McpAuthSecretsApi } f
 import type { McpServer } from './types.js'
 import { isVisibleTo, type VisibilityFilter } from '../visibilityFilter.js'
 import type { ReviewedTool, ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
-import { ToolProtocol, toolFailure, validateReviewedToolArguments, type ToolConnection } from '../agentFederation/toolProtocol.js'
+import { ToolProtocol, snapshotToolArguments, toolFailure, validateReviewedToolArguments, type ToolConnection } from '../agentFederation/toolProtocol.js'
 import { contentDigest } from '../agentFederation/provider/protocol.js'
 
 export interface ReviewedMcpDependencies {
@@ -53,11 +53,11 @@ export class ReviewedMcpAccess {
     return { server, config, policyDigest: contentDigest({ server, policy }) }
   }
 
-  async authorizeHostRead(org: string, userId: string, serverId: string, tool: string) {
+  async authorizeHostRead(org: string, userId: string, serverId: string, tool: string, args: Record<string, unknown> = {}) {
     const resource = `mcp:${serverId}/${tool}`
     const review = await this.store.review(org, resource)
     if (!review || review.serverId !== serverId || review.tool.name !== tool || review.action !== 'read') toolFailure('HOST_READ_REVIEW_REQUIRED', 403)
-    validateReviewedToolArguments(review.tool, {})
+    validateReviewedToolArguments(review.tool, args)
     const initial = await this.authorize(org, userId, review)
     // A host context read has no task asset identity. Never ignore an agent/skill restriction.
     if (initial.server.bound_assistants !== null || initial.server.bound_skills !== null) toolFailure('HOST_READ_AGENT_BINDING_UNSUPPORTED', 403)
@@ -65,9 +65,13 @@ export class ReviewedMcpAccess {
   }
 
   /** Trusted host reads only. Agent calls retain the separate task/grant/asset gate. */
-  async readForHost(org: string, userId: string, serverId: string, tool: string, cancellation?: AbortSignal) {
+  async readForHost(org: string, userId: string, serverId: string, tool: string,
+    options: { arguments?: Record<string, unknown>; signal?: AbortSignal } = {}) {
+    // Snapshot caller-owned selections before the first asynchronous policy lookup.
+    // Validation below still enforces the exact independently reviewed descriptor.
+    const args = snapshotToolArguments(options.arguments ?? {})
     const resource = `mcp:${serverId}/${tool}`
-    const initial = await this.authorizeHostRead(org, userId, serverId, tool)
+    const initial = await this.authorizeHostRead(org, userId, serverId, tool, args)
     const { review } = initial
     const identity = contentDigest({ policy: initial.policyDigest, config: initial.config })
     const current = async () => {
@@ -76,7 +80,7 @@ export class ReviewedMcpAccess {
       const allowed = await this.authorize(org, userId, latest)
       if (contentDigest({ policy: allowed.policyDigest, config: allowed.config }) !== identity) toolFailure('TOOL_POLICY_CHANGED', 403)
     }
-    const signal = AbortSignal.any([AbortSignal.timeout(30000), ...(cancellation ? [cancellation] : [])])
+    const signal = AbortSignal.any([AbortSignal.timeout(30000), ...(options.signal ? [options.signal] : [])])
     signal.throwIfAborted()
     const protocol = this.protocol(initial.config, signal)
     try {
@@ -85,7 +89,7 @@ export class ReviewedMcpAccess {
       if (descriptor?.digest !== review.digest) toolFailure('TOOL_DESCRIPTOR_CHANGED')
       await current()
       signal.throwIfAborted()
-      const result = await protocol.call(tool, {})
+      const result = await protocol.call(tool, args)
       await current()
       signal.throwIfAborted()
       if (result.isError) toolFailure('HOST_READ_FAILED', 502)
