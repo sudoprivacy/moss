@@ -42,7 +42,7 @@ import { attachSessionSocketAuthorization } from './sessionSocketAuthorization.j
 import { RuntimeInputBarrier } from './runtime/runtimeInputBarrier.js'
 import { RuntimeAdmissionPauses } from './runtime/runtimeAdmissionPauses.js'
 import { dispatchRuntimeAdmission, isRuntimeAdmissionRoute } from './api/runtimeAdmission.js'
-import { getSessionProject, listSessionProjects, parseOntologyProjectId } from './ontology/sessionProjects.js'
+import { getSessionProject, listSessionProjects, parseOntologyProjectId, withSessionProjectAccess } from './ontology/sessionProjects.js'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
@@ -10969,47 +10969,52 @@ export function startServer(
 
       if (req.method === 'GET' && pathname === '/api/v1/sessions') {
         authService.requireAnyScope(auth, ['sessions:list', 'sessions:list:any'])
-        const activeOnly = url.searchParams.get('active_only') === 'true'
-        const source = url.searchParams.get('source') || undefined
-        // Visibility tiers: sessions:list:any → whole org; a dept_admin →
-        // sessions of every user in their department subtree (self + descendants,
-        // dept_admins included); everyone else → their own only.
-        const sessionSubtree = hasScope(auth.scopes, 'sessions:list:any')
-          ? null
-          : await authService.listSubtreeUserIds(auth.orgId, auth)
-        let sessions: Awaited<ReturnType<typeof runtime.listSessions>>
-        if (hasScope(auth.scopes, 'sessions:list:any')) {
-          sessions = await runtime.listSessions({ orgId: auth.orgId, activeOnly })
-        } else if (sessionSubtree && sessionSubtree.size > 1) {
-          // dept_admin: list the whole org, then narrow to the subtree set.
-          sessions = (await runtime.listSessions({ orgId: auth.orgId, activeOnly }))
-            .filter(session => sessionSubtree.has(session.userId))
-        } else {
-          sessions = await runtime.listSessions({ orgId: auth.orgId, userId: auth.userId, activeOnly })
-        }
+        const ontologyProjectId = parseOntologyProjectId(url.searchParams.get('ontology_project_id') ?? undefined)
+        if (ontologyProjectId !== undefined) res.setHeader('Cache-Control', 'no-store')
+        const owner = auth
+        const response = await withSessionProjectAccess(runtime.store, owner, ontologyProjectId, async () => {
+          const activeOnly = url.searchParams.get('active_only') === 'true'
+          const source = url.searchParams.get('source') || undefined
+          // Visibility tiers: sessions:list:any → whole org; a dept_admin →
+          // sessions of every user in their department subtree (self + descendants,
+          // dept_admins included); everyone else → their own only.
+          const sessionSubtree = hasScope(owner.scopes, 'sessions:list:any')
+            ? null
+            : await authService.listSubtreeUserIds(owner.orgId, owner)
+          let sessions: Awaited<ReturnType<typeof runtime.listSessions>>
+          if (hasScope(owner.scopes, 'sessions:list:any')) {
+            sessions = await runtime.listSessions({ orgId: owner.orgId, activeOnly, ontologyProjectId })
+          } else if (sessionSubtree && sessionSubtree.size > 1) {
+            // dept_admin: list the whole org, then narrow to the subtree set.
+            sessions = (await runtime.listSessions({ orgId: owner.orgId, activeOnly, ontologyProjectId }))
+              .filter(session => sessionSubtree.has(session.userId))
+          } else {
+            sessions = await runtime.listSessions({ orgId: owner.orgId, userId: owner.userId, activeOnly, ontologyProjectId })
+          }
 
-        // Filter by source if provided
-        if (source) {
-          sessions = sessions.filter(session => {
-            if (!session.source) return false
-            try {
-              const sourceData = JSON.parse(session.source)
-              return sourceData.source === source
-            } catch {
-              return session.source === source
-            }
-          })
-        }
+          // Filter by source if provided
+          if (source) {
+            sessions = sessions.filter(session => {
+              if (!session.source) return false
+              try {
+                const sourceData = JSON.parse(session.source)
+                return sourceData.source === source
+              } catch {
+                return session.source === source
+              }
+            })
+          }
 
-        // Attach an org-agnostic owner name so the admin UI can display owners
-        // outside this org's roster (e.g. a switched super_admin) by name.
-        const resolveName = makeUserNameResolver(resolveUserName)
-        const sessionsWithOwner = await Promise.all(sessions.map(async session => ({
-          ...session,
-          userName: await resolveName(session.userId),
-        })))
-
-        writeJson(res, 200, { sessions: sessionsWithOwner })
+          // Attach an org-agnostic owner name so the admin UI can display owners
+          // outside this org's roster (e.g. a switched super_admin) by name.
+          const resolveName = makeUserNameResolver(resolveUserName)
+          const sessionsWithOwner = await Promise.all(sessions.map(async session => ({
+            ...session,
+            userName: await resolveName(session.userId),
+          })))
+          return { sessions: sessionsWithOwner }
+        })
+        writeJson(res, 200, response)
         return
       }
 

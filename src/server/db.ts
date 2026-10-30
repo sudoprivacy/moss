@@ -2148,6 +2148,14 @@ export class DirectConnectStore {
       clauses.push('user_id = ?')
       values.push(filter.userId)
     }
+    if (filter.ontologyProjectId !== undefined) {
+      clauses.push(`EXISTS (SELECT 1 FROM ontology_session_bindings b
+        JOIN ontology_projects p ON p.project_id = b.project_id
+        WHERE b.session_id = sessions.session_id AND b.project_id = ?
+        AND b.org_id = sessions.org_id AND b.user_id = sessions.user_id
+        AND p.org_id = sessions.org_id AND p.enabled = 1)`)
+      values.push(filter.ontologyProjectId)
+    }
     if (!filter.includeDeleted) {
       clauses.push('deleted_at IS NULL')
     }

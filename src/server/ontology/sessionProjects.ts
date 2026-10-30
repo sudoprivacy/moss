@@ -34,6 +34,26 @@ export async function listSessionProjects(store: DirectConnectStore, owner: { or
   } finally { await host.close() }
 }
 
+/** Narrow ordinary session discovery using current project access, without reading model text. */
+export async function withSessionProjectAccess<T>(store: DirectConnectStore,
+  owner: { orgId: string; userId: string }, projectId: string | undefined, read: () => Promise<T>): Promise<T> {
+  if (projectId === undefined) return read()
+  const project = await store.ontologyProjects.get(owner.orgId, projectId)
+  const host = await createModelContextHost(store)
+  try {
+    await host.ontologyContext.authorizeProject(project, owner.userId)
+    const result = await read()
+    await host.ontologyContext.authorizeProject(project, owner.userId)
+    if (JSON.stringify(await store.ontologyProjects.get(owner.orgId, projectId)) !== JSON.stringify(project)) {
+      throw new ResourceAccessError(403, 'Canonical model binding is unavailable')
+    }
+    return result
+  } catch (error) {
+    if (error instanceof ExternalProviderError) throw new ResourceAccessError(error.status, error.code)
+    throw error
+  } finally { await host.close() }
+}
+
 export async function createModelSession<T>(store: DirectConnectStore,
   binding: { projectId: string; sessionId: string; orgId: string; userId: string }, create: () => Promise<T>): Promise<T> {
   const host = await createModelContextHost(store)

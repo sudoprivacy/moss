@@ -4,6 +4,7 @@ import { test, type TestContext } from 'node:test'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { DirectConnectStore } from '../db.js'
+import { RuntimeService } from '../runtimeService.js'
 import { AuthCenterDb } from '../authCenter/db.js'
 import { AccountMemberships } from '../identity/accountMemberships.js'
 import { McpStore } from '../mcp/db.js'
@@ -14,7 +15,7 @@ import { NexusClient } from '../nexus/nexusClient.js'
 import { orgScopedNamespace, secretSubject } from '../secrets/secretSubject.js'
 import { registerModelContextTool } from './contextWorker.js'
 import { createSessionRunnerHost } from './runnerHost.js'
-import { createModelSession, getSessionProject, listSessionProjects, parseOntologyProjectId } from './sessionProjects.js'
+import { createModelSession, getSessionProject, listSessionProjects, parseOntologyProjectId, withSessionProjectAccess } from './sessionProjects.js'
 
 async function fixture(t: TestContext) {
   const store = new DirectConnectStore(':memory:')
@@ -87,6 +88,68 @@ void test('project discovery returns only current authorized canonical reference
   assert.equal(f.state.calls, 0)
   await f.mcp.updateMcpServer('org', f.server.id, { visible_to: { user_ids: [] } }, 'manager')
   assert.deepEqual(await listSessionProjects(f.store, { orgId: 'org', userId: 'alice' }), { projects: [] })
+})
+
+void test('project filtering narrows existing session ownership and excludes unbound, stale and deleted sessions', async t => {
+  const f = await fixture(t)
+  const other = await f.store.ontologyProjects.register({ orgId: 'org', authorityRef: 'other',
+    workerRef: f.server.id, modelRef: 'other', sourceRefs: ['source'] })
+  const create = async (sessionId: string, userId: string, projectId?: string) => {
+    await f.store.createSession({ sessionId, transcriptSessionId: sessionId, transcriptPath: '/unused/transcript',
+      orgId: 'org', userId, role: 'member', scopes: [], cwd: '/unused',
+      runtime: { type: 'cohost', engine: 'scode' }, status: 'active', desiredState: 'active' })
+    if (projectId) await f.store.ontologyProjects.bind({ sessionId, orgId: 'org', userId, projectId }, { authorize: async () => {} })
+  }
+  await create('ordinary', 'alice')
+  await create('different-project', 'alice', other.projectId)
+  await create('another-owner', 'bob', f.project.projectId)
+  await create('deleted', 'alice', f.project.projectId)
+  await create('changed-owner', 'alice', f.project.projectId)
+  await f.store.driver.run("UPDATE sessions SET deleted_at = 1 WHERE session_id = 'deleted'")
+  await f.store.driver.run("UPDATE sessions SET user_id = 'bob' WHERE session_id = 'changed-owner'")
+  const owner = { orgId: 'org', userId: 'alice' }
+  // Exercise the runtime's forwarding method against real SQL without starting agent backends.
+  const runtime = Object.assign(Object.create(RuntimeService.prototype) as RuntimeService, { store: f.store })
+  const read = () => runtime.listSessions({ ...owner, ontologyProjectId: f.project.projectId })
+  const result = await withSessionProjectAccess(f.store, owner, f.project.projectId, read)
+  assert.deepEqual(result.map(item => item.sessionId), ['session'])
+  assert.equal((await f.store.listSessions(owner)).length, 3, 'ordinary discovery retains its existing scope')
+  assert.deepEqual((await f.store.listSessions({ ...owner, ontologyProjectId: other.projectId })).map(item => item.sessionId), ['different-project'])
+  assert.equal((await f.store.listSessions({ ...owner, orgId: 'foreign', ontologyProjectId: f.project.projectId })).length, 0)
+  await f.store.ontologyProjects.setEnabled('org', f.project.projectId, false)
+  assert.equal((await read()).length, 0)
+  assert.equal(f.state.calls, 0, 'discovery never loads business context or records')
+})
+
+void test('project session discovery refuses revoked access before and after listing and ordinary discovery stays independent', async t => {
+  const f = await fixture(t)
+  const owner = { orgId: 'org', userId: 'alice' }
+  let reads = 0
+  const read = async () => { reads++; return ['private-session'] }
+  await f.mcp.updateMcpServer('org', f.server.id, { visible_to: { user_ids: [] } }, 'manager')
+  await assert.rejects(withSessionProjectAccess(f.store, owner, f.project.projectId, read), error =>
+    error instanceof Error && 'statusCode' in error && error.statusCode === 403)
+  await assert.rejects(withSessionProjectAccess(f.store, { ...owner, orgId: 'foreign' }, f.project.projectId, read), /unavailable/)
+  assert.equal(reads, 0)
+  assert.deepEqual(await withSessionProjectAccess(f.store, owner, undefined, read), ['private-session'])
+  assert.equal(reads, 1)
+  await f.mcp.updateMcpServer('org', f.server.id, { visible_to: { user_ids: ['alice'] } }, 'manager')
+  await assert.rejects(withSessionProjectAccess(f.store, owner, f.project.projectId, async () => {
+    await f.mcp.updateMcpServer('org', f.server.id, { visible_to: { user_ids: [] } }, 'manager')
+    return ['must-not-be-returned']
+  }), error => error instanceof Error && 'statusCode' in error && error.statusCode === 403)
+  assert.equal(f.state.calls, 0)
+})
+
+void test('project lifecycle changes fence an in-flight session listing', async t => {
+  const f = await fixture(t)
+  const owner = { orgId: 'org', userId: 'alice' }
+  await assert.rejects(withSessionProjectAccess(f.store, owner, f.project.projectId, async () => {
+    await f.store.ontologyProjects.setEnabled('org', f.project.projectId, false)
+    await f.store.ontologyProjects.setEnabled('org', f.project.projectId, true)
+    return ['must-not-be-returned']
+  }), /unavailable/)
+  assert.equal(f.state.calls, 0)
 })
 
 void test('a new canonical session is atomically bound before returning and can recover its owning project', async t => {

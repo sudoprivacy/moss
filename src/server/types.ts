@@ -947,6 +947,7 @@ export type ServerInstanceRecord = {
 export type SessionListFilter = {
   orgId: string
   userId?: string
+  ontologyProjectId?: string
   activeOnly?: boolean
   includeDeleted?: boolean
 }

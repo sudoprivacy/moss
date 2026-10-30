@@ -42,6 +42,7 @@ import type {
   RunnerManifest,
   ServerConfig,
   SessionCreateInput,
+  SessionListFilter,
   SessionRecord,
   SessionStatus,
   SessionSummary,
@@ -483,27 +484,17 @@ export class RuntimeService {
     }
   }
 
-  async listSessions(filter: {
-    orgId: string
-    userId?: string
-    activeOnly?: boolean
-  }): Promise<SessionSummary[]> {
+  async listSessions(filter: Omit<SessionListFilter, 'includeDeleted'>): Promise<SessionSummary[]> {
     return this.store.listSessions({
-      orgId: filter.orgId,
-      userId: filter.userId,
-      activeOnly: filter.activeOnly,
+      ...filter,
+      includeDeleted: false,
     })
   }
 
-  async listSessionRecords(filter: {
-    orgId: string
-    userId?: string
-    activeOnly?: boolean
-  }): Promise<SessionRecord[]> {
+  async listSessionRecords(filter: Omit<SessionListFilter, 'includeDeleted'>): Promise<SessionRecord[]> {
     return this.store.listSessionRecords({
-      orgId: filter.orgId,
-      userId: filter.userId,
-      activeOnly: filter.activeOnly,
+      ...filter,
+      includeDeleted: false,
     })
   }
 
