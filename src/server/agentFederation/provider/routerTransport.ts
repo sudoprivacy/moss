@@ -47,6 +47,11 @@ export function mcpJsonTransport(endpoint: string, policy: RouterNetworkPolicy =
   return fixedJsonTransport(endpoint, policy, {}, true)
 }
 
+/** Trusted human-host profile. Agent/MCP transports retain their original bounds. */
+export function hostReviewJsonTransport(endpoint: string, policy: RouterNetworkPolicy = {}): RouterRequest {
+  return fixedJsonTransport(endpoint, policy, {}, false, 32 * 1024 * 1024, true)
+}
+
 /** Native HTTP connection pinned to the checked DNS result; no proxy, redirect or connection reuse. */
 export function routerTransport(endpoint: string, policy: RouterNetworkPolicy = {}, dependencies: {
   resolve?: Resolver
@@ -57,7 +62,8 @@ export function routerTransport(endpoint: string, policy: RouterNetworkPolicy = 
   return fixedJsonTransport(`${endpoint}/chat/completions`, policy, dependencies)
 }
 
-function fixedJsonTransport(endpoint: string, policy: RouterNetworkPolicy, dependencies: { resolve?: Resolver; ca?: string }, mcp = false): RouterRequest {
+function fixedJsonTransport(endpoint: string, policy: RouterNetworkPolicy, dependencies: { resolve?: Resolver; ca?: string },
+  mcp = false, responseLimit = 2 * 1024 * 1024, hasErrorBody = false): RouterRequest {
   let target: URL
   try { target = new URL(endpoint) } catch { throw new AgentProtocolError(400, 'INVALID_ROUTER_ENDPOINT') }
   const hostname = target.hostname.replace(/^\[|\]$/g, '')
@@ -115,7 +121,7 @@ function fixedJsonTransport(endpoint: string, policy: RouterNetworkPolicy, depen
           // The original POST may already have run. Never follow or classify it as zero-dispatch.
           response.destroy(); reject(unconfirmed()); return
         }
-        if (status < 200 || status >= 300) {
+        if ((status < 200 || status >= 300) && !hasErrorBody) {
           response.destroy(); resolveResponse(new Response(null, { status })); return
         }
         const session = response.headers['mcp-session-id']
@@ -125,12 +131,15 @@ function fixedJsonTransport(endpoint: string, policy: RouterNetworkPolicy, depen
         let size = 0
         response.on('data', (chunk: Buffer) => {
           size += chunk.length
-          if (size > 2 * 1024 * 1024) { response.destroy(); reject(new AgentProtocolError(502, 'MODEL_OUTPUT_INVALID')); return }
+          if (size > (status >= 200 && status < 300 ? responseLimit : 65536)) { response.destroy(); reject(new AgentProtocolError(502, 'MODEL_OUTPUT_INVALID')); return }
           chunks.push(chunk)
         })
         response.on('error', () => reject(unconfirmed()))
         response.on('end', () => {
           const contentType = response.headers['content-type'] ?? ''
+          if (hasErrorBody && (status < 200 || status >= 300) && !/^application\/json(?:\s*;|$)/i.test(contentType)) {
+            resolveResponse(new Response(null, { status })); return
+          }
           if (!/^application\/json(?:\s*;|$)/i.test(contentType) || (response.headers['content-encoding'] && response.headers['content-encoding'] !== 'identity')) {
             reject(new AgentProtocolError(502, 'MODEL_OUTPUT_INVALID')); return
           }

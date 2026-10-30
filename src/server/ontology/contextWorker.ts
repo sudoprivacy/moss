@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { SudographCompilerError } from '@sudowork/sudograph-runtime'
 import { validateOntologyContext, type OntologyContextPorts, type OntologyProject } from './projectRegistry.js'
+import { WORKER_REVIEW_PROFILE, WORKER_REVIEW_PROFILE_KEY } from './workerReviewProtocol.js'
 
 /** Register on the deployment's authenticated MCP server; no paths or authority arrive in tool arguments. */
 export function registerModelContextTool(server: McpServer,
@@ -26,10 +27,10 @@ export function registerModelContextTool(server: McpServer,
 
 /** Exact reads use compiler-issued pointers; the deployment fixes every execution option. */
 export function registerModelContextReadTool(server: McpServer,
-  read: (request: Record<string, unknown>) => Promise<unknown>) {
+  read: (request: Record<string, unknown>) => Promise<unknown>, options: { hostReview?: boolean } = {}) {
   server.registerTool('sudograph_context_read', {
     description: 'Read a source object, field, definition, evidence item, catalogue, subgraph or bounded live record page using the revision and digest from sudograph_context.',
-    _meta: { 'moss/input-profile': 'bounded-record-v1' },
+    _meta: { 'moss/input-profile': 'bounded-record-v1', ...(options.hostReview ? { [WORKER_REVIEW_PROFILE_KEY]: WORKER_REVIEW_PROFILE } : {}) },
     inputSchema: z.object({
       revision: z.string().min(1), context_digest: z.string().min(1), id: z.string().min(1),
       records: z.boolean().optional(), offset: z.number().int().min(0).optional(),

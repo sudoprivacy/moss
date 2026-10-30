@@ -5,7 +5,7 @@ import { createServer as tlsServer } from 'node:https'
 import { once } from 'node:events'
 import { generateKeyPairSync } from 'node:crypto'
 import forge from 'node-forge'
-import { routerTransport } from './routerTransport.js'
+import { routerTransport, hostReviewJsonTransport } from './routerTransport.js'
 import { routerExecutor, immutableAgent } from './runtime.js'
 
 const init = (signal?: AbortSignal): RequestInit => ({ method: 'POST', redirect: 'error', body: '{"query":"synthetic"}', headers: { authorization: 'Bearer synthetic-key', 'content-type': 'application/json' }, signal })
@@ -131,5 +131,26 @@ void test('bounded responses and upstream errors do not expose upstream diagnost
     const result = routerTransport(endpoint)(`${endpoint}/chat/completions`, init())
     if (expected) await assert.rejects(result, { code: expected })
     else { const response = await result; assert.equal(response.status, 401); assert.equal(await response.text(), '') }
+  }
+})
+
+void test('human host JSON has separate fixed response and error bounds without changing model limits', async t => {
+  let size = 2 * 1024 * 1024 + 1, status = 200
+  const base = await listen(t, createServer((req, res) => {
+    req.resume()
+    res.writeHead(status, { 'Content-Type': 'application/json' })
+    res.end('x'.repeat(size))
+  }))
+  const endpoint = base + '/review'
+  const send = hostReviewJsonTransport(endpoint)
+  assert.equal((await (await send(endpoint, init())).text()).length, size)
+  size = 32 * 1024 * 1024 + 1
+  await assert.rejects(send(endpoint, init()), { code: 'MODEL_OUTPUT_INVALID' })
+  status = 409
+  size = 65537
+  await assert.rejects(send(endpoint, init()), { code: 'MODEL_OUTPUT_INVALID' })
+  for (const [url, options] of [[endpoint + '/foreign', init()], [endpoint, { ...init(), method: 'GET' }],
+    [endpoint, { ...init(), redirect: 'follow' }]] as [string, RequestInit][]) {
+    await assert.rejects(send(url, options), { code: 'MODEL_EGRESS_DENIED' })
   }
 })

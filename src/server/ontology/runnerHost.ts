@@ -10,6 +10,7 @@ import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
 import { NexusClient } from '../nexus/nexusClient.js'
 import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
 import { McpOntologyContextPorts } from './mcpContextPorts.js'
+import { McpOntologyReviewPorts } from './mcpReviewPorts.js'
 
 export interface SessionRunnerHost {
   ontologyContext?: OntologyContextPorts
@@ -23,7 +24,7 @@ export async function createSessionRunnerHost(store: DirectConnectStore, session
 }
 
 /** Shared trusted composition for project discovery, session creation and runner recovery. */
-export async function createModelContextHost(store: DirectConnectStore): Promise<{ ontologyContext: McpOntologyContextPorts; close(): Promise<void> }> {
+export async function createModelContextHost(store: DirectConnectStore): Promise<{ ontologyContext: McpOntologyContextPorts; ontologyReview: McpOntologyReviewPorts; close(): Promise<void> }> {
   const auth = new AuthCenterDb(store)
   const mcp = new McpStore(store.driver)
   const reviews = new ToolGatewayStore(store.driver)
@@ -43,8 +44,14 @@ export async function createModelContextHost(store: DirectConnectStore): Promise
       return nexus.listSecrets(namespace, subject)
     }, org),
   })
+  const ontologyContext = new McpOntologyContextPorts(access, mcp)
+  const ontologyReview = new McpOntologyReviewPorts(access, mcp, async binding => {
+    await store.ontologyProjects.assertCurrentBinding(binding)
+    await ontologyContext.authorize(binding)
+    await store.ontologyProjects.assertCurrentBinding(binding)
+  })
   return {
-    ontologyContext: new McpOntologyContextPorts(access, mcp),
+    ontologyContext, ontologyReview,
     close: async () => { if (isClosed) return; isClosed = true; nexus?.close() },
   }
 }

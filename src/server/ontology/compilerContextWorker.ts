@@ -7,6 +7,7 @@ import { SudographCompilerError, SudographModelClient, type ISudographContext, t
 import { z } from 'zod'
 import type { OntologyProject } from './projectRegistry.js'
 import { registerModelContextReadTool, registerModelContextTool } from './contextWorker.js'
+import { workerReviewRequest, WORKER_REVIEW_PROFILE } from './workerReviewProtocol.js'
 
 export interface CompilerContextWorkerConfig {
   binding: Pick<OntologyProject, 'authorityRef' | 'modelRef' | 'sourceRefs'>
@@ -43,10 +44,6 @@ export function createCompilerContextWorker(config: CompilerContextWorkerConfig)
     }
   }
   const expected = Buffer.from(`Bearer ${config.token}`)
-  const reviewRequest = z.union([
-    z.object({ operation: z.enum(['html', 'document']), endpoint: z.string().regex(/^\/review\/[a-f0-9]{32}\/v1$/) }).strict(),
-    z.object({ operation: z.enum(['head', 'graph', 'context', 'page']), params: z.record(z.string(), z.unknown()).optional() }).strict(),
-  ])
   return createServer((req, res) => {
     void (async () => {
       res.setHeader('Cache-Control', 'no-store')
@@ -55,7 +52,7 @@ export function createCompilerContextWorker(config: CompilerContextWorkerConfig)
       if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) { res.writeHead(401).end(); return }
       if (req.url === '/review') {
         res.setHeader('Content-Type', 'application/json; charset=utf-8')
-        let request: z.infer<typeof reviewRequest>
+        let request: z.infer<typeof workerReviewRequest>
         try {
           if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') throw new Error()
           const chunks: Buffer[] = []
@@ -65,14 +62,16 @@ export function createCompilerContextWorker(config: CompilerContextWorkerConfig)
             if (size > 65536) throw new Error()
             chunks.push(Buffer.from(chunk))
           }
-          request = reviewRequest.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+          request = workerReviewRequest.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')))
         } catch { req.resume(); res.writeHead(400).end(JSON.stringify({ error: 'READ_CONTRACT' })); return }
         try {
-          // Host transport only. The resource, actor and source are deployment
-          // bindings; HTML never travels through the agent's bounded MCP result.
-          const result = await client.review(binding.modelRef, actor, binding.modelRef, request)
-          res.end(JSON.stringify({ format: 'sudograph-worker-review/v1', authority_ref: binding.authorityRef,
-            model_ref: binding.modelRef, source_refs: binding.sourceRefs, scope: 'full-registered-model', result }))
+          // Host transport only. Model, actor and source remain deployment
+          // bindings; the trusted host supplies only the rendering resource.
+          // HTML never travels through the agent's bounded MCP result.
+          const { resource = binding.modelRef, ...read } = request
+          const result = await client.review(binding.modelRef, actor, resource, read)
+          res.end(JSON.stringify({ format: WORKER_REVIEW_PROFILE, authority_ref: binding.authorityRef,
+            model_ref: binding.modelRef, resource_ref: resource, source_refs: binding.sourceRefs, scope: 'full-registered-model', result }))
         } catch (error) {
           const code = error instanceof SudographCompilerError ? error.code : 'VIEW_UNAVAILABLE'
           const status = code === 'ACCESS_DENIED' ? 403 : ['CONTEXT_STALE', 'REVISION_UNKNOWN', 'SOURCE_SCHEMA_CHANGED'].includes(code) ? 409
@@ -88,7 +87,7 @@ export function createCompilerContextWorker(config: CompilerContextWorkerConfig)
       registerModelContextTool(sdk, binding, () => client.invoke<ISudographContext>(
         binding.modelRef, actor, { operation: 'read', product: 'context' }))
       registerModelContextReadTool(sdk, request => client.invoke(
-        binding.modelRef, actor, { operation: 'context_read', request }))
+        binding.modelRef, actor, { operation: 'context_read', request }), { hostReview: true })
       sdk.registerTool('sudograph_model_contract', {
         description: 'Read the bound canonical YAML, current revision and checked write contract.',
         inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true, destructiveHint: false },
