@@ -35,6 +35,13 @@ import {
   ClipboardList,
   Database,
   Boxes,
+  Vault,
+  ListFilter,
+  Landmark,
+  Network,
+  UserRound,
+  History,
+  RotateCw,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -219,15 +226,15 @@ const menuItems: PrimaryNavItem[] = [
     title: '凭据中心',
     group: 'organization',
     url: '/secrets',
-    icon: KeyRound,
+    icon: Vault,
     requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'],
     children: [
-      { title: '配置项列表', url: '/secrets/config-items', icon: KeyRound, requiredScope: 'admin:secrets' },
-      { title: '企业凭据', url: '/secrets/enterprise', icon: KeyRound, requiredScope: 'admin:secrets' },
-      { title: '部门凭据', url: '/secrets/department', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:department:read'] },
-      { title: '用户凭据', url: '/secrets/user-credentials', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:user:write'] },
-      { title: '审计日志', url: '/secrets/audit-log', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'] },
-      { title: '轮换告警', url: '/secrets/rotation-alerts', icon: KeyRound, requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'] },
+      { title: '配置项列表', url: '/secrets/config-items', icon: ListFilter, requiredScope: 'admin:secrets' },
+      { title: '企业凭据', url: '/secrets/enterprise', icon: Landmark, requiredScope: 'admin:secrets' },
+      { title: '部门凭据', url: '/secrets/department', icon: Network, requiredAnyScopes: ['admin:secrets', 'secrets:department:read'] },
+      { title: '用户凭据', url: '/secrets/user-credentials', icon: UserRound, requiredAnyScopes: ['admin:secrets', 'secrets:user:write'] },
+      { title: '审计日志', url: '/secrets/audit-log', icon: History, requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'] },
+      { title: '轮换告警', url: '/secrets/rotation-alerts', icon: RotateCw, requiredAnyScopes: ['admin:secrets', 'secrets:department:read', 'secrets:user:write'] },
     ],
   },
   {
@@ -473,10 +480,10 @@ export function AppSidebar() {
           <SidebarMenuItem key={item.title}>
             <Collapsible open={isExpanded} onOpenChange={(open) => setMenuExpanded(item.title, open)}>
               <SidebarMenuButton asChild isActive={isAnyChildActive} tooltip={item.title}>
-                <Link to={item.url}>
+                <button type="button" onClick={() => setMenuExpanded(item.title, !isExpanded)}>
                   <item.icon />
                   <span>{item.title}</span>
-                </Link>
+                </button>
               </SidebarMenuButton>
               <CollapsibleTrigger asChild>
                 <SidebarMenuAction aria-label={`${item.title} 展开/收起`} showOnHover>
