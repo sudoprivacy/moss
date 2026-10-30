@@ -2584,7 +2584,7 @@ export function startServer(
       const browserAgentMatch = pathname.match(/^\/api\/v1\/agent\/browser\/([^/]+)\/mcp$/)
       if (req.method === 'POST' && browserAgentMatch) {
         res.setHeader('Cache-Control', 'no-store')
-        if (!managedBrowserConfigured()) throw new HttpError(503, 'Managed browser is not configured')
+        if (!managedBrowserConfigured()) throw new HttpError(503, 'managed_browser_not_configured')
         const binding = await runtime.browserCapabilities.authorize(browserAgentMatch[1]!, getBearerToken(req), {
           getSession: id => runtime.getSession(id),
           // Browser access fails closed and re-reads the current account, rather
@@ -11071,8 +11071,8 @@ export function startServer(
       if (req.method === 'POST' && browserConversationMatch) {
         const intent = browserConversationIntent(await readJsonBody(req))
         const current = await runtime.getSession(browserConversationMatch[1]!)
-        if (!current) throw new HttpError(404, 'Session not found')
-        if (!canAccessSession(auth, current, 'sessions:attach:any')) throw new HttpError(403, 'Forbidden')
+        if (!current) throw new HttpError(404, 'session_not_found')
+        if (!canAccessSession(auth, current, 'sessions:attach:any')) throw new HttpError(403, 'session_forbidden')
         // A trusted manager can continue a conversation without acquiring the
         // owner's personal browser, including sessions with no browser at all.
         if (current.orgId !== auth.orgId || current.userId !== auth.userId) {
@@ -11092,7 +11092,7 @@ export function startServer(
       const browserFileUploadMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/browser\/files\/upload$/)
       const browserFileDownloadMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/browser\/files\/([a-f0-9]{32})$/)
       if ((req.method === 'POST' && browserFileUploadMatch) || (req.method === 'GET' && browserFileDownloadMatch)) {
-        if (!managedBrowserConfigured()) throw new HttpError(503, 'Managed browser is not configured')
+        if (!managedBrowserConfigured()) throw new HttpError(503, 'managed_browser_not_configured')
         const match = browserFileUploadMatch || browserFileDownloadMatch!
         const binding = await authorizeSessionBrowser({
           getSession: id => runtime.getSession(id),
@@ -11103,11 +11103,11 @@ export function startServer(
         if (browserFileUploadMatch) {
           const controlEpoch = Number(req.headers['x-browser-control-epoch'])
           const targetEpoch = Number(req.headers['x-browser-target-epoch'])
-          if (![controlEpoch, targetEpoch].every(value => Number.isSafeInteger(value) && value >= 0)) throw new HttpError(400, 'Invalid browser epoch')
+          if (![controlEpoch, targetEpoch].every(value => Number.isSafeInteger(value) && value >= 0)) throw new HttpError(400, 'invalid_browser_epoch')
           let name: string
           try { name = decodeURIComponent(String(req.headers['x-browser-file-name'] || '')) }
-          catch { throw new HttpError(400, 'Invalid browser file name') }
-          if (!name || name.length > 240) throw new HttpError(400, 'Invalid browser file name')
+          catch { throw new HttpError(400, 'invalid_browser_file_name') }
+          if (!name || name.length > 240) throw new HttpError(400, 'invalid_browser_file_name')
           const data = await readRawBody(req, 16 * 1024 * 1024)
           writeJson(res, 200, await browserWorkers.upload(binding, controller, name, data, { controlEpoch, targetEpoch }))
         } else {
@@ -11118,7 +11118,7 @@ export function startServer(
         return
       }
       if (req.method === 'POST' && sessionBrowserMatch) {
-        if (!managedBrowserConfigured()) throw new HttpError(503, 'Managed browser is not configured')
+        if (!managedBrowserConfigured()) throw new HttpError(503, 'managed_browser_not_configured')
         const action = await readJsonBody(req)
         const result = await invokeSessionBrowser({
           getSession: id => runtime.getSession(id),
@@ -11136,6 +11136,17 @@ export function startServer(
           }
         }
         writeJson(res, 200, result)
+        return
+      }
+
+      const sessionBrowserOwnerMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/browser-owner$/)
+      if (req.method === 'GET' && sessionBrowserOwnerMatch) {
+        if (!managedBrowserConfigured()) throw new HttpError(503, 'managed_browser_not_configured')
+        const binding = await authorizeSessionBrowser({
+          getSession: id => runtime.getSession(id),
+          isUserActive: async principal => (await authService.getUserOrNull(principal.userId, principal.orgId))?.status === 'active',
+        }, auth, sessionBrowserOwnerMatch[1]!)
+        writeJson(res, 200, await browserWorkers.ownerInfo(binding))
         return
       }
 
@@ -11509,7 +11520,7 @@ export function startServer(
 
         const browserStreamMatch = pathname.match(/^\/ws\/sessions\/([^/]+)\/browser\/window$/)
         if (browserStreamMatch) {
-          if (!managedBrowserConfigured()) throw new HttpError(503, 'Managed browser is not configured')
+          if (!managedBrowserConfigured()) throw new HttpError(503, 'managed_browser_not_configured')
           const sessionId = decodeURIComponent(browserStreamMatch[1]!)
           const access = {
             getSession: (id: string) => runtime.getSession(id),

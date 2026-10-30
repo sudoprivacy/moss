@@ -13,8 +13,8 @@ void test('opening a panel does not retain revoked profile authorization', async
   }
   await invokeSessionBrowser(deps, principal, 'conversation', { kind: 'state' })
   active = false
-  await assert.rejects(invokeSessionBrowser(deps, principal, 'conversation', { kind: 'frame', viewerId: '00000000-0000-4000-8000-000000000000', controlEpoch: 1, targetEpoch: 0 }), /Forbidden/)
-  await assert.rejects(invokeSessionBrowser(deps, { ...principal, userId: 'manager' }, 'conversation', { kind: 'take', controlEpoch: 1, targetEpoch: 0 }), /Forbidden/)
+  await assert.rejects(invokeSessionBrowser(deps, principal, 'conversation', { kind: 'frame', viewerId: '00000000-0000-4000-8000-000000000000', controlEpoch: 1, targetEpoch: 0 }), /session_forbidden/)
+  await assert.rejects(invokeSessionBrowser(deps, { ...principal, userId: 'manager' }, 'conversation', { kind: 'take', controlEpoch: 1, targetEpoch: 0 }), /session_forbidden/)
   assert.equal(calls.length, 1)
 })
 
@@ -33,7 +33,7 @@ void test('human requests cannot impersonate AI or switch browser ownership', as
   assert.deepEqual(calls, [[{ sessionId: 'conversation', ...principal }, browserController(principal), {
     kind: 'input', controlEpoch: 4, targetEpoch: 2, input: { kind: 'text', text: 'Manual login' },
   }]])
-  await assert.rejects(invokeSessionBrowser(deps, principal, 'conversation', { kind: 'input', controlEpoch: true, targetEpoch: 2 }), /Invalid browser epoch/)
+  await assert.rejects(invokeSessionBrowser(deps, principal, 'conversation', { kind: 'input', controlEpoch: true, targetEpoch: 2 }), /invalid_browser_epoch/)
 })
 
 void test('a timed out input is sent once and carries only the trusted host credential', async () => {
@@ -45,6 +45,6 @@ void test('a timed out input is sent once and carries only the trusted host cred
     assert.equal((options?.headers as Record<string, string>).Authorization, 'Bearer fixture-host-token')
     throw new Error('Input may have reached Chrome')
   })
-  await assert.rejects(worker.invoke({ orgId: 'org', userId: 'owner', sessionId: 'conversation' }, 'trusted-controller', { kind: 'input' }), /not replayed/)
+  await assert.rejects(worker.invoke({ orgId: 'org', userId: 'owner', sessionId: 'conversation' }, 'trusted-controller', { kind: 'input' }), /browser_connection_unavailable/)
   assert.equal(calls, 1)
 })

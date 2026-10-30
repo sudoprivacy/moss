@@ -35,21 +35,21 @@ const actionFields: Record<string, string[]> = {
 
 /** Callers cannot supply actor roles, user IDs, profile paths or raw endpoints. */
 export function browserAction(input: unknown): Record<string, unknown> {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new HttpError(400, 'Invalid browser action')
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new HttpError(400, 'invalid_browser_action')
   const body = input as Record<string, unknown>
-  if (typeof body.kind !== 'string' || !Object.hasOwn(actionFields, body.kind)) throw new HttpError(400, 'Invalid browser action')
+  if (typeof body.kind !== 'string' || !Object.hasOwn(actionFields, body.kind)) throw new HttpError(400, 'invalid_browser_action')
   const action: Record<string, unknown> = { kind: body.kind }
   for (const key of actionFields[body.kind]!) {
     if (key in body) action[key] = body[key]
   }
   if (actionFields[body.kind]!.includes('controlEpoch')) {
     for (const key of ['controlEpoch', 'targetEpoch']) {
-      if (!Number.isSafeInteger(action[key]) || (action[key] as number) < 0) throw new HttpError(400, 'Invalid browser epoch')
+      if (!Number.isSafeInteger(action[key]) || (action[key] as number) < 0) throw new HttpError(400, 'invalid_browser_epoch')
     }
   }
   if (actionFields[body.kind]!.includes('viewerId') &&
     (typeof action.viewerId !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(action.viewerId))) {
-    throw new HttpError(400, 'Invalid browser viewer')
+    throw new HttpError(400, 'invalid_browser_viewer')
   }
   return action
 }
@@ -82,11 +82,11 @@ export async function authorizeSessionBrowser(
   principal: BrowserPrincipal, sessionId: string,
 ): Promise<BrowserBinding> {
   const session = await deps.getSession(sessionId)
-  if (!session) throw new HttpError(404, 'Session not found')
+  if (!session) throw new HttpError(404, 'session_not_found')
   // Browser cookies/profile remain personal even when a manager may inspect a
   // conversation. Check current authorization on every frame and input call.
   if (session.orgId !== principal.orgId || session.userId !== principal.userId || !(await deps.isUserActive(principal))) {
-    throw new HttpError(403, 'Forbidden')
+    throw new HttpError(403, 'session_forbidden')
   }
   const binding = { orgId: session.orgId, userId: session.userId, sessionId: session.sessionId }
   return binding
@@ -117,10 +117,10 @@ export class HttpBrowserWorker implements BrowserWorkerPort {
       })
     } catch {
       // An uncertain input outcome must be observed, never retried here.
-      throw new HttpError(503, 'Browser connection unavailable; input was not replayed')
+      throw new HttpError(503, 'browser_connection_unavailable')
     }
     if (!response.ok) {
-      let code = 'Browser operation failed'
+      let code = 'browser_operation_failed'
       const value = await response.json().catch(() => null) as { error?: unknown } | null
       if (typeof value?.error === 'string' && /^[a-z_]{1,80}$/.test(value.error)) code = value.error
       throw new HttpError([400, 403, 409, 503].includes(response.status) ? response.status : 502, code)
@@ -137,7 +137,7 @@ export class HttpBrowserWorker implements BrowserWorkerPort {
       method: 'POST', redirect: 'error',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.aiToken}`, 'X-Moss-Browser-Session': binding.sessionId },
       body: JSON.stringify(message), signal: AbortSignal.timeout(90_000),
-    }).catch(() => { throw new HttpError(503, 'Browser connection unavailable; input was not replayed') })
+    }).catch(() => { throw new HttpError(503, 'browser_connection_unavailable') })
     if (response.status === 202) return null
     if (!response.ok) throw new HttpError(502, 'Managed browser MCP unavailable')
     return response.json()
@@ -159,10 +159,10 @@ export class HttpBrowserWorker implements BrowserWorkerPort {
         body: data ? new Uint8Array(data).buffer : undefined,
         signal: AbortSignal.timeout(90_000),
       })
-    } catch { throw new HttpError(503, 'Browser file transfer unavailable; request was not replayed') }
+    } catch { throw new HttpError(503, 'browser_file_transfer_unavailable') }
     if (!response.ok) {
       const value = await response.json().catch(() => null) as { error?: unknown } | null
-      const code = typeof value?.error === 'string' && /^[a-z_]{1,80}$/.test(value.error) ? value.error : 'Browser file transfer failed'
+      const code = typeof value?.error === 'string' && /^[a-z_]{1,80}$/.test(value.error) ? value.error : 'browser_file_transfer_failed'
       throw new HttpError([400, 403, 409, 413, 503].includes(response.status) ? response.status : 502, code)
     }
     return response

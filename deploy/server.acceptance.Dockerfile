@@ -1,0 +1,172 @@
+# --- Stage: runtime external deps (bun) --------------------------------------
+# scripts/build.js marks @xenova/transformers / onnxruntime-node / sharp as
+# --external, so they are NOT in bin/moss-server.mjs and must be resolvable from
+# /app/node_modules at runtime; otherwise the wiki embedder degrades to
+# grep-only. Install just those into an isolated node_modules and COPY it into
+# the runtime image. (onnxruntime-node is a transitive dep of @xenova.)
+FROM oven/bun:1 AS runtime-deps
+WORKDIR /deps
+COPY deploy/runtime-deps.package.json package.json
+RUN bun install
+
+# --- Stage: unzip the embedding model ----------------------------------------
+# The model ships in-repo as deploy/models/Xenova.zip (tracked via git-lfs). Its
+# top level is Xenova/multilingual-e5-small/...; unzip it here and strip Mac junk
+# so the runtime stage COPYs only the clean model tree (the zip + unzip tooling
+# never land in the final image).
+FROM debian:bookworm-slim AS model-stage
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
+WORKDIR /m
+COPY deploy/models/Xenova.zip ./Xenova.zip
+RUN unzip -q Xenova.zip -d out \
+    && rm -rf out/__MACOSX \
+    && find out -name '.DS_Store' -delete \
+    && find out -name '.cache' -type d -prune -exec rm -rf {} + \
+    && test -f out/Xenova/multilingual-e5-small/onnx/model_quantized.onnx
+
+FROM node:22.22.1-slim
+# 让 apt 对镜像源的瞬时故障 (例如代理偶发 502/连接超时) 自动重试，并强制串行单连接下载，
+# 避免并发把脆弱的代理打挂导致整层构建失败。
+RUN printf 'Acquire::Retries "20";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\nAcquire::Queue-Mode "access";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/80-retries
+# 安装 Docker CLI + LibreOffice 依赖
+# 镜像源代理偶发 502/连接超时，单次 apt-get install 任一包失败即整层失败。用重试循环包裹安装：
+# apt 的下载缓存在同一 RUN 内保留，每次重试只补拉仍缺失的包，最终收敛。jq 供 OAuth2 凭证脚本解析 JSON。
+RUN apt-get update \
+    && for i in 1 2 3 4 5 6 7 8; do \
+         apt-get install -y --no-install-recommends \
+           curl \
+           ca-certificates \
+           gnupg \
+           lsb-release \
+           unzip \
+           jq \
+           tzdata \
+           # LibreOffice 依赖
+           libxinerama1 \
+           libcairo2 \
+           libcups2 \
+           libxrandr2 \
+           libxdamage1 \
+           libxtst6 \
+           libgtk-3-0 \
+           libgl1-mesa-glx \
+           libglib2.0-0 \
+           libsm6 \
+           libice6 \
+           libxrender1 \
+           libfontconfig1 \
+           libdbus-1-3 \
+           libxi6 \
+           # LibreOffice 26.2 需要 OpenSSL 3 和 NSS
+           libssl3 \
+           libnss3 \
+           libnspr4 \
+         && break || { echo "apt install attempt $i failed; retrying in 10s..."; sleep 10; }; \
+       done \
+    && command -v jq >/dev/null || (echo "jq not installed after retries" && exit 1) \
+    # LibreOffice looks for libssl3.so, but Debian provides libssl.so.3
+    && ln -sf /lib/x86_64-linux-gnu/libssl.so.3 /lib/x86_64-linux-gnu/libssl3.so \
+    && ln -sf /lib/x86_64-linux-gnu/libcrypto.so.3 /lib/x86_64-linux-gnu/libcrypto3.so \
+    && rm -rf /var/lib/apt/lists/*
+
+# 整个服务运行在中国时间（Asia/Shanghai）：日志、时间戳、cron 墙钟均为 CST。
+# 默认 UTC 会导致 cron "9-17" 在 UTC 9-17（即中国傍晚）触发。tzdata 已在上面安装。
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo 'Asia/Shanghai' > /etc/timezone
+
+# 安装 Docker CLI (使用重试 + 国内镜像备用)
+RUN for i in 1 2 3; do \
+        if curl -fsSL --connect-timeout 30 https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null; then \
+            echo "Downloaded Docker GPG key from official source"; \
+            break; \
+        elif curl -fsSL --connect-timeout 30 https://mirrors.aliyun.com/docker-ce/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg 2>/dev/null; then \
+            echo "Downloaded Docker GPG key from Aliyun mirror"; \
+            break; \
+        else \
+            echo "Retry $i: Failed to download Docker GPG key, waiting..."; \
+            sleep 5; \
+        fi; \
+    done \
+    && if [ ! -f /usr/share/keyrings/docker-archive-keyring.gpg ]; then \
+        echo "ERROR: Failed to download Docker GPG key from all sources"; \
+        exit 1; \
+    fi \
+    && DISTRO_CODENAME=$(/usr/bin/lsb_release -cs) \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DISTRO_CODENAME} stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update && apt-get install -y docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+# 下载 scode
+# 安装 LibreOffice 和 PDF 工具 (直接从 apt 安装，确保依赖完整)
+# 同样用重试循环包裹，避免镜像源代理瞬时故障导致整层失败 (见上方 apt 配置)。
+RUN apt-get update \
+    && for i in 1 2 3 4 5 6 7 8; do \
+         apt-get install -y --no-install-recommends \
+           libreoffice-writer libreoffice-core poppler-utils fonts-noto-cjk \
+         && break || { echo "libreoffice install attempt $i failed; retrying in 10s..."; sleep 10; }; \
+       done \
+    && command -v soffice >/dev/null || (echo "libreoffice not installed after retries" && exit 1) \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LIBREOFFICE_BIN=/usr/bin/soffice
+
+
+WORKDIR /app
+
+# 复制本地构建产物
+COPY bin/scode bin/
+COPY bin/wiki bin/
+COPY bin/moss-server.mjs ./bin/
+COPY bin/msgaudit-pull-child.js ./bin/
+COPY bin/direct-connect-session-runner.mjs ./bin/
+COPY bin/artifact-mcp.mjs ./bin/
+COPY bin/nexus/ ./bin/nexus/
+RUN chmod +x ./bin/nexus/nexusd
+COPY admin/dist/ ./admin/dist/
+COPY assistants/ ./assistants/
+COPY skills/ ./skills/
+
+# 复制 wiki (从 Go 构建阶段)
+RUN chmod +x ./bin/wiki
+RUN chmod +x ./bin/scode
+
+# Runtime external deps (@xenova/transformers + onnxruntime-node + sharp), so
+# the wiki embedder can import('@xenova/transformers') instead of degrading to
+# grep-only. Lands at /app/node_modules (cwd=/app), the default resolution root.
+COPY --from=runtime-deps /deps/node_modules ./node_modules
+RUN node --input-type=module -e "await import('@sudo/contracts/common/v1/resource-ref')"
+
+# Embedding model baked into the image at /app/models (NOT /root/.moss/models:
+# docker-compose mounts the host ./.moss over /root/.moss and would shadow it).
+# MOSS_MODELS_DIR points the embedder cache here. The model-stage unzipped the
+# in-repo deploy/models/Xenova.zip to /m/out/Xenova/...
+COPY --from=model-stage /m/out/Xenova /app/models/Xenova
+ENV MOSS_MODELS_DIR=/app/models
+
+
+# 企微会话存档 SDK (libWeWorkFinanceSdk_C.so)
+# ------------------------------------------------------------
+# 拉取聊天记录的 GetChatData/DecryptData 在 qyapi 上不存在，只存在于企微
+# 发布的原生 C 库里，官方仅提供 linux/amd64。本镜像本身已是 amd64-only
+# (上方 /lib/x86_64-linux-gnu 符号链接)，故不引入新约束。
+#
+# 该库不在仓库中：需自行从企微后台下载并放到 deploy/wework-finance-sdk/。
+# 这里 COPY 整个 deploy/ 而不是直接 COPY 该文件：COPY 缺失路径会让构建失败，
+# 而通配符也救不了「目录不存在」的情况（已实测）。故整目录拷入后再判断。
+# 缺失时此层跳过，镜像照常构建 —— 只是会话存档拉取不可用（连接器会在
+# 运行时报出可读的错误），其余功能不受影响。
+COPY deploy/ /tmp/deploy-src/
+RUN if [ -f /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so ]; then \
+        cp /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so /usr/local/lib/ \
+        && ldconfig \
+        && echo "WeCom finance SDK installed"; \
+    else \
+        echo "WeCom finance SDK not vendored; 会话存档 pull will be unavailable"; \
+    fi \
+    && rm -rf /tmp/deploy-src
+
+EXPOSE 43127
+
+CMD ["node", "bin/moss-server.mjs", "start"]
