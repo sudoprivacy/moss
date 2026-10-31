@@ -20,6 +20,14 @@ claim; this is not an execution lease. The ordinary chat delivery adapter must
 still enforce idempotency using the stable message ID and reconcile interrupted
 turns before retrying execution.
 
+Migration 28 adds an independent, atomic dispatch reservation for each inbox
+item. Exactly one controller can reserve it, including across database handles
+and process restarts. It never expires or resets when delivery fails or the
+provider repeats an event. A replacement controller reads the existing native
+conversation to recover a pending or completed turn; an unknown outcome requires
+reconciliation and cannot trigger another submission. Missing or foreign inbox
+items cannot be reserved. Deleting an inbox item removes its bookkeeping.
+
 Database acceptance exercises production initialization, organization isolation,
 rollback, duplicate events, immutable routing, independent PostgreSQL controllers
 and reopening. This store alone does not activate a cloud review page, select a

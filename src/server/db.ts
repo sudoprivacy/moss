@@ -4,6 +4,7 @@ import { ensureOrganizationResourceSchema } from './catalog/organizationResource
 import { ONTOLOGY_PROJECT_SCHEMA } from './ontology/projectSchema.js'
 import { ONTOLOGY_REVIEW_STORE_SCHEMA } from './ontology/reviewStoreSchema.js'
 import { ONTOLOGY_REVIEW_GRANT_SCHEMA } from './ontology/reviewGrantSchema.js'
+import { ONTOLOGY_REVIEW_DISPATCH_SCHEMA } from './ontology/reviewDispatchSchema.js'
 import { OntologyProjectRegistry } from './ontology/projectRegistry.js'
 import { randomUUID } from 'crypto'
 import { mkdirSync } from 'fs'
@@ -736,6 +737,7 @@ export class DirectConnectStore {
     this.db.exec(ONTOLOGY_PROJECT_SCHEMA)
     this.db.exec(ONTOLOGY_REVIEW_STORE_SCHEMA)
     this.db.exec(ONTOLOGY_REVIEW_GRANT_SCHEMA)
+    this.db.exec(ONTOLOGY_REVIEW_DISPATCH_SCHEMA)
 
     // Secrets base table must exist before column migrations below. On a fresh
     // DB, PRAGMA table_info(nonexistent) returns an empty list, and ALTER TABLE
