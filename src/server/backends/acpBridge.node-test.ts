@@ -650,6 +650,7 @@ void test('native input forwarding preserves admission, commit, flush and cancel
   const submit = sent.find(item => item.params?.action === 'submit')
   assert.equal(submit.method, '_sudocode/session/input')
   assert.equal(submit.params.delivery, 'queue')
+  assert.equal(submit.params.display, 'original draft')
   assert.equal(submit.params.content[0].data, 'test-png')
   assert.deepEqual(submit.params.draft, { text: 'original draft', files: ['/webupload/example'] })
   const pending = [{ id: 2, clientId: 'draft-1', display: 'original draft', source: 'human', delivery: 'queue' }]
@@ -686,6 +687,11 @@ void test('native input forwarding preserves admission, commit, flush and cancel
   await handle.destroy(true)
   const records = (await readFile(transcriptPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
   assert.equal(records.filter(item => item.type === 'user' && item.uuid === 'draft-1').length, 1)
+  const user = records.find(item => item.type === 'user' && item.uuid === 'draft-1')
+  assert.equal(user.displayText, 'original draft', 'history preserves human text separately from expanded agent content')
+  assert.match(user.message.content, /REFERENCE_INPUT: continue the original task/, 'resume retains the exact agent input')
+  assert.equal(parseSessionTranscriptMessages(await readFile(transcriptPath, 'utf8')).find(item => item.uuid === 'draft-1')?.displayText,
+    'original draft', 'the existing context API returns the same human display text after reload')
   assert.equal(records.filter(item => item.subtype === 'error_interrupted').length, 1, 'native turns retain the interrupted outcome even without a prompt RPC')
   assert.equal(sent.some(item => item.method === 'session/prompt'), false, 'native delivery must not fall back to a second turn scheduler')
 })
