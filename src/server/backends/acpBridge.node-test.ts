@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -694,4 +694,80 @@ void test('native input forwarding preserves admission, commit, flush and cancel
     'original draft', 'the existing context API returns the same human display text after reload')
   assert.equal(records.filter(item => item.subtype === 'error_interrupted').length, 1, 'native turns retain the interrupted outcome even without a prompt RPC')
   assert.equal(sent.some(item => item.method === 'session/prompt'), false, 'native delivery must not fall back to a second turn scheduler')
+})
+
+void test('native receipts recover the original transcript after restart without resubmitting input', async t => {
+  for (const stopReason of ['end_turn', 'cancelled', 'error', 'write_failure'] as const) await t.test(stopReason, async child => {
+    const cwd = await mkdtemp(join(tmpdir(), 'moss-native-receipt-'))
+    const transcriptPath = join(cwd, 'transcript.jsonl')
+    const handles: ReturnType<typeof createAcpBridgeHandle>[] = []
+    child.after(async () => { for (const handle of handles) await handle.destroy(); await rm(cwd, { recursive: true, force: true }) })
+    const start = async (nativeSession: string) => {
+      const sent: any[] = [], output: any[] = []
+      let events!: import('./acpTransport.js').AcpTransportEvents
+      const transport: import('./acpTransport.js').AcpMessageTransport = {
+        connected: true, start(value) { events = value }, async send(message) { sent.push(message) }, async close() {},
+      }
+      const handle = createAcpBridgeHandle({ transport, cwd, sessionId: 'receipt-host', model: 'fixture', transcriptPath,
+        enabledSkillNames: [], runtime: { type: 'cohost', engine: 'scode' } })
+      handles.push(handle)
+      handle.onStdoutLine(line => output.push(JSON.parse(line)))
+      const waitFor = async (predicate: () => boolean) => {
+        const deadline = Date.now() + 5000
+        while (!predicate()) { assert.ok(Date.now() < deadline, 'native receipt deadline'); await delay(5) }
+      }
+      const receive = (value: any) => events.onMessage({ jsonrpc: '2.0', ...value })
+      const update = (value: any) => receive({ method: '_sudocode/session/input_update', params: { sessionId: nativeSession, update: value } })
+      const control = (requestId: string, request: any) => handle.writeStdin(JSON.stringify({ type: 'control_request', request_id: requestId, request }))
+      const receipt = async (clientId: string) => {
+        const id = 'receipt-' + output.length
+        control(id, { subtype: 'input_receipt', clientId })
+        await waitFor(() => output.some(item => item.type === 'input_delivery_receipt' && item.requestId === id))
+        return output.find(item => item.type === 'input_delivery_receipt' && item.requestId === id).receipt
+      }
+      await waitFor(() => sent.some(item => item.method === 'initialize'))
+      receive({ id: 'm-init', result: { _meta: { sudocode: { inputDelivery: { version: 1 } } } } })
+      receive({ id: 'm-session-new', result: { sessionId: nativeSession } })
+      await waitFor(() => output.some(item => item.type === 'hello'))
+      assert.equal(output.find(item => item.type === 'hello').nativeInputReceipts?.version, 1, 'callers require the advertised receipt protocol before sending its controls')
+      return { sent, output, handle, waitFor, receive, update, control, receipt }
+    }
+    const original = await start('native-original')
+    if (stopReason === 'write_failure') await mkdir(transcriptPath)
+    original.control('submit', { subtype: 'input', action: { action: 'submit', clientId: 'stable-input', delivery: 'queue',
+      display: 'Human review comment', content: [{ type: 'text', text: 'Full anchored review input' }] } })
+    await original.waitFor(() => original.sent.some(item => item.params?.action === 'submit'))
+    const submission = original.sent.find(item => item.params?.action === 'submit')
+    const state = { revision: 1, activeTurnId: 7, running: true, paused: false,
+      pending: [{ clientId: 'stable-input', id: 7, source: 'human', delivery: 'queue' }] }
+    original.update({ kind: 'state', state })
+    original.receive({ id: submission.id, result: { id: 7, state } })
+    assert.deepEqual(await original.receipt('stable-input'), { state: 'pending' }, 'admission is pending, never a completed turn')
+    original.update({ kind: 'committed', clientId: 'stable-input', source: 'human' })
+    original.update({ kind: 'state', state: { ...state, revision: 2, pending: [] } })
+    assert.deepEqual(await original.receipt('stable-input'), { state: stopReason === 'write_failure' ? 'unknown' : 'pending' }, 'model consumption alone does not prove completion')
+    original.receive({ method: 'session/update', params: { sessionId: 'native-original', update: {
+      sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Original answer, preserved exactly.' } } } })
+    if (stopReason === 'error') original.update({ kind: 'error', message: 'Provider failed after partial output' })
+    else original.update({ kind: 'turn_complete', turnId: 7, stopReason: stopReason === 'write_failure' ? 'end_turn' : stopReason })
+    original.update({ kind: 'state', state: { ...state, revision: 3, activeTurnId: null, pending: [], running: false } })
+    await original.waitFor(() => original.output.some(item => item.type === 'input_delivery_persisted'))
+    assert.equal(original.output.find(item => item.type === 'input_delivery_persisted').error, stopReason === 'write_failure' ? 'TRANSCRIPT_WRITE_FAILED' : undefined)
+    const expected = { state: 'complete', text: 'Original answer, preserved exactly.',
+      ...(stopReason === 'cancelled' ? { error: 'TURN_CANCELLED' } : stopReason === 'error' ? { error: 'TURN_FAILED' } : {}) }
+    const recovered = stopReason === 'write_failure' ? { state: 'unknown' } : expected
+    assert.deepEqual(await original.receipt('stable-input'), recovered)
+    await original.handle.destroy(true)
+    const replacement = await start('native-replacement')
+    assert.deepEqual(await replacement.receipt('stable-input'), recovered, 'recovery survives a different native execution')
+    assert.deepEqual(await replacement.receipt('never-admitted'), { state: 'unknown' })
+    if (stopReason !== 'write_failure') {
+      await appendFile(transcriptPath, [
+        { type: 'user', uuid: 'legacy-no-receipt', message: { role: 'user', content: 'Legacy input' } },
+        { type: 'assistant', uuid: 'legacy-answer', message: { role: 'assistant', content: [{ type: 'text', text: 'Unrelated adjacent answer' }] } },
+      ].map(row => JSON.stringify(row) + '\n').join(''))
+      assert.deepEqual(await replacement.receipt('legacy-no-receipt'), { state: 'unknown' }, 'adjacent messages cannot prove native completion')
+    }
+    assert.equal(replacement.sent.some(item => item.params?.action === 'submit' || item.method === 'session/prompt'), false)
+  })
 })

@@ -1,4 +1,4 @@
-import { appendFile, mkdir, rm, writeFile } from 'fs/promises'
+import { appendFile, mkdir, open, rm, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import type { BackendAvailableSkill, BackendHandle, BackendHostContextResolver, SessionRuntimeInfo } from '../sessionManager.js'
@@ -14,6 +14,7 @@ import { ensureDraftsDirectory } from '../draftsCleanup.js'
 
 import { ArtifactTracker, artifactManifestPath } from '../artifacts.js'
 import { readAcpExecutionWorkspace, type ExecutionWorkspace } from './executionWorkspace.js'
+import { readNativeInputReceipt } from './nativeInputReceipt.js'
 
 type AcpBridgeOptions = {
   child?: ChildProcess
@@ -77,6 +78,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   let isNativeArtifactBatch = false
   let isNativeTurnCancelled = false
   const nativeUserEvents = new Map<string, Record<string, unknown>>()
+  const nativeCommittedInputs = new Set<string>()
+  const nativeTurnIdentity = () => acpSessionId && nativeInputState?.activeTurnId
+    ? { sessionId: acpSessionId, turnId: nativeInputState.activeTurnId, clientIds: [...nativeCommittedInputs] } : undefined
   let pendingInputPreparations = 0
 
   // A2: busy state machine
@@ -248,17 +252,37 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   }
 
   let transcriptWrites = Promise.resolve()
-  const writeTranscript = (event: any): Promise<void> => {
-    if (!transcriptPath) return Promise.resolve()
+  let isTranscriptComplete = true
+  const writeTranscript = (event: any, isFlushed = false): Promise<boolean> => {
+    if (!transcriptPath) return Promise.resolve(false)
     const line = JSON.stringify(event) + '\n'
     // File operations must preserve the parent chain's message order.
-    transcriptWrites = transcriptWrites.then(async () => {
+    const persisted = transcriptWrites.then(async () => {
+      if (isFlushed && !isTranscriptComplete) throw new Error('Earlier transcript writes failed; native outcome is unknown')
       await mkdir(dirname(transcriptPath), { recursive: true })
-      await appendFile(transcriptPath, line, 'utf8')
-    }).catch((error: unknown) => {
+      if (isFlushed) {
+        const file = await open(transcriptPath, 'a')
+        try { await file.writeFile(line, 'utf8'); await file.sync() }
+        finally { await file.close() }
+      } else await appendFile(transcriptPath, line, 'utf8')
+    })
+    transcriptWrites = persisted.catch((error: unknown) => {
+      isTranscriptComplete = false
       process.stderr.write(`[AcpBridge] TRANSCRIPT WRITE ERROR: ${error instanceof Error ? error.message : String(error)}\n`)
     })
-    return transcriptWrites
+    return persisted.then(() => true, () => false)
+  }
+
+  const persistNativeCompletion = (stopReason: 'end_turn' | 'cancelled' | 'error'): void => {
+    const nativeInput = nativeTurnIdentity()
+    if (!nativeInput?.clientIds.length) return
+    const event = { type: 'result', result_type: 'user', subtype: 'native_input_complete', sessionId,
+      uuid: randomUUID(), parentUuid: lastPersistedUuid, timestamp: new Date().toISOString(),
+      nativeInput, stopReason }
+    void writeTranscript(event, true).then(isPersisted => {
+      emitStdout(JSON.stringify({ type: 'input_delivery_persisted', session_id: sessionId, nativeInput,
+        ...(isPersisted ? { stopReason } : { error: 'TRANSCRIPT_WRITE_FAILED' }) }) + '\n')
+    })
   }
 
   const persistThoughtText = (): void => {
@@ -278,6 +302,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const uuid = currentTurnAssistantUuid ?? randomUUID()
     void writeTranscript({
       type: 'assistant', sessionId, uuid, parentUuid: lastPersistedUuid,
+      nativeInput: nativeTurnIdentity(),
       isSidechain: false, timestamp: new Date().toISOString(), cwd,
       userType: 'external', version: 'unknown',
       message: {
@@ -846,8 +871,10 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           if (update?.kind === 'committed') {
             if (update.source === 'human') isFirstMessage = false
             const event = nativeUserEvents.get(update.clientId)
+            if (typeof update.clientId === 'string') nativeCommittedInputs.add(update.clientId)
             if (event) {
               event.parentUuid = lastPersistedUuid
+              event.nativeInput = nativeTurnIdentity()
               void writeTranscript(event)
               lastPersistedUuid = update.clientId
               nativeUserEvents.delete(update.clientId)
@@ -855,6 +882,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           }
           emitStdout(JSON.stringify({ type: 'input_delivery_update', session_id: sessionId, update }) + '\n')
           if (update?.kind === 'state') {
+            if (update.state?.activeTurnId !== nativeInputState?.activeTurnId) nativeCommittedInputs.clear()
             nativeInputState = update.state
             reevaluateBusy()
             if (!nativeInputState?.running && (nativeInputState?.paused || !nativeInputState?.pending.length) && isNativeArtifactBatch) {
@@ -934,6 +962,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             emitStdout(JSON.stringify(resultEvent) + '\n')
           })
           void writeTranscript({ ...resultEvent, uuid: randomUUID(), timestamp: new Date().toISOString() })
+          if (parsed.nativeInput) persistNativeCompletion('error')
           currentAssistantText = ''
           currentThoughtText = ''
           currentTurnAssistantUuid = null
@@ -1006,6 +1035,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
           const isNativeTurn = parsed.nativeInput === true
           if (isNativeTurn) {
+            persistNativeCompletion(parsed.result.stopReason === 'cancelled' ? 'cancelled' : 'end_turn')
             emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: 'success', is_error: false, usage }) + '\n')
           }
           if (!isNativeTurn) artifactFinalization = (artifacts?.finish(parsed.result?.stopReason === 'cancelled') ?? Promise.resolve({ changed: [] }))
@@ -1120,6 +1150,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               currentAssistantText = ''
               const assistantUuid = randomUUID()
               const assistantEvent = {
+                nativeInput: nativeTurnIdentity(),
                 type: 'assistant',
                 session_id: sessionId,
                 sessionId,
@@ -1329,6 +1360,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       session_id: sessionId,
       runtimeType: runtime.type,
       state: 'running',
+      nativeInputReceipts: { version: 1 },
     }) + '\n'
     // We don't use emitStdout here because we want hello to be first and we know
     // it will be buffered if listeners aren't ready yet, or sent immediately if they are.
@@ -1417,6 +1449,20 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
       try {
         const parsed = JSON.parse(data)
+        if (parsed?.type === 'control_request' && parsed.request?.subtype === 'input_receipt') {
+          const requestId = parsed.request_id, clientId = parsed.request.clientId
+          if (typeof requestId === 'string' && typeof clientId === 'string' && clientId.length > 0 && clientId.length <= 512) {
+            void (async () => {
+              await transcriptWrites
+              let receipt = transcriptPath && isTranscriptComplete ? await readNativeInputReceipt(transcriptPath, clientId) : { state: 'unknown' as const }
+              if (receipt.state === 'pending' && (receipt.sessionId !== acpSessionId || receipt.turnId !== nativeInputState?.activeTurnId || !nativeInputState.running)) receipt = { state: 'unknown' }
+              const isQueued = nativeInputState?.pending.some(item => (item as { clientId?: string }).clientId === clientId)
+              emitStdout(JSON.stringify({ type: 'input_delivery_receipt', session_id: sessionId, requestId, isSupported: isInputDeliverySupported,
+                receipt: isQueued ? { state: 'pending' } : receipt.state === 'pending' ? { state: 'pending' } : receipt }) + '\n')
+            })()
+          }
+          return
+        }
         if (parsed?.type === 'control_request' && parsed.request?.subtype === 'input') {
           if (typeof parsed.request_id === 'string' && parsed.request.action && typeof parsed.request.action === 'object') {
             void controlInput(parsed.request_id, parsed.request.action)
