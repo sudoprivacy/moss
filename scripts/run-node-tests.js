@@ -17,6 +17,7 @@ const nodeTestFiles = [
   'src/server/ontology/projectRegistry.node-test.ts',
   'src/server/ontology/reviewStore.node-test.ts',
   'src/server/ontology/reviewGrantStore.node-test.ts',
+  'src/server/ontology/nativeConversationReview.node-test.ts',
   'src/server/ontology/runnerContext.node-test.ts',
   'src/server/ontology/runnerHost.node-test.ts',
   'src/server/ontology/compilerContextWorker.node-test.ts',
