@@ -49,7 +49,7 @@ void test('trusted review launch uses the existing host transport and revokes un
   const cookie = { name: 'fixture_review', value: 'a'.repeat(64), url: 'http://127.0.0.1:8123/review/private/',
     path: '/review/private/', httpOnly: true as const, sameSite: 'Strict' as const, expires: Date.now() / 1000 + 60 }
   const page = Object.defineProperties({ url: cookie.url }, {
-    cookie: { value: cookie }, revoke: { value: () => { revoked++ } },
+    cookie: { value: cookie }, revoke: { value: async () => { await new Promise<void>(resolve => setImmediate(resolve)); revoked++ } },
   }) as AuthorizedBrowserPage
   assert(!JSON.stringify(page).includes(cookie.value), 'the private SDK handoff remains non-serializable')
   const result = await openSessionAuthorizedPage(deps, binding, binding.sessionId, page, epochs)
@@ -59,6 +59,7 @@ void test('trusted review launch uses the existing host transport and revokes un
   assert.equal(revoked, 0)
 
   await assert.rejects(openSessionAuthorizedPage(deps, { ...binding, userId: 'manager' }, binding.sessionId, page, epochs), /session_forbidden/)
+  assert.equal(revoked, 1, 'a failed launch must wait for the shared database revocation to commit')
   assert.equal(actions.length, 1, 'another account cannot reach the private worker operation')
   owner = { ...binding, sessionId: 'another-conversation' }
   await assert.rejects(openSessionAuthorizedPage(deps, binding, binding.sessionId, page, epochs), /browser_not_started/)
