@@ -8,6 +8,7 @@ import { OntologyReviewGrantStore, reviewAuthorizationRef } from './reviewGrantS
 export async function createSharedModelReviewHost(store: DirectConnectStore, options: {
   origin: string
   comments: NonNullable<ISudographReviewHostOptions['comments']>
+  isUserActive?: (owner: { orgId: string; userId: string }) => Promise<boolean>
 }) {
   if (!options.comments) throw new ResourceAccessError(503, 'Model review requires the existing comment provider')
   const ports = await createModelContextHost(store)
@@ -17,6 +18,7 @@ export async function createSharedModelReviewHost(store: DirectConnectStore, opt
     if (!binding || binding.projectId !== grant.workspaceId || reviewAuthorizationRef(binding) !== grant.authorizationRef) {
       throw new ResourceAccessError(403, 'Canonical review authorization is unavailable')
     }
+    if (options.isUserActive && !await options.isUserActive({ orgId: binding.orgId, userId: binding.userId })) throw new ResourceAccessError(403, 'Canonical review authorization is unavailable')
     await ports.ontologyReview.authorize(binding)
     return binding
   }
