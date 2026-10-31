@@ -93,6 +93,16 @@ export class OntologyReviewStore implements ISudographReviewStore {
     })
   }
 
+  /** Reserve execution once; an uncertain native outcome must be reconciled, never replayed. */
+  async claimReviewDelivery(id: string): Promise<boolean> {
+    const changed = await this.driver.run(`INSERT INTO ontology_review_dispatch_claims (org_id,item_id)
+      SELECT org_id,id FROM ontology_review_inbox WHERE org_id=? AND id=? ON CONFLICT DO NOTHING`, [this.orgId, id])
+    if (changed) return true
+    const item = await this.driver.get('SELECT id FROM ontology_review_inbox WHERE org_id=? AND id=?', [this.orgId, id])
+    if (!item) throw new Error('Review inbox item is unavailable')
+    return false
+  }
+
   async reviewDeliverySummary(account: string, workspaceId: string, conversationId: string): Promise<Record<string, number>> {
     const rows = await this.driver.all(`SELECT i.status,count(*) AS total FROM ontology_review_inbox i
       JOIN ontology_review_subscriptions s ON i.org_id=s.org_id AND i.subscription_id=s.id

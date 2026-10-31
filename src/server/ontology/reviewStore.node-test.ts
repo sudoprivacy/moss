@@ -74,6 +74,25 @@ async function contract(t: TestContext, drivers: DbDriver[], reopen: () => Promi
     assert.deepEqual(await create('foreign').reviewDeliverySummary(value.account, value.workspaceId, value.conversationId), {})
   })
 
+  await t.test('dispatch is reserved once across independent controllers, failures and restart', async () => {
+    await create().acceptReviewEvents([packet('dispatch')])
+    const attempts = await Promise.all(drivers.map((_driver, index) => create('org', index).claimReviewDelivery('dispatch')))
+    assert.equal(attempts.filter(Boolean).length, 1)
+    await create().finishReviewEvent('dispatch', 'error', 'NATIVE_OUTCOME_UNKNOWN')
+    await reopen()
+    assert.equal(await create().claimReviewDelivery('dispatch'), false, 'an uncertain submission cannot be replayed')
+    await create().acceptReviewEvents([packet('dispatch')])
+    assert.equal(await create().claimReviewDelivery('dispatch'), false, 'polling the provider cannot reset a reservation')
+    await assert.rejects(create('foreign').claimReviewDelivery('dispatch'), /unavailable/)
+    await assert.rejects(create().claimReviewDelivery('missing'), /unavailable/)
+    const foreignSubscription = { ...value, id: 'foreign-dispatch-subscription' }
+    await create('foreign').subscribeReview(foreignSubscription)
+    await create('foreign').acceptReviewEvents([{ ...packet('dispatch'), subscription: foreignSubscription }])
+    assert.equal(await create('foreign').claimReviewDelivery('dispatch'), true, 'each organization owns its dispatch namespace')
+    await drivers[0].run('DELETE FROM ontology_review_inbox WHERE org_id=? AND id=?', ['org', 'dispatch'])
+    assert.equal(await drivers[0].get('SELECT item_id FROM ontology_review_dispatch_claims WHERE org_id=? AND item_id=?', ['org', 'dispatch']), undefined)
+  })
+
   await t.test('the installed shared provider waits for this durable inbox before acknowledging HTTP events', async child => {
     const database = create('provider-org')
     const settings = { viewer_scope: 'owner_and_collaborators', allow_comments: true, is_public: false }
@@ -150,8 +169,8 @@ async function contract(t: TestContext, drivers: DbDriver[], reopen: () => Promi
 void test('SQLite production initialization and reopened review delivery store', async t => {
   const root = await mkdtemp(join(tmpdir(), 'moss-review-store-'))
   const path = join(root, 'host.db')
-  const drivers: DbDriver[] = [new DirectConnectStore(path).driver]
-  t.after(async () => { await drivers[0].close(); await rm(root, { recursive: true, force: true }) })
+  const drivers: DbDriver[] = [new DirectConnectStore(path).driver, new DirectConnectStore(path).driver]
+  t.after(async () => { await Promise.all(drivers.map(driver => driver.close())); await rm(root, { recursive: true, force: true }) })
   await contract(t, drivers, async () => { await drivers[0].close(); drivers[0] = new DirectConnectStore(path).driver }, false)
 })
 
@@ -173,5 +192,6 @@ void test('PostgreSQL production migration and independent review store controll
   // The registry upgrade contract separately exercises concurrent migrations.
   for (const driver of drivers) await applyPgSchema(driver)
   assert.equal((await drivers[0].get('SELECT name FROM _migrations WHERE version=26'))?.name, 'canonical-review-delivery-bookkeeping')
+  assert.equal((await drivers[0].get('SELECT name FROM _migrations WHERE version=28'))?.name, 'canonical-review-dispatch-reservations')
   await contract(t, drivers, async () => { await drivers[0].close(); drivers[0] = make() }, true)
 })

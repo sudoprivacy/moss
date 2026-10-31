@@ -8,6 +8,7 @@ import { COHOST_AGENT_HOME_SCHEMA } from '../storage/cohostAgentHomeSchema.js'
 import { ONTOLOGY_PROJECT_SCHEMA } from '../ontology/projectSchema.js'
 import { ONTOLOGY_REVIEW_STORE_SCHEMA } from '../ontology/reviewStoreSchema.js'
 import { ONTOLOGY_REVIEW_GRANT_SCHEMA } from '../ontology/reviewGrantSchema.js'
+import { ONTOLOGY_REVIEW_DISPATCH_SCHEMA } from '../ontology/reviewDispatchSchema.js'
 /**
  * PostgreSQL schema for moss (HA P1-2e).
  *
@@ -2042,6 +2043,7 @@ export const MIGRATIONS: PgMigration[] = [
   { version: 25, name: 'canonical-ontology-project-bindings', sql: ONTOLOGY_PROJECT_SCHEMA },
   { version: 26, name: 'canonical-review-delivery-bookkeeping', sql: ONTOLOGY_REVIEW_STORE_SCHEMA },
   { version: 27, name: 'canonical-review-browser-grants', sql: ONTOLOGY_REVIEW_GRANT_SCHEMA },
+  { version: 28, name: 'canonical-review-dispatch-reservations', sql: ONTOLOGY_REVIEW_DISPATCH_SCHEMA },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */
