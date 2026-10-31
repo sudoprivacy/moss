@@ -172,6 +172,6 @@ void test('PostgreSQL production migration and independent review store controll
   // This contract races delivery claims, not the bounded first-boot schema lock.
   // The registry upgrade contract separately exercises concurrent migrations.
   for (const driver of drivers) await applyPgSchema(driver)
-  assert.equal(Number((await drivers[0].get('SELECT max(version) AS version FROM _migrations'))?.version), 26)
+  assert.equal((await drivers[0].get('SELECT name FROM _migrations WHERE version=26'))?.name, 'canonical-review-delivery-bookkeeping')
   await contract(t, drivers, async () => { await drivers[0].close(); drivers[0] = make() }, true)
 })

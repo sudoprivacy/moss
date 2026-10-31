@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import type { ISudographReviewHostOptions, ShareoneReviewAssets } from '@sudowork/sudograph-runtime'
 import { test, type TestContext } from 'node:test'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -13,11 +14,13 @@ import { ToolGatewayStore } from '../agentFederation/toolGatewayStore.js'
 import { ToolProtocol } from '../agentFederation/toolProtocol.js'
 import { NexusClient } from '../nexus/nexusClient.js'
 import { orgScopedNamespace, secretSubject } from '../secrets/secretSubject.js'
-import { registerModelContextTool } from './contextWorker.js'
+import { registerModelContextReadTool, registerModelContextTool } from './contextWorker.js'
+import { createSharedModelReviewHost } from './sharedReviewHost.js'
+import { WORKER_REVIEW_PROFILE } from './workerReviewProtocol.js'
 import { createSessionRunnerHost } from './runnerHost.js'
 import { createModelSession, getSessionProject, listProjectSessions, listSessionProjects, parseOntologyProjectId, withSessionProjectAccess } from './sessionProjects.js'
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, humanReview = false) {
   const store = new DirectConnectStore(':memory:')
   const auth = new AuthCenterDb(store)
   await auth.createOrganization('org', 'Fixture organization', Date.now())
@@ -28,16 +31,30 @@ async function fixture(t: TestContext) {
   await store.createSession({ sessionId: 'session', transcriptSessionId: 'native-history', transcriptPath: '/unused/transcript',
     userId: 'alice', orgId: 'org', role: 'admin', scopes: ['*'], cwd: '/unused', runtime: { type: 'cohost', engine: 'scode' },
     status: 'active', desiredState: 'active' })
-  const state = { text: 'Current policy A', calls: 0, token: null as string | null, beforeReply: undefined as (() => Promise<void>) | undefined }
+  const state = { text: 'Current policy A', revision: 'a'.repeat(64), calls: 0, reviewCalls: 0,
+    token: null as string | null, beforeReply: undefined as (() => Promise<void>) | undefined }
   const http = createServer((req, res) => {
     void (async () => {
       if (state.token && req.headers.authorization !== `Bearer ${state.token}`) { res.writeHead(401); res.end(); return }
+      if (humanReview && req.url === '/review') {
+        const chunks: Buffer[] = []
+        for await (const chunk of req) chunks.push(Buffer.from(chunk))
+        const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { resource: string }
+        state.reviewCalls++
+        await state.beforeReply?.()
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ format: WORKER_REVIEW_PROFILE, authority_ref: 'authority', model_ref: 'model',
+          resource_ref: input.resource, source_refs: ['source'], scope: 'full-registered-model',
+          result: { revision: state.revision, context_digest: 'b'.repeat(64) } }))
+        return
+      }
       const sdk = new McpServer({ name: 'registered-worker', version: '1.0.0' })
       registerModelContextTool(sdk, { authorityRef: 'authority', modelRef: 'model', sourceRefs: ['source'] }, async () => {
         state.calls++
         await state.beforeReply?.()
-        return { format: 'sudograph-agent-context/v1', revision: 'a'.repeat(64), context_digest: 'b'.repeat(64), text: state.text }
+        return { format: 'sudograph-agent-context/v1', revision: state.revision, context_digest: 'b'.repeat(64), text: state.text }
       })
+      if (humanReview) registerModelContextReadTool(sdk, async () => ({}), { hostReview: true })
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
       res.once('close', () => { void sdk.close() })
       await sdk.connect(transport)
@@ -59,12 +76,13 @@ async function fixture(t: TestContext) {
   await mcp.setMcpServerStatus('org', server.id, 'enabled', 'manager')
   await mcp.upsertMcpPolicy('org', { allow_http_sse_mcp: true, allow_external_network: true, domain_whitelist_json: ['127.0.0.1'] }, 'manager')
   const protocol = new ToolProtocol({ endpoint: server.url!, headers: {}, timeoutMs: 5000 }, AbortSignal.timeout(10000))
-  let descriptor
-  try { await protocol.connect(); descriptor = (await protocol.descriptors())[0] } finally { await protocol.close() }
-  assert(descriptor)
-  await reviews.saveReview({ ...descriptor, orgId: 'org', resource: `mcp:${server.id}/sudograph_context`, serverId: server.id,
-    serverDigest: mcpServerDigest(server), action: 'read', sensitive: true,
-    outbound: false, enabled: true, revision: 'review', reviewedBy: 'manager', reviewedAt: Date.now() }, null)
+  let descriptors
+  try { await protocol.connect(); descriptors = await protocol.descriptors() } finally { await protocol.close() }
+  for (const descriptor of descriptors) {
+    await reviews.saveReview({ ...descriptor, orgId: 'org', resource: `mcp:${server.id}/${descriptor.tool.name}`, serverId: server.id,
+      serverDigest: mcpServerDigest(server), action: 'read', sensitive: true,
+      outbound: false, enabled: true, revision: descriptor.tool.name + '-review', reviewedBy: 'manager', reviewedAt: Date.now() }, null)
+  }
   const host = await createSessionRunnerHost(store, 'session')
   assert.deepEqual(host, {}, 'ordinary sessions do not initialize a model host')
   const project = await store.ontologyProjects.register({ orgId: 'org', authorityRef: 'authority', workerRef: server.id,
@@ -77,6 +95,55 @@ async function fixture(t: TestContext) {
   t.after(() => production.close?.())
   return { store, mcp, server, project, production, state, read: () => reader({ sessionId: 'session', nativeSessionId: 'native-history' }) }
 }
+
+void test('the production shared review composition mounts current host policy and durable browser grants', async t => {
+  const f = await fixture(t, true)
+  let current: Awaited<ReturnType<typeof createSharedModelReviewHost>>
+  const server = createServer((req, res) => {
+    void current.handleRequest(req, res).then(handled => { if (!handled) res.writeHead(404).end() })
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  assert(address && typeof address !== 'string')
+  const origin = `http://127.0.0.1:${address.port}`
+  const comments: NonNullable<ISudographReviewHostOptions['comments']> = {
+    assets: { shell: (_prefix: string, config: unknown) => JSON.stringify(config), get: () => undefined } as unknown as ShareoneReviewAssets,
+    prepare: async () => ({ shareId: 'private-comment-space' }), proxy: async () => ({ status: 200, body: {} }),
+    status: async () => ({ delivered: 0 }),
+  }
+  const make = () => createSharedModelReviewHost(f.store, { origin, comments })
+  current = await make()
+  t.after(async () => { await current.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
+  await assert.rejects(createSharedModelReviewHost(f.store, { origin, comments: undefined! }), /requires the existing comment provider/)
+  await assert.rejects(current.open({ orgId: 'org', userId: 'bob' }, 'session'), /authorization is unavailable/)
+  await assert.rejects(current.open({ orgId: 'foreign', userId: 'alice' }, 'session'), /authorization is unavailable/)
+  const launch = await current.open({ orgId: 'org', userId: 'alice' }, 'session')
+  assert.equal((await fetch(launch.url)).status, 403)
+  const headers = { Cookie: launch.cookie.name + '=' + launch.cookie.value }
+  const shell = await (await fetch(launch.url, { headers })).json() as { allow_comments: boolean }
+  assert.equal(shell.allow_comments, true)
+  const readHead = async () => {
+    const response = await fetch(launch.url + 'v1', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ view: f.project.projectId, operation: 'head' }) })
+    assert.equal(response.status, 200)
+    return (await response.json() as { result: { revision: string } }).result.revision
+  }
+  assert.equal(await readHead(), 'a'.repeat(64))
+  const previous = current
+  current = await make()
+  await previous.close()
+  f.state.revision = 'c'.repeat(64)
+  assert.equal(await readHead(), f.state.revision, 'model changes and host replacement retain the same durable grant')
+  await f.store.ontologyProjects.setEnabled('org', f.project.projectId, false)
+  await f.store.ontologyProjects.setEnabled('org', f.project.projectId, true)
+  const calls = f.state.reviewCalls
+  assert.equal((await fetch(launch.url, { headers })).status, 403)
+  assert.equal(f.state.reviewCalls, calls, 'a stale generation cannot dispatch a worker read')
+  const fresh = await current.open({ orgId: 'org', userId: 'alice' }, 'session')
+  assert.ok((await f.store.driver.get('SELECT count(*) AS n FROM ontology_review_grants'))?.n)
+  await fresh.revoke()
+  assert.equal((await fetch(fresh.url, { headers: { Cookie: fresh.cookie.name + '=' + fresh.cookie.value } })).status, 403)
+})
 
 void test('project discovery returns only current authorized canonical references without reading business context', async t => {
   const f = await fixture(t)

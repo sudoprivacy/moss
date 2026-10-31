@@ -14,7 +14,7 @@ export interface BrowserBinding extends BrowserPrincipal { sessionId: string }
 export interface AuthorizedBrowserPage {
   url: string
   cookie: { name: string; value: string; url: string; path: string; httpOnly: true; sameSite: 'Strict'; expires: number }
-  revoke(): void
+  revoke(): void | Promise<void>
 }
 export interface BrowserEpochs { controlEpoch: number; targetEpoch: number }
 export interface BrowserWorkerPort {
@@ -119,7 +119,7 @@ export async function openSessionAuthorizedPage(
   } catch (error) {
     // An uncertain navigation is not replayed. Revoke just this review grant;
     // the shared browser, its profile and other tabs retain their ownership.
-    page.revoke()
+    await page.revoke()
     throw error
   }
 }
