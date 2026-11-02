@@ -160,7 +160,8 @@ stop and lock recovery each require a confirmation and are written to the
 operation audit as `RUNTIME_*` actions.
 
 A disabled or locked owner's runtime stops automatically: an account status
-change triggers it, and the controller repeats the check every ten minutes.
+change triggers it, and the controller checks every owner a minute after it
+starts and every ten minutes after that.
 Stopping detaches the owner's native sessions, then removes only the Pod by its
 observed UID. The volume, Service, Secret and durable histories remain; a
 re-enabled owner's next session starts on the same volume. Pods whose owner has

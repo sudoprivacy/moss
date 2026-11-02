@@ -2106,7 +2106,9 @@ export function startServer(
   const reconcileRuntimes = (ownerId?: string) => void (ownerId ? runtimeFleet.reconcileOwner(ownerId) : runtimeFleet.reconcile())
     .catch(error => logger.warn(`[runtime-fleet] reconcile failed: ${error instanceof Error ? error.message : String(error)}`))
   authService.onRuntimeOwnerStatusChanged(ownerId => reconcileRuntimes(ownerId))
+  const firstRuntimeReconciliation = setTimeout(() => reconcileRuntimes(), 60_000)
   const runtimeReconciliation = setInterval(() => reconcileRuntimes(), 10 * 60_000)
+  firstRuntimeReconciliation.unref()
   runtimeReconciliation.unref()
   const agentControl = process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID
     ? authService.createAgentControlService(process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID, {
@@ -12110,6 +12112,7 @@ export function startServer(
     ready,
     stop: async () => {
       isStopped = true
+      clearTimeout(firstRuntimeReconciliation)
       clearInterval(runtimeReconciliation)
       await hostedReady.catch(() => {})
       await agentInventory.close()
