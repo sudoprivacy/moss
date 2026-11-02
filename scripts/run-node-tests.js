@@ -24,6 +24,7 @@ const nodeTestFiles = [
   'src/server/ontology/compilerWorkerSource.node-test.ts',
   'src/server/ontology/mcpContextPorts.node-test.ts',
   'src/server/runnerReadiness.node-test.ts',
+  'src/server/operatorRuntime.node-test.ts',
   'src/server/runtimeModelEnvironment.node-test.ts',
   'src/server/runnerExitLifecycle.node-test.ts',
   'src/server/sessionResume.node-test.ts',

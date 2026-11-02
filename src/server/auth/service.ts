@@ -2035,6 +2035,12 @@ export class AuthService {
       scopes: defaultScopesForRole(user.role) } : null
   }
 
+  /** The organization of an active runtime owner, for host-only operator upgrades. */
+  async getRuntimeOwnerOrganization(userId: string): Promise<string | null> {
+    const user = await this.db.getUserById(userId)
+    return user && (user.status || 'active') === 'active' ? user.orgId : null
+  }
+
   /** Internal policy delivery inventory; authenticated admin routes select its scope. */
   async listEgressPolicyOwners(organizationId?: string) {
     const organizationIds = organizationId ? [organizationId] : (await this.db.listOrganizations()).map(org => org.id)

@@ -152,6 +152,16 @@ runtime after changing a model credential. Changing another owner's runtime
 requires `admin:settings`, followed by the organization visibility check. The
 detail page uses the same authorization rule as the upgrade endpoint.
 
+Fleet upgrades across organizations use a host-only operator route. It exists
+only when `MOSS_OPERATOR_TOKEN_FILE` names a private file (mode 600, at least 32
+characters) and accepts only direct loopback requests carrying
+`X-Moss-Operator-Token`; requests through a reverse proxy never qualify.
+`deploy/operator-upgrade-runtimes.py` lists owner Pods by their runtime-owner
+annotation, inspects each and upgrades drifted owners one at a time through the
+same owner lock, active-work refusal and rollback. Busy owners are reported for
+a later run. Each completed operator upgrade is logged as
+`agent_runtime_upgraded` with actor `operator`.
+
 Role changes invalidate existing access tokens. SudoWork checks access before
 each conversation control frame and terminal input, including established
 connections. Idle management subscribers are checked every five seconds.
