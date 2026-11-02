@@ -392,6 +392,7 @@ export class K8sBackend implements SessionBackend {
       enabledSkillNames: enabledSkills,
       availableWikis: options.availableWikis,
       availableCorpApps: options.availableCorpApps,
+      agentifyBlock: options.agentifyBlock,
       sharedMemory: options.sharedMemory,
       runtime: runtimeInfo,
     })

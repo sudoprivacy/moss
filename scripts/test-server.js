@@ -23,12 +23,13 @@ import { spawnSync } from 'node:child_process'
  * Suites this gates, by directory. Adding a directory here is what makes its
  * tests run in CI at all — a test outside these is not protecting anything.
  */
-const SUITES = ['src/server/__tests__', 'src/channels/__tests__', 'src/server/nexus/__tests__']
+const SUITES = ['src/server/__tests__', 'src/channels/__tests__', 'src/server/nexus/__tests__', 'src/server/agentify/__tests__']
 
 const BUN = [
   // src/server/nexus/__tests__
   'nexusClient.test.ts',
   'nexusManager.test.ts',
+  'nexusUpgrade.test.ts',
   // src/channels/__tests__
   'agentUnavailableRecovery.test.ts',
   'connectionScope.test.ts',
@@ -68,6 +69,10 @@ const BUN = [
  * Node runtime path on purpose — jsonlParse exercises parseJSONL's non-Bun
  * fallback, the branch the production (node) bundle actually executes. */
 const NODE = [
+  // src/server/agentify/__tests__ (node:sqlite)
+  'agentifyA2A.test.ts',
+  'agentifyCore.test.ts',
+  // src/server/__tests__
   'authProxySessionToken.test.ts',
   'claimAttempt.test.ts',
   'cronLeaseRelease.test.ts',

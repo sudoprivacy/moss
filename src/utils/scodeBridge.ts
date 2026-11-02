@@ -251,6 +251,11 @@ export async function prepareFirstMessageForScode(
      * files through these apps.
      */
     availableCorpApps?: Array<{ id: string; name: string; type: string; key: string }>
+    /**
+     * Agentify: memory, history search and colleague agents for an agentified
+     * agent, built by the main process (AgentifyService.buildSessionBlock).
+     */
+    agentifyBlock?: string
   }
 ): Promise<string> {
   const instructions: string[] = []
@@ -352,6 +357,11 @@ export async function prepareFirstMessageForScode(
     lines.push('  - Use group-msg-queue to remember intent across runs; quota is spent at')
     lines.push('    confirmation, not creation, so delivered-only checks are not enough.')
     instructions.push(lines.join('\n'))
+  }
+
+  // 6. Agentify: agent home + colleague agents
+  if (config.agentifyBlock && config.agentifyBlock.trim()) {
+    instructions.push(config.agentifyBlock.trim())
   }
 
   if (instructions.length === 0) {

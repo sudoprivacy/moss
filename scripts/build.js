@@ -185,6 +185,9 @@ buildGoCli('wiki')
 // bin/corpapp（企业应用管理: in-scode corp-app CLI; same PATH mechanism.）
 buildGoCli('corpapp')
 
+// bin/agentctl（agentify: agent home + agent-to-agent CLI; same PATH mechanism.）
+buildGoCli('agentctl')
+
 // direct-connect-open.mjs（独立 headless 客户端入口）
 // build('direct-connect-open.mjs', [
 //   'build', 'src/server/openCli.ts',

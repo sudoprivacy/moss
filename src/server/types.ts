@@ -861,6 +861,8 @@ export type RunnerManifest = {
      * the CLI + instance names exist.
      */
     availableCorpApps?: Array<{ id: string; name: string; type: string; key: string }>
+    /** Agentify: `[Agent Home & Collaboration]` block for the first message. */
+    agentifyBlock?: string
     sharedMemory?: string | null
     /** Enabled skill names (from client or agent config) */
     enabledSkills?: string[]

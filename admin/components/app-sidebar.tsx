@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   Plane,
   Webhook,
+  Network,
   ServerCog,
   ReceiptText,
 } from 'lucide-react'
@@ -130,6 +131,12 @@ const menuItems: NavItem[] = [
     url: '/settings/agents',
     icon: Bot,
     requiredAnyScopes: ['admin:settings', 'store:read'],
+  },
+  {
+    title: '协作智能体',
+    url: '/agentify',
+    icon: Network,
+    requiredScope: 'admin:settings',
   },
   {
     title: '技能商店',

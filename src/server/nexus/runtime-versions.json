@@ -1,6 +1,8 @@
 {
-  "nexusd-cluster": "0.1.5",
-  "nexus-vault": "0.5.44",
+  "nexusd-cluster": "0.8.26",
+  "nexus-vault": "0.5.71",
+  "nexusd-cluster-legacy": "0.1.5",
+  "nexus-vault-legacy": "0.5.44",
   "scode": "v0.2.0-ruigu.1",
   "scode-linux-x64-bundle-sha256": "3df297be29a8ed5447a364463ee4a1a81dcdab5700c8729c8b6de6d9ebf1b062"
 }
