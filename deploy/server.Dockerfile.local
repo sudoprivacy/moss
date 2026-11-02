@@ -344,6 +344,7 @@ COPY --from=host-node-runtime /opt/node ./node
 COPY --from=js-builder /src/bin/moss-server.mjs /src/bin/direct-connect-session-runner.mjs ./app/bin/
 COPY --from=js-builder /src/bin/moss-qualify-sqlite-upgrade.mjs /src/bin/moss-inspect-existing-product.mjs ./app/bin/
 COPY --from=js-builder /src/bin/artifact-mcp.mjs ./app/bin/
+COPY --from=js-builder --chmod=0755 /src/deploy/operator-upgrade-runtimes.py ./app/bin/moss-operator-upgrade-runtimes.py
 COPY --from=js-builder /src/admin/dist ./app/admin/dist
 COPY --from=js-builder /src/assistants ./app/assistants
 COPY --from=js-builder /src/skills ./app/skills

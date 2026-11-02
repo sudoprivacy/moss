@@ -637,6 +637,12 @@ export type ServerConfig = {
    * values alike) because it is interpolated into Set-Cookie.
    */
   instanceId?: string
+  /**
+   * Private token file that enables host-only operator routes for fleet
+   * runtime upgrades across organizations. Env: MOSS_OPERATOR_TOKEN_FILE.
+   * Unset → the operator routes do not exist.
+   */
+  operatorTokenFile?: string
   /** Route cookie name for Nginx sticky routing (default `moss_route`). */
   routeCookieName: string
   /** Append `Secure` to the route cookie (set true behind TLS). */

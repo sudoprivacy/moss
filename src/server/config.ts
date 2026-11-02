@@ -251,6 +251,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       if (value !== undefined) assertLbTokenValue('server.instanceId', value)
       return value
     })(),
+    operatorTokenFile: process.env.MOSS_OPERATOR_TOKEN_FILE?.trim() || undefined,
     routeCookieName: (() => {
       const value =
         process.env.MOSS_ROUTE_COOKIE_NAME?.trim() || raw.server.routeCookieName || 'moss_route'

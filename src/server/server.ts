@@ -10,6 +10,7 @@ import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { AgentManager } from './agentManager.js'
 import { AgentManagementOperations } from './agentManagementOperations.js'
+import { OperatorAccess, serveOperatorRuntime, type OperatorRuntimeDependencies } from './operatorRuntime.js'
 import { DeviceDeployClient } from './agentControl/deviceDeploy.js'
 import { dispatchAgentControl, isAgentControlPath } from './agentControl/routes.js'
 import { isMossRuntimeAgentName, mossAgentName, sessionAgentName } from './agentIdentity.js'
@@ -2081,6 +2082,13 @@ export function startServer(
     workspaceUrl: (sessionId, orgId) => agentWorkspaceUrl(sessionId, undefined, orgId),
     record: event => logger.info(`${event.name} ${JSON.stringify(event.fields)}`),
   })
+  const operatorAccess = OperatorAccess.load(config.operatorTokenFile)
+  const operatorRuntime: OperatorRuntimeDependencies = {
+    inspect: ownerId => runtime.inspectUserRuntime(ownerId),
+    ownerOrganization: ownerId => authService.getRuntimeOwnerOrganization(ownerId),
+    upgrade: (ownerId, orgId) => runtime.upgradeUserRuntime(ownerId, orgId),
+    record: event => logger.info(`${event.name} ${JSON.stringify(event.fields)}`),
+  }
   const agentControl = process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID
     ? authService.createAgentControlService(process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID, {
       actor: (sessionId, userId, orgId) => runtime.inspectManagedControlActor(sessionId, userId, orgId),
@@ -2636,6 +2644,8 @@ export function startServer(
         writeJson(res, 200, { ok: true, ready: true })
         return
       }
+
+      if (await serveOperatorRuntime(req, res, pathname, operatorAccess, operatorRuntime)) return
 
       if ((req.method === 'GET' || isHead) && pathname === '/readyz') {
         const readiness = await computeReadiness(config, runtime, {
