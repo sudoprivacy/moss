@@ -831,6 +831,59 @@ export class RuntimeService {
     return this.ownerRuntime ? this.ownerRuntime.inspect(ownerId) : { ownerId, isPresent: false, isDrifted: false, phase: 'legacy' }
   }
 
+  /** Owner allocations that currently have a Pod; nothing is provisioned. */
+  async listUserRuntimes(): Promise<Array<{ ownerId: string; allocationId: string }>> {
+    return this.userPods ? this.userPods.runtimes() : []
+  }
+
+  /**
+   * Stop an owner's runtime in every allocation, e.g. after the owner is
+   * disabled. Their native sessions are detached first, so nothing reconnects
+   * and recreates the Pod; volumes, Services and durable histories remain.
+   */
+  async retireUserRuntime(ownerId: string, orgId: string | null): Promise<boolean> {
+    return this.workAdmission.run(async () => {
+      const ownerRuntime = this.ownerRuntime
+      if (!ownerRuntime) throw new ResourceAccessError(409, 'User runtime placement is not enabled')
+      if (this.upgradingOwners.has(ownerId)) throw new ResourceAccessError(409, 'An owner upgrade is already in progress')
+      if (await this.countLiveOtherInstances()) throw new ResourceAccessError(409, 'Drain peer Moss controllers before stopping this owner')
+      this.upgradingOwners.add(ownerId)
+      try {
+        const sessions = orgId ? (await this.store.listUserSessions(orgId, ownerId))
+          .filter(session => session.runtime.type === 'cohost' && session.desiredState === 'active') : []
+        for (const session of sessions) await this.terminateSession(session.sessionId, true)
+        let isRetired = false
+        for (const placement of await ownerRuntime.placements(ownerId)) {
+          if (!placement.service.retire) throw new ResourceAccessError(409, 'Runtime retirement is unavailable')
+          isRetired = await placement.service.retire(ownerId) || isRetired
+        }
+        return isRetired
+      } finally {
+        this.upgradingOwners.delete(ownerId)
+      }
+    })
+  }
+
+  /**
+   * Remove an upgrade lock an interrupted controller left behind. Only a lock
+   * created before this process started can be removed, and only while no
+   * peer controller is live and this controller is not changing the owner.
+   */
+  async recoverUserRuntimeLock(ownerId: string): Promise<boolean> {
+    const ownerRuntime = this.ownerRuntime
+    if (!ownerRuntime) throw new ResourceAccessError(409, 'User runtime placement is not enabled')
+    if (this.upgradingOwners.has(ownerId)) throw new ResourceAccessError(409, 'An owner upgrade is already in progress')
+    if (await this.countLiveOtherInstances()) throw new ResourceAccessError(409, 'Drain peer Moss controllers before recovering this owner')
+    const started = new Date(Date.now() - process.uptime() * 1000)
+    let isRecovered = false
+    for (const placement of await ownerRuntime.placements(ownerId)) {
+      if (!placement.service.recoverUpgradeLock) throw new ResourceAccessError(409, 'Runtime lock recovery is unavailable')
+      try { isRecovered = await placement.service.recoverUpgradeLock(ownerId, started) || isRecovered }
+      catch (error) { throw new ResourceAccessError(409, error instanceof Error ? error.message : String(error)) }
+    }
+    return isRecovered
+  }
+
   /** Reject new traffic while this controller drains an owner's native runtime. */
   isUserRuntimeUpgrading(ownerId: string): boolean {
     return this.upgradingOwners.has(ownerId)

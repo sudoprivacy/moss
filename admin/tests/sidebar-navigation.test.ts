@@ -4,18 +4,19 @@ import { hasScope } from '../lib/api/client'
 
 test('every primary destination appears exactly once after Agent and Zone entries', () => {
   const routes = primaryNavGroups.flatMap(group => group.items.map(item => item.url))
-  expect(routes).toHaveLength(18)
+  expect(routes).toHaveLength(19)
   expect(new Set(routes).size).toBe(routes.length)
   expect([...routes].sort()).toEqual([
     '/', '/budget', '/users', '/agents', '/zones', '/sessions', '/cabin/conversations',
     '/cron', '/event-triggers', '/channels', '/corp-apps', '/settings/agents',
-    '/settings/skill', '/settings/agent-ledger', '/document-center', '/secrets', '/operations', '/mcp',
+    '/settings/skill', '/settings/agent-ledger', '/document-center', '/secrets', '/runtimes', '/operations', '/mcp',
   ].sort())
 })
 
 test('operations and tools retain their destinations and authorization gates', () => {
   const operations = primaryNavGroups.find(group => group.id === 'operations')!
-  expect(operations.items.map(item => item.url)).toEqual(['/event-triggers', '/settings/agent-ledger', '/operations', '/mcp'])
+  expect(operations.items.map(item => item.url)).toEqual(['/event-triggers', '/settings/agent-ledger', '/runtimes', '/operations', '/mcp'])
+  expect(operations.items.find(item => item.url === '/runtimes')?.requiredScope).toBe('admin:settings')
   const center = operations.items.find(item => item.url === '/operations')!
   expect(center.requiredScope).toBe('admin:settings')
   expect(center.children?.map(item => item.url)).toContain('/operations/billing')
