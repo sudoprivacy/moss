@@ -152,7 +152,31 @@ runtime after changing a model credential. Changing another owner's runtime
 requires `admin:settings`, followed by the organization visibility check. The
 detail page uses the same authorization rule as the upgrade endpoint.
 
-Fleet upgrades across organizations use a host-only operator route. It exists
+The admin 运行环境 page and `/api/v1/agent-runtimes` manage owner runtimes as
+a fleet. Settings administrators see the owners of their organization; the
+deployment's `super_admin` also sees every organization. Each row reports the
+owner's account status, Pod phase, release drift and upgrade lock. Upgrade,
+stop and lock recovery each require a confirmation and are written to the
+operation audit as `RUNTIME_*` actions.
+
+A disabled or locked owner's runtime stops automatically: an account status
+change triggers it, and the controller checks every owner a minute after it
+starts and every ten minutes after that.
+Stopping detaches the owner's native sessions, then removes only the Pod by its
+observed UID. The volume, Service, Secret and durable histories remain; a
+re-enabled owner's next session starts on the same volume. Pods whose owner has
+no account are listed for the platform administrator and stopped only on
+request.
+
+The platform administrator upgrades drifted owners together from the same
+page. The plan lists every active owner whose present runtime differs from the
+controller's release; starting it requires the reviewed owner list and its
+count, and a plan that changed in the meantime must be reviewed again. The
+controller upgrades one owner at a time, starting each when its anonymous
+memory is below 35% of host memory, waiting up to five minutes for it to fall,
+and stopping the rollout at 60%. Owners with active work are reported as busy.
+
+Fleet upgrades from host automation use a host-only operator route. It exists
 only when `MOSS_OPERATOR_TOKEN_FILE` names a private file (mode 600, at least 32
 characters) and accepts only direct loopback requests carrying
 `X-Moss-Operator-Token`; requests through a reverse proxy never qualify.
@@ -170,11 +194,10 @@ the controller's anonymous memory (its cgroup `memory.stat`) is below
 for it to fall, and stops the run at `--stop-memory` (default 60%).
 
 An interrupted upgrade can leave its `<pod>-upgrade` lock Secret; while it
-exists the controller refuses that owner's runtime connections. Remove it only
-with identity evidence: the Secret's owner annotation names the owner, it was
-created before the current controller started, and the owner's Pod still has
-the UID and image it had before that upgrade. Then run the owner's upgrade
-again.
+exists the controller refuses that owner's runtime connections. 清除升级锁 on the
+运行环境 page removes it by its observed UID when the lock names the owner, was
+created before the current controller process started, is not held by this
+controller, and no peer controller is live. Then upgrade the owner again.
 
 Role changes invalidate existing access tokens. SudoWork checks access before
 each conversation control frame and terminal input, including established

@@ -238,6 +238,13 @@ const menuItems: PrimaryNavItem[] = [
     ],
   },
   {
+    title: '运行环境',
+    group: 'operations',
+    url: '/runtimes',
+    icon: ServerCog,
+    requiredScope: 'admin:settings',
+  },
+  {
     title: '运营中心',
     group: 'operations',
     url: '/operations',

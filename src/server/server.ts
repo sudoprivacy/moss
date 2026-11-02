@@ -11,6 +11,7 @@ import { SessionStartupError } from './sessionStartup.js'
 import { AgentManager } from './agentManager.js'
 import { AgentManagementOperations } from './agentManagementOperations.js'
 import { OperatorAccess, serveOperatorRuntime, type OperatorRuntimeDependencies } from './operatorRuntime.js'
+import { RuntimeFleet, controllerMemory } from './runtimeFleet.js'
 import { DeviceDeployClient } from './agentControl/deviceDeploy.js'
 import { dispatchAgentControl, isAgentControlPath } from './agentControl/routes.js'
 import { isMossRuntimeAgentName, mossAgentName, sessionAgentName } from './agentIdentity.js'
@@ -2089,6 +2090,26 @@ export function startServer(
     upgrade: (ownerId, orgId) => runtime.upgradeUserRuntime(ownerId, orgId),
     record: event => logger.info(`${event.name} ${JSON.stringify(event.fields)}`),
   }
+  const runtimeFleet = new RuntimeFleet({
+    placements: () => runtime.listUserRuntimes(),
+    inspect: ownerId => runtime.inspectUserRuntime(ownerId),
+    owner: ownerId => authService.getRuntimeOwner(ownerId),
+    upgrade: (ownerId, orgId) => runtime.upgradeUserRuntime(ownerId, orgId),
+    retire: (ownerId, orgId) => runtime.retireUserRuntime(ownerId, orgId),
+    recoverLock: ownerId => runtime.recoverUserRuntimeLock(ownerId),
+    memory: controllerMemory,
+    audit: event => authService.recordRuntimeAudit({ actorUserId: event.actor?.userId ?? null, orgId: event.orgId,
+      action: event.action, ownerId: event.ownerId, details: event.details }),
+  })
+  // A disabled or locked owner's runtime stops promptly; the periodic pass
+  // also covers status changes made while this controller was not running.
+  const reconcileRuntimes = (ownerId?: string) => void (ownerId ? runtimeFleet.reconcileOwner(ownerId) : runtimeFleet.reconcile())
+    .catch(error => logger.warn(`[runtime-fleet] reconcile failed: ${error instanceof Error ? error.message : String(error)}`))
+  authService.onRuntimeOwnerStatusChanged(ownerId => reconcileRuntimes(ownerId))
+  const firstRuntimeReconciliation = setTimeout(() => reconcileRuntimes(), 60_000)
+  const runtimeReconciliation = setInterval(() => reconcileRuntimes(), 10 * 60_000)
+  firstRuntimeReconciliation.unref()
+  runtimeReconciliation.unref()
   const agentControl = process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID
     ? authService.createAgentControlService(process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID, {
       actor: (sessionId, userId, orgId) => runtime.inspectManagedControlActor(sessionId, userId, orgId),
@@ -7676,7 +7697,40 @@ export function startServer(
       const runtimeUpgradeMatch = pathname.match(/^\/api\/v1\/agent-runtimes\/([^/]+)\/upgrade$/)
       if (req.method === 'POST' && runtimeUpgradeMatch) {
         const ownerId = runtimeUpgradeMatch[1]!
-        writeJson(res, 200, await agentOperations.upgrade(auth, ownerId))
+        // Settings administrators upgrade the owners they manage, with an
+        // audit record; an owner may reload their own runtime.
+        writeJson(res, 200, hasScope(auth.scopes, 'admin:settings')
+          ? await runtimeFleet.upgrade(auth, ownerId) : await agentOperations.upgrade(auth, ownerId))
+        return
+      }
+
+      // Runtime fleet: organization admins manage their organization's owner
+      // runtimes; the platform administrator sees every organization and runs
+      // paced rollouts. Each change is written to the operation audit.
+      if (req.method === 'GET' && pathname === '/api/v1/agent-runtimes') {
+        const scope = url.searchParams.get('scope') === 'all' ? 'all' : 'org'
+        writeJson(res, 200, { runtimes: await runtimeFleet.list(auth, scope) })
+        return
+      }
+      if (pathname === '/api/v1/agent-runtimes/rollout') {
+        if (req.method === 'GET') {
+          writeJson(res, 200, { rollout: runtimeFleet.current(auth), plan: await runtimeFleet.plan(auth) })
+          return
+        }
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req)
+          const reviewed = Array.isArray(body.owner_ids) && body.owner_ids.every((id: unknown) => typeof id === 'string')
+            ? body.owner_ids as string[] : null
+          if (!reviewed) throw new HttpError(400, 'owner_ids must list the reviewed owners')
+          writeJson(res, 202, { rollout: await runtimeFleet.startRollout(auth, reviewed) })
+          return
+        }
+      }
+      const runtimeActionMatch = pathname.match(/^\/api\/v1\/agent-runtimes\/([^/]+)\/(retire|recover-lock)$/)
+      if (req.method === 'POST' && runtimeActionMatch) {
+        const ownerId = runtimeActionMatch[1]!
+        writeJson(res, 200, runtimeActionMatch[2] === 'retire'
+          ? await runtimeFleet.retire(auth, ownerId) : await runtimeFleet.recoverLock(auth, ownerId))
         return
       }
 
@@ -12058,6 +12112,8 @@ export function startServer(
     ready,
     stop: async () => {
       isStopped = true
+      clearTimeout(firstRuntimeReconciliation)
+      clearInterval(runtimeReconciliation)
       await hostedReady.catch(() => {})
       await agentInventory.close()
       await hostedEvaluations?.close()

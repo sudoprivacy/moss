@@ -9,6 +9,7 @@ import { hasScope } from '@/lib/api/client'
 const LoginPage = lazy(() => import('./pages/login-page'))
 const DashboardPage = lazy(() => import('./pages/dashboard-page'))
 const BudgetPage = lazy(() => import('./pages/budget-page'))
+const RuntimesPage = lazy(() => import('./pages/runtimes-page'))
 const SessionsPage = lazy(() => import('./pages/sessions-page'))
 const CabinConversationsPage = lazy(() => import('./pages/cabin-conversations-page'))
 const UsersPage = lazy(() => import('./pages/users-page'))
@@ -142,6 +143,7 @@ export default function App() {
           element={<SuspendedRoute><AgentManagerPage /></SuspendedRoute>}
         />
         <Route path="/moss" element={<SuspendedRoute><MyMossPage /></SuspendedRoute>} />
+        <Route path="/runtimes" element={<SuspendedRoute><RuntimesPage /></SuspendedRoute>} />
         <Route
           path="/agents/:ownerId/:name"
           element={<SuspendedRoute><AgentManagerDetailPage /></SuspendedRoute>}

@@ -5,7 +5,8 @@ import { ResourceAccessError } from '../catalog/resourceError.js'
 import { readAgentNamespace } from '../nexus/agentNamespace.js'
 import { connectSessionRuntime, type SessionConnectionConfig } from '../nexus/sessionConnection.js'
 
-type PlacementService = Pick<UserPodService, 'resolve' | 'find' | 'inspect' | 'upgrade'> & Partial<Pick<UserPodService, 'configurePolicy'>>
+type PlacementService = Pick<UserPodService, 'resolve' | 'find' | 'inspect' | 'upgrade'> &
+  Partial<Pick<UserPodService, 'configurePolicy' | 'retire' | 'recoverUpgradeLock'>>
 type PlacementRoot = { forAllocation(allocationId: string): PlacementService }
 type NamespaceReader = (config: UserRuntimeConnectionConfig, ownerId: string) => Promise<RuntimeAgentNamespace>
 
@@ -78,6 +79,7 @@ export class CohostOwnerRuntime {
     const primary = allocations[0]!
     return { ...primary, allocations, phase: allocations.every(state => state.phase === primary.phase) ? primary.phase : 'mixed',
       isPresent: allocations.some(state => state.isPresent),
-      isDrifted: allocations.some(state => state.isDrifted) }
+      isDrifted: allocations.some(state => state.isDrifted),
+      upgradeLock: allocations.find(state => state.upgradeLock)?.upgradeLock ?? null }
   }
 }

@@ -9,6 +9,7 @@ import { ensureSqliteCompatibilityDomainSchemas, ensureCompatibilityCoreSchema }
 import { createAuthService } from '../auth/service.js'
 import { RuntimeService } from '../runtimeService.js'
 import { startServer } from '../server.js'
+import { ResourceAccessError } from '../catalog/resourceError.js'
 
 if (process.env.MOSS_AGENT_MANAGER_FIXTURE !== '1') throw new Error('Explicit Agent manager fixture selection is required')
 const { config } = await readServerConfig(process.env.MOSS_SERVER_CONFIG!)
@@ -31,7 +32,7 @@ runtime.readAgentNamespace = async ownerId => {
 }
 runtime.upgradeUserRuntime = async ownerId => {
   const allocation = { ownerId, allocationId: 'primary', isPresent: true, isDrifted: false,
-    phase: 'Running', expectedImage: 'fixture:verified', observedImageDigest: null, releaseId: null }
+    phase: 'Running', expectedImage: 'fixture:verified', observedImageDigest: null, releaseId: null, upgradeLock: null }
   return { ...allocation, allocations: [allocation] }
 }
 runtime.createSession = async input => {
@@ -54,6 +55,41 @@ if (process.env.MOSS_AGENT_CONTROL_FIXTURE === '1') {
   runtime.assertManagedControlActorCurrent = async (actor, orgId) => {
     const current = await runtime.inspectManagedControlActor(actor.sessionId, actor.ownerId, orgId)
     if (JSON.stringify(current) !== JSON.stringify(actor)) throw new Error('Fixture actor changed')
+  }
+}
+if (process.env.MOSS_RUNTIME_FLEET_FIXTURE === '1') {
+  // Every account except the bootstrap administrator owns one drifted runtime;
+  // accounts named `*-locked` carry a lock an interrupted upgrade left behind.
+  const sqlite = store.requireSqliteDb()
+  const retired = new Set<string>(), upgraded = new Set<string>(), recovered = new Set<string>()
+  const owners = () => sqlite.prepare('SELECT id, name FROM users WHERE name <> ?')
+    .all(config.bootstrapAdmin?.username ?? '') as Array<{ id: string; name: string }>
+  const state = (ownerId: string) => {
+    const owner = owners().find(row => row.id === ownerId)
+    const isPresent = Boolean(owner) && !retired.has(ownerId)
+    const allocation = { ownerId, allocationId: 'primary', isPresent, isDrifted: isPresent && !upgraded.has(ownerId),
+      phase: isPresent ? 'Running' : 'absent', expectedImage: 'fixture:verified', observedImageDigest: null, releaseId: 'fixture-release',
+      upgradeLock: owner?.name.endsWith('-locked') && !recovered.has(ownerId) ? { createdAt: '2026-11-02T06:58:00Z' } : null }
+    return { ...allocation, allocations: [allocation] }
+  }
+  runtime.listUserRuntimes = async () => owners().filter(row => !retired.has(row.id))
+    .map(row => ({ ownerId: row.id, allocationId: 'primary' }))
+  runtime.inspectUserRuntime = async ownerId => state(ownerId)
+  runtime.upgradeUserRuntime = async ownerId => {
+    if (state(ownerId).upgradeLock) throw new ResourceAccessError(409, 'An owner upgrade is already in progress')
+    upgraded.add(ownerId)
+    return state(ownerId)
+  }
+  runtime.retireUserRuntime = async ownerId => {
+    const isPresent = state(ownerId).isPresent
+    retired.add(ownerId)
+    console.log(`FLEET_FIXTURE_RETIRED:${ownerId}`)
+    return isPresent
+  }
+  runtime.recoverUserRuntimeLock = async ownerId => {
+    const isLocked = Boolean(state(ownerId).upgradeLock)
+    recovered.add(ownerId)
+    return isLocked
   }
 }
 const runner = createServer(socket => {

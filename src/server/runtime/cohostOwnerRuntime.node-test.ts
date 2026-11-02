@@ -30,7 +30,7 @@ void test('execution, native Agent adoption and discovery retain the same SQL ho
         find: async ownerId => configurations.get(key(ownerId)),
         inspect: async ownerId => ({ ownerId, allocationId, isPresent: configurations.has(key(ownerId)),
           isDrifted: drift.has(key(ownerId)), phase: 'Running', expectedImage: 'runtime:verified',
-          observedImageDigest: null, releaseId: 'verified-release' }),
+          observedImageDigest: null, releaseId: 'verified-release', upgradeLock: null }),
         upgrade: async (ownerId, drain) => { await drain(configurations.get(key(ownerId))); return resolve(ownerId) },
       }
     },
