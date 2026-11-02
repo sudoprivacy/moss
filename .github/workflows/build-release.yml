@@ -388,6 +388,7 @@ jobs:
           bash -n deploy/k3s/install-control.sh
           python3 -m unittest discover -s deploy/k3s -p 'test_*.py'
           python3 -m unittest discover -s deploy -p 'test_fetch_scode.py'
+          python3 -m unittest discover -s deploy -p 'test_operator_upgrade_runtimes.py'
           bash -n scripts/publish-server-to-cos.sh
           bash -n scripts/e2e/run-server-release-smoke.sh
           node --check scripts/e2e/mock-openai-server.mjs

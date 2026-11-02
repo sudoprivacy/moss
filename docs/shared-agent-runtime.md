@@ -162,6 +162,20 @@ same owner lock, active-work refusal and rollback. Busy owners are reported for
 a later run. Each completed operator upgrade is logged as
 `agent_runtime_upgraded` with actor `operator`.
 
+An upgrade resumes the owner's sessions in the controller after it returns.
+Back-to-back upgrades of 13 owners once drove the controller service's memory to
+5.9 GB on an 8 GB host and hung it, so the script starts each owner only when
+the controller's anonymous memory (its cgroup `memory.stat`) is below
+`--pause-memory` (default 35% of host memory), waits up to `--settle-seconds`
+for it to fall, and stops the run at `--stop-memory` (default 60%).
+
+An interrupted upgrade can leave its `<pod>-upgrade` lock Secret; while it
+exists the controller refuses that owner's runtime connections. Remove it only
+with identity evidence: the Secret's owner annotation names the owner, it was
+created before the current controller started, and the owner's Pod still has
+the UID and image it had before that upgrade. Then run the owner's upgrade
+again.
+
 Role changes invalidate existing access tokens. SudoWork checks access before
 each conversation control frame and terminal input, including established
 connections. Idle management subscribers are checked every five seconds.
