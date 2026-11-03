@@ -14,7 +14,7 @@ import { OperatorAccess, serveOperatorRuntime, type OperatorRuntimeDependencies 
 import { RuntimeFleet, controllerMemory } from './runtimeFleet.js'
 import { DeviceDeployClient } from './agentControl/deviceDeploy.js'
 import { dispatchAgentControl, isAgentControlPath } from './agentControl/routes.js'
-import { isMossRuntimeAgentName, mossAgentName, sessionAgentName } from './agentIdentity.js'
+import { isMossRuntimeAgentName, mossAgentName, sessionAgentName, userCreatedAgentName } from './agentIdentity.js'
 import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
 import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
 import { dispatchOrganizationRecharge, parseOrganizationPaymentCallback } from './billing/organizationRechargeRoutes.js'
@@ -272,6 +272,7 @@ import { listMyAgents } from './myAgents.js'
 import {
   InvalidAgentNameError,
   createUserAgent,
+  deleteUserAgent,
   initUserAgentStore,
   listUserAgents,
 } from './userAgentStore.js'
@@ -2082,6 +2083,10 @@ export function startServer(
     sessions: (orgId, ownerId) => runtime.store.listUserSessions(orgId, ownerId),
     workspaceUrl: (sessionId, orgId) => agentWorkspaceUrl(sessionId, undefined, orgId),
     record: event => logger.info(`${event.name} ${JSON.stringify(event.fields)}`),
+    deleteUserAgent,
+    audit: event => authService.recordRuntimeAudit({ actorUserId: event.actorUserId, orgId: event.orgId,
+      action: 'AGENT_DELETED', ownerId: event.ownerId, resource: 'agent',
+      details: { agentName: event.agentName, ...event.details } }),
   })
   const operatorAccess = OperatorAccess.load(config.operatorTokenFile)
   const operatorRuntime: OperatorRuntimeDependencies = {
@@ -7745,10 +7750,15 @@ export function startServer(
 
       // The canonical management path also permits names reserved by legacy template aliases.
       const managedAgentMatch = pathname.match(/^\/api\/v1\/(?:agent-manager\/agents|agents)\/([^/]+)(\/sessions)?$/)
-      if (managedAgentMatch && (req.method === 'GET' || req.method === 'POST')) {
+      if (managedAgentMatch && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE')) {
         let name: string
         try { name = decodeURIComponent(managedAgentMatch[1]!) }
         catch { throw new HttpError(400, 'Invalid Agent name') }
+        if (req.method === 'DELETE' && !managedAgentMatch[2]) {
+          const ownerId = url.searchParams.get('owner_id') || auth.userId
+          writeJson(res, 200, await agentOperations.deleteAgent(auth, ownerId, name))
+          return
+        }
         if (req.method === 'GET' && !managedAgentMatch[2]) {
           const ownerId = url.searchParams.get('owner_id') || auth.userId
           writeJson(res, 200, await agentOperations.detail(auth, ownerId, name))
@@ -7761,6 +7771,14 @@ export function startServer(
           writeJson(res, 201, await agentOperations.start(auth, ownerId, name))
           return
         }
+      }
+
+      // A person deletes an agent they made; the same deletion the Agent manager runs.
+      const userAgentMatch = pathname.match(/^\/api\/v1\/user-agents\/([0-9a-f-]{36})$/)
+      if (req.method === 'DELETE' && userAgentMatch) {
+        const agentName = sessionAgentName(auth.userId, userCreatedAgentName(userAgentMatch[1]!))
+        writeJson(res, 200, { success: true, data: await agentOperations.deleteAgent(auth, auth.userId, agentName) })
+        return
       }
 
       if (pathname === '/api/v1/user-agents') {

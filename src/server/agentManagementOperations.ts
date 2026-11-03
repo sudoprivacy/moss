@@ -1,21 +1,32 @@
 import { AgentManager, canUpgradeAgentRuntime, managedSessionAgentName } from './agentManager.js'
+import { isMossRuntimeAgentName, sessionAgentName, userCreatedAgentId } from './agentIdentity.js'
 import type { AuthContext } from './auth/token.js'
 import { ResourceAccessError } from './catalog/resourceError.js'
 import type { RuntimeService } from './runtimeService.js'
 import type { SessionRecord } from './types.js'
 
 type ManagementEvent = {
-  name: 'agent_runtime_upgraded' | 'agent_manager_session_created'
+  name: 'agent_runtime_upgraded' | 'agent_manager_session_created' | 'agent_deleted'
   fields: Record<string, string>
 }
 
 export interface AgentManagementDependencies {
   manager: AgentManager
-  runtime: Pick<RuntimeService, 'inspectUserRuntime' | 'upgradeUserRuntime' | 'createSession'>
+  runtime: Pick<RuntimeService, 'inspectUserRuntime' | 'upgradeUserRuntime' | 'createSession' | 'deleteOwnerAgent'>
   owner(ownerId: string, orgId: string): Promise<{ status: string; role: string; scopes: string[] } | null>
   sessions(orgId: string, ownerId: string): Promise<SessionRecord[]>
   workspaceUrl(sessionId: string, orgId?: string): string | null
   record(event: ManagementEvent): void
+  /** Remove a personal Agent's identity once its runtime data is gone. */
+  deleteUserAgent(orgId: string, ownerId: string, id: string): Promise<boolean>
+  audit(event: { actorUserId: string; orgId: string; ownerId: string; agentName: string; details: Record<string, unknown> }): Promise<void>
+}
+
+/** Why an owner's Agent always stays, or null when it may be deleted. */
+function keptAgentReason(ownerId: string, name: string): string | null {
+  if (name === sessionAgentName(ownerId, null)) return 'The default Agent cannot be deleted'
+  if (isMossRuntimeAgentName(name)) return 'The Moss Agent cannot be deleted here'
+  return null
 }
 
 /** Shared commands for the browser and authenticated Agent adapters.
@@ -44,6 +55,7 @@ export class AgentManagementOperations {
           ? this.deps.workspaceUrl(session.sessionId, session.orgId) : null }))
     return { agent, sessions, runtime: await this.deps.runtime.inspectUserRuntime(ownerId),
       canUpgrade: agent.isOwnerActive && canUpgradeAgentRuntime(auth, ownerId),
+      canDelete: agent.isOwnerActive && canUpgradeAgentRuntime(auth, ownerId) && keptAgentReason(ownerId, name) === null,
       isWorkspaceAvailable: Boolean(this.deps.workspaceUrl('probe')) }
   }
 
@@ -71,6 +83,26 @@ export class AgentManagementOperations {
     const runtime = await this.deps.runtime.upgradeUserRuntime(ownerId, auth.orgId)
     this.deps.record({ name: 'agent_runtime_upgraded', fields: { ownerId, orgId: auth.orgId, actorUserId: auth.userId } })
     return { runtime }
+  }
+
+  /**
+   * Delete one of an owner's Agents: its native data, home and sessions, and
+   * a personal Agent's identity. The owner's default Agent and Moss Agent stay.
+   * Owners delete their own Agents; settings administrators the Agents of
+   * owners they manage.
+   */
+  async deleteAgent(auth: AuthContext, ownerId: string, name: string) {
+    if (!canUpgradeAgentRuntime(auth, ownerId)) throw new ResourceAccessError(403, 'Deleting this Agent is not permitted')
+    const agent = await this.deps.manager.get(auth, ownerId, name)
+    const kept = keptAgentReason(ownerId, name)
+    if (kept) throw new ResourceAccessError(409, kept)
+    const result = await this.deps.runtime.deleteOwnerAgent(ownerId, auth.orgId, name)
+    const personalId = userCreatedAgentId(agent.reference)
+    const isIdentityDeleted = personalId ? await this.deps.deleteUserAgent(auth.orgId, ownerId, personalId) : false
+    const details = { sessions: result.sessions, isNativeDeleted: result.isNativeDeleted, isIdentityDeleted }
+    this.deps.record({ name: 'agent_deleted', fields: { actorUserId: auth.userId, ownerId, orgId: auth.orgId, agentName: name } })
+    await this.deps.audit({ actorUserId: auth.userId, orgId: auth.orgId, ownerId, agentName: name, details })
+    return { name, ...details }
   }
 
   async inspectRuntime(auth: AuthContext, ownerId: string) {

@@ -114,6 +114,17 @@ export async function getUserAgent(
   return agents.find(agent => agent.id === id) ?? null
 }
 
+/** Remove one agent, only if this user owns it; true when it existed. */
+export async function deleteUserAgent(orgId: string, userId: string, id: string): Promise<boolean> {
+  if (driver) {
+    return await driver.run('DELETE FROM user_agents WHERE org_id = ? AND user_id = ? AND id = ?', [orgId, userId, id]) > 0
+  }
+  const key = memoryKey(orgId, userId)
+  const agents = memoryStore.get(key) ?? []
+  memoryStore.set(key, agents.filter(agent => agent.id !== id))
+  return agents.some(agent => agent.id === id)
+}
+
 /** Test seam: drop in-memory state between cases. */
 export function resetUserAgentStoreForTests(): void {
   memoryStore.clear()

@@ -2060,12 +2060,13 @@ export class AuthService {
     for (const listener of this.runtimeOwnerStatusListeners) listener(userId)
   }
 
-  async recordRuntimeAudit(event: { actorUserId: string | null; orgId: string; action: string; ownerId: string | null; details?: unknown }): Promise<void> {
+  async recordRuntimeAudit(event: { actorUserId: string | null; orgId: string; action: string; ownerId: string | null;
+    resource?: 'agent_runtime' | 'agent'; details?: unknown }): Promise<void> {
     const id = randomUUID()
     await this.identityRepository.insertOperationAudit({
       id, idempotencyKey: id, orgId: event.orgId, actorUserId: event.actorUserId,
       actorName: event.actorUserId ? null : 'controller',
-      action: event.action, resource: 'agent_runtime', resourceId: event.ownerId, requestData: event.details,
+      action: event.action, resource: event.resource ?? 'agent_runtime', resourceId: event.ownerId, requestData: event.details,
     })
   }
 

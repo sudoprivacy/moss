@@ -32,6 +32,17 @@ export class CohostAgentHomeRepository implements AgentRuntimeHomeStore {
     return rows.map(homeFromRow)
   }
 
+  /**
+   * Forget a deleted Agent's home and its native session bindings together:
+   * a binding left behind would be adopted again as a home by the next claim.
+   */
+  async remove(ownerId: string, agentId: string): Promise<void> {
+    await this.driver.transaction(async () => {
+      await this.driver.run('DELETE FROM cohost_sessions WHERE owner_user_id = ? AND native_agent_id = ?', [ownerId, agentId])
+      await this.driver.run('DELETE FROM cohost_agent_homes WHERE owner_user_id = ? AND native_agent_id = ?', [ownerId, agentId])
+    })
+  }
+
   async claim(ownerId: string, agentId: string,
     chooseAllocation: (homes: readonly AgentRuntimeHome[]) => string): Promise<AgentRuntimeHome> {
     // Existing Agent homes are immutable. Session startup needs one indexed read,

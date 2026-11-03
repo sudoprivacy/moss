@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { getManagedAgent, getManagedAgents, startManagedAgent, upgradeUserRuntime, type ManagedAgentDetail, type ManagedAgentList } from '@/lib/api/agent-manager'
+import { deleteManagedAgent, getManagedAgent, getManagedAgents, startManagedAgent, upgradeUserRuntime, type ManagedAgentDetail, type ManagedAgentList } from '@/lib/api/agent-manager'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { MossImBindingPanel } from '../components/moss-im-binding'
 
@@ -92,6 +96,10 @@ export function AgentManagerDetailPage() {
   const [error, setError] = useState<string | null>(null)
   const [isStarting, setIsStarting] = useState(false)
   const [isUpgrading, setIsUpgrading] = useState(false)
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false)
+  const [deleteConfirmation, setDeleteConfirmation] = useState('')
+  const [isDeleting, setIsDeleting] = useState(false)
+  const navigate = useNavigate()
   useEffect(() => {
     let isActive = true
     setDetail(null)
@@ -118,6 +126,17 @@ export function AgentManagerDetailPage() {
       toast.success('运行环境已升级，会话正在恢复。')
     } catch (failure) { toast.error(failure instanceof Error ? failure.message : '无法升级运行环境') }
     finally { setIsUpgrading(false) }
+  }
+  const onDelete = async () => {
+    setIsDeleting(true)
+    try {
+      const deleted = await deleteManagedAgent(ownerId, name)
+      toast.success(deleted.sessions ? `Agent 已删除，同时移除了 ${deleted.sessions} 个对话。` : 'Agent 已删除。')
+      navigate('/agents')
+    } catch (failure) {
+      toast.error(failure instanceof Error ? failure.message : '无法删除 Agent')
+      setIsDeleting(false)
+    }
   }
   return (
     <DashboardLayout title={detail?.agent.displayName || 'Agent 详情'} description={detail?.agent.path}
@@ -150,6 +169,28 @@ export function AgentManagerDetailPage() {
             </Table>
           </div>
           {currentUser?.id === ownerId && detail.agent.reference?.startsWith('moss-agent:operator:') && <MossImBindingPanel key={`${activeOrgId}:${ownerId}`} />}
+          {detail.canDelete && <section aria-label="删除 Agent" className="space-y-2 rounded-lg border border-destructive/40 p-4">
+            <h2 className="font-medium">删除 Agent</h2>
+            <p className="text-sm text-muted-foreground">永久删除该 Agent 的记忆、对话列表和会话记录。与其他 Agent 共享的对话保留在对方处。执行中的工作结束后才能删除。</p>
+            <Button variant="destructive" onClick={() => { setDeleteConfirmation(''); setIsConfirmingDelete(true) }}>删除 Agent</Button>
+          </section>}
+          <AlertDialog open={isConfirmingDelete} onOpenChange={open => { if (!open && !isDeleting) setIsConfirmingDelete(false) }}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>删除 Agent：{detail.agent.displayName}</AlertDialogTitle>
+                <AlertDialogDescription>此操作无法撤销。该 Agent 的记忆、对话列表和 {detail.sessions.length} 个会话将被永久删除。</AlertDialogDescription>
+              </AlertDialogHeader>
+              <label className="block space-y-1 text-sm">
+                <span>输入 Agent 名称 {detail.agent.displayName} 以确认</span>
+                <Input aria-label="确认删除的 Agent 名称" value={deleteConfirmation} onChange={event => setDeleteConfirmation(event.target.value)} />
+              </label>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={isDeleting}>取消</AlertDialogCancel>
+                <AlertDialogAction disabled={deleteConfirmation.trim() !== detail.agent.displayName || isDeleting}
+                  onClick={event => { event.preventDefault(); void onDelete() }}>{isDeleting ? '删除中…' : '永久删除'}</AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
       )}
     </DashboardLayout>

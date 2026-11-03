@@ -37,6 +37,8 @@ const nodeTestFiles = [
   'src/server/runtimeAdmissionDaemon.node-test.ts',
   'src/server/agentManager.node-test.ts',
   'src/server/agentManagerRoutes.node-test.ts',
+  'src/server/agentDeletion.node-test.ts',
+  'src/server/agentDeletionRoutes.node-test.ts',
   'src/server/auth/agentControlAudience.node-test.ts',
   'src/server/agentControl/managedActor.node-test.ts',
   'src/server/agentControl/service.node-test.ts',
