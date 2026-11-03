@@ -275,7 +275,7 @@ RUN for i in 1 2 3; do \
 RUN apt-get update \
     && for i in 1 2 3 4 5 6 7 8; do \
          apt-get install -y --no-install-recommends \
-           libreoffice-writer libreoffice-core poppler-utils fonts-noto-cjk \
+           libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-core poppler-utils fonts-noto-cjk \
          && break || { echo "libreoffice install attempt $i failed; retrying in 10s..."; sleep 10; }; \
        done \
     && command -v soffice >/dev/null || (echo "libreoffice not installed after retries" && exit 1) \

@@ -22,6 +22,7 @@ import { existsSync, readdirSync, readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import WebSocket from 'ws'
+import JSZip from 'jszip'
 import { issueAccessToken, issueWikiSessionToken } from '../src/server/auth/token.js'
 
 function arg(name: string, fallback?: string): string {
@@ -155,6 +156,25 @@ async function chat(token: string, sessionId: string, text: string): Promise<str
 
 async function digest(admin: string, agentId: string): Promise<void> {
   await api(admin, 'POST', `/api/v1/admin/agentify/agents/${encodeURIComponent(agentId)}/digest`, {})
+}
+
+/** A small but complete .xlsx: one sheet, a title row, then the header and rows. */
+async function buildXlsx(sheet: string, title: string, rows: Array<Array<string | number>>): Promise<Buffer> {
+  const zip = new JSZip()
+  const x = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+  const col = (i: number) => String.fromCharCode(65 + i)
+  const cell = (r: number, c: number, v: string | number) => typeof v === 'number'
+    ? `<c r="${col(c)}${r}"><v>${v}</v></c>`
+    : `<c r="${col(c)}${r}" t="inlineStr"><is><t>${x(v)}</t></is></c>`
+  const sheetRows = [[title], ...rows].map((row, i) => `<row r="${i + 1}">${row.map((v, c) => cell(i + 1, c, v)).join('')}</row>`).join('')
+  const ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+  zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>`)
+  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8"?><workbook ${ns}><sheets><sheet name="${x(sheet)}" sheetId="1" r:id="rId1"/></sheets></workbook>`)
+  zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`)
+  zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetData>${sheetRows}</sheetData><mergeCells count="1"><mergeCell ref="A1:F1"/></mergeCells></worksheet>`)
+  return zip.generateAsync({ type: 'nodebuffer' })
 }
 
 async function waitQuiet(ms: number): Promise<void> {
@@ -302,6 +322,48 @@ async function main(): Promise<void> {
     check(settled?.confirmedBy !== null, 'the confirmer is recorded', settled?.confirmedBy)
   }
 
+  const asA = agentSessionToken(users.gendan1!.userId, A.id, s2)
+
+  // 8a. Files: an employee uploads a spreadsheet; its content becomes
+  //     searchable as that employee's input, the agent's output as shared work.
+  const SKU = `ZX-${RUN.slice(-4).toUpperCase()}`
+  const xlsx = await buildXlsx('返厂明细', `第45周返厂明细（${RUN}）`, [
+    ['日期', 'SKU', '品类', '返厂数量', '主要原因', '供应商'],
+    ['2026-11-02', SKU, '厨卫五金', 63, '密封圈老化', '佛山某五金厂'],
+    ['2026-11-02', 'LD-2208', '灯具', 12, '灯珠不亮', '中山某灯饰厂'],
+    ['2026-11-03', 'GC-5521', '管材', 7, '接口开裂', '宁波某管业'],
+  ])
+  const s5 = await startSession(users.shouhou1!.token, B.id)
+  const upName = `第45周返厂明细_nexus_${Date.now()}.xlsx`
+  await api(users.shouhou1!.token, 'POST', `/api/v1/sessions/${s5}/workspace/file`, { path: upName, content_base64: xlsx.toString('base64') })
+  const r5 = await chat(users.shouhou1!.token, s5,
+    `@${upName} 这是第45周返厂明细（xlsx，可用 python 的 zipfile 读取）。请找出返厂数量最多的 SKU 及原因，把结论写进 week45-summary.md，并用一句话回复我。`)
+  log(`files: returns agent: ${r5.slice(0, 160)}`)
+  await waitQuiet(25_000)
+  await digest(admin, B.id)
+  const fileHits = (await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?q=${encodeURIComponent(SKU)}`)).hits as any[]
+  const inputHit = fileHits.find(h => h.kind === 'input')
+  check(Boolean(inputHit), `a value that is only inside the uploaded spreadsheet (${SKU}) is searchable`, fileHits.map(h => `${h.kind}:${h.title}`))
+  check(/返厂数量=63｜主要原因=密封圈老化/.test(inputHit?.snippet ?? '') || /SKU/.test(inputHit?.snippet ?? ''), 'the hit shows the row with its column names', inputHit?.snippet?.slice(0, 300))
+  check(inputHit?.title === '第45周返厂明细.xlsx（输入）', 'the input is titled by the name people use (upload suffix removed)', inputHit?.title)
+  const s5Summary = ((await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=summary&limit=50`)).items as any[]).find(d => d.sessionId === s5)
+  const s5Text = s5Summary ? (await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history/${s5Summary.id}`)).text as string : ''
+  check(/输入文件：第45周返厂明细\.xlsx/.test(s5Text), 'the session summary links the input file', s5Text.slice(0, 400))
+  const outputDoc = ((await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=artifact&limit=100`)).items as any[]).find(d => d.sessionId === s5 && /week45-summary\.md/.test(d.title))
+  check(Boolean(outputDoc), 'the agent’s output file has its own searchable entry', outputDoc?.title ?? 'no week45-summary.md output')
+  // Reading through agents: the employee's own session gets the JSON data; the other agent gets neither the input nor its search hits.
+  const asB = agentSessionToken(users.shouhou1!.userId, B.id, s5)
+  const extractJson = inputHit ? await api<any>(asB, 'GET', `/api/v1/agent/agentify/files?path=${encodeURIComponent(`${inputHit.path}.extract.json`)}`).catch((e: any) => ({ error: e.status })) : null
+  check(Boolean(extractJson?.sheets?.[0]?.rows?.some((r: any) => r.SKU === SKU && r.返厂数量 === 63)), 'the returns agent can load the spreadsheet as JSON rows (no xlsx library needed)', extractJson?.error ?? extractJson?.sheets?.[0]?.rows?.[0])
+  const aRecall = await api<any>(asA, 'GET', `/api/v1/agent/agentify/recall?agent=${B.id}&q=${encodeURIComponent(SKU)}`)
+  check((aRecall.hits as any[]).every(h => h.kind !== 'input'), 'the follow-up agent does not see the employee’s input in search', (aRecall.hits as any[]).map(h => h.kind))
+  const aRead = inputHit ? await api(asA, 'GET', `/api/v1/agent/agentify/files?agent=${B.id}&path=${encodeURIComponent(inputHit.path)}`).then(() => 200, (e: any) => e.status) : 0
+  check(aRead === 403, 'and cannot read the input file', aRead)
+  if (outputDoc) {
+    const aOut = await api(asA, 'GET', `/api/v1/agent/agentify/files?agent=${B.id}&path=${encodeURIComponent(outputDoc.path)}`).then(() => 200, (e: any) => e.status)
+    check(aOut === 200, 'but can read the output', aOut)
+  }
+
   // 8. Boundaries visible from outside.
   const notAgent = await api(users.gendan1!.token, 'GET', '/api/v1/agent/agentify/recall?q=x').then(() => false, (e: any) => e.status === 403)
   check(notAgent, 'a plain employee token cannot use the agent-only endpoints')
@@ -319,7 +381,6 @@ async function main(): Promise<void> {
   check(refused, 'a lookback longer than the deletion window is refused')
   const bSummaries = (await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=summary&limit=200`)).items as any[]
   const bMemoryBefore = ((await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=memory&limit=200`)).items as any[]).length
-  const asA = agentSessionToken(users.gendan1!.userId, A.id, s2)
   const summaryPath = bSummaries[0]?.path as string | undefined
   const readable = summaryPath ? await api(asA, 'GET', `/api/v1/agent/agentify/files?agent=${B.id}&path=${encodeURIComponent(summaryPath)}`).then(() => true, () => false) : false
   check(bSummaries.length > 0 && readable, `before deletion the follow-up agent can read the returns agent's summary in Nexus (${bSummaries.length} summaries)`)

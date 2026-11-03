@@ -11251,6 +11251,8 @@ export function startServer(
           path: typeof body.path === 'string' ? body.path : null,
           contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
         }, resolveSessionWorkspaceAccess(session, config))
+        // Agentify: an uploaded file is an input of the session (searchable later).
+        agentify.recordUpload(sessionId, result.relativePath)
         writeJson(res, 200, result)
         return
       }

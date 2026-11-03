@@ -111,10 +111,10 @@ await page.getByText(/历史与产出：/).waitFor()
 await page.getByPlaceholder(/用中文提问/).fill('第44周 返厂')
 await page.getByRole('button', { name: '检索' }).click()
 await page.waitForTimeout(2500)
-const results = await page.locator('[role=dialog] button', { hasText: /摘要|产出|协作|对话|记忆/ }).count()
+const results = await page.locator('[role=dialog] button', { hasText: /摘要|产出|输入|协作|对话|记忆/ }).count()
 check(results > 0, `history search returns results (${results})`)
 if (results > 0) {
-  await page.locator('[role=dialog] button', { hasText: /摘要|产出|协作|对话|记忆/ }).first().click()
+  await page.locator('[role=dialog] button', { hasText: /摘要|产出|输入|协作|对话|记忆/ }).first().click()
   await page.waitForTimeout(1500)
   check(await page.locator('[role=dialog] pre').first().isVisible(), 'a history entry opens with its full text')
 }

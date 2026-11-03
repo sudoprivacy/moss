@@ -28,12 +28,15 @@ export function buildAgentifyBlock(input: AgentifyBlockInput): string {
   }
   lines.push('')
   lines.push('Your memory and history:')
-  lines.push('  agentctl recall "<question or keywords>"          # search your past work (summaries, outputs, notes)')
+  lines.push('  agentctl recall "<question or keywords>"          # search your past work: summaries, notes, and the content of')
+  lines.push('                                                     # input/output files (spreadsheet rows, documents, PDFs)')
   lines.push('  agentctl history list [--limit 20]                 # your most recent work')
   lines.push('  agentctl history show <id>                         # one summary in full')
   lines.push('  agentctl files get <path> [--out <file>]           # copy a saved output into this workspace')
   lines.push('  agentctl memory add "<fact>" [--private]           # remember a fact (--private: only for this employee)')
   lines.push('Search before you redo work or say you do not know. Save durable facts with `memory add`; never save secrets.')
+  lines.push('A file hit shows where the file is kept. For its data, `agentctl files get <that path>.extract.json`: every sheet')
+  lines.push('as JSON rows keyed by column name (dates as ISO strings), or a document/PDF as text — no spreadsheet library needed.')
 
   if (input.collaborators.length > 0) {
     lines.push('')

@@ -26,7 +26,7 @@ func fakeServer(t *testing.T) (*httptest.Server, *[]string) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/v1/agent/agentify/recall":
-			json.NewEncoder(w).Encode(map[string]any{"hits": []map[string]any{{"id": "doc-123456789", "kind": "summary", "title": "第44周返厂", "snippet": "厨卫五金 128 件", "createdAt": 1793600000000}}})
+			json.NewEncoder(w).Encode(map[string]any{"hits": []map[string]any{{"id": "doc-123456789", "kind": "summary", "title": "第44周返厂", "snippet": "厨卫五金 128 件", "createdAt": 1793600000000}, {"id": "doc-987654321", "kind": "input", "title": "10月发车.xlsx（输入）", "path": "/agent-home/o/a/inputs/s1/10月发车.xlsx", "snippet": "第3行：日期=2026-10-03", "createdAt": 1793600000000}}})
 		case r.URL.Path == "/api/v1/agent/agentify/ask" && r.Method == "POST":
 			var body map[string]string
 			json.NewDecoder(r.Body).Decode(&body)
@@ -77,7 +77,8 @@ func run(t *testing.T, srv *httptest.Server, args ...string) (int, string, strin
 func TestRecallPrintsHits(t *testing.T) {
 	srv, seen := fakeServer(t)
 	code, out, _ := run(t, srv, "recall", "返厂 品类", "--limit", "3")
-	if code != 0 || !strings.Contains(out, "厨卫五金 128 件") || !strings.Contains(out, "(id doc-1234)") {
+	if code != 0 || !strings.Contains(out, "厨卫五金 128 件") || !strings.Contains(out, "(id doc-1234)") ||
+		!strings.Contains(out, "file: /agent-home/o/a/inputs/s1/10月发车.xlsx") || strings.Count(out, "file: ") != 1 {
 		t.Fatalf("code=%d out=%q", code, out)
 	}
 	if !strings.Contains((*seen)[0], "limit=3") || !strings.Contains((*seen)[0], "q=%E8%BF%94") {

@@ -5,7 +5,9 @@
  *   /agent-home/<org>/<agent>/history/<yyyy>/<mm>/<session>/summary.md
  *   /agent-home/<org>/<agent>/history/.../conversation.md
  *   /agent-home/<org>/<agent>/history/.../artifacts.json
- *   /agent-home/<org>/<agent>/artifacts/<session>/<relative path>
+ *   /agent-home/<org>/<agent>/artifacts/<session>/<relative path>   outputs
+ *   /agent-home/<org>/<agent>/inputs/<session>/<relative path>      inputs
+ *     (each extracted file has a `<file>.extract.json` next to it)
  *   /agent-home/<org>/<agent>/memory/shared.md
  *   /agent-home/<org>/<agent>/memory/users/<user>.md
  *   /agent-home/<org>/<agent>/a2a/<call>.md
@@ -66,6 +68,10 @@ export function historyDir(orgId: string, agentId: string, sessionId: string, cr
 
 export function artifactDir(orgId: string, agentId: string, sessionId: string): string {
   return `${agentRoot(orgId, agentId)}/artifacts/${safeSegment(sessionId)}`
+}
+
+export function inputDir(orgId: string, agentId: string, sessionId: string): string {
+  return `${agentRoot(orgId, agentId)}/inputs/${safeSegment(sessionId)}`
 }
 
 export function sharedMemoryPath(orgId: string, agentId: string): string {

@@ -9,9 +9,10 @@
  */
 import { stat, readFile } from 'fs/promises'
 import type { AgentHomeStore } from './agentHome.js'
-import { artifactDir, historyDir } from './agentHome.js'
+import { artifactDir, historyDir, inputDir } from './agentHome.js'
 import { historyPolicy, hoursToMs } from './config.js'
-import { collectArtifacts, describeArtifacts, type ArtifactEntry } from './artifacts.js'
+import { collectArtifacts, describeArtifacts, displayName, type ArtifactEntry } from './artifacts.js'
+import { extractFile, isExtractable } from './fileExtract.js'
 import type { HistoryIndex } from './historyIndex.js'
 import type { AgentifyStore, AgentRow, SessionAgentInfo } from './store.js'
 import type { Summarizer } from './summarizer.js'
@@ -22,7 +23,14 @@ const QUIET_MS = Number(process.env.MOSS_AGENTIFY_DIGEST_QUIET_MS) || 2 * 60 * 1
 const SWEEP_MS = Number(process.env.MOSS_AGENTIFY_DIGEST_SWEEP_MS) || 60 * 1000
 /** How often expired history is deleted. */
 const PURGE_EVERY_MS = Number(process.env.MOSS_AGENTIFY_PURGE_EVERY_MS) || 3600 * 1000
-const TEXT_OUTPUT = /\.(md|txt|csv|tsv|json|html?|xml|ya?ml|log|sql)$/i
+/**
+ * Bumped when the digest starts producing different documents; sessions
+ * digested by an older version are redone (within the lookback).
+ * 2 = per-file content documents for inputs and outputs.
+ */
+export const DIGEST_VERSION = 2
+/** Files extracted per digest pass (unchanged files do not count). */
+const MAX_EXTRACTED_FILES = Number(process.env.MOSS_AGENTIFY_EXTRACT_MAX_FILES) || 20
 
 export interface DigestDeps {
   store: AgentifyStore
@@ -198,7 +206,7 @@ export class DigestService {
   /**
    * Delete digested history that has had no activity for longer than each
    * agent's deleteAfterHours: index entries, the session's summary,
-   * conversation and output copies in the agent home, collaboration logs, and
+   * conversation, input and output copies in the agent home, collaboration logs, and
    * finished call records. Curated memory notes are kept. The original session
    * transcript (outside the agent home) is not touched. Applies to agents with
    * agentify turned off too, since their history is still stored.
@@ -218,14 +226,21 @@ export class DigestService {
         try {
           if (doc.kind === 'summary' && doc.sessionId && doc.path.endsWith('/summary.md')) {
             // The session's history directory (summary, conversation,
-            // artifacts.json) and its output copies go together.
+            // artifacts.json) and its input and output copies go together.
             await home.remove(doc.path.slice(0, doc.path.lastIndexOf('/')))
             await home.remove(artifactDir(agent.orgId, agent.agentId, doc.sessionId))
+            await home.remove(inputDir(agent.orgId, agent.agentId, doc.sessionId))
             store.deleteDigestState(doc.sessionId)
+            store.deleteUploads(doc.sessionId)
             result.sessions += 1
+          } else if (doc.docKey.startsWith('file:')) {
+            // One input or output file and its JSON copy.
+            await home.remove(doc.path)
+            await home.remove(`${doc.path}.extract.json`)
           } else if (doc.kind === 'artifact' && doc.sessionId) {
             await home.remove(doc.path)
             await home.remove(artifactDir(agent.orgId, agent.agentId, doc.sessionId))
+            await home.remove(inputDir(agent.orgId, agent.agentId, doc.sessionId))
           } else {
             await home.remove(doc.path)
           }
@@ -275,23 +290,24 @@ export class DigestService {
       return { status: 'skipped', reason: 'no transcript' }
     }
     const prev = this.deps.store.getDigestState(session.sessionId)
-    if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs)) return { status: 'unchanged' }
+    if (prev && prev.size === st.size && prev.mtime === Math.round(st.mtimeMs) && prev.version === DIGEST_VERSION) return { status: 'unchanged' }
     if (opts.requireQuiet && Date.now() - st.mtimeMs < QUIET_MS && !session.endedAt) {
       return { status: 'skipped', reason: 'still active' }
     }
+    const state = { size: st.size, mtime: Math.round(st.mtimeMs), version: DIGEST_VERSION }
     try {
       const conv = parseTranscript(await readFile(session.transcriptPath, 'utf8'))
       if (!conv.turns.some(t => t.role === 'assistant')) {
-        this.deps.store.setDigestState(session.sessionId, { size: st.size, mtime: Math.round(st.mtimeMs), status: 'skipped' })
+        this.deps.store.setDigestState(session.sessionId, { ...state, status: 'skipped' })
         return { status: 'skipped', reason: 'no agent reply yet' }
       }
       const result = await this.writeDigest(session, agent, conv, st.mtimeMs)
-      this.deps.store.setDigestState(session.sessionId, { size: st.size, mtime: Math.round(st.mtimeMs), status: 'ok' })
+      this.deps.store.setDigestState(session.sessionId, { ...state, status: 'ok' })
       return result
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.warn(`[agentify] digest of session ${session.sessionId} failed: ${message}`)
-      this.deps.store.setDigestState(session.sessionId, { size: st.size, mtime: Math.round(st.mtimeMs), status: 'error', error: message })
+      this.deps.store.setDigestState(session.sessionId, { ...state, status: 'error', error: message })
       return { status: 'error', reason: message }
     }
   }
@@ -301,9 +317,14 @@ export class DigestService {
     const userName = this.deps.getUserName(session.userId)
     const origin = describeOrigin(session.source, userName)
     const dir = historyDir(session.orgId, agent.agentId, session.sessionId, session.createdAt)
+    const createdAt = session.createdAt
+    const activeAt = Math.max(session.lastActiveAt, Math.round(transcriptMtime))
+    const base = { orgId: session.orgId, agentId: agent.agentId, sessionId: session.sessionId, userId: session.userId, createdAt, activeAt }
 
     let artifacts: ArtifactEntry[] = []
     if (session.cwd) {
+      const ms = (ts: string | null) => (ts ? Date.parse(ts) || null : null)
+      const firstAgentTurn = conv.turns.find(t => t.role !== 'user' && t.timestamp)
       artifacts = await collectArtifacts({
         home,
         orgId: session.orgId,
@@ -312,9 +333,20 @@ export class DigestService {
         workspace: session.cwd,
         windowStartMs: session.createdAt,
         windowEndMs: Math.max(session.lastActiveAt, transcriptMtime),
+        hints: {
+          uploaded: this.deps.store.listUploads(session.sessionId),
+          userTurns: conv.turns.filter(t => t.role === 'user').map(t => ({ text: t.text, at: ms(t.timestamp) })),
+          agentStartedAt: ms(firstAgentTurn?.timestamp ?? null),
+        },
       })
     }
-    const artifactLines = describeArtifacts(artifacts)
+    const files = await this.indexSessionFiles(base, artifacts)
+    const inputs = artifacts.filter(a => a.role === 'input' && !a.duplicateOf)
+    const outputs = artifacts.filter(a => a.role === 'output' && !a.duplicateOf)
+    const artifactLines = artifacts.filter(a => !a.duplicateOf).map(a => {
+      const outline = files.outlines.get(a.path)
+      return `${describeArtifacts([a])[0]}${outline ? `：${outline}` : ''}`
+    })
     const conversation = renderConversation(conv, { maxChars: 60_000 })
     const { text: summaryBody, model } = await summarizer.summarize({
       agentDisplayName: agent.displayName,
@@ -325,12 +357,15 @@ export class DigestService {
     })
 
     const when = conv.startedAt ?? new Date(session.createdAt).toISOString()
+    const nameList = (list: ArtifactEntry[]) => list.slice(0, 12).map(a => displayName(a.path)).join('、') + (list.length > 12 ? ` 等 ${list.length} 个` : '')
     const header = [
       `# ${agent.displayName} 工作摘要`,
       '',
       `- 会话：${session.sessionId}`,
       `- 时间：${when}${conv.endedAt && conv.endedAt !== when ? ` ~ ${conv.endedAt}` : ''}`,
       `- 来源：${origin}`,
+      ...(inputs.length ? [`- 输入文件：${nameList(inputs)}`] : []),
+      ...(outputs.length ? [`- 产出文件：${nameList(outputs)}`] : []),
       ...(model ? [`- 摘要模型：${model}`] : ['- 摘要方式：抽取']),
       '',
     ].join('\n')
@@ -341,29 +376,85 @@ export class DigestService {
     await home.write(`${dir}/conversation.md`, `# 对话记录\n\n- 会话：${session.sessionId}\n- 来源：${origin}\n\n${conversation}\n`)
     await home.write(`${dir}/artifacts.json`, `${JSON.stringify({ sessionId: session.sessionId, artifacts }, null, 2)}\n`)
 
-    const createdAt = session.createdAt
-    const activeAt = Math.max(session.lastActiveAt, Math.round(transcriptMtime))
-    const base = { orgId: session.orgId, agentId: agent.agentId, sessionId: session.sessionId, userId: session.userId, createdAt, activeAt }
     await index.indexDoc({ ...base, kind: 'summary', docKey: `summary:${session.sessionId}`, visibility: 'shared', path: `${dir}/summary.md`, title, text: summaryText, meta: { origin, model } })
     await index.indexDoc({ ...base, kind: 'conversation', docKey: `conversation:${session.sessionId}`, visibility: 'private', path: `${dir}/conversation.md`, title: `${title}（对话）`, text: conversation })
 
     if (artifacts.length > 0) {
-      // Index text outputs' content so "what did the after-sales agent find"
-      // can match the report itself, not just its file name.
-      const parts: string[] = [`# ${agent.displayName} 产出文件`, '', ...artifactLines.map(l => `- ${l}`)]
-      let budget = 30_000
-      for (const a of artifacts) {
-        if (!a.homePath || a.role !== 'output' || !TEXT_OUTPUT.test(a.path) || budget <= 0) continue
-        const buf = await home.read(a.homePath)
-        if (!buf) continue
-        const text = truncateMiddle(buf.toString('utf8'), Math.min(8000, budget))
-        budget -= text.length
-        parts.push('', `## ${a.path}`, '', text)
-      }
-      await index.indexDoc({ ...base, kind: 'artifact', docKey: `artifacts:${session.sessionId}`, visibility: 'shared', path: `${dir}/artifacts.json`, title: `${title}（产出）`, text: parts.join('\n'), meta: { files: artifacts } })
+      // The session's file list: which inputs led to which outputs. Input
+      // names only — their content is in the (private) input documents.
+      const shared = artifacts.filter(a => !a.duplicateOf)
+      const listLines = shared.map(a => {
+        const outline = a.role === 'input' ? '' : files.outlines.get(a.path)
+        return `- ${describeArtifacts([a])[0]}${outline ? `：${outline}` : ''}${a.homePath ? `\n  副本：${a.homePath}` : ''}${files.extracts.get(a.path) && a.role !== 'input' ? `\n  数据：${files.extracts.get(a.path)}` : ''}`
+      })
+      const text = [`# ${title} 的文件`, '', ...(inputs.length ? [`输入：${nameList(inputs)}`] : []), ...(outputs.length ? [`产出：${nameList(outputs)}`] : []), '', ...listLines].join('\n')
+      await index.indexDoc({ ...base, kind: 'artifact', docKey: `artifacts:${session.sessionId}`, visibility: 'shared', path: `${dir}/artifacts.json`, title: `${title}（文件）`, text, meta: { files: artifacts } })
     } else {
       this.deps.store.deleteDoc(session.orgId, agent.agentId, `artifacts:${session.sessionId}`)
     }
     return { status: 'ok', summaryPath: `${dir}/summary.md` }
+  }
+
+  /**
+   * One searchable document per distinct file: its extracted content, with a
+   * JSON copy of the data next to the file in the agent home. Unchanged files
+   * (same content hash as last time) are not extracted again.
+   */
+  private async indexSessionFiles(
+    base: { orgId: string; agentId: string; sessionId: string; userId: string; createdAt: number; activeAt: number },
+    artifacts: ArtifactEntry[],
+  ): Promise<{ outlines: Map<string, string>; extracts: Map<string, string> }> {
+    const { store, home, index } = this.deps
+    const outlines = new Map<string, string>()
+    const extracts = new Map<string, string>()
+    const keep = new Set<string>()
+    let extracted = 0
+    for (const a of artifacts) {
+      if (a.duplicateOf || !a.homePath || !a.sha256 || !isExtractable(a.path)) continue
+      const docKey = `file:${base.sessionId}:${a.sha256.slice(0, 20)}`
+      keep.add(docKey)
+      const kind = a.role === 'input' ? 'input' : 'artifact'
+      const existing = store.getDocByKey(base.orgId, base.agentId, docKey)
+      if (existing && existing.kind === kind && existing.meta.sha256 === a.sha256) {
+        store.touchDoc(existing.id, base.activeAt)
+        if (typeof existing.meta.outline === 'string') outlines.set(a.path, existing.meta.outline)
+        if (typeof existing.meta.extractPath === 'string') extracts.set(a.path, existing.meta.extractPath)
+        continue
+      }
+      if (extracted >= MAX_EXTRACTED_FILES) continue
+      const buf = await home.read(a.homePath)
+      if (!buf) continue
+      extracted += 1
+      const shown = displayName(a.path)
+      const result = await extractFile(buf, shown)
+      const roleLabel = a.role === 'input' ? '输入' : a.role === 'output' ? '产出' : '中间文件'
+      const sameContent = artifacts.filter(o => o.duplicateOf === a.path).map(o => o.path)
+      let extractPath: string | null = null
+      if (result) {
+        extractPath = `${a.homePath}.extract.json`
+        const json = { file: shown, path: a.path, role: a.role, sessionId: base.sessionId, via: result.via, truncated: result.truncated, outline: result.outline, ...result.data }
+        await home.write(extractPath, JSON.stringify(json))
+        outlines.set(a.path, result.outline)
+        extracts.set(a.path, extractPath)
+      }
+      const intro = `${shown}（${roleLabel}，会话 ${base.sessionId}）${result ? `：${result.outline}` : ''}${extractPath ? `\n完整数据（JSON）：${extractPath}` : ''}\n原文件：${a.homePath}`
+      await index.indexDoc({
+        ...base,
+        kind,
+        docKey,
+        // An employee's input stays theirs unless the agent shares full history.
+        visibility: a.role === 'input' ? 'private' : 'shared',
+        path: a.homePath,
+        title: `${shown}（${roleLabel}）`,
+        text: intro,
+        chunks: [{ text: intro, embed: true }, ...(result?.chunks ?? [])],
+        meta: { role: a.role, path: a.path, sameContent, size: a.size, sha256: a.sha256, extractPath, outline: result?.outline ?? null, via: result?.via ?? null, truncated: result?.truncated ?? false },
+      })
+    }
+    // Files that are no longer part of the session (re-digest of a reused workspace).
+    for (const doc of store.listSessionDocs(base.orgId, base.agentId, base.sessionId, 'file:')) {
+      if (!keep.has(doc.docKey)) store.deleteDocById(doc.id)
+    }
+    return { outlines, extracts }
   }
 }

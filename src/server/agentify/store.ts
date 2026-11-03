@@ -12,7 +12,13 @@ import { parseAgentifyConfig, type AgentifyConfig } from './config.js'
 
 type Row = Record<string, unknown>
 
-export type DocKind = 'summary' | 'conversation' | 'memory' | 'a2a' | 'artifact'
+/**
+ * `artifact` = a session's output (one document per file, plus the session's
+ * file list); `input` = a file an employee gave the session (uploaded or
+ * pointed at). Inputs are private to that employee unless the agent shares
+ * full history.
+ */
+export type DocKind = 'summary' | 'conversation' | 'memory' | 'a2a' | 'artifact' | 'input'
 /** `shared` = any session of the agent; `private` = only the employee who produced it. */
 export type DocVisibility = 'shared' | 'private'
 
@@ -272,6 +278,19 @@ export class AgentifyStore {
         updated_at) WHERE active_at IS NULL`)
     }
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_agentify_docs_active ON agentify_docs(org_id, agent_id, active_at)`)
+    // Which digest format produced a session's documents; older ones are redone.
+    if (!this.hasColumn('agentify_digest_state', 'version')) {
+      this.db.exec(`ALTER TABLE agentify_digest_state ADD COLUMN version INTEGER NOT NULL DEFAULT 1`)
+    }
+    // Files employees uploaded into a session workspace (they are its inputs).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agentify_uploads (
+        session_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        uploaded_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, path)
+      )
+    `)
   }
 
   // ---------------------------------------------------------------- agents
@@ -405,19 +424,46 @@ export class AgentifyStore {
       .all(orgId, ...agentIds, sinceMs) as Row[]).map(r => this.mapSessionInfo(r))
   }
 
-  getDigestState(sessionId: string): { size: number; mtime: number; digestedAt: number; status: string } | null {
+  getDigestState(sessionId: string): { size: number; mtime: number; digestedAt: number; status: string; version: number } | null {
     const r = this.db.prepare(`SELECT * FROM agentify_digest_state WHERE session_id = ?`).get(sessionId) as Row | undefined
-    return r ? { size: n(r.transcript_size), mtime: n(r.transcript_mtime), digestedAt: n(r.digested_at), status: s(r.status) } : null
+    return r ? { size: n(r.transcript_size), mtime: n(r.transcript_mtime), digestedAt: n(r.digested_at), status: s(r.status), version: n(r.version ?? 1) } : null
   }
 
-  setDigestState(sessionId: string, state: { size: number; mtime: number; status: 'ok' | 'error' | 'skipped'; error?: string | null }): void {
+  setDigestState(sessionId: string, state: { size: number; mtime: number; status: 'ok' | 'error' | 'skipped'; error?: string | null; version: number }): void {
     this.db
-      .prepare(`INSERT INTO agentify_digest_state (session_id, transcript_size, transcript_mtime, digested_at, status, error)
-                VALUES (?, ?, ?, ?, ?, ?)
+      .prepare(`INSERT INTO agentify_digest_state (session_id, transcript_size, transcript_mtime, digested_at, status, error, version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET transcript_size = excluded.transcript_size,
                   transcript_mtime = excluded.transcript_mtime, digested_at = excluded.digested_at,
-                  status = excluded.status, error = excluded.error`)
-      .run(sessionId, state.size, state.mtime, Date.now(), state.status, state.error ?? null)
+                  status = excluded.status, error = excluded.error, version = excluded.version`)
+      .run(sessionId, state.size, state.mtime, Date.now(), state.status, state.error ?? null, state.version)
+  }
+
+  recordUpload(sessionId: string, relPath: string): void {
+    this.db
+      .prepare(`INSERT INTO agentify_uploads (session_id, path, uploaded_at) VALUES (?, ?, ?)
+                ON CONFLICT(session_id, path) DO UPDATE SET uploaded_at = excluded.uploaded_at`)
+      .run(sessionId, relPath, Date.now())
+  }
+
+  deleteUploads(sessionId: string): void {
+    this.db.prepare(`DELETE FROM agentify_uploads WHERE session_id = ?`).run(sessionId)
+  }
+
+  listUploads(sessionId: string): string[] {
+    return (this.db.prepare(`SELECT path FROM agentify_uploads WHERE session_id = ?`).all(sessionId) as Row[]).map(r => s(r.path))
+  }
+
+  /** Documents of one session whose key starts with `prefix` (per-file documents). */
+  listSessionDocs(orgId: string, agentId: string, sessionId: string, keyPrefix: string): DocRow[] {
+    return (this.db
+      .prepare(`SELECT * FROM agentify_docs WHERE org_id = ? AND agent_id = ? AND session_id = ? AND doc_key LIKE ? ESCAPE '\\'`)
+      .all(orgId, agentId, sessionId, `${keyPrefix.replace(/[\\%_]/g, c => `\\${c}`)}%`) as Row[]).map(r => this.mapDoc(r))
+  }
+
+  /** Mark a document active again without re-indexing it (unchanged file). */
+  touchDoc(id: string, activeAt: number): void {
+    this.db.prepare(`UPDATE agentify_docs SET active_at = MAX(COALESCE(active_at, 0), ?) WHERE id = ?`).run(activeAt, id)
   }
 
   // ------------------------------------------------------------------ docs
@@ -492,6 +538,13 @@ export class AgentifyStore {
 
   getDoc(id: string): DocRow | null {
     const r = this.db.prepare(`SELECT * FROM agentify_docs WHERE id = ?`).get(id) as Row | undefined
+    return r ? this.mapDoc(r) : null
+  }
+
+  getDocByPath(orgId: string, agentId: string, docPath: string): DocRow | null {
+    const r = this.db
+      .prepare(`SELECT * FROM agentify_docs WHERE org_id = ? AND agent_id = ? AND path = ? ORDER BY visibility = 'private' DESC LIMIT 1`)
+      .get(orgId, agentId, docPath) as Row | undefined
     return r ? this.mapDoc(r) : null
   }
 

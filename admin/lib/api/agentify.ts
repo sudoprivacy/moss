@@ -58,7 +58,7 @@ export interface AgentifyAgent {
 
 export interface HistoryDoc {
   id: string
-  kind: 'summary' | 'conversation' | 'memory' | 'a2a' | 'artifact'
+  kind: 'summary' | 'conversation' | 'memory' | 'a2a' | 'artifact' | 'input'
   title: string
   path: string
   sessionId: string | null

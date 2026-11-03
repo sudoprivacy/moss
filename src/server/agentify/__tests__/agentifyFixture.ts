@@ -60,7 +60,18 @@ export interface Fixture {
   usable: Set<string>
   admins: Set<string>
   /** Create a finished session for an agent with a transcript. */
-  addSession(input: { agent: string; userId: string; turns: Array<{ role: 'user' | 'assistant'; text: string }>; files?: Record<string, string>; source?: string; ageMs?: number }): string
+  addSession(input: {
+    agent: string
+    userId: string
+    turns: Array<{ role: 'user' | 'assistant'; text: string }>
+    /** Files the agent wrote (after its first reply). */
+    files?: Record<string, string | Buffer>
+    /** Files the employee provided before the agent started; `uploaded` ones go through the upload API. */
+    inputs?: Record<string, string | Buffer>
+    uploaded?: string[]
+    source?: string
+    ageMs?: number
+  }): string
   cleanup(): void
 }
 
@@ -138,15 +149,16 @@ export function createFixture(agentMetas: Array<AssistantStoreMeta & { id: strin
       const script = scripts.get(call.input.assistantName)
       if (!script) throw new Error(`no scripted agent for ${call.input.assistantName}`)
       const out = script({ prompt, session: { ...call.input, sessionId } })
+      // Like scode: the prompt arrives and the agent starts, then writes files.
+      const tp = store.getSession(sessionId)!.transcriptPath
+      const now = Date.now()
+      appendFileSync(tp, transcriptLine('user', prompt, sessionId, now - 20))
+      appendFileSync(tp, transcriptLine('assistant', out.reply, sessionId, now - 10))
       for (const [rel, content] of Object.entries(out.files ?? {})) {
         const p = path.join(call.input.cwd, rel)
         mkdirSync(path.dirname(p), { recursive: true })
         writeFileSync(p, content)
       }
-      const tp = store.getSession(sessionId)!.transcriptPath
-      const now = Date.now()
-      appendFileSync(tp, transcriptLine('user', prompt, sessionId, now))
-      appendFileSync(tp, transcriptLine('assistant', out.reply, sessionId, now + 1))
       return { reply: out.reply }
     },
     async terminate() {},
@@ -195,20 +207,29 @@ export function createFixture(agentMetas: Array<AssistantStoreMeta & { id: strin
     })
     // What RuntimeService's agentify hook does on creation.
     svc.store.setSessionAgent(sessionId, { assistantId: meta.id })
-    const at = Date.now() - (input.ageMs ?? 0)
+    // Turns first, then the files the agent wrote (inputs are added explicitly).
+    const at = Date.now() - (input.ageMs ?? 0) - (input.turns.length + 1) * 1000
     if (input.ageMs) store.db.prepare('UPDATE sessions SET created_at = ?, last_active_at = ? WHERE session_id = ?').run(at, at, sessionId)
+    for (const [rel, content] of Object.entries(input.inputs ?? {})) {
+      const p = path.join(cwd, rel)
+      mkdirSync(path.dirname(p), { recursive: true })
+      writeFileSync(p, content)
+      utimesSync(p, new Date(at - 500), new Date(at - 500))
+    }
+    for (const rel of input.uploaded ?? []) svc.recordUpload(sessionId, rel)
+    if (!input.ageMs && input.inputs) store.db.prepare('UPDATE sessions SET created_at = ? WHERE session_id = ?').run(at - 1000, sessionId)
     let t = at
     for (const turn of input.turns) appendFileSync(transcriptPath, transcriptLine(turn.role, turn.text, sessionId, (t += 1000)))
     for (const [rel, content] of Object.entries(input.files ?? {})) {
       const p = path.join(cwd, rel)
       mkdirSync(path.dirname(p), { recursive: true })
       writeFileSync(p, content)
-      if (input.ageMs) utimesSync(p, new Date(at + 500), new Date(at + 500))
+      if (input.ageMs) utimesSync(p, new Date(t + 500), new Date(t + 500))
     }
     if (input.ageMs) {
       // An old session: its transcript was last written back then too.
-      utimesSync(transcriptPath, new Date(t), new Date(t))
-      store.db.prepare('UPDATE sessions SET last_active_at = ? WHERE session_id = ?').run(t, sessionId)
+      utimesSync(transcriptPath, new Date(t + 1000), new Date(t + 1000))
+      store.db.prepare('UPDATE sessions SET last_active_at = ? WHERE session_id = ?').run(t + 1000, sessionId)
     }
     return sessionId
   }

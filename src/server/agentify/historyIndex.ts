@@ -62,13 +62,29 @@ export function recencyWeight(ageMs: number, halfLifeHours: number): number {
 
 const CJK = /[㐀-鿿豈-﫿]/
 const RRF_K = 60
+const EXACT_BONUS = 1.6
+
+/** Query words to look for verbatim (whitespace-separated, at least 2 characters). */
+export function exactWords(query: string): string[] {
+  return query
+    .normalize('NFKC')
+    .toLowerCase()
+    .split(/[\s,，。;；、]+/)
+    .map(w => w.trim())
+    .filter(w => w.length >= 2)
+    .slice(0, 8)
+}
 
 /** Can this viewer see this document? */
 export function canSeeDoc(doc: Pick<DocRow, 'visibility' | 'userId' | 'kind'>, viewerUserId: string | null, share: HistoryShare): boolean {
   if (doc.visibility === 'shared') return true
   if (viewerUserId && doc.userId === viewerUserId) return true
-  // `full` sharing opens other employees' conversations, never their private memory.
-  return share === 'full' && doc.kind === 'conversation' && viewerUserId !== null
+  if (share !== 'full') return false
+  // `full` sharing opens other employees' conversations and input files, never
+  // their private memory. Other agents (no viewer) get input files, not
+  // conversations.
+  if (doc.kind === 'input') return true
+  return doc.kind === 'conversation' && viewerUserId !== null
 }
 
 /**
@@ -123,14 +139,23 @@ export function chunkDocument(text: string, title: string): string[] {
 export class HistoryIndex {
   constructor(private readonly store: AgentifyStore, private readonly embedder: EmbedderProvider) {}
 
-  /** Index (or re-index) one document. Returns the stored row. */
-  async indexDoc(input: DocInput): Promise<DocRow> {
-    const texts = chunkDocument(input.text, input.title)
-    let vectors: Array<Float32Array | null> = texts.map(() => null)
+  /**
+   * Index (or re-index) one document. Returns the stored row. `chunks`
+   * replaces the default splitting (extracted files come pre-chunked); chunks
+   * with `embed: false` are keyword-searchable only.
+   */
+  async indexDoc(input: DocInput & { chunks?: Array<{ text: string; embed: boolean }> }): Promise<DocRow> {
+    const specs = input.chunks ?? chunkDocument(input.text, input.title).map(text => ({ text, embed: true }))
+    const texts = specs.map(c => c.text)
+    const vectors: Array<Float32Array | null> = texts.map(() => null)
     const emb = await this.embedder().catch(() => null)
-    if (emb && texts.length > 0) {
+    const toEmbed = specs.map((c, i) => (c.embed ? i : -1)).filter(i => i >= 0)
+    if (emb && toEmbed.length > 0) {
       try {
-        vectors = await emb.passage(texts.map(t => `${input.title}\n${t}`))
+        const out = await emb.passage(toEmbed.map(i => `${input.title}\n${texts[i]}`))
+        toEmbed.forEach((i, k) => {
+          vectors[i] = out[k] ?? null
+        })
       } catch (err) {
         console.warn(`[agentify] embedding failed, indexing keywords only: ${err instanceof Error ? err.message : String(err)}`)
       }
@@ -186,6 +211,7 @@ export class HistoryIndex {
     const byId = new Map(rows.map(r => [r.id, r]))
     const now = Date.now()
     const halfLife = opts.decayHalfLifeHours ?? historyPolicy(this.store.getAgent(opts.orgId, opts.agentId)?.config).decayHalfLifeHours
+    const words = exactWords(query)
     const bestPerDoc = new Map<string, SearchHit>()
     for (const c of candidates) {
       const row = byId.get(c.chunkId)
@@ -195,7 +221,11 @@ export class HistoryIndex {
       if (opts.sinceMs && doc.createdAt < opts.sinceMs) continue
       if (!opts.includeAll && !canSeeDoc(doc, opts.viewerUserId, opts.share)) continue
       const kindBoost = doc.kind === 'summary' || doc.kind === 'memory' ? 1.15 : 1
-      const score = c.base * recencyWeight(now - doc.activeAt, halfLife) * kindBoost
+      // Every word of the query appears verbatim (an id, an order number, a
+      // name): that passage beats one that is only similar in meaning.
+      const lower = row.text.toLowerCase()
+      const exact = words.length > 0 && words.every(w => lower.includes(w)) ? EXACT_BONUS : 1
+      const score = c.base * recencyWeight(now - doc.activeAt, halfLife) * kindBoost * exact
       const prev = bestPerDoc.get(doc.id)
       if (!prev || prev.score < score) {
         bestPerDoc.set(doc.id, {

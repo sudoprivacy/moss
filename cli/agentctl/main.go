@@ -149,7 +149,12 @@ func dispatch(args []string, c *Client, out io.Writer, sleep func(time.Duration)
 			return nil
 		}
 		for _, h := range hits {
-			fmt.Fprintf(out, "[%s] %s  %s  (id %s)\n%s\n\n", h.Kind, day(h.CreatedAt), h.Title, short(h.ID), strings.TrimSpace(h.Snippet))
+			fmt.Fprintf(out, "[%s] %s  %s  (id %s)\n", h.Kind, day(h.CreatedAt), h.Title, short(h.ID))
+			if h.Kind == "artifact" || h.Kind == "input" {
+				// File hits: where the file is kept, for `agentctl files get`.
+				fmt.Fprintf(out, "file: %s\n", h.Path)
+			}
+			fmt.Fprintf(out, "%s\n\n", strings.TrimSpace(h.Snippet))
 		}
 		return nil
 

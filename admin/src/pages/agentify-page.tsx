@@ -50,6 +50,7 @@ const KIND_LABEL: Record<string, string> = {
   memory: '记忆',
   a2a: '协作',
   artifact: '产出',
+  input: '输入',
 }
 
 const NEXUS_LABEL: Record<NexusUpgradeReport['status'], string> = {

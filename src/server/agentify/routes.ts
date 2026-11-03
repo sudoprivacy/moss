@@ -28,7 +28,7 @@ export interface AgentifyRouteDeps {
   getNexusStatus?: () => unknown
 }
 
-const DOC_KINDS: DocKind[] = ['summary', 'conversation', 'memory', 'a2a', 'artifact']
+const DOC_KINDS: DocKind[] = ['summary', 'conversation', 'memory', 'a2a', 'artifact', 'input']
 const CALL_STATUSES: A2ACallStatus[] = ['pending_confirmation', 'queued', 'running', 'done', 'failed', 'rejected', 'cancelled', 'expired']
 
 export function isAgentifyAdmin(auth: AgentAuth): boolean {

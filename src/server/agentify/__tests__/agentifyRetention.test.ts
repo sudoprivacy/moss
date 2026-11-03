@@ -153,7 +153,8 @@ describe('history policy in action', () => {
     assert.ok(existsSync(path.join(home, 'artifacts', old, 'old.md')))
 
     const purged = await fx.svc.digest.purgeExpired()
-    assert.deepEqual(purged, { docs: 4, sessions: 1, calls: 1 }, 'summary + conversation + outputs + call log of the old session')
+    assert.deepEqual(purged, { docs: 5, sessions: 1, calls: 1 }, 'summary + conversation + file list + old.md + call log of the old session')
+    assert.equal(fx.svc.store.listSessionDocs(ORG, SHOUHOU, old, 'file:').length, 0, 'per-file documents deleted')
     for (const key of [`summary:${old}`, `conversation:${old}`, `artifacts:${old}`, `a2a:${call.id}`]) {
       assert.equal(fx.svc.store.getDocByKey(ORG, SHOUHOU, key), null, `${key} deleted`)
     }

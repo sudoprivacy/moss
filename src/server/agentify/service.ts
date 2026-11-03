@@ -164,6 +164,15 @@ export class AgentifyService {
   }
 
   /** Is this session barred from outbound actions? */
+  /** An employee uploaded a file into a session workspace: it is an input of that session. */
+  recordUpload(sessionId: string, relativePath: string): void {
+    try {
+      this.store.recordUpload(sessionId, relativePath)
+    } catch (err) {
+      console.warn(`[agentify] could not record upload ${relativePath}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   isReadonlySession(sessionId: string | null | undefined): boolean {
     if (!sessionId) return false
     return this.store.getSessionAgentInfo(sessionId)?.a2aReadonly === true

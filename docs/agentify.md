@@ -87,6 +87,8 @@ agentctl files get --agent <名称> <path>         # 对方的产出文件
                                                     .../conversation.md  对话（去掉工具载荷）
                                                     .../artifacts.json   产出清单
 /agent-home/<org>/<agent>/artifacts/<session>/<文件>                     产出与中间文件副本
+/agent-home/<org>/<agent>/inputs/<session>/<文件>                        输入文件副本（员工上传 / 指定的文件）
+                                             <文件>.extract.json          可解析文件的结构化数据（JSON）
 /agent-home/<org>/<agent>/memory/shared.md | users/<员工>.md              记忆
 /agent-home/<org>/<agent>/a2a/<call>.md                                  协作记录
 ```
@@ -94,6 +96,35 @@ agentctl files get --agent <名称> <path>         # 对方的产出文件
 moss.db 中只有索引：`agentify_docs`、`agentify_chunks`（含向量）、`agentify_chunks_fts`（FTS5 trigram，中文无需分词器）。检索 = 关键词 + 向量（复用知识库的 multilingual-e5-small）RRF 融合 + 时间衰减。原始会话记录仍在主机磁盘，不进主目录。
 
 会话结束、或安静 2 分钟后（`MOSS_AGENTIFY_DIGEST_QUIET_MS`），后台每分钟整理一次：生成摘要（系统模型；不可用时用抽取式摘要）、复制产出文件、建索引。定时任务复用同一会话时，会重新整理并替换。
+
+### 文件内容检索（输入与产出）
+
+整理会话时，除摘要和对话外，会话涉及的文件也逐个建立索引：
+
+- **输入**：员工通过上传接口放进会话的文件、员工消息里点名的文件（通常是 `@文件名`）、或智能体开始工作前就在工作区里的文件。
+- **产出 / 中间文件**：会话期间智能体新建或修改的文件（`.drafts/` 下为中间文件）。
+- 内容相同的文件（重复上传）只保存、只索引一次；未变化的文件再次整理时不重新解析。
+
+| 格式 | 怎么解析 |
+|---|---|
+| xlsx / xlsm、csv / tsv（UTF-8 或 GB18030） | 逐行：每行一条「列名=值」记录（如 `第12行：日期=2026-10-03｜出发地=上虞｜运费含税=694.2`），自动识别表头（跳过合并的标题行）；日期转为 ISO，公式取计算结果，合并单元格补齐。每个工作表另有概况：行数、列、类型、数值范围与合计、日期范围 |
+| docx | 标题层级与段落；表格按行转为「列名=值」 |
+| pptx | 每页文字与备注 |
+| pdf | 每页文字（pdftotext） |
+| xls / ods / doc / rtf / odt / ppt / odp | 先用 LibreOffice 转换，再按上面处理 |
+| md / txt / json / yaml / html 等 | 原文 |
+
+表格不转成 markdown 表：检索按约 500 字的片段召回，片段离开表头后数字就失去含义；每行带列名可以单独理解。每个文件的完整数据另存为 `<文件>.extract.json`（工作表为按列名的 JSON 行，类型保留），智能体用 `agentctl files get <路径>.extract.json` 即可读取，运行环境无需安装表格库。
+
+可见范围与对话相同：
+
+- 产出：所有使用该智能体的员工、以及有 `historyReaders` 权限的其他智能体都可检索和读取。
+- 输入：只有提供它的员工（以及管理员）可见；`memory.share = full` 时对所有员工和有读取权限的智能体开放。
+- 会话摘要和文件清单写明「输入文件 → 产出文件」，按任一文件命中都能找到同一会话。
+
+限制（环境变量）：每个工作表索引前 `MOSS_AGENTIFY_EXTRACT_MAX_INDEX_ROWS`（3000）行、JSON 保留前 `MOSS_AGENTIFY_EXTRACT_MAX_JSON_ROWS`（50000）行（概况统计覆盖全部行）；每个文件最多 `MOSS_AGENTIFY_EXTRACT_MAX_EMBEDDED_CHUNKS`（40）个片段做向量，其余行只做关键词检索；每次整理最多解析 `MOSS_AGENTIFY_EXTRACT_MAX_FILES`（20）个文件；单个文件超过 `MOSS_AGENTIFY_ARTIFACT_MAX_FILE_BYTES`（20MB）只登记文件名。图片暂不识别文字。
+
+升级后，回溯期内已整理过的会话会自动重新整理一次，补上文件内容。
 
 ## Nexus 升级（0.1.5 → 0.8.26）
 

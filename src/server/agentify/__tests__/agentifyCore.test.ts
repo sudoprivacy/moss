@@ -185,8 +185,10 @@ describe('history index and digest', () => {
     assert.ok(kw.every(h => h.kind !== 'conversation'), 'another employee must not see the raw conversation')
     const short = await fx.svc.index.search({ orgId: ORG, agentId, query: '阀芯', viewerUserId: 'u-b', share: 'summary' })
     assert.ok(short.some(h => h.snippet.includes('阀芯')))
+    // The report's content is its own document, ranked first.
     const report = await fx.svc.index.search({ orgId: ORG, agentId, query: '灯具 40 件', viewerUserId: 'u-b', share: 'summary', kinds: ['artifact'] })
-    assert.equal(report.length, 1)
+    assert.equal(report[0]?.title, 'week44.md（产出）')
+    assert.match(report[0]!.snippet, /灯具 40 件/)
 
     const own = await fx.svc.index.search({ orgId: ORG, agentId, query: '统计第44周', viewerUserId: 'u-a', share: 'summary', kinds: ['conversation'] })
     assert.equal(own.length, 1, 'the employee who ran the session sees its conversation')

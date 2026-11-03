@@ -15,11 +15,12 @@
  */
 import path from 'path'
 import { mkdir } from 'fs/promises'
-import { listAdmitsAgent, type CapabilityConfig } from './config.js'
+import { listAdmitsAgent, type CapabilityConfig, type HistoryShare } from './config.js'
+import { displayName } from './artifacts.js'
 import type { AgentRef, AgentRegistry } from './agentRegistry.js'
 import type { AgentHomeStore } from './agentHome.js'
 import { a2aLogPath, agentRoot } from './agentHome.js'
-import type { HistoryIndex, SearchHit } from './historyIndex.js'
+import { canSeeDoc, type HistoryIndex, type SearchHit } from './historyIndex.js'
 import type { A2ACall, A2ACallStatus, AgentifyStore, AgentRow } from './store.js'
 import { A2A_TERMINAL } from './store.js'
 import type { SessionDriver } from './sessionDriver.js'
@@ -450,10 +451,11 @@ export class A2AService {
       orgId: caller.orgId,
       agentId: target.row.agentId,
       query: input.query,
-      // Another agent reads as nobody in particular: shared documents only.
+      // Another agent reads as nobody in particular: shared documents, plus
+      // input files when the target agent shares full history.
       viewerUserId: null,
-      share: 'summary',
-      kinds: ['summary', 'artifact', 'a2a', 'memory'],
+      share: target.row.config.memory.share,
+      kinds: ['summary', 'artifact', 'a2a', 'memory', ...(target.row.config.memory.share === 'full' ? (['input'] as const) : [])],
       limit: input.limit,
     })
   }
@@ -466,11 +468,23 @@ export class A2AService {
     const p = input.path.startsWith('/') ? input.path : `${root}/${input.path}`
     if (!p.startsWith(`${root}/`)) throw new A2AError(403, 'outside_agent', 'path is outside that agent home')
     const rel = p.slice(root.length + 1)
+    const self = target.row.agentId === caller.agent.agentId
     // Private parts of another agent's home are never readable this way.
-    if (target.row.agentId !== caller.agent.agentId && (rel.startsWith('memory/users/') || rel.endsWith('/conversation.md'))) {
+    if (!self && (rel.startsWith('memory/users/') || rel.endsWith('/conversation.md'))) {
       throw new A2AError(403, 'private', 'that file is private to the agent')
     }
-    const buf = (await this.deps.home.read(p)) ?? (await this.findOutputByName(caller.orgId, target.row.agentId, input.path))
+    // The same rules as search: an employee's conversation and input files are
+    // theirs unless the agent shares full history (other agents never get
+    // conversations). The JSON copy of a file follows the file.
+    const viewer = self ? caller.userId : null
+    const share = target.row.config.memory.share
+    const doc = this.deps.store.getDocByPath(caller.orgId, target.row.agentId, p.replace(/\.extract\.json$/, ''))
+    if (doc && !canSeeDoc(doc, viewer, share)) throw new A2AError(403, 'private', 'that file belongs to another employee')
+    if (!doc && rel.startsWith('inputs/')) {
+      const owner = this.deps.store.getSessionAgentInfo(rel.split('/')[1] ?? '')?.userId
+      if (share !== 'full' && !(viewer && owner === viewer)) throw new A2AError(403, 'private', 'that file belongs to another employee')
+    }
+    const buf = (await this.deps.home.read(p)) ?? (await this.findOutputByName(caller.orgId, target.row.agentId, input.path, viewer, share))
     if (!buf) throw new A2AError(404, 'file_not_found', 'no such file')
     return buf
   }
@@ -479,13 +493,15 @@ export class A2AService {
    * Agents usually ask for a file by the name they were told ("returns-week44.md"),
    * not its home path: resolve it to the newest saved output with that path or name.
    */
-  private async findOutputByName(orgId: string, agentId: string, wanted: string): Promise<Buffer | null> {
+  private async findOutputByName(orgId: string, agentId: string, wanted: string, viewer: string | null, share: HistoryShare): Promise<Buffer | null> {
     const name = wanted.replace(/^\.\//, '')
     if (!name || name.startsWith('/')) return null
     const docs = this.deps.store.listDocs({ orgId, agentId, kinds: ['artifact'], limit: 100 })
     for (const doc of docs) {
-      const files = (doc.meta.files as Array<{ path: string; homePath: string | null }> | undefined) ?? []
-      const hit = files.find(f => f.homePath && (f.path === name || f.path.split('/').pop() === name))
+      const files = (doc.meta.files as Array<{ path: string; homePath: string | null; role?: string }> | undefined) ?? []
+      // Inputs only for the employee who gave them (or with full sharing).
+      const inputOk = share === 'full' || (viewer !== null && doc.userId === viewer)
+      const hit = files.find(f => f.homePath && (f.role !== 'input' || inputOk) && (f.path === name || f.path.split('/').pop() === name || displayName(f.path) === name))
       if (hit?.homePath) {
         const buf = await this.deps.home.read(hit.homePath)
         if (buf) return buf
