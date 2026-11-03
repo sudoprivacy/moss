@@ -351,10 +351,10 @@ describe('per-connection lifecycle coordination', () => {
     let reloads = 0;
     const rows = ['first', 'second'].map((id) => ({
       id, type: 'test-lifecycle', name: id, enabled: 1, status: 'stopped',
-      user_id: 'user', created_at: 1, updated_at: 1,
+      user_id: 'user', owner_status: 'active', created_at: 1, updated_at: 1,
     }));
     const db = {
-      listChannelPlugins: async () => rows,
+      listChannelPluginsWithOwnerStatus: async () => rows,
       claimChannelPluginLease: async () => { claims++; return true; },
       updateChannelPluginStatus: async () => {},
       releaseAllChannelPluginLeases: async () => {},
@@ -378,9 +378,9 @@ describe('per-connection lifecycle coordination', () => {
     ControlledPlugin.nextStart = gate.promise;
     let releases = 0;
     const db = {
-      listChannelPlugins: async () => [{
+      listChannelPluginsWithOwnerStatus: async () => [{
         id: 'test', type: 'test-lifecycle', name: 'test', enabled: 1, status: 'stopped',
-        user_id: 'user', created_at: 1, updated_at: 1,
+        user_id: 'user', owner_status: 'active', created_at: 1, updated_at: 1,
       }],
       claimChannelPluginLease: async () => true,
       updateChannelPluginStatus: async () => {},
@@ -407,11 +407,11 @@ describe('per-connection lifecycle coordination', () => {
     manager();
     const rows = ['bad', 'good'].map((id) => ({
       id, type: 'test-lifecycle', name: id, enabled: 1, status: 'stopped',
-      user_id: 'user', created_at: 1, updated_at: 1,
+      user_id: 'user', owner_status: 'active', created_at: 1, updated_at: 1,
       config_json: id === 'bad' ? '{' : '{}',
     }));
     const db = {
-      listChannelPlugins: async () => rows,
+      listChannelPluginsWithOwnerStatus: async () => rows,
       claimChannelPluginLease: async () => true,
       updateChannelPluginStatus: async () => {},
       releaseAllChannelPluginLeases: async () => {},

@@ -92,6 +92,16 @@ export class PluginManager {
    * renewing; a dead holder's lease expires within TTL and a peer takes over. */
   private static readonly LEASE_TTL_MS = 60_000;
   private static readonly LEASE_TICK_MS = 20_000;
+  /** Longest wait between automatic retries of a connection that keeps failing. */
+  private static readonly RETRY_MAX_MS = 15 * 60_000;
+
+  /**
+   * Connections whose automatic start failed, keyed by instance: the stored
+   * settings that failed and when the lease pass may try them again. A failed
+   * start is retried with a doubling delay, not on every tick; changed
+   * settings or a start a person asks for retries at once.
+   */
+  private failedStarts = new Map<string, { settings: string; attempts: number; retryAt: number }>();
 
   constructor(sessionManager: SessionManager, db: DirectConnectStore, nexus?: NexusClient | null, instanceId?: string) {
     this.sessionManager = sessionManager;
@@ -187,6 +197,7 @@ export class PluginManager {
    */
   async startPlugin(config: IChannelPluginConfig, instanceKey?: string): Promise<void> {
     const key = instanceKey || config.id;
+    this.failedStarts.delete(key);
     await this.runLifecycle(key, () => this.startPluginInstance(config, instanceKey));
   }
 
@@ -427,12 +438,13 @@ export class PluginManager {
    */
   async startEnabledPlugins(): Promise<void> {
     this.isStopping = false;
-    const rows = await this.db.listChannelPlugins();
+    const rows = await this.db.listChannelPluginsWithOwnerStatus();
     console.log(`[PluginManager] Starting enabled plugins, found ${rows.length} rows`);
 
     if (!this.instanceId) {
       for (const row of rows) {
-        if (Boolean(row.enabled)) await this.startFromRow(row);
+        // A row without an owner is the single-user deployment's own bot.
+        if (Boolean(row.enabled) && (!row.user_id || row.owner_status === 'active')) await this.startFromRow(row);
       }
       return;
     }
@@ -442,8 +454,8 @@ export class PluginManager {
     this.startLeaseTick();
   }
 
-  /** Build a plugin config from a DB row and start it (hydrating secrets). */
-  private async startFromRow(row: SqlRow): Promise<void> {
+  /** Build a plugin config from a DB row and start it (hydrating secrets); true when it runs. */
+  private async startFromRow(row: SqlRow): Promise<boolean> {
     const userId = row.user_id ? String(row.user_id) : undefined;
     try {
       const config: IChannelPluginConfig = {
@@ -467,10 +479,29 @@ export class PluginManager {
         )) as typeof config.credentials;
       }
       console.log(`[PluginManager] Starting plugin ${config.id} with instanceKey=${instanceKey}`);
-      await this.startPlugin(config, instanceKey);
+      await this.runLifecycle(instanceKey, () => this.startPluginInstance(config, instanceKey));
+      return true;
     } catch (error) {
       console.error(`[PluginManager] Failed to start plugin ${String(row.id)}:`, error);
+      return false;
     }
+  }
+
+  /** Whether the lease pass may start this row now, given earlier failures. */
+  private isRetryDue(instanceKey: string, settings: string, now: number): boolean {
+    const failed = this.failedStarts.get(instanceKey);
+    if (failed && failed.settings !== settings) this.failedStarts.delete(instanceKey);
+    return !failed || failed.settings !== settings || now >= failed.retryAt;
+  }
+
+  private recordStart(instanceKey: string, settings: string, isRunning: boolean, now: number): void {
+    if (isRunning) {
+      this.failedStarts.delete(instanceKey);
+      return;
+    }
+    const attempts = (this.failedStarts.get(instanceKey)?.attempts ?? 0) + 1;
+    const delay = Math.min(PluginManager.LEASE_TICK_MS * 2 ** attempts, PluginManager.RETRY_MAX_MS);
+    this.failedStarts.set(instanceKey, { settings, attempts, retryAt: now + delay });
   }
 
   private startLeaseTick(): void {
@@ -506,13 +537,23 @@ export class PluginManager {
     const leaseUntil = now + PluginManager.LEASE_TTL_MS;
     let acquiredNew = false;
     const starts: Promise<void>[] = [];
-    const rows = await this.db.listChannelPlugins();
+    const rows = await this.db.listChannelPluginsWithOwnerStatus();
     for (const row of rows) {
       if (this.isStopping) break;
       if (!Boolean(row.enabled)) continue;
       const userId = row.user_id ? String(row.user_id) : undefined;
       if (!userId) continue; // enterprise rows are always keyed by user_id
       const id = String(row.id);
+      const instanceKey = `${id}:${userId}`;
+      if (row.owner_status !== 'active') {
+        // A disabled or removed owner's bots stop and are not restarted.
+        if (this.plugins.has(instanceKey)) {
+          await this.stopPluginLocally(instanceKey).catch(err =>
+            console.error(`[PluginManager] failed to stop inactive owner's plugin ${instanceKey}:`, err),
+          );
+        }
+        continue;
+      }
       const claimed = await this.db.claimChannelPluginLease(id, userId, this.instanceId, leaseUntil, now);
       if (!claimed) {
         // Lease lost to a peer (or never held): stop any local plugin for this
@@ -525,12 +566,16 @@ export class PluginManager {
         }
         continue; // a live peer holds this row
       }
-      const instanceKey = `${id}:${userId}`;
       // Not currently running here → new acquire / takeover / self error-retry.
-      // (A failed start is never added to this.plugins, so it retries here.)
-      if (!this.plugins.has(instanceKey) || this.plugins.get(instanceKey)?.status === 'error') {
-        starts.push(this.startFromRow(row));
-        acquiredNew = true;
+      // (A failed start is never added to this.plugins, so it retries here,
+      // with backoff while its stored settings stay the same.)
+      const settings = `${String(row.credentials_json ?? '')}\n${String(row.config_json ?? '')}`;
+      if ((!this.plugins.has(instanceKey) || this.plugins.get(instanceKey)?.status === 'error')
+        && this.isRetryDue(instanceKey, settings, now)) {
+        starts.push(this.startFromRow(row).then(isRunning => {
+          this.recordStart(instanceKey, settings, isRunning, now);
+          if (isRunning) acquiredNew = true;
+        }));
       }
     }
     await Promise.all(starts);

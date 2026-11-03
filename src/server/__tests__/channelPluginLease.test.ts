@@ -64,3 +64,20 @@ describe("B8: channel plugin lease claim/release", () => {
     store.requireSqliteDb().close();
   });
 });
+
+describe("channel plugin rows carry their owner's status", () => {
+  it("reports active, disabled and missing owners", async () => {
+    const store = new DirectConnectStore(":memory:");
+    const db = store.requireSqliteDb();
+    // Accounts live in the auth schema in production; only id and status matter here.
+    db.exec("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, status TEXT NOT NULL)");
+    const insertUser = (id: string, status: string) => db.prepare("INSERT INTO users (id, status) VALUES (?, ?)").run(id, status);
+    insertUser("u1", "active");
+    insertUser("u2", "disabled");
+    for (const user of ["u1", "u2", "gone"]) insertPlugin(store, "tg", user);
+    const rows = await store.listChannelPluginsWithOwnerStatus();
+    const byOwner = Object.fromEntries(rows.map(row => [String(row.user_id), row.owner_status ?? null]));
+    assert.deepEqual(byOwner, { u1: "active", u2: "disabled", gone: null });
+    db.close();
+  });
+});
