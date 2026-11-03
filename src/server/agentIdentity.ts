@@ -102,6 +102,11 @@ export function isUserCreatedAgentName(name: string | null | undefined): boolean
   return typeof name === 'string' && name.startsWith(USER_CREATED_AGENT_PREFIX)
 }
 
+/** The id of an agent the user made, from its stored reference; null for any other reference. */
+export function userCreatedAgentId(name: string | null | undefined): string | null {
+  return isUserCreatedAgentName(name) ? name!.slice(USER_CREATED_AGENT_PREFIX.length) : null
+}
+
 /**
  * Whether this reference names one of the user's own agents — the implicit
  * default, or one they made — rather than a template.

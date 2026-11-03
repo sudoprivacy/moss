@@ -894,6 +894,52 @@ export class RuntimeService {
     return this.workAdmission.run(() => this.upgradeAdmittedUserRuntime(ownerId, orgId, configuration))
   }
 
+  /** The model transport and egress policy a replacement or restarted owner runtime receives. */
+  private async ownerRuntimeConfiguration(ownerId: string, orgId: string,
+    owner: { role: string; scopes: string[] }, configuration?: Record<string, string>): Promise<Record<string, string>> {
+    configuration ??= await withOrganizationResources(await this.resourceScope({ orgId, userId: ownerId,
+      role: owner.role, scopes: owner.scopes }), async () => {
+      const context = await this.resolveRunnerModelContext({ userId: ownerId, orgId,
+        sessionId: 'owner-runtime-upgrade', runtime: { type: 'cohost', engine: 'scode' } })
+      // Replacing a runtime configures its authorized transport; it does not
+      // execute the user's selected model. Model admission stays at session start.
+      const environment = this.buildModelEnvironment(context)
+      return buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
+        environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!,
+        cohostModelName(environment.MOSS_DEFAULT_MODEL!, environment.MOSS_MODEL_PROVIDER_ID, environment.MOSS_COHOST_MODEL_ROUTING))
+    })
+    return { ...configuration, [POLICY_FILENAME]: JSON.stringify(await this.egressPolicies.policy(orgId)) }
+  }
+
+  /**
+   * Delete one of an owner's Agents: its native presence and home through the
+   * owner runtime, then its Moss sessions. Its pair conversations stay with
+   * the peers that share them. Refuses while the Agent has active work.
+   */
+  async deleteOwnerAgent(ownerId: string, orgId: string, agentName: string): Promise<{ sessions: number; isNativeDeleted: boolean }> {
+    return this.workAdmission.run(async () => {
+      if (this.upgradingOwners.has(ownerId)) throw new ResourceAccessError(409, 'An owner upgrade is already in progress')
+      const owner = await this.authService.getAgentOwner(ownerId, orgId)
+      if (!owner || owner.status !== 'active') throw new ResourceAccessError(409, 'Agent owner is unavailable')
+      // New traffic for this owner waits out the deletion, as during an upgrade.
+      this.upgradingOwners.add(ownerId)
+      try {
+        const isNativeDeleted = this.ownerRuntime
+          ? await this.ownerRuntime.removeAgent(ownerId, agentName, () => this.ownerRuntimeConfiguration(ownerId, orgId, owner))
+          : false
+        const sessions = (await this.store.listUserSessions(orgId, ownerId))
+          .filter(session => sessionAgentName(ownerId, session.assistantName) === agentName)
+        for (const session of sessions) {
+          if (session.desiredState === 'active') await this.terminateSession(session.sessionId)
+          await this.store.deleteSession(session.sessionId)
+        }
+        return { sessions: sessions.length, isNativeDeleted }
+      } finally {
+        this.upgradingOwners.delete(ownerId)
+      }
+    })
+  }
+
   private async upgradeAdmittedUserRuntime(ownerId: string, orgId: string, configuration?: Record<string, string>) {
     const ownerRuntime = this.ownerRuntime
     if (!ownerRuntime) throw new ResourceAccessError(409, 'User runtime placement is not enabled')
@@ -905,18 +951,7 @@ export class RuntimeService {
     this.upgradingOwners.add(ownerId)
     const paused = new Set<string>()
     try {
-      configuration ??= await withOrganizationResources(await this.resourceScope({ orgId, userId: ownerId,
-        role: owner.role, scopes: owner.scopes }), async () => {
-        const context = await this.resolveRunnerModelContext({ userId: ownerId, orgId,
-          sessionId: 'owner-runtime-upgrade', runtime: { type: 'cohost', engine: 'scode' } })
-        // Replacing a runtime configures its authorized transport; it does not
-        // execute the user's selected model. Model admission stays at session start.
-        const environment = this.buildModelEnvironment(context)
-        return buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
-          environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!,
-          cohostModelName(environment.MOSS_DEFAULT_MODEL!, environment.MOSS_MODEL_PROVIDER_ID, environment.MOSS_COHOST_MODEL_ROUTING))
-      })
-      configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(await this.egressPolicies.policy(orgId)) }
+      configuration = await this.ownerRuntimeConfiguration(ownerId, orgId, owner, configuration)
       const sessions = (await this.store.listUserSessions(orgId, ownerId))
         .filter(session => session.runtime.type === 'cohost' && session.desiredState === 'active')
       const bindings = await Promise.all(sessions.map(async session => ({ session,

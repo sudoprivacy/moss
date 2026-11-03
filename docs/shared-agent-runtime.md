@@ -104,6 +104,27 @@ the historical template and personal Agent endpoints retain their behavior.
 Disabled owners remain visible for inspection. New conversations and runtime
 upgrades remain unavailable until the owner is active again.
 
+## Agent deletion
+
+`DELETE /api/v1/agent-manager/agents/:name?owner_id=` deletes one of an owner's
+Agents. Owners delete their own Agents; settings administrators delete the
+Agents of owners they manage. The owner's default Agent and Moss Agent stay.
+`DELETE /api/v1/user-agents/:id` is the same deletion for an Agent the caller
+made.
+
+Deletion runs through the owner runtime in the allocation that holds the
+Agent's home. A stopped runtime starts so its retained data can be removed. Idle
+managed executions are cancelled; any other live execution refuses the deletion
+before anything changes. The Agent's `/agents/<name>` directory (memory, chat
+list and session records) is deleted, its home and native session bindings are
+forgotten together, its Moss sessions are terminated and removed, and a personal
+Agent's identity row goes last. Pair conversations stay with the peers that
+share them. New traffic for the owner waits out the deletion, as during an
+upgrade. Each deletion is recorded as an `AGENT_DELETED` operation audit event.
+
+The Agent detail page offers deletion when the server reports `canDelete`, after
+the person types the Agent's name.
+
 ## Shared release and upgrades
 
 Sudostack publishes the common lifecycle implementation as `@sudo/user-runtime`.
