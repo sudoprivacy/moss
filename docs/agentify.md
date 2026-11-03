@@ -28,12 +28,27 @@
 |---|---|
 | `memory.share` | `summary`：其他员工的会话只共享摘要、结论和产出；`full`：也共享对话正文。员工本人始终能看到自己的。个人记忆永不共享 |
 | `memory.injectChars` | 新会话开头注入的记忆字数上限 |
+| `memory.digestLookbackHours` | 整理回溯（小时）：最近活动在此时间内的会话会被整理、建索引（有变化时重新整理）。更早的会话不再处理，但已整理的内容保留。不填 = 服务器默认 |
+| `memory.decayHalfLifeHours` | 检索时间衰减半衰期（小时）：按最近活动时间计算，每过一个半衰期，时间权重向 0.7 下降一半（相关性仍是主导）。`0` = 不衰减。不填 = 服务器默认 |
+| `memory.deleteAfterHours` | 历史删除期限（小时）：最近活动早于此时间的摘要、对话、产出副本、协作记录及其索引会被删除（每小时检查一次）。`0` = 永久保留。记忆条目（`memory/`）不按时间删除。不填 = 服务器默认 |
 | `capabilities` | 本智能体对外提供的能力。`ask` 只读问答；`task` 委派任务。`allowOutbound`（可对外发送）必须同时 `requiresConfirmation` |
 | `requireCallerVisibility` | 能力级开关：发起调用的员工也必须能直接使用本智能体 |
 | `allowCallers` | 允许调用本智能体的智能体（名称、显示名或 ID；`*` = 所有已开启协作的智能体） |
 | `historyReaders` | 允许直接检索本智能体共享历史、读取其产出文件的智能体 |
 | `confirmers` | 可以确认委派任务的员工；管理员始终可以 |
 | `dailyCallLimit` | 每天最多接受的调用次数 |
+
+三个时间字段也可在管理端配置对话框上方直接填写。整理回溯不会超过删除期限（否则会反复整理又删除）：同时填写时校验，使用默认值时自动取较小者。
+
+服务器默认值（环境变量，单位：小时）：
+
+| 变量 | 默认 |
+|---|---|
+| `MOSS_AGENTIFY_DIGEST_LOOKBACK_HR` | `720`（30 天） |
+| `MOSS_AGENTIFY_DECAY_HALF_LIFE_HR` | `720`（30 天；`0` = 不衰减） |
+| `MOSS_AGENTIFY_DELETE_AFTER_HR` | `4320`（180 天；`0` = 永久保留） |
+
+删除只涉及主目录中的整理结果和索引；主机上的原始会话记录（会话列表中的会话）不受影响。需要立即执行时：`POST /api/v1/admin/agentify/agents/<智能体>/purge`。
 
 配置存在 `agentify_agents` 表（按智能体稳定 ID），不写入 `_moss_meta.json`。
 

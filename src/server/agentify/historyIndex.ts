@@ -12,7 +12,7 @@
 import { splitMarkdown } from '../wikiIndex/chunkSplitter.js'
 import type { Embedder } from '../wikiIndex/embedder.js'
 import type { AgentifyStore, DocInput, DocKind, DocRow } from './store.js'
-import type { HistoryShare } from './config.js'
+import { historyPolicy, type HistoryShare } from './config.js'
 
 export type EmbedderProvider = () => Promise<Embedder | null>
 
@@ -24,6 +24,8 @@ export interface SearchHit {
   sessionId: string | null
   userId: string | null
   createdAt: number
+  /** Last activity of what the document describes. */
+  activeAt: number
   score: number
   snippet: string
 }
@@ -43,11 +45,23 @@ export interface SearchOptions {
   sinceMs?: number
   /** Administrators: skip the per-viewer visibility rules. */
   includeAll?: boolean
+  /** Recency half-life; defaults to the agent's configured policy. 0 = no decay. */
+  decayHalfLifeHours?: number
+}
+
+/**
+ * Weight for how recent a document is: 1 when just active, falling to 0.7 as
+ * it ages (half way there after one half-life). Old work still ranks by
+ * relevance; recency only breaks near-ties.
+ */
+export function recencyWeight(ageMs: number, halfLifeHours: number): number {
+  if (halfLifeHours <= 0) return 1
+  const recency = Math.pow(0.5, Math.max(0, ageMs) / (halfLifeHours * 3_600_000))
+  return 0.7 + 0.3 * recency
 }
 
 const CJK = /[㐀-鿿豈-﫿]/
 const RRF_K = 60
-const HALF_LIFE_DAYS = 30
 
 /** Can this viewer see this document? */
 export function canSeeDoc(doc: Pick<DocRow, 'visibility' | 'userId' | 'kind'>, viewerUserId: string | null, share: HistoryShare): boolean {
@@ -171,6 +185,7 @@ export class HistoryIndex {
     const rows = this.store.getChunksWithDocs(candidates.map(c => c.chunkId))
     const byId = new Map(rows.map(r => [r.id, r]))
     const now = Date.now()
+    const halfLife = opts.decayHalfLifeHours ?? historyPolicy(this.store.getAgent(opts.orgId, opts.agentId)?.config).decayHalfLifeHours
     const bestPerDoc = new Map<string, SearchHit>()
     for (const c of candidates) {
       const row = byId.get(c.chunkId)
@@ -179,10 +194,8 @@ export class HistoryIndex {
       if (opts.kinds && opts.kinds.length > 0 && !opts.kinds.includes(doc.kind)) continue
       if (opts.sinceMs && doc.createdAt < opts.sinceMs) continue
       if (!opts.includeAll && !canSeeDoc(doc, opts.viewerUserId, opts.share)) continue
-      const ageDays = Math.max(0, (now - doc.createdAt) / 86_400_000)
-      const recency = Math.pow(0.5, ageDays / HALF_LIFE_DAYS)
       const kindBoost = doc.kind === 'summary' || doc.kind === 'memory' ? 1.15 : 1
-      const score = c.base * (0.7 + 0.3 * recency) * kindBoost
+      const score = c.base * recencyWeight(now - doc.activeAt, halfLife) * kindBoost
       const prev = bestPerDoc.get(doc.id)
       if (!prev || prev.score < score) {
         bestPerDoc.set(doc.id, {
@@ -193,6 +206,7 @@ export class HistoryIndex {
           sessionId: doc.sessionId,
           userId: doc.userId,
           createdAt: doc.createdAt,
+          activeAt: doc.activeAt,
           score,
           snippet: row.text,
         })
@@ -215,6 +229,7 @@ export class HistoryIndex {
         sessionId: doc.sessionId,
         userId: doc.userId,
         createdAt: doc.createdAt,
+        activeAt: doc.activeAt,
         score: 0,
         snippet: chunk ?? '',
       })

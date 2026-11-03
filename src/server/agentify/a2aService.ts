@@ -423,6 +423,7 @@ export class A2AService {
           title: `协作：${caller?.displayName ?? ''} → ${target?.displayName ?? ''}（${call.capability}）`,
           text,
           createdAt: call.createdAt,
+          activeAt: call.finishedAt ?? Date.now(),
           meta: { callId: call.id, status: call.status },
         })
       }

@@ -9,7 +9,8 @@
  */
 import { stat, readFile } from 'fs/promises'
 import type { AgentHomeStore } from './agentHome.js'
-import { historyDir } from './agentHome.js'
+import { artifactDir, historyDir } from './agentHome.js'
+import { historyPolicy, hoursToMs } from './config.js'
 import { collectArtifacts, describeArtifacts, type ArtifactEntry } from './artifacts.js'
 import type { HistoryIndex } from './historyIndex.js'
 import type { AgentifyStore, AgentRow, SessionAgentInfo } from './store.js'
@@ -19,7 +20,8 @@ import type { AgentRegistry } from './agentRegistry.js'
 
 const QUIET_MS = Number(process.env.MOSS_AGENTIFY_DIGEST_QUIET_MS) || 2 * 60 * 1000
 const SWEEP_MS = Number(process.env.MOSS_AGENTIFY_DIGEST_SWEEP_MS) || 60 * 1000
-const LOOKBACK_MS = Number(process.env.MOSS_AGENTIFY_DIGEST_LOOKBACK_MS) || 30 * 24 * 3600 * 1000
+/** How often expired history is deleted. */
+const PURGE_EVERY_MS = Number(process.env.MOSS_AGENTIFY_PURGE_EVERY_MS) || 3600 * 1000
 const TEXT_OUTPUT = /\.(md|txt|csv|tsv|json|html?|xml|ya?ml|log|sql)$/i
 
 export interface DigestDeps {
@@ -36,6 +38,17 @@ export interface DigestResult {
   reason?: string
   summaryPath?: string
 }
+
+export interface PurgeResult {
+  /** Index documents removed. */
+  docs: number
+  /** Sessions whose digested history was removed. */
+  sessions: number
+  /** Finished agent-to-agent call records removed. */
+  calls: number
+}
+
+const lookbackStart = (agent: AgentRow, now: number): number => now - hoursToMs(historyPolicy(agent.config).digestLookbackHours)
 
 /** Human-readable description of how a session was started. */
 export function describeOrigin(source: string | null, userName: string | undefined): string {
@@ -73,14 +86,18 @@ export class DigestService {
   private timer: ReturnType<typeof setTimeout> | null = null
   private running = false
   private stopped = true
+  /** Set by stop(): long loops give up early during shutdown. */
+  private shuttingDown = false
   /** Digests running now, so a second request for the same session waits for the first. */
   private inProgress = new Map<string, Promise<DigestResult>>()
+  private lastPurgeAt = 0
 
   constructor(private readonly deps: DigestDeps) {}
 
   start(): void {
     if (!this.stopped) return
     this.stopped = false
+    this.shuttingDown = false
     const tick = () => {
       if (this.stopped) return
       this.sweepOnce()
@@ -98,6 +115,7 @@ export class DigestService {
 
   stop(): void {
     this.stopped = true
+    this.shuttingDown = true
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
   }
@@ -136,13 +154,22 @@ export class DigestService {
       }
       const now = Date.now()
       for (const [orgId, agents] of byOrg) {
-        const sessions = this.deps.store.listSessionsForAgents(orgId, agents.map(a => a.agentId), now - LOOKBACK_MS)
+        // One query per org from the earliest lookback, then each agent's own window.
+        const since = Math.min(...agents.map(a => lookbackStart(a, now)))
+        const sessions = this.deps.store.listSessionsForAgents(orgId, agents.map(a => a.agentId), since)
         for (const session of sessions) {
-          if (this.stopped) return done
+          if (this.shuttingDown) return done
           const agent = agents.find(a => a.agentId === session.assistantId)
-          if (!agent) continue
+          if (!agent || session.lastActiveAt < lookbackStart(agent, now)) continue
           const r = await this.digestSession(session, agent, { requireQuiet: true })
           if (r.status === 'ok') done += 1
+        }
+      }
+      if (now - this.lastPurgeAt >= PURGE_EVERY_MS && !this.shuttingDown) {
+        this.lastPurgeAt = now
+        const purged = await this.purgeExpired(now)
+        if (purged.docs > 0 || purged.calls > 0) {
+          console.log(`[agentify] deleted expired history: ${purged.sessions} sessions, ${purged.docs} documents, ${purged.calls} call records`)
         }
       }
     } finally {
@@ -161,11 +188,57 @@ export class DigestService {
     const agent = this.deps.store.getAgent(orgId, agentId)
     if (!agent?.config.enabled) return { backfilled, digested: 0 }
     let digested = 0
-    for (const session of this.deps.store.listSessionsForAgents(orgId, [agentId], Date.now() - LOOKBACK_MS)) {
+    for (const session of this.deps.store.listSessionsForAgents(orgId, [agentId], lookbackStart(agent, Date.now()))) {
       const r = await this.digestSession(session, agent, { requireQuiet: false })
       if (r.status === 'ok') digested += 1
     }
     return { backfilled, digested }
+  }
+
+  /**
+   * Delete digested history that has had no activity for longer than each
+   * agent's deleteAfterHours: index entries, the session's summary,
+   * conversation and output copies in the agent home, collaboration logs, and
+   * finished call records. Curated memory notes are kept. The original session
+   * transcript (outside the agent home) is not touched. Applies to agents with
+   * agentify turned off too, since their history is still stored.
+   */
+  async purgeExpired(now = Date.now(), onlyAgent?: { orgId: string; agentId: string }): Promise<PurgeResult> {
+    const { store, home } = this.deps
+    const result: PurgeResult = { docs: 0, sessions: 0, calls: 0 }
+    const agents = onlyAgent
+      ? [store.getAgent(onlyAgent.orgId, onlyAgent.agentId)].filter((a): a is AgentRow => a !== null)
+      : store.listAllAgents()
+    for (const agent of agents) {
+      const hours = historyPolicy(agent.config).deleteAfterHours
+      if (hours <= 0) continue
+      const cutoff = now - hoursToMs(hours)
+      for (const doc of store.listExpiredDocs(agent.orgId, agent.agentId, cutoff)) {
+        if (this.shuttingDown && !onlyAgent) return result
+        try {
+          if (doc.kind === 'summary' && doc.sessionId && doc.path.endsWith('/summary.md')) {
+            // The session's history directory (summary, conversation,
+            // artifacts.json) and its output copies go together.
+            await home.remove(doc.path.slice(0, doc.path.lastIndexOf('/')))
+            await home.remove(artifactDir(agent.orgId, agent.agentId, doc.sessionId))
+            store.deleteDigestState(doc.sessionId)
+            result.sessions += 1
+          } else if (doc.kind === 'artifact' && doc.sessionId) {
+            await home.remove(doc.path)
+            await home.remove(artifactDir(agent.orgId, agent.agentId, doc.sessionId))
+          } else {
+            await home.remove(doc.path)
+          }
+        } catch (err) {
+          // Keep the index entry so the next purge retries the files.
+          console.warn(`[agentify] could not delete ${doc.path}: ${err instanceof Error ? err.message : String(err)}`)
+          continue
+        }
+        if (store.deleteDocById(doc.id)) result.docs += 1
+      }
+      result.calls += store.deleteFinishedCallsBefore(agent.orgId, agent.agentId, cutoff)
+    }
+    return result
   }
 
   /** Digest one session now (used after an agent-to-agent call completes). */
@@ -269,7 +342,8 @@ export class DigestService {
     await home.write(`${dir}/artifacts.json`, `${JSON.stringify({ sessionId: session.sessionId, artifacts }, null, 2)}\n`)
 
     const createdAt = session.createdAt
-    const base = { orgId: session.orgId, agentId: agent.agentId, sessionId: session.sessionId, userId: session.userId, createdAt }
+    const activeAt = Math.max(session.lastActiveAt, Math.round(transcriptMtime))
+    const base = { orgId: session.orgId, agentId: agent.agentId, sessionId: session.sessionId, userId: session.userId, createdAt, activeAt }
     await index.indexDoc({ ...base, kind: 'summary', docKey: `summary:${session.sessionId}`, visibility: 'shared', path: `${dir}/summary.md`, title, text: summaryText, meta: { origin, model } })
     await index.indexDoc({ ...base, kind: 'conversation', docKey: `conversation:${session.sessionId}`, visibility: 'private', path: `${dir}/conversation.md`, title: `${title}（对话）`, text: conversation })
 

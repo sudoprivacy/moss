@@ -39,6 +39,12 @@ export interface DocInput {
   title: string
   text: string
   createdAt: number
+  /**
+   * Last activity of what the document describes (the session's last turn,
+   * the call's finish, the memory edit). Recency ranking and deletion count
+   * from here. Defaults to now.
+   */
+  activeAt?: number
   meta?: Record<string, unknown>
 }
 
@@ -55,6 +61,7 @@ export interface DocRow {
   title: string
   createdAt: number
   updatedAt: number
+  activeAt: number
   meta: Record<string, unknown>
 }
 
@@ -255,6 +262,16 @@ export class AgentifyStore {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN a2a_readonly INTEGER NOT NULL DEFAULT 0`)
     }
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_assistant_id ON sessions(assistant_id)`)
+    // Last activity per document (recency ranking and deletion). Documents
+    // indexed before this column existed take their session's last activity.
+    if (!this.hasColumn('agentify_docs', 'active_at')) {
+      this.db.exec(`ALTER TABLE agentify_docs ADD COLUMN active_at INTEGER`)
+      this.db.exec(`UPDATE agentify_docs SET active_at = COALESCE(
+        CASE WHEN kind IN ('summary', 'conversation', 'artifact')
+          THEN (SELECT s.last_active_at FROM sessions s WHERE s.session_id = agentify_docs.session_id) END,
+        updated_at) WHERE active_at IS NULL`)
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_agentify_docs_active ON agentify_docs(org_id, agent_id, active_at)`)
   }
 
   // ---------------------------------------------------------------- agents
@@ -421,15 +438,15 @@ export class AgentifyStore {
         this.deleteChunks(id)
         this.db
           .prepare(`UPDATE agentify_docs SET kind = ?, session_id = ?, user_id = ?, visibility = ?, path = ?, title = ?,
-                    meta_json = ?, updated_at = ? WHERE id = ?`)
+                    meta_json = ?, updated_at = ?, active_at = ? WHERE id = ?`)
           .run(input.kind, input.sessionId ?? null, input.userId ?? null, input.visibility, input.path, input.title,
-            JSON.stringify(input.meta ?? {}), now, id)
+            JSON.stringify(input.meta ?? {}), now, input.activeAt ?? now, id)
       } else {
         this.db
           .prepare(`INSERT INTO agentify_docs (id, org_id, agent_id, kind, doc_key, session_id, user_id, visibility, path, title,
-                    meta_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+                    meta_json, created_at, updated_at, active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(id, input.orgId, input.agentId, input.kind, input.docKey, input.sessionId ?? null, input.userId ?? null,
-            input.visibility, input.path, input.title, JSON.stringify(input.meta ?? {}), input.createdAt, now)
+            input.visibility, input.path, input.title, JSON.stringify(input.meta ?? {}), input.createdAt, now, input.activeAt ?? now)
       }
       const insertChunk = this.db.prepare(`INSERT INTO agentify_chunks (doc_id, idx, text, embedding) VALUES (?, ?, ?, ?)`)
       const insertFts = this.db.prepare(`INSERT INTO agentify_chunks_fts (rowid, text) VALUES (?, ?)`)
@@ -456,11 +473,15 @@ export class AgentifyStore {
     const row = this.db
       .prepare(`SELECT id FROM agentify_docs WHERE org_id = ? AND agent_id = ? AND doc_key = ?`)
       .get(orgId, agentId, docKey) as Row | undefined
-    if (!row) return false
+    return row ? this.deleteDocById(s(row.id)) : false
+  }
+
+  deleteDocById(id: string): boolean {
+    if (!this.db.prepare(`SELECT 1 FROM agentify_docs WHERE id = ?`).get(id)) return false
     this.db.exec('BEGIN')
     try {
-      this.deleteChunks(s(row.id))
-      this.db.prepare(`DELETE FROM agentify_docs WHERE id = ?`).run(s(row.id))
+      this.deleteChunks(id)
+      this.db.prepare(`DELETE FROM agentify_docs WHERE id = ?`).run(id)
       this.db.exec('COMMIT')
     } catch (err) {
       this.db.exec('ROLLBACK')
@@ -494,8 +515,30 @@ export class AgentifyStore {
     }
     args.push(filter.limit ?? 50, filter.offset ?? 0)
     return (this.db
-      .prepare(`SELECT * FROM agentify_docs WHERE ${where.join(' AND ')} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+      .prepare(`SELECT * FROM agentify_docs WHERE ${where.join(' AND ')} ORDER BY active_at DESC LIMIT ? OFFSET ?`)
       .all(...args) as Row[]).map(r => this.mapDoc(r))
+  }
+
+  /** History documents (never curated memory) last active before `beforeMs`. */
+  listExpiredDocs(orgId: string, agentId: string, beforeMs: number, limit = 2000): DocRow[] {
+    return (this.db
+      .prepare(`SELECT * FROM agentify_docs WHERE org_id = ? AND agent_id = ? AND kind != 'memory' AND active_at < ?
+                ORDER BY active_at LIMIT ?`)
+      .all(orgId, agentId, beforeMs, limit) as Row[]).map(r => this.mapDoc(r))
+  }
+
+  deleteDigestState(sessionId: string): void {
+    this.db.prepare(`DELETE FROM agentify_digest_state WHERE session_id = ?`).run(sessionId)
+  }
+
+  /** Delete finished calls this agent answered, finished before `beforeMs`. */
+  deleteFinishedCallsBefore(orgId: string, targetAgentId: string, beforeMs: number): number {
+    const marks = A2A_TERMINAL.map(() => '?').join(',')
+    const r = this.db
+      .prepare(`DELETE FROM a2a_calls WHERE org_id = ? AND target_agent_id = ? AND status IN (${marks})
+                AND COALESCE(finished_at, created_at) < ?`)
+      .run(orgId, targetAgentId, ...A2A_TERMINAL, beforeMs)
+    return Number(r.changes)
   }
 
   countDocs(orgId: string, agentId: string): number {
@@ -517,6 +560,7 @@ export class AgentifyStore {
       title: s(r.title),
       createdAt: n(r.created_at),
       updatedAt: n(r.updated_at),
+      activeAt: r.active_at === null || r.active_at === undefined ? n(r.updated_at) : n(r.active_at),
       meta: jsonOr<Record<string, unknown>>(r.meta_json, {}),
     }
   }

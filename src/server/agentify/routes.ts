@@ -13,7 +13,7 @@ import type http from 'http'
 import { writeJson } from '../httpRespond.js'
 import { hasScope } from '../auth/token.js'
 import { A2AError, type CallerContext } from './a2aService.js'
-import { AgentifyConfigError } from './config.js'
+import { AgentifyConfigError, historyPolicy, serverHistoryDefaults } from './config.js'
 import type { AgentAuth, AgentifyService } from './service.js'
 import type { A2ACall, A2ACallStatus, DocKind } from './store.js'
 import { getInstalledAssistants } from '../agentStore.js'
@@ -272,10 +272,12 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
           enabled: a.enabled,
           agentified: Boolean(row?.config.enabled),
           config: row?.config ?? null,
+          /** Hours in effect, after server defaults and the lookback ≤ deletion rule. */
+          historyPolicy: historyPolicy(row?.config),
           documents: row ? svc.store.countDocs(auth.orgId, ref.id) : 0,
         })
       }
-      writeJson(res, 200, { agents, home: svc.home.kind })
+      writeJson(res, 200, { agents, home: svc.home.kind, historyDefaults: serverHistoryDefaults() })
       return
     }
 
@@ -343,6 +345,11 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
         }
         const docs = svc.store.listDocs({ orgId: auth.orgId, agentId: ref.id, kinds, limit: Math.min(Number(url.searchParams.get('limit')) || 50, 200), offset: Number(url.searchParams.get('offset')) || 0 })
         writeJson(res, 200, { items: docs, total: svc.store.countDocs(auth.orgId, ref.id) })
+        return
+      }
+      if (tail === '/purge' && req.method === 'POST') {
+        // Delete this agent's expired history now instead of at the next hourly pass.
+        writeJson(res, 200, await svc.digest.purgeExpired(Date.now(), { orgId: auth.orgId, agentId: ref.id }))
         return
       }
       if (tail === '/digest' && req.method === 'POST') {

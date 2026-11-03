@@ -69,12 +69,41 @@ await page.screenshot({ path: join(OUT, '1-agents.png'), fullPage: true })
 
 // Config dialog of the first agentified agent.
 const enabledRow = page.locator('table tbody tr', { hasText: '已开启' }).first()
+const enabledName = (await enabledRow.locator('td').first().innerText()).split('\n')[0]!.trim()
 await enabledRow.getByRole('button', { name: '配置' }).click()
 await page.getByText(/协作配置：/).waitFor()
 check(await page.getByText(/capabilities/).first().isVisible(), 'config dialog explains the fields')
-await page.waitForTimeout(1500)
+const deleteInput = page.getByLabel('删除期限（小时）')
+check(await page.getByLabel('整理回溯（小时）').isVisible() && await page.getByLabel('检索衰减半衰期（小时）').isVisible() && await deleteInput.isVisible(),
+  'config dialog has lookback / decay / deletion hour fields')
+check((await deleteInput.getAttribute('placeholder')) === '默认 4320', `deletion field shows the server default (${await deleteInput.getAttribute('placeholder')})`)
+check(await visible(page.getByTestId('history-policy').filter({ hasText: '删除期限 4320 小时（180 天）' })), 'dialog shows the policy in effect')
+await deleteInput.fill('2400')
+await page.getByLabel('整理回溯（小时）').fill('48')
+check((await deleteInput.inputValue()) === '2400', 'hour fields write into the config JSON and read back')
+check(await page.locator('[role=dialog] .monaco-editor .line-numbers').first().waitFor({ timeout: 20_000 }).then(() => true, () => false),
+  'the JSON editor renders (with line numbers) next to the hour fields')
+check(await visible(page.locator('[role=dialog] .view-lines').filter({ hasText: '"deleteAfterHours": 2400' })), 'the JSON editor shows the hours typed into the fields')
+await page.waitForTimeout(500)
 await page.screenshot({ path: join(OUT, '2-config.png') })
-await page.keyboard.press('Escape')
+await page.getByRole('button', { name: '保存', exact: true }).click()
+await page.getByText(/协作配置：/).waitFor({ state: 'hidden' })
+const adminApi = async (method: string, path: string, body?: unknown) => {
+  const r = await fetch(`${BASE}${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+  return r.json() as Promise<any>
+}
+const listed = (await adminApi('GET', '/api/v1/admin/agentify/agents')).agents.find((a: any) => a.displayName === enabledName)
+check(listed?.config?.memory?.deleteAfterHours === 2400 && listed?.config?.memory?.digestLookbackHours === 48, `saving from the dialog stores the hours (${JSON.stringify(listed?.config?.memory)})`)
+check(listed?.historyPolicy?.deleteAfterHours === 2400 && listed?.historyPolicy?.digestLookbackHours === 48, 'the agent list reports the policy in effect')
+// Put the agent back on server defaults through the dialog.
+await enabledRow.getByRole('button', { name: '配置' }).click()
+await page.getByText(/协作配置：/).waitFor()
+await page.getByLabel('删除期限（小时）').fill('')
+await page.getByLabel('整理回溯（小时）').fill('')
+await page.getByRole('button', { name: '保存', exact: true }).click()
+await page.getByText(/协作配置：/).waitFor({ state: 'hidden' })
+const restored = (await adminApi('GET', '/api/v1/admin/agentify/agents')).agents.find((a: any) => a.displayName === enabledName)
+check(restored?.config?.memory?.deleteAfterHours === undefined && restored?.historyPolicy?.deleteAfterHours === 4320, 'clearing the fields returns the agent to server defaults')
 
 // History dialog with a Chinese search.
 await enabledRow.getByRole('button', { name: '历史' }).click()

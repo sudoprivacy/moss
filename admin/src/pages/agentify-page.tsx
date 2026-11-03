@@ -29,6 +29,7 @@ import {
   type A2ACallView,
   type AgentifyAgent,
   type HistoryDoc,
+  type HistoryPolicy,
   type NexusUpgradeReport,
 } from '@/lib/api/agentify'
 
@@ -74,17 +75,42 @@ function errorText(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback
 }
 
+type HourKey = keyof HistoryPolicy
+
+const HOUR_FIELDS: Array<{ key: HourKey; label: string; help: string }> = [
+  { key: 'digestLookbackHours', label: '整理回溯（小时）', help: '最近活动在这段时间内的会话会被整理、可检索' },
+  { key: 'decayHalfLifeHours', label: '检索衰减半衰期（小时）', help: '检索时越久远排名越靠后；0 = 不衰减' },
+  { key: 'deleteAfterHours', label: '删除期限（小时）', help: '超过这段时间无活动的摘要、对话、产出和协作记录会被删除；0 = 永久保留；记忆条目不删除' },
+]
+
+function hoursText(h: number, key: HourKey): string {
+  if (h === 0) return key === 'deleteAfterHours' ? '永久保留' : '不衰减'
+  return h >= 24 && h % 24 === 0 ? `${h} 小时（${h / 24} 天）` : `${h} 小时`
+}
+
+/** Read a memory.* hours field from the JSON being edited; undefined when unset or the JSON is invalid. */
+function readHours(configText: string, key: HourKey): { valid: boolean; value: number | undefined } {
+  try {
+    const v = (JSON.parse(configText) as { memory?: Record<string, unknown> }).memory?.[key]
+    return { valid: true, value: typeof v === 'number' ? v : undefined }
+  } catch {
+    return { valid: false, value: undefined }
+  }
+}
+
 const CONFIG_HELP = `capabilities: 本智能体对外提供的能力（kind=ask 只读问答；kind=task 委派任务，可设 requiresConfirmation / allowOutbound）
 allowCallers: 允许调用本智能体的其他智能体（名称 / ID，"*" 表示全部已开启协作的智能体）
 historyReaders: 允许直接读取本智能体共享历史与产出的智能体
 confirmers: 可以确认委派任务的员工 ID（管理员始终可以）
-memory.share: summary = 其他员工的会话只共享摘要与产出；full = 也共享对话正文`
+memory.share: summary = 其他员工的会话只共享摘要与产出；full = 也共享对话正文
+memory.digestLookbackHours / decayHalfLifeHours / deleteAfterHours: 见上方，留空 = 服务器默认`
 
 export default function AgentifyPage() {
   const [loading, setLoading] = useState(true)
   const [agents, setAgents] = useState<AgentifyAgent[]>([])
   const [home, setHome] = useState<'nexus' | 'local' | null>(null)
   const [nexus, setNexus] = useState<NexusUpgradeReport | null>(null)
+  const [historyDefaults, setHistoryDefaults] = useState<HistoryPolicy | null>(null)
   const [filter, setFilter] = useState('')
 
   const [configAgent, setConfigAgent] = useState<AgentifyAgent | null>(null)
@@ -115,6 +141,7 @@ export default function AgentifyPage() {
       ])
       setAgents(a.agents)
       setHome(a.home)
+      setHistoryDefaults(a.historyDefaults ?? null)
       setNexus(n?.nexus ?? null)
       setCalls(c.calls)
       setPending(p.calls)
@@ -138,6 +165,18 @@ export default function AgentifyPage() {
   const openConfig = (agent: AgentifyAgent) => {
     setConfigAgent(agent)
     setConfigText(JSON.stringify(agent.config ?? DEFAULT_CONFIG, null, 2))
+  }
+
+  const setHours = (key: HourKey, raw: string) => {
+    try {
+      const cfg = JSON.parse(configText) as { memory?: Record<string, unknown> }
+      const memory = { ...(cfg.memory ?? {}) }
+      if (raw.trim() === '') delete memory[key]
+      else memory[key] = Number(raw)
+      setConfigText(JSON.stringify({ ...cfg, memory }, null, 2))
+    } catch {
+      // The inputs are disabled while the JSON is invalid.
+    }
   }
 
   const saveConfig = async () => {
@@ -395,7 +434,34 @@ export default function AgentifyPage() {
             <DialogTitle>协作配置：{configAgent?.displayName}</DialogTitle>
             <DialogDescription className="whitespace-pre-line text-xs">{CONFIG_HELP}</DialogDescription>
           </DialogHeader>
-          <JsonEditor value={configText} onChange={setConfigText} height="420px" />
+          <div className="grid gap-3 sm:grid-cols-3">
+            {HOUR_FIELDS.map(f => {
+              const { valid, value } = readHours(configText, f.key)
+              const def = historyDefaults?.[f.key]
+              return (
+                <label key={f.key} className="space-y-1 text-sm">
+                  <span className="font-medium whitespace-nowrap">{f.label}</span>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1}
+                    aria-label={f.label}
+                    disabled={!valid}
+                    value={value ?? ''}
+                    placeholder={def !== undefined ? `默认 ${def}` : '服务器默认'}
+                    onChange={e => setHours(f.key, e.target.value)}
+                  />
+                  <span className="block text-xs text-muted-foreground">{f.help}{def !== undefined ? `（默认 ${hoursText(def, f.key)}）` : ''}</span>
+                </label>
+              )
+            })}
+          </div>
+          {configAgent?.agentified ? (
+            <p className="text-xs text-muted-foreground" data-testid="history-policy">
+              当前生效：回溯 {hoursText(configAgent.historyPolicy.digestLookbackHours, 'digestLookbackHours')} · 衰减半衰期 {hoursText(configAgent.historyPolicy.decayHalfLifeHours, 'decayHalfLifeHours')} · 删除期限 {hoursText(configAgent.historyPolicy.deleteAfterHours, 'deleteAfterHours')}（回溯不会超过删除期限）
+            </p>
+          ) : null}
+          <JsonEditor value={configText} onChange={setConfigText} height="320px" />
           <DialogFooter className="gap-2">
             {configAgent?.agentified ? <Button variant="outline" onClick={() => void turnOff()}>关闭协作</Button> : null}
             <Button onClick={() => void saveConfig()} disabled={saving}>{configAgent?.agentified ? '保存' : '开启协作'}</Button>
@@ -444,7 +510,7 @@ export default function AgentifyPage() {
                   className="w-full text-left p-3 border-b hover:bg-muted"
                   onClick={() => void showDoc(doc)}
                 >
-                  <div className="text-xs text-muted-foreground">{KIND_LABEL[doc.kind] ?? doc.kind} · {fmt(doc.createdAt)}</div>
+                  <div className="text-xs text-muted-foreground">{KIND_LABEL[doc.kind] ?? doc.kind} · {fmt(doc.activeAt ?? doc.createdAt)}</div>
                   <div className="text-sm font-medium truncate">{doc.title}</div>
                   {doc.snippet ? <div className="text-xs text-muted-foreground line-clamp-2">{doc.snippet}</div> : null}
                 </button>

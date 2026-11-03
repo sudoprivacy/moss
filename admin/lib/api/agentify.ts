@@ -17,7 +17,16 @@ export interface AgentifyCapability {
 
 export interface AgentifyConfig {
   enabled: boolean
-  memory: { share: 'summary' | 'full'; injectChars: number }
+  memory: {
+    share: 'summary' | 'full'
+    injectChars: number
+    /** Hours; absent = server default. */
+    digestLookbackHours?: number
+    /** Hours; 0 = no decay; absent = server default. */
+    decayHalfLifeHours?: number
+    /** Hours; 0 = keep forever; absent = server default. */
+    deleteAfterHours?: number
+  }
   a2a: {
     capabilities: AgentifyCapability[]
     allowCallers: string[]
@@ -25,6 +34,12 @@ export interface AgentifyConfig {
     confirmers: string[]
     dailyCallLimit: number
   }
+}
+
+export interface HistoryPolicy {
+  digestLookbackHours: number
+  decayHalfLifeHours: number
+  deleteAfterHours: number
 }
 
 export interface AgentifyAgent {
@@ -36,6 +51,8 @@ export interface AgentifyAgent {
   enabled: boolean
   agentified: boolean
   config: AgentifyConfig | null
+  /** Hours in effect for this agent. */
+  historyPolicy: HistoryPolicy
   documents: number
 }
 
@@ -48,6 +65,7 @@ export interface HistoryDoc {
   userId: string | null
   visibility?: 'shared' | 'private'
   createdAt: number
+  activeAt?: number
   text?: string
   snippet?: string
   score?: number
@@ -98,7 +116,7 @@ export const DEFAULT_CONFIG: AgentifyConfig = {
 }
 
 export const listAgentifyAgents = () =>
-  dcClient.get<{ agents: AgentifyAgent[]; home: 'nexus' | 'local' }>(`${BASE}/agents`)
+  dcClient.get<{ agents: AgentifyAgent[]; home: 'nexus' | 'local'; historyDefaults: HistoryPolicy }>(`${BASE}/agents`)
 
 export const saveAgentifyConfig = (agentId: string, config: AgentifyConfig) =>
   dcClient.put<{ agent: { id: string; displayName: string; config: AgentifyConfig } }>(`${BASE}/agents/${enc(agentId)}`, { config })
@@ -122,6 +140,9 @@ export const listAgentHistory = (agentId: string, opts: { q?: string; kind?: str
 
 export const getAgentHistoryDoc = (agentId: string, docId: string) =>
   dcClient.get<HistoryDoc>(`${BASE}/agents/${enc(agentId)}/history/${enc(docId)}`)
+
+export const purgeExpiredNow = (agentId: string) =>
+  dcClient.post<{ docs: number; sessions: number; calls: number }>(`${BASE}/agents/${enc(agentId)}/purge`, {})
 
 export const digestNow = (agentId: string) =>
   dcClient.post<{ backfilled: number; digested: number }>(`${BASE}/agents/${enc(agentId)}/digest`, {})

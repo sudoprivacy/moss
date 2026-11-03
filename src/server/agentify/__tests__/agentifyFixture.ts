@@ -4,7 +4,7 @@
  * home, a deterministic embedder and a scripted session driver standing in
  * for scode.
  */
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, utimesSync } from 'fs'
 import { readdir, readFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
@@ -203,6 +203,12 @@ export function createFixture(agentMetas: Array<AssistantStoreMeta & { id: strin
       const p = path.join(cwd, rel)
       mkdirSync(path.dirname(p), { recursive: true })
       writeFileSync(p, content)
+      if (input.ageMs) utimesSync(p, new Date(at + 500), new Date(at + 500))
+    }
+    if (input.ageMs) {
+      // An old session: its transcript was last written back then too.
+      utimesSync(transcriptPath, new Date(t), new Date(t))
+      store.db.prepare('UPDATE sessions SET last_active_at = ? WHERE session_id = ?').run(t, sessionId)
     }
     return sessionId
   }

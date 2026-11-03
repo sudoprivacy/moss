@@ -22,7 +22,7 @@ import { existsSync, readdirSync, readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import WebSocket from 'ws'
-import { issueAccessToken } from '../src/server/auth/token.js'
+import { issueAccessToken, issueWikiSessionToken } from '../src/server/auth/token.js'
 
 function arg(name: string, fallback?: string): string {
   const i = process.argv.indexOf(`--${name}`)
@@ -34,6 +34,8 @@ function arg(name: string, fallback?: string): string {
 const BASE = arg('base', 'http://127.0.0.1:43137').replace(/\/$/, '')
 const WS_BASE = BASE.replace(/^http/, 'ws')
 const DB_PATH = arg('db')
+/** The server's data directory (sessions live under it); defaults to the --db file's directory. */
+const DATA_DIR = process.argv.includes('--data') ? arg('data') : dirname(DB_PATH)
 const ORG = arg('org', '609ce2ab-f742-4cfe-aeb8-a09617bffe3a')
 const RUN = Date.now().toString(36)
 const TURN_TIMEOUT_MS = Number(process.env.E2E_TURN_TIMEOUT_MS) || 20 * 60 * 1000
@@ -71,6 +73,16 @@ async function api<T = any>(token: string, method: string, path: string, body?: 
     throw err
   }
   return parsed as T
+}
+
+/** A token like the one moss gives an agent's session (agent id + session id claims). */
+function agentSessionToken(userId: string, agentId: string, sessionId: string): string {
+  const db = new DatabaseSync(DB_PATH, { readOnly: true })
+  const cfg = (k: string) => (db.prepare('SELECT value FROM server_config WHERE key = ?').get(k) as { value?: string } | undefined)?.value
+  const secret = cfg('jwt_secret')!
+  const issuer = cfg('issuer') ?? 'moss-server'
+  db.close()
+  return issueWikiSessionToken({ secret, issuer, userId, orgId: ORG, role: 'user', scopes: [], keyId: randomUUID(), assistantName: agentId, sessionId, expiresInSec: 3600 }).token
 }
 
 function adminToken(): string {
@@ -253,7 +265,7 @@ async function main(): Promise<void> {
   const s2ctx = await api<any>(users.gendan1!.token, 'GET', `/api/v1/sessions/${s2}/context`)
   const usedFiles = JSON.stringify(s2ctx.context?.messages ?? []).includes('agentctl files get')
   check(usedFiles, 'the follow-up agent used `agentctl files get` on the returns agent', 'no `agentctl files get` in the transcript')
-  const fetched = join(dirname(DB_PATH), 'runtime', 'sessions', s2, 'workspace')
+  const fetched = join(DATA_DIR, 'runtime', 'sessions', s2, 'workspace')
   const landed = existsSync(fetched) && readdirSync(fetched).some(f => /week44|返厂/.test(f) && readFileSync(join(fetched, f), 'utf8').includes('厨卫'))
   check(landed, 'the returns agent’s report landed in the follow-up agent’s workspace', existsSync(fetched) ? readdirSync(fetched) : 'no workspace')
 
@@ -295,6 +307,38 @@ async function main(): Promise<void> {
   check(notAgent, 'a plain employee token cannot use the agent-only endpoints')
   const notAdmin = await api(users.gendan1!.token, 'GET', '/api/v1/admin/agentify/agents').then(() => false, (e: any) => e.status === 403)
   check(notAdmin, 'a plain employee cannot read agentify administration')
+
+  // 9. History policy (hours): defaults, validation, and deletion on the live
+  //    server — the returns agent's files in Nexus, read through the follow-up agent.
+  const policyList = await api<any>(admin, 'GET', '/api/v1/admin/agentify/agents')
+  check(JSON.stringify(policyList.historyDefaults) === JSON.stringify({ digestLookbackHours: 720, decayHalfLifeHours: 720, deleteAfterHours: 4320 }),
+    'server defaults: 720 h lookback and decay half-life, 4320 h (180 days) deletion', policyList.historyDefaults)
+  const cfgB = policyList.agents.find((a: any) => a.id === B.id).config
+  const refused = await api(admin, 'PUT', `/api/v1/admin/agentify/agents/${B.id}`, { config: { ...cfgB, memory: { ...cfgB.memory, digestLookbackHours: 1000, deleteAfterHours: 500 } } })
+    .then(() => false, (e: any) => e.status === 400)
+  check(refused, 'a lookback longer than the deletion window is refused')
+  const bSummaries = (await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=summary&limit=200`)).items as any[]
+  const bMemoryBefore = ((await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=memory&limit=200`)).items as any[]).length
+  const asA = agentSessionToken(users.gendan1!.userId, A.id, s2)
+  const summaryPath = bSummaries[0]?.path as string | undefined
+  const readable = summaryPath ? await api(asA, 'GET', `/api/v1/agent/agentify/files?agent=${B.id}&path=${encodeURIComponent(summaryPath)}`).then(() => true, () => false) : false
+  check(bSummaries.length > 0 && readable, `before deletion the follow-up agent can read the returns agent's summary in Nexus (${bSummaries.length} summaries)`)
+  // 0.001 h = 3.6 s: everything the returns agent did is now "old".
+  await api(admin, 'PUT', `/api/v1/admin/agentify/agents/${B.id}`, { config: { ...cfgB, memory: { ...cfgB.memory, deleteAfterHours: 0.001 } } })
+  await new Promise(r => setTimeout(r, 5000))
+  const purged = await api<any>(admin, 'POST', `/api/v1/admin/agentify/agents/${B.id}/purge`, {})
+  check(purged.sessions >= bSummaries.length && purged.docs >= bSummaries.length, 'purge deletes the returns agent’s digested sessions', purged)
+  const bAfter = (await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=summary,conversation,artifact,a2a&limit=200`)).items as any[]
+  check(bAfter.length === 0, 'no summaries, conversations, outputs or call logs remain indexed', bAfter.map(d => d.title))
+  const gone = summaryPath ? await api(asA, 'GET', `/api/v1/agent/agentify/files?agent=${B.id}&path=${encodeURIComponent(summaryPath)}`).then(() => false, (e: any) => e.status === 404) : false
+  check(gone, 'the summary file is gone from Nexus too')
+  const bMemoryAfter = ((await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=memory&limit=200`)).items as any[]).length
+  check(bMemoryAfter === bMemoryBefore, `curated memory is kept (${bMemoryAfter} entries)`)
+  const recallAfter = await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?q=${encodeURIComponent('厨卫五金 返厂')}`)
+  check((recallAfter.hits as any[]).every(h => h.kind === 'memory'), 'search finds nothing from the deleted history', (recallAfter.hits as any[]).map(h => h.kind))
+  await api(admin, 'PUT', `/api/v1/admin/agentify/agents/${B.id}`, { config: cfgB })
+  const restoredB = (await api<any>(admin, 'GET', '/api/v1/admin/agentify/agents')).agents.find((a: any) => a.id === B.id)
+  check(restoredB.historyPolicy.deleteAfterHours === 4320, 'the returns agent is back on the server defaults')
 
   log(failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`)
   log(`sessions: returns=${s1} ask=${s2} memory=${s3} delegate=${s4}`)

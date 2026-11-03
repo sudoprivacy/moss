@@ -50,6 +50,20 @@ export interface AgentifyConfig {
     share: HistoryShare
     /** Characters of agent memory injected into a new session. */
     injectChars: number
+    /**
+     * Hours. Absent = the server default (see serverHistoryDefaults).
+     *
+     * digestLookbackHours: sessions active within this window are digested
+     *   (and re-digested when they change). Older sessions are left alone.
+     * decayHalfLifeHours: search ranks a document half as high for recency
+     *   after this long since its last activity; 0 = no decay.
+     * deleteAfterHours: digested history (summaries, conversations, outputs,
+     *   collaboration logs) is deleted this long after its last activity;
+     *   0 = keep forever. Curated memory notes are never deleted by age.
+     */
+    digestLookbackHours?: number
+    decayHalfLifeHours?: number
+    deleteAfterHours?: number
   }
   a2a: {
     capabilities: CapabilityConfig[]
@@ -72,6 +86,62 @@ export const DEFAULT_AGENTIFY_CONFIG: AgentifyConfig = {
   memory: { share: 'summary', injectChars: 4000 },
   a2a: { capabilities: [], allowCallers: [], historyReaders: [], confirmers: [], dailyCallLimit: 200 },
 }
+
+export interface HistoryPolicy {
+  digestLookbackHours: number
+  decayHalfLifeHours: number
+  deleteAfterHours: number
+}
+
+const MAX_HOURS = 24 * 365 * 20
+let processDefaults: HistoryPolicy | undefined
+
+function envHours(env: NodeJS.ProcessEnv, name: string, fallback: number, allowZero: boolean): number {
+  const raw = env[name]
+  if (raw === undefined || raw.trim() === '') return fallback
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0 || (n === 0 && !allowZero)) {
+    console.warn(`[agentify] ignoring ${name}=${raw}: expected ${allowZero ? 'a number of hours >= 0' : 'a positive number of hours'}`)
+    return fallback
+  }
+  return Math.min(n, MAX_HOURS)
+}
+
+/**
+ * Server-wide defaults, in hours, for agents that do not set their own:
+ *   MOSS_AGENTIFY_DIGEST_LOOKBACK_HR   (default 720 = 30 days)
+ *   MOSS_AGENTIFY_DECAY_HALF_LIFE_HR   (default 720 = 30 days; 0 = no decay)
+ *   MOSS_AGENTIFY_DELETE_AFTER_HR      (default 4320 = 180 days; 0 = keep forever)
+ */
+export function serverHistoryDefaults(env?: NodeJS.ProcessEnv): HistoryPolicy {
+  // The process environment does not change while running: read it once.
+  if (!env) return (processDefaults ??= serverHistoryDefaults(process.env))
+  return {
+    digestLookbackHours: envHours(env, 'MOSS_AGENTIFY_DIGEST_LOOKBACK_HR', 30 * 24, false),
+    decayHalfLifeHours: envHours(env, 'MOSS_AGENTIFY_DECAY_HALF_LIFE_HR', 30 * 24, true),
+    deleteAfterHours: envHours(env, 'MOSS_AGENTIFY_DELETE_AFTER_HR', 180 * 24, true),
+  }
+}
+
+/**
+ * The policy in effect for one agent. The digest lookback never reaches past
+ * the deletion window: a session old enough to be deleted must not be digested
+ * again, or it would be written and deleted over and over.
+ */
+export function historyPolicy(config: Pick<AgentifyConfig, 'memory'> | null | undefined, defaults: HistoryPolicy = serverHistoryDefaults()): HistoryPolicy {
+  const m = config?.memory
+  const deleteAfterHours = m?.deleteAfterHours ?? defaults.deleteAfterHours
+  let digestLookbackHours = m?.digestLookbackHours ?? defaults.digestLookbackHours
+  if (deleteAfterHours > 0) digestLookbackHours = Math.min(digestLookbackHours, deleteAfterHours)
+  return {
+    digestLookbackHours,
+    decayHalfLifeHours: m?.decayHalfLifeHours ?? defaults.decayHalfLifeHours,
+    deleteAfterHours,
+  }
+}
+
+const HOUR_MS = 3600 * 1000
+export const hoursToMs = (hours: number): number => hours * HOUR_MS
 
 const CAPABILITY_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
@@ -99,6 +169,17 @@ function positiveInt(value: unknown, fallback: number, field: string, max: numbe
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) throw new AgentifyConfigError(`${field} must be a positive number`)
   return Math.min(Math.floor(n), max)
+}
+
+/** Optional hours: absent/null/'' = server default; `allowZero` admits 0 (= off). */
+function optionalHours(value: unknown, field: string, allowZero: boolean): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0 || (n === 0 && !allowZero)) {
+    throw new AgentifyConfigError(`${field} must be ${allowZero ? 'a number of hours >= 0 (0 = off)' : 'a positive number of hours'}`)
+  }
+  if (n > MAX_HOURS) throw new AgentifyConfigError(`${field} must be at most ${MAX_HOURS} hours`)
+  return n
 }
 
 function parseCapability(raw: unknown, index: number): CapabilityConfig {
@@ -155,12 +236,23 @@ export function parseAgentifyConfig(raw: unknown): AgentifyConfig {
     seen.add(c.id)
   }
 
+  const memory: AgentifyConfig['memory'] = {
+    share,
+    injectChars: positiveInt(memoryRaw.injectChars, DEFAULT_AGENTIFY_CONFIG.memory.injectChars, 'memory.injectChars', 20000),
+  }
+  const lookback = optionalHours(memoryRaw.digestLookbackHours, 'memory.digestLookbackHours', false)
+  const halfLife = optionalHours(memoryRaw.decayHalfLifeHours, 'memory.decayHalfLifeHours', true)
+  const deleteAfter = optionalHours(memoryRaw.deleteAfterHours, 'memory.deleteAfterHours', true)
+  if (lookback !== undefined) memory.digestLookbackHours = lookback
+  if (halfLife !== undefined) memory.decayHalfLifeHours = halfLife
+  if (deleteAfter !== undefined) memory.deleteAfterHours = deleteAfter
+  if (lookback !== undefined && deleteAfter !== undefined && deleteAfter > 0 && lookback > deleteAfter) {
+    throw new AgentifyConfigError('memory.digestLookbackHours cannot be longer than memory.deleteAfterHours')
+  }
+
   return {
     enabled: r.enabled === undefined ? true : r.enabled === true,
-    memory: {
-      share,
-      injectChars: positiveInt(memoryRaw.injectChars, DEFAULT_AGENTIFY_CONFIG.memory.injectChars, 'memory.injectChars', 20000),
-    },
+    memory,
     a2a: {
       capabilities,
       allowCallers: stringList(a2aRaw.allowCallers, 'a2a.allowCallers'),
