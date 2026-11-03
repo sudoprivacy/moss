@@ -2450,6 +2450,15 @@ export class DirectConnectStore {
     return this.driver.all<SqlRow>(`SELECT * FROM channel_plugins ORDER BY created_at DESC`)
   }
 
+  /** Every plugin row with its owner's account status (`owner_status`). */
+  async listChannelPluginsWithOwnerStatus(): Promise<SqlRow[]> {
+    return this.driver.all<SqlRow>(`
+      SELECT p.*, u.status AS owner_status
+      FROM channel_plugins p LEFT JOIN users u ON u.id = p.user_id
+      ORDER BY p.created_at DESC
+    `)
+  }
+
   /**
    * Claim (or renew) the lease on one plugin row for `owner` (HA). Takes the
    * lease when it is unheld, already ours, or expired; renews lease_until when
