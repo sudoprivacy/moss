@@ -438,12 +438,13 @@ export class PluginManager {
    */
   async startEnabledPlugins(): Promise<void> {
     this.isStopping = false;
-    const rows = await this.db.listChannelPlugins();
+    const rows = await this.db.listChannelPluginsWithOwnerStatus();
     console.log(`[PluginManager] Starting enabled plugins, found ${rows.length} rows`);
 
     if (!this.instanceId) {
       for (const row of rows) {
-        if (Boolean(row.enabled)) await this.startFromRow(row);
+        // A row without an owner is the single-user deployment's own bot.
+        if (Boolean(row.enabled) && (!row.user_id || row.owner_status === 'active')) await this.startFromRow(row);
       }
       return;
     }
