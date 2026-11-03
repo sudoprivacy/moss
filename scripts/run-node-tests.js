@@ -14,6 +14,7 @@ const nodeTestFiles = [
   'scripts/e2e/packaged-pg-ha-fixture.test.mjs',
   'src/server/runtime/runtimePlacementPolicy.node-test.ts',
   'src/server/runtime/cohostOwnerRuntime.node-test.ts',
+  'src/server/runtime/mossOwnedExecution.node-test.ts',
   'src/server/ontology/projectRegistry.node-test.ts',
   'src/server/ontology/reviewStore.node-test.ts',
   'src/server/ontology/reviewGrantStore.node-test.ts',

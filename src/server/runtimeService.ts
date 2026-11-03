@@ -82,6 +82,7 @@ import { createEgressPolicy, EgressPolicyRepository, POLICY_FILENAME, readEgress
 import { EgressPolicyService, type EgressRuntimeReceipt, type EgressRuntimeTarget } from './configuration/egressPolicyService.js'
 import type { EgressPolicy } from '@sudo/egress-policy'
 import { CohostOwnerRuntime } from './runtime/cohostOwnerRuntime.js'
+import { isMossOwnedExecution } from './runtime/mossOwnedExecution.js'
 import type { NexusSessionEndpoint } from '@nexus-ai-fs/vfs-client'
 import { assertRuntimePlacement } from './runtime/runtimePlacementPolicy.js'
 import { readRuntimeRelease } from '@sudo/user-runtime/release'
@@ -957,6 +958,9 @@ export class RuntimeService {
       const bindings = await Promise.all(sessions.map(async session => ({ session,
         binding: await this.store.cohostSessions.get(session.sessionId),
         home: await ownerRuntime.resolveHome(ownerId, sessionAgentName(ownerId, session.assistantName)) })))
+      // A ready execution of an ended Moss session stays up as its Agent's
+      // standby receiver. Moss started it, so the upgrade may cancel it.
+      const knownBindings = await this.store.cohostSessions.listForOwner(ownerId)
       for (const placement of await ownerRuntime.placements(ownerId)) {
         const allocationBindings = bindings.filter(({ home }) => home.allocationId === placement.allocationId)
         const allocationSessions = allocationBindings.map(({ session }) => session)
@@ -974,8 +978,7 @@ export class RuntimeService {
                   throw new ResourceAccessError(409, 'Finish active Agent work before upgrading this owner')
                 }
                 const snapshot = await agent.getSession(execution.processId)
-                if (!snapshot.session_endpoint || snapshot.owner_id !== ownerId || !allocationBindings.some(({ binding }) => binding?.ownerId === ownerId &&
-                  binding.agentId === snapshot.agent_id && binding.durableSessionId === snapshot.durable_session_id)) {
+                if (!isMossOwnedExecution(snapshot, ownerId, [...allocationBindings.map(({ binding }) => binding), ...knownBindings])) {
                   throw new ResourceAccessError(409, 'An external Agent session must drain before this upgrade')
                 }
                 processes.push({ id: execution.processId, endpoint: snapshot.session_endpoint })
