@@ -24,6 +24,8 @@ export type AuthContext = {
   exp: number
   /** Document Center: set when the token was issued for an in-container scode session. */
   assistantId?: string | null
+  /** Agentify: the session an in-container token was issued for. */
+  sessionId?: string | null
 }
 
 function base64UrlEncode(input: string | Buffer): string {
@@ -100,12 +102,14 @@ export function issueWikiSessionToken(params: {
   scopes: string[]
   keyId: string
   assistantName: string | null
+  /** Agentify: binds the token to one session (call chains, read-only mode). */
+  sessionId?: string | null
   expiresInSec?: number
 }): { token: string; expiresAt: number } {
   const issuedAt = Math.floor(Date.now() / 1000)
   const expiresAt = issuedAt + (params.expiresInSec ?? 24 * 60 * 60)
   const header = { alg: 'HS256', typ: 'JWT' }
-  const payload: AccessTokenClaims & { assistant_id: string | null } = {
+  const payload: AccessTokenClaims & { assistant_id: string | null; session_id?: string } = {
     iss: params.issuer,
     sub: params.userId,
     org_id: params.orgId,
@@ -117,6 +121,7 @@ export function issueWikiSessionToken(params: {
     iat: issuedAt,
     exp: expiresAt,
     assistant_id: params.assistantName,
+    ...(params.sessionId ? { session_id: params.sessionId } : {}),
   }
 
   const encodedHeader = base64UrlEncode(JSON.stringify(header))
@@ -211,6 +216,10 @@ export function verifyAccessToken(
         : (payload as AccessTokenClaims & { assistant_id?: unknown }).assistant_id === null
           ? null
           : undefined,
+    sessionId:
+      typeof (payload as AccessTokenClaims & { session_id?: unknown }).session_id === 'string'
+        ? (payload as AccessTokenClaims & { session_id: string }).session_id
+        : undefined,
   }
 }
 

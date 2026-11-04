@@ -7,6 +7,19 @@ import {
   writeFileSync,
 } from 'fs'
 import { NexusVfsClient } from '@nexus-ai-fs/vfs-client'
+import { NexusClient } from './nexusClient.js'
+import {
+  backupDataDir,
+  compareFingerprints,
+  fingerprintSecrets,
+  readDataState,
+  readUpgradeReport,
+  restoreDataDir,
+  writeUpgradeReport,
+  writeVersionMarker,
+  type SecretFingerprint,
+  type UpgradeReport,
+} from './nexusUpgrade.js'
 import { createServer } from 'net'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -267,6 +280,8 @@ export class NexusManager {
   private probeClient: NexusVfsClient | null = null
   private readonly config: ResolvedNexusConfig
   private isRustBinary = false
+  /** Version of the daemon actually serving (the bundled old one after a rollback or hold). */
+  private servingVersion: string | null = null
 
   constructor(options: NexusManagerOptions = {}) {
     this.config = options.config ?? resolveNexusConfigFromEnv()
@@ -310,6 +325,19 @@ export class NexusManager {
     return this.isRustBinary
   }
 
+  get runningVersion(): string | null {
+    return this.servingVersion
+  }
+
+  /** Outcome of the last in-place upgrade attempt, if any. */
+  get upgradeReport(): UpgradeReport | null {
+    return readUpgradeReport(this.nexusDir)
+  }
+
+  get dataDirectory(): string {
+    return join(this.nexusDir, 'data')
+  }
+
   async start(): Promise<void> {
     if (this.config.mode === 'external') {
       // Connect-only: the production nexusd-cluster owns the daemon lifecycle.
@@ -340,16 +368,160 @@ export class NexusManager {
     const dataDir = join(this.nexusDir, 'data')
     const pluginDir = resolveNexusPluginDir()
     assertVaultPluginAvailable(pluginDir)
-    const args = buildNexusArgs(this.grpcPort, dataDir, pluginDir)
-    console.log(`[NexusManager] Spawning: ${resolvedBin} ${args.join(' ')}`)
 
-    const child = spawn(resolvedBin, args, {
+    const state = readDataState(dataDir, NEXUS_VERSION)
+    if (state.kind === 'other') {
+      await this.startWithUpgrade(resolvedBin, pluginDir, dataDir, state.version)
+    } else {
+      this.child = await this.spawnAndWait(resolvedBin, pluginDir, dataDir)
+      this.servingVersion = NEXUS_VERSION
+      writeVersionMarker(dataDir, NEXUS_VERSION)
+      if (state.kind === 'empty' && !readUpgradeReport(this.nexusDir)) {
+        writeUpgradeReport(this.nexusDir, {
+          status: 'fresh', from: null, to: NEXUS_VERSION, running: NEXUS_VERSION,
+          at: new Date().toISOString(), backup: null, secrets: null, verified: false,
+        })
+      }
+    }
+    this.writeReadyFile()
+    console.log(
+      `[NexusManager] Nexus started (version=${this.servingVersion}, pid=${this.child?.pid ?? 'unknown'}, gRPC=127.0.0.1:${this.grpcPort})`,
+    )
+  }
+
+  /**
+   * Data written by another nexusd version: back it up, migrate by starting
+   * the new daemon on it, and keep the result only if every secret reads back
+   * identically. See nexusUpgrade.ts.
+   */
+  private async startWithUpgrade(newBin: string, pluginDir: string, dataDir: string, fromMarker: string | null): Promise<void> {
+    const legacy = this.resolveLegacyBinary()
+    const mode = (process.env.MOSS_NEXUS_UPGRADE ?? 'auto').trim().toLowerCase()
+    const from = fromMarker ?? legacy?.version ?? null
+    const report = (r: Omit<UpgradeReport, 'at' | 'to'>) =>
+      writeUpgradeReport(this.nexusDir, { ...r, to: NEXUS_VERSION, at: new Date().toISOString() })
+
+    if (mode === 'hold') {
+      if (!legacy) {
+        throw new Error('MOSS_NEXUS_UPGRADE=hold, but the previous nexusd is not bundled in bin/nexus/legacy; cannot keep the old version running')
+      }
+      console.warn(`[NexusManager] MOSS_NEXUS_UPGRADE=hold: keeping nexusd ${legacy.version} on existing data; set it to auto to upgrade to ${NEXUS_VERSION}`)
+      this.child = await this.spawnAndWait(legacy.bin, legacy.pluginDir, dataDir)
+      this.servingVersion = legacy.version
+      report({ status: 'held', from, running: legacy.version, backup: null, secrets: null, verified: false })
+      return
+    }
+
+    console.warn(`[NexusManager] Upgrading Nexus data from ${from ?? 'an unmarked version'} to ${NEXUS_VERSION}`)
+    let backup: string
+    try {
+      backup = backupDataDir(this.nexusDir, dataDir, from ?? 'unmarked')
+    } catch (error) {
+      // No backup, no upgrade: the data is still untouched, so keep serving it
+      // with the version that wrote it.
+      const message = `could not back up Nexus data before upgrading: ${error instanceof Error ? error.message : String(error)}`
+      console.error(`[NexusManager] ${message}`)
+      if (!legacy) throw new Error(`${message}; no previous nexusd is bundled to keep running`)
+      this.child = await this.spawnAndWait(legacy.bin, legacy.pluginDir, dataDir)
+      this.servingVersion = legacy.version
+      report({ status: 'held', from, running: legacy.version, backup: null, secrets: null, verified: false, error: message })
+      return
+    }
+    console.warn(`[NexusManager] Backed up Nexus data to ${backup}`)
+
+    let before: SecretFingerprint[] | null = null
+    if (legacy) {
+      const old = await this.spawnAndWait(legacy.bin, legacy.pluginDir, dataDir)
+      try {
+        before = await this.readFingerprints()
+        console.log(`[NexusManager] Recorded ${before.length} secrets with nexusd ${legacy.version}`)
+      } finally {
+        await this.terminateChild(old)
+        await this.waitForPortFree()
+      }
+    } else {
+      console.warn('[NexusManager] Previous nexusd is not bundled: the upgrade is checked for readability only')
+    }
+
+    let fresh: ChildProcess | null = null
+    try {
+      fresh = await this.spawnAndWait(newBin, pluginDir, dataDir)
+      const after = await this.readFingerprints()
+      if (before) {
+        const verdict = compareFingerprints(before, after)
+        if (!verdict.ok) throw new Error(`upgrade verification failed: ${verdict.reason}`)
+      }
+      this.child = fresh
+      this.servingVersion = NEXUS_VERSION
+      writeVersionMarker(dataDir, NEXUS_VERSION)
+      report({ status: 'upgraded', from, running: NEXUS_VERSION, backup, secrets: after.length, verified: before !== null })
+      console.warn(`[NexusManager] Nexus upgraded to ${NEXUS_VERSION}; ${after.length} secrets ${before ? 'verified' : 'readable'}`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[NexusManager] Nexus upgrade failed: ${message}. Restoring ${backup}`)
+      if (fresh) {
+        await this.terminateChild(fresh)
+        await this.waitForPortFree()
+      }
+      restoreDataDir(backup, dataDir)
+      if (!legacy) {
+        report({ status: 'rolled_back', from, running: 'none', backup, secrets: null, verified: false, error: message })
+        throw new Error(`Nexus upgrade failed and no previous nexusd is bundled to fall back to: ${message}. Data restored from ${backup}.`)
+      }
+      this.child = await this.spawnAndWait(legacy.bin, legacy.pluginDir, dataDir)
+      this.servingVersion = legacy.version
+      report({ status: 'rolled_back', from, running: legacy.version, backup, secrets: before?.length ?? null, verified: false, error: message })
+    }
+  }
+
+  /** The previous nexusd + its vault plugin, bundled for upgrades and rollback. */
+  private resolveLegacyBinary(): { bin: string; pluginDir: string; version: string } | null {
+    const localName = process.platform === 'win32' ? 'nexusd.exe' : 'nexusd'
+    const bin = process.env.MOSS_NEXUS_LEGACY_BIN || join(process.cwd(), 'bin', 'nexus', 'legacy', localName)
+    const pluginDir = process.env.MOSS_NEXUS_LEGACY_PLUGIN_DIR || join(process.cwd(), 'bin', 'nexus', 'legacy', 'plugins')
+    if (!existsSync(bin) || !existsSync(pluginDir)) return null
+    const version = this.readBinaryVersion(bin)
+    if (!version || version === NEXUS_VERSION) return null
+    return { bin, pluginDir, version }
+  }
+
+  private async readFingerprints(): Promise<SecretFingerprint[]> {
+    const client = new NexusClient(this.grpcUrl, this.authToken, this.tlsConfig)
+    try {
+      return fingerprintSecrets(await client.listSecrets())
+    } finally {
+      client.vfs().close()
+    }
+  }
+
+  private async waitForPortFree(): Promise<void> {
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      try {
+        await assertTcpPortAvailable(this.grpcPort)
+        return
+      } catch (error) {
+        if (Date.now() > deadline) throw error
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+    }
+  }
+
+  /** Spawn nexusd on `dataDir` and wait until it serves gRPC. */
+  private async spawnAndWait(bin: string, pluginDir: string, dataDir: string): Promise<ChildProcess> {
+    const args = buildNexusArgs(this.grpcPort, dataDir, pluginDir)
+    console.log(`[NexusManager] Spawning: ${bin} ${args.join(' ')}`)
+    // A fresh probe channel per daemon: the previous one may still point at a
+    // process that has just been stopped on the same port.
+    this.probeClient?.close()
+    this.probeClient = null
+
+    const child = spawn(bin, args, {
       stdio: 'pipe',
       // vault 插件读 NEXUS_DATA_DIR 决定数据目录（含 master.key），不读
       // --data-dir 参数；不设置会把加密数据落到 cwd 的 ./nexus-data
       env: { ...process.env, NEXUS_DATA_DIR: dataDir },
     })
-    this.child = child
     console.log(`[NexusManager] Spawned nexusd-cluster pid=${child.pid ?? 'unknown'}`)
 
     let lastStderr = ''
@@ -373,15 +545,11 @@ export class NexusManager {
 
     try {
       await this.waitForGrpcReady(child, () => exitInfo, () => spawnError, () => lastStderr)
-      this.writeReadyFile()
     } catch (error) {
       await this.terminateChild(child)
-      if (this.child === child) this.child = null
       throw error
     }
-    console.log(
-      `[NexusManager] Nexus started (version=${NEXUS_VERSION}, pid=${child.pid ?? 'unknown'}, gRPC=127.0.0.1:${this.grpcPort})`,
-    )
+    return child
   }
 
   async stop(): Promise<void> {

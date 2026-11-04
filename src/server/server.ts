@@ -170,6 +170,11 @@ import { ChannelAgentResolver } from '../channels/gateway/ChannelAgentResolver.j
 import { WikiJobExecutor } from '../channels/gateway/WikiJobExecutor.js'
 import { loadIndex, vectorSearch, rrfFuse, createQuerySemaphore, runWikiGrep } from './wikiIndex/query.js'
 import { ensureEmbedder } from './wikiIndex/embedder.js'
+import { AgentifyService } from './agentify/service.js'
+import { createAgentifyRoutes } from './agentify/routes.js'
+import { RuntimeSessionDriver } from './agentify/sessionDriver.js'
+import type { NexusVfsLike } from './agentify/agentHome.js'
+import { readUpgradeReport } from './nexus/nexusUpgrade.js'
 import { MOSS_MODELS_DIR } from '../utils/wikis/localWikiDirectories.js'
 import { decodeResourceToken } from './wikiResourceToken.js'
 import { rewriteWikiImageRefs, isMarkdownPath, RESOURCE_PREFIX } from './wikiImageRefs.js'
@@ -2227,6 +2232,73 @@ export function startServer(
     },
   })
   const eventTriggerIngest = createEventTriggerIngest(eventTriggerService)
+
+  // Agentify: durable agents with an agent home (Nexus VFS when available),
+  // searchable history and agent-to-agent collaboration.
+  const agentify = new AgentifyService({
+    db: runtime.store.db,
+    runtimeDir: config.runtimeDir,
+    localHomeDir: AgentifyService.localHomeDirFor(config.rootDir),
+    nexusVfs: nexusClient && process.env.MOSS_AGENTIFY_HOME !== 'local' ? (nexusClient.vfs() as unknown as NexusVfsLike) : null,
+    lookup: { findAssistantDir, readAssistantMeta },
+    embedder: () =>
+      config.wikiIndex.enabled
+        ? ensureEmbedder({ modelId: config.wikiIndex.modelId, cacheDir: MOSS_MODELS_DIR, mirror: config.wikiIndex.modelMirror })
+        : Promise.resolve(null),
+    modelGateway: () => {
+      const st = getSystemSettings()
+      const url = st.url || process.env.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1'
+      const apiKey = st.apiKey || process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY || ''
+      const model = process.env.MOSS_AGENTIFY_SUMMARY_MODEL || st.model
+      return apiKey && model ? { url, apiKey, model } : null
+    },
+    driver: new RuntimeSessionDriver(runtime),
+    getUserName: resolveUserName,
+    getUserAuth: (userId: string, orgId: string) => {
+      try {
+        const user = authService.getUserOrNull(userId, orgId)
+        // Same source cron and event triggers use for a run's scopes.
+        return user ? { role: user.role, scopes: (user as { scopes?: string[] }).scopes || [] } : null
+      } catch {
+        return null
+      }
+    },
+    isAdmin: (userId: string, orgId: string) => {
+      try {
+        const role = authService.getUserOrNull(userId, orgId)?.role
+        return role === 'admin' || role === 'super_admin'
+      } catch {
+        return false
+      }
+    },
+    isAgentUsableBy: (ref, userId, orgId) => {
+      try {
+        const user = authService.getUserOrNull(userId, orgId)
+        if (!user) return false
+        const filter = authService.buildVisibilityFilter({
+          rawToken: '', userId, orgId, role: user.role, scopes: (user as { scopes?: string[] }).scopes || [], keyId: '', jti: '', exp: 0,
+        })
+        return isUsableBy(ref.visibleTo, ref.ownerId, filter)
+      } catch {
+        return false
+      }
+    },
+  })
+  runtime.agentifyHooks = {
+    onSessionCreated: (sessionId, assistantName, source) => agentify.onSessionCreated(sessionId, assistantName, source),
+    buildSessionBlock: input => agentify.buildSessionBlock(input),
+    isReadonlySession: sessionId => agentify.isReadonlySession(sessionId),
+  }
+  // Scheduled runs of agentified agents start with which job and when the run started.
+  cronService.setRunNote(({ job, startedAt }) =>
+    agentify.cronRunNote({ orgId: job.orgId, assistant: job.assistantId ?? job.assistantName, jobName: job.name, startedAt, timeZone: job.schedule.tz }),
+  )
+  const agentifyRoutes = createAgentifyRoutes(agentify, {
+    readJsonBody,
+    getUserName: resolveUserName,
+    // NexusManager's default directory; the report is written there on start.
+    getNexusStatus: () => readUpgradeReport(join(os.homedir(), '.moss', 'nexus')),
+  })
   const eventTriggerApi = createEventTriggerApi({
     store: eventTriggerService.getStore(),
     getUserName: resolveUserName,
@@ -2782,6 +2854,9 @@ export function startServer(
 
   // Start the event trigger executor (drains externally-POSTed events)
   eventTriggerService.start()
+
+  // Agentify: digest sweeper + agent-to-agent task executor
+  agentify.start()
 
   // Startup integrity check: approved tenant skills must have their files on
   // disk. The DB row is the source of truth for "this skill exists", but the
@@ -3889,6 +3964,19 @@ export function startServer(
       if (!auth) {
         throw new HttpError(401, 'Unauthorized')
       }
+
+      // Agentify: a session answering another agent is read-only — it may read
+      // corp-app data but not send, upload, create groups or queue broadcasts.
+      if (
+        pathname.startsWith('/api/v1/agent/corp-apps') &&
+        req.method !== 'GET' &&
+        !/^\/api\/v1\/agent\/corp-apps\/[^/]+\/names$/.test(pathname) &&
+        agentify.isReadonlySession(auth.sessionId)
+      ) {
+        writeJson(res, 403, { error: { code: 'readonly_session', message: 'this session answers another agent and is read-only' } })
+        return
+      }
+      if (await agentifyRoutes.handle(req, res, pathname, url, auth)) return
 
       const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || undefined
 
@@ -11168,6 +11256,8 @@ export function startServer(
           path: typeof body.path === 'string' ? body.path : null,
           contentBase64: typeof body.content_base64 === 'string' ? body.content_base64 : null,
         }, resolveSessionWorkspaceAccess(session, config))
+        // Agentify: an uploaded file is an input of the session (searchable later).
+        agentify.recordUpload(sessionId, result.relativePath)
         writeJson(res, 200, result)
         return
       }
@@ -11414,6 +11504,28 @@ export function startServer(
           throw error
         }
         wss.handleUpgrade(req, socket, head, ws => {
+          // Listen from the moment the socket opens: clients send their first
+          // message as soon as it does, before the runner connection below is
+          // up. Messages that arrive early wait in `early` and go out, in
+          // order, once it is.
+          const early: string[] = []
+          let deliver: ((text: string) => void) | null = null
+          let clientGone = false
+          ws.on('message', data => {
+            const text =
+              typeof data === 'string'
+                ? data
+                : Buffer.from(data).toString('utf8')
+            process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+            if (deliver) deliver(text)
+            else early.push(text)
+          })
+          ws.on('close', () => {
+            clientGone = true
+          })
+          ws.on('error', () => {
+            clientGone = true
+          })
           void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
             let buffer = ''
             const sendToRunner = (payload: Record<string, unknown>) => {
@@ -11424,18 +11536,17 @@ export function startServer(
                 process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
               }
             }
+            if (clientGone) {
+              runnerSocket.destroy()
+              return
+            }
 
-            ws.on('message', data => {
-              const text =
-                typeof data === 'string'
-                  ? data
-                  : Buffer.from(data).toString('utf8')
-              process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+            deliver = text =>
               sendToRunner({
                 type: 'stdin',
                 data: text.endsWith('\n') ? text : `${text}\n`,
               })
-            })
+            for (const text of early.splice(0)) deliver(text)
             ws.on('close', () => {
               runnerSocket.destroy()
             })
@@ -11654,6 +11765,7 @@ export function startServer(
       wikiJobExecutor.stop()
       sourceSyncWorker.stop()
       cronService.stop()
+      agentify.stop()
       cabinFlightAutomation?.stop()
       wss.close()
       msgAuditWorker.stop()

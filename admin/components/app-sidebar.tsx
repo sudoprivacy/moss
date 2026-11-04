@@ -25,8 +25,10 @@ import {
   ShieldCheck,
   Plane,
   Webhook,
+  Network,
   ServerCog,
   ReceiptText,
+  ClipboardCheck,
 } from 'lucide-react'
 
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -130,6 +132,19 @@ const menuItems: NavItem[] = [
     url: '/settings/agents',
     icon: Bot,
     requiredAnyScopes: ['admin:settings', 'store:read'],
+  },
+  {
+    title: '协作智能体',
+    url: '/agentify',
+    icon: Network,
+    requiredScope: 'admin:settings',
+    exact: true,
+  },
+  {
+    // Any signed-in employee: confirmers need not be administrators.
+    title: '待确认任务',
+    url: '/agentify/confirmations',
+    icon: ClipboardCheck,
   },
   {
     title: '技能商店',

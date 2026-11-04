@@ -214,7 +214,15 @@ interface TokenEntry {
 }
 
 /** Identity a session token resolves to (see {@link SessionTokenResolver}). */
-export type SessionTokenIdentity = Pick<TokenEntry, 'userId' | 'orgId' | 'departmentId' | 'isAdmin'>
+export type SessionTokenIdentity = Pick<TokenEntry, 'userId' | 'orgId' | 'departmentId' | 'isAdmin'> & {
+  /**
+   * The session answers another agent and is read-only: stored credentials
+   * may only be used to read (GET / HEAD / OPTIONS), never to change anything.
+   */
+  readOnly?: boolean
+}
+
+const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 /**
  * Resolves a runner's bearer token (by its sha256) to the session identity it
@@ -565,6 +573,11 @@ export class AuthProxyServer {
         res.end(JSON.stringify({ error: 'invalid_token' }))
         return
       }
+      if (tokenEntry.readOnly && !READ_METHODS.has((req.method ?? 'GET').toUpperCase())) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'readonly_session', message: 'this session answers another agent and is read-only' }))
+        return
+      }
       await handleSecretsRequest(req, res, parsedUrl.pathname, parsedUrl, {
         userId: tokenEntry.userId,
         orgId: tokenEntry.orgId,
@@ -595,6 +608,14 @@ export class AuthProxyServer {
     if (!tokenEntry) {
       res.writeHead(401, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'invalid_token' }))
+      return
+    }
+
+    // 1b. A read-only session (answering another agent) may only read upstream.
+    const requestedMethod = ((req.headers['x-remote-method'] as string | undefined) || req.method || 'GET').toUpperCase()
+    if (tokenEntry.readOnly && !READ_METHODS.has(requestedMethod)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'readonly_session', message: `this session answers another agent and is read-only: ${requestedMethod} is not allowed` }))
       return
     }
 

@@ -141,6 +141,8 @@ export class CronService {
   private db: DatabaseSync
   private running = false
   private checkInterval?: ReturnType<typeof setInterval>
+  /** Optional first line of a run's message (agentify: which job, and when this run started). */
+  private runNote: ((input: { job: CronJob; startedAt: number }) => Promise<string | null>) | null = null
 
   constructor(db: DatabaseSync, config: CronServiceConfig) {
     // Fail loud if required config is missing. The project has no type-check
@@ -423,7 +425,7 @@ export class CronService {
       const sessionId = await this.resolveSessionForRun(job, run, userAuth, `job ${job.id}`)
       this.markRunSessionStarted(job, run, sessionId)
 
-      await this.sendCronMessage(sessionId, job.payloadMessage)
+      await this.sendCronMessage(sessionId, await this.runMessage(job, run))
 
       // Update run status with session
       this.store.updateRunStatus(run.id, {
@@ -797,6 +799,24 @@ export class CronService {
     }
   }
 
+  /** Set the provider of a run's first line (see runNote). */
+  setRunNote(fn: ((input: { job: CronJob; startedAt: number }) => Promise<string | null>) | null): void {
+    this.runNote = fn
+  }
+
+  /** The message a run sends: the job's message, after the run note when there is one. */
+  private async runMessage(job: CronJob, run: CronJobRun): Promise<string> {
+    if (!this.runNote) return job.payloadMessage
+    try {
+      const startedAt = this.store.getRunById(run.id)?.startedAt ?? Date.now()
+      const note = await this.runNote({ job, startedAt })
+      return note ? `${note}\n${job.payloadMessage}` : job.payloadMessage
+    } catch (err) {
+      console.warn(`[CronService] run note for job ${job.id} failed:`, err)
+      return job.payloadMessage
+    }
+  }
+
   /**
    * Get the store for direct access
    */
@@ -819,7 +839,7 @@ export class CronService {
 
   private async completeRunInSession(job: CronJob, run: CronJobRun, sessionId: string, summary: string): Promise<void> {
     try {
-      await this.sendCronMessage(sessionId, job.payloadMessage)
+      await this.sendCronMessage(sessionId, await this.runMessage(job, run))
 
       this.store.updateRunStatus(run.id, {
         status: 'ok',

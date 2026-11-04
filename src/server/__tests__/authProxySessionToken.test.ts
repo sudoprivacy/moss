@@ -72,7 +72,7 @@ function setup() {
     store.setAttemptAuthProxyTokenHash(attempt.attemptId, hashFn(token));
     return { attempt, token };
   }
-  return { store, users, resolver, spawnAttempt };
+  return { store, users, resolver, spawnAttempt, runtime };
 }
 
 describe("auth proxy session tokens (DB-backed)", () => {
@@ -112,13 +112,13 @@ describe("auth proxy session tokens (DB-backed)", () => {
     return proxy;
   }
 
-  async function call(proxy: AuthProxyServer, token: string): Promise<number> {
+  async function call(proxy: AuthProxyServer, token: string, remoteMethod = "GET"): Promise<number> {
     const res = await fetch(`http://127.0.0.1:${proxy.port}/proxy`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
         "X-Remote-URL": `http://127.0.0.1:${upstreamPort}/headers`,
-        "X-Remote-Method": "GET",
+        "X-Remote-Method": remoteMethod,
       },
     });
     await res.text();
@@ -156,6 +156,24 @@ describe("auth proxy session tokens (DB-backed)", () => {
     const proxy = await newProxy(resolver);
     assert.equal(await call(proxy, token), 200);
     assert.equal(seen[0].authorization, "Bearer user:u1:whoami/whoami");
+  });
+
+  it("lets a read-only session (answering another agent) only read upstream", async () => {
+    const { resolver, spawnAttempt, runtime } = setup();
+    const { token } = spawnAttempt(mod.hashAuthProxyToken);
+    // Without agentify hooks a session is not read-only.
+    let proxy = await newProxy(resolver);
+    assert.equal(await call(proxy, token, "POST"), 200);
+    (runtime as unknown as { agentifyHooks: unknown }).agentifyHooks = { isReadonlySession: (id: string) => id === "s1" };
+    proxy = await newProxy(resolver);
+    seen.length = 0;
+    assert.equal(await call(proxy, token, "GET"), 200);
+    assert.equal(await call(proxy, token, "HEAD"), 200);
+    for (const m of ["POST", "PUT", "PATCH", "DELETE"]) assert.equal(await call(proxy, token, m), 403, m);
+    assert.equal(seen.length, 2, "refused writes never reach the upstream");
+    // The secrets endpoint follows the same rule.
+    const write = await fetch(`http://127.0.0.1:${proxy.port}/secrets/x`, { method: "PUT", headers: { Authorization: `Bearer ${token}` }, body: "{}" });
+    assert.equal(write.status, 403);
   });
 
   it("stays valid more than 24h after spawn while the attempt is live", async () => {

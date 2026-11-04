@@ -68,6 +68,11 @@ export class NexusClient {
     return this.client
   }
 
+  /** Raw VFS access (agentify stores the agent home here). */
+  vfs(): NexusVfsClient {
+    return this.getClient()
+  }
+
   private getSecretClient(): NexusSecretClient {
     if (!this.secretClient) {
       this.secretClient = new NexusSecretClient(this.getClient(), this.authToken)

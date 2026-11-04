@@ -31,6 +31,15 @@ COPY ./cli/corpauth/*.go ./
 COPY ./cli/corpauth/client/*.go ./client/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/corpauth .
 
+# Stage 1e: build the agentctl CLI (Go, no deps) — agent home (memory, history,
+# outputs) and agent-to-agent collaboration for agentified agents.
+FROM golang:1.22-alpine AS agentctl-builder
+WORKDIR /src
+COPY ./cli/agentctl/go.mod ./
+# go.sum intentionally absent — agentctl CLI has zero external deps
+COPY ./cli/agentctl/*.go ./
+RUN rm -f ./*_test.go && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/agentctl .
+
 # Stage 1d: build the fetchurl CLI (Go, no deps) — curl-compatible HTTP through
 # the auth proxy so skills reach authenticated services without handling creds.
 FROM golang:1.22-alpine AS fetchurl-builder
@@ -95,7 +104,8 @@ COPY --from=wiki-builder /out/wiki /usr/local/bin/wiki
 COPY --from=corpapp-builder /out/corpapp /usr/local/bin/corpapp
 COPY --from=corpauth-builder /out/corpauth /usr/local/bin/corpauth
 COPY --from=fetchurl-builder /out/fetchurl /usr/local/bin/fetchurl
-RUN chmod +x /usr/local/bin/wiki /usr/local/bin/corpapp /usr/local/bin/corpauth /usr/local/bin/fetchurl
+COPY --from=agentctl-builder /out/agentctl /usr/local/bin/agentctl
+RUN chmod +x /usr/local/bin/wiki /usr/local/bin/corpapp /usr/local/bin/corpauth /usr/local/bin/fetchurl /usr/local/bin/agentctl
 
 # 6. moss-session-launch / moss-session-reap (per-user container mode)
 #    Launcher records pid + start_ticks (USER_HZ since boot, /proc/<pid>/stat

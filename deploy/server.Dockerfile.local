@@ -67,7 +67,9 @@ RUN test -n "$TARGETARCH" \
     && cd cli/wiki \
     && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" go build -ldflags="-s -w" -o /out/wiki . \
     && cd /src/cli/corpapp \
-    && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" go build -ldflags="-s -w" -o /out/corpapp .
+    && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" go build -ldflags="-s -w" -o /out/corpapp . \
+    && cd /src/cli/agentctl \
+    && CGO_ENABLED=0 GOOS=linux GOARCH="$TARGETARCH" go build -ldflags="-s -w" -o /out/agentctl .
 
 # --- Stage 4: downloaded binaries (nexusd-cluster, scode) --------------------
 FROM debian:bookworm-slim AS nexus-dl
@@ -76,39 +78,57 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /dl
 COPY src/server/nexus/runtime-versions.json /runtime-versions.json
-# nexusd-cluster (Rust nexus daemon).
+# nexusd-cluster (Rust nexus daemon). From 0.8.x it is released by
+# nexi-lab/nexus-vfs itself (0.1.5 was a nexi-lab/nexus packaging of nexus-vfs
+# v0.7.7). Checksums are the release's SHA256SUMS.txt entries.
 RUN NEXUSD_CLUSTER_VERSION="$(jq -er '."nexusd-cluster"' /runtime-versions.json)" \
     && case "$TARGETARCH" in \
-      amd64) NEXUS_ARCH="x86_64" ;; \
-      arm64) NEXUS_ARCH="aarch64" ;; \
+      amd64) NEXUS_ARCH="x86_64"; NEXUS_SHA256="872bba05ec8f52b2f443cdf7cfce16e8801035c3f8a303f5f34a65fd00dde652" ;; \
+      arm64) NEXUS_ARCH="aarch64"; NEXUS_SHA256="d917a8c81d5480e1cbe82f696753b19851efbdff7613dcb98a8eab6aa243bb49" ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
     esac \
-    && case "$TARGETARCH" in \
-      amd64) NEXUS_SHA256="033861b16c811a997723b2c900a69de297a969db2b39c81936bbee08d2851b25" ;; \
-      arm64) NEXUS_SHA256="f3cfbaef5fbf4328ed41e7a8f9ae79fc6c1347ec55cb414b16dabd78d4441f11" ;; \
-    esac \
-    && curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/nexusd-cluster-v${NEXUSD_CLUSTER_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
+    && curl -fsSL "https://github.com/nexi-lab/nexus-vfs/releases/download/v${NEXUSD_CLUSTER_VERSION}/nexusd-cluster-linux-${NEXUS_ARCH}.tar.gz" -o nexus.tar.gz \
     && echo "${NEXUS_SHA256}  nexus.tar.gz" | sha256sum -c - \
     && tar -xzf nexus.tar.gz \
     && mkdir -p /out/bin/nexus \
     && mv "nexusd-cluster-linux-${NEXUS_ARCH}/nexusd-cluster" /out/bin/nexus/nexusd \
     && chmod +x /out/bin/nexus/nexusd
 # vault plugin (GenericSecretsService — AES-256-GCM secrets storage). Loaded by
-# nexusd via --plugin-dir; the dylib AND its Ed25519 .sig must ship together
-# (nexusd refuses to load an unsigned/unsigned-looking plugin). NOTE release tag
-# prefix is "vault-v*", NOT "nexusd-cluster-v*". No linux-aarch64 artifact is
-# published — fail fast on non-amd64 instead of shipping an image whose secrets
-# layer cannot load.
+# nexusd via --plugin-dir; the library AND its Ed25519 .sig must ship together
+# (nexusd refuses an unsigned plugin). Release tag prefix is "vault-v*".
+# 0.5.71 speaks plugin ABI 7 (nexusd 0.8.x) and also ships linux-aarch64.
 RUN NEXUS_VAULT_VERSION="$(jq -er '."nexus-vault"' /runtime-versions.json)" \
-    && if [ "$TARGETARCH" != "amd64" ]; then \
-      echo "ERROR: nexus-vault plugin has no linux-aarch64 release artifact; amd64 builds only until nexus publishes one" && exit 1; \
-    fi \
-    && VAULT_SHA256="675c72efcff64557f69452625f2c312558e7f0b924e62bd84844165f716a7395" \
-    && curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/vault-v${NEXUS_VAULT_VERSION}/nexus-vault-linux-x86_64.tar.gz" -o vault.tar.gz \
+    && case "$TARGETARCH" in \
+      amd64) VAULT_ARCH="x86_64"; VAULT_SHA256="2f7f32d3b2dde51fa5947cb635d4c0072a98cb0d7256287f8d8c8a42a556de16" ;; \
+      arm64) VAULT_ARCH="aarch64"; VAULT_SHA256="b322d142abcffcb210af961dde0dfc5817f752fd27c1c07f2ea4a305e1fca6f3" ;; \
+    esac \
+    && curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/vault-v${NEXUS_VAULT_VERSION}/nexus-vault-linux-${VAULT_ARCH}.tar.gz" -o vault.tar.gz \
     && echo "${VAULT_SHA256}  vault.tar.gz" | sha256sum -c - \
     && tar -xzf vault.tar.gz \
     && mkdir -p /out/bin/nexus/plugins \
     && mv libnexus_vault.so libnexus_vault.so.sig /out/bin/nexus/plugins/
+# The previous nexusd + vault (plugin ABI 6), kept under bin/nexus/legacy so an
+# existing deployment's Nexus data is upgraded in place with a verified
+# before/after comparison and can fall back (see src/server/nexus/nexusUpgrade.ts).
+# vault 0.5.44 was published for x86_64 only; arm64 images upgrade without the
+# before/after comparison (readability check + backup only).
+RUN LEGACY_CLUSTER="$(jq -er '."nexusd-cluster-legacy"' /runtime-versions.json)" \
+    && LEGACY_VAULT="$(jq -er '."nexus-vault-legacy"' /runtime-versions.json)" \
+    && if [ "$TARGETARCH" = "amd64" ]; then \
+      mkdir -p /legacy && cd /legacy \
+      && curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/nexusd-cluster-v${LEGACY_CLUSTER}/nexusd-cluster-linux-x86_64.tar.gz" -o nexus.tar.gz \
+      && echo "033861b16c811a997723b2c900a69de297a969db2b39c81936bbee08d2851b25  nexus.tar.gz" | sha256sum -c - \
+      && tar -xzf nexus.tar.gz \
+      && curl -fsSL "https://github.com/nexi-lab/nexus/releases/download/vault-v${LEGACY_VAULT}/nexus-vault-linux-x86_64.tar.gz" -o vault.tar.gz \
+      && echo "675c72efcff64557f69452625f2c312558e7f0b924e62bd84844165f716a7395  vault.tar.gz" | sha256sum -c - \
+      && tar -xzf vault.tar.gz \
+      && mkdir -p /out/bin/nexus/legacy/plugins \
+      && mv nexusd-cluster-linux-x86_64/nexusd-cluster /out/bin/nexus/legacy/nexusd \
+      && chmod +x /out/bin/nexus/legacy/nexusd \
+      && mv libnexus_vault.so libnexus_vault.so.sig /out/bin/nexus/legacy/plugins/; \
+    else \
+      mkdir -p /out/bin/nexus/legacy; \
+    fi
 # Download the host scode binary in a child stage so the nexus-only server image
 # stages do not fetch it unless the host package is being exported.
 FROM nexus-dl AS dl
@@ -255,7 +275,7 @@ RUN for i in 1 2 3; do \
 RUN apt-get update \
     && for i in 1 2 3 4 5 6 7 8; do \
          apt-get install -y --no-install-recommends \
-           libreoffice-writer libreoffice-core poppler-utils fonts-noto-cjk \
+           libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-core poppler-utils fonts-noto-cjk \
          && break || { echo "libreoffice install attempt $i failed; retrying in 10s..."; sleep 10; }; \
        done \
     && command -v soffice >/dev/null || (echo "libreoffice not installed after retries" && exit 1) \
@@ -278,12 +298,14 @@ COPY --from=js-builder /src/skills/ ./skills/
 # Go CLIs cross-compiled for target arch (from go-builder).
 COPY --from=go-builder /out/wiki ./bin/wiki
 COPY --from=go-builder /out/corpapp ./bin/corpapp
+COPY --from=go-builder /out/agentctl ./bin/agentctl
 # Downloaded binaries (from dl).
 # nexusd lives in /app/bin/nexus/ (NOT /root/.moss/nexus/bin/) because
 # docker-compose mounts the host ./.moss over /root/.moss and would shadow it;
 # NexusManager.resolveBinary() falls back to <cwd>/bin/nexus/nexusd (cwd=/app).
 COPY --from=dl /out/bin/nexus/nexusd ./bin/nexus/nexusd
 COPY --from=dl /out/bin/nexus/plugins ./bin/nexus/plugins
+COPY --from=dl /out/bin/nexus/legacy ./bin/nexus/legacy
 COPY --from=dl /out/bin/scode ./bin/scode
 
 RUN chmod +x ./bin/wiki ./bin/corpapp ./bin/scode ./bin/nexus/nexusd

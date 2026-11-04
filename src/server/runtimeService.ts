@@ -416,6 +416,17 @@ export class RuntimeService {
    * spawnAttempt). Default false → single-instance behavior unchanged.
    */
   draining = false
+  /**
+   * Agentify (set by the server once the service exists): stamps sessions with
+   * the agent's stable id and adds the agent-home / collaboration block to an
+   * agentified agent's first message. Null leaves sessions untouched.
+   */
+  agentifyHooks: {
+    onSessionCreated(sessionId: string, assistantName: string | null | undefined, source: string | null | undefined): Promise<void>
+    buildSessionBlock(input: { sessionId: string; orgId: string; userId: string; role: string; scopes: string[]; assistantName: string | null | undefined }): Promise<string | null>
+    /** The session answers another agent and may only read through stored credentials. */
+    isReadonlySession?(sessionId: string): boolean
+  } | null = null
 
   constructor(private readonly options: RuntimeServiceOptions) {
     this.store = options.store ?? openDirectConnectStore(options.config)
@@ -694,6 +705,14 @@ export class RuntimeService {
       source: input.source,
       channelChatId: input.channelChatId,
     })
+
+    if (this.agentifyHooks) {
+      // Before the first attempt spawns, so the session token and first
+      // message already know which agent (and which agent call) this is.
+      await this.agentifyHooks
+        .onSessionCreated(created.sessionId, input.assistantName, input.source)
+        .catch(err => console.warn(`[RuntimeService] agentify onSessionCreated failed for ${created.sessionId}:`, err))
+    }
 
     // Ensure config directory exists for scode sessions (which don't use session-runner which normally creates it)
     if (runtime.engine === 'scode') {
@@ -1127,6 +1146,7 @@ export class RuntimeService {
       // Admins/super_admins bypass the department-credential policy gate in
       // the auth proxy (full privileges within org / across orgs).
       isAdmin: user.role === 'admin' || user.role === 'super_admin',
+      ...(this.agentifyHooks?.isReadonlySession?.(session.sessionId) ? { readOnly: true } : {}),
     }
   }
 
@@ -1415,6 +1435,7 @@ export class RuntimeService {
         role: session.role,
         scopes: session.scopes,
         assistantName: effectiveAssistantName ?? null,
+        sessionId: session.sessionId,
       })
       sessionToken = signed.token
     } catch (err) {
@@ -1661,6 +1682,22 @@ export class RuntimeService {
       }
     }
 
+    let agentifyBlock: string | undefined
+    if (this.agentifyHooks && effectiveAssistantName) {
+      try {
+        agentifyBlock = (await this.agentifyHooks.buildSessionBlock({
+          sessionId: session.sessionId,
+          orgId: session.orgId,
+          userId: session.userId,
+          role: session.role,
+          scopes: session.scopes,
+          assistantName: effectiveAssistantName,
+        })) ?? undefined
+      } catch (err) {
+        console.warn(`[RuntimeService] agentify block failed for ${session.sessionId}:`, err)
+      }
+    }
+
     const manifest: RunnerManifest = {
       config: this.options.config,
       session: {
@@ -1682,6 +1719,7 @@ export class RuntimeService {
         availableWikis,
         availableCorpApps,
         sharedMemory,
+        ...(agentifyBlock ? { agentifyBlock } : {}),
         enabledSkills: options.enabledSkills,
         visibilityFilter: visibilityFilter ? {
           isAdmin: visibilityFilter.isAdmin,

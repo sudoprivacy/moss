@@ -1946,6 +1946,7 @@ export class AuthService {
     role: string
     scopes: string[]
     assistantName: string | null
+    sessionId?: string | null
     expiresInSec?: number
   }): { token: string; expiresAt: number } {
     return issueWikiSessionToken({
@@ -1957,6 +1958,7 @@ export class AuthService {
       scopes: input.scopes,
       keyId: randomUUID(),
       assistantName: input.assistantName,
+      sessionId: input.sessionId,
       expiresInSec: input.expiresInSec,
     })
   }
