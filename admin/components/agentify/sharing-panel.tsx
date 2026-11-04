@@ -86,20 +86,22 @@ function ListPicker(props: {
   )
 }
 
-/** Allow + deny pickers for one list; `inherit` shows the list it falls back to when unset. */
+/** Allow + deny pickers for one list. Unset = uses `inherited` (shown, and copied on the first edit). */
 function AccessPickers(props: {
   options: PickOption[]
   value: AccessList | undefined
   onChange: (next: AccessList | undefined) => void
   inheritText?: string
+  /** The list in effect while `value` is unset; editing starts from it. */
+  inherited?: AccessList
   disabled?: boolean
   label: string
 }) {
-  const v = props.value ?? EMPTY
   const inherited = props.value === undefined && props.inheritText !== undefined
+  // While inheriting, the pickers show the inherited names; the first edit copies them.
+  const v = props.value ?? props.inherited ?? EMPTY
   const set = (part: 'allow' | 'deny', names: string[]) => {
-    const next = { ...v, [part]: names }
-    props.onChange(next)
+    props.onChange({ allow: [...v.allow], deny: [...v.deny], [part]: names })
   }
   return (
     <div className="space-y-1 min-w-[180px]">
@@ -110,7 +112,7 @@ function AccessPickers(props: {
           options={props.options}
           value={v.allow}
           onChange={names => set('allow', names)}
-          placeholder={inherited ? props.inheritText! : '无'}
+          placeholder={inherited ? `${props.inheritText}（无）` : '无'}
           disabled={props.disabled}
         />
       </div>
@@ -121,10 +123,11 @@ function AccessPickers(props: {
           options={props.options}
           value={v.deny}
           onChange={names => set('deny', names)}
-          placeholder={inherited ? '（同上）' : '无'}
+          placeholder='无'
           disabled={props.disabled}
         />
       </div>
+      {inherited && !props.disabled ? <p className="text-xs text-muted-foreground">使用{props.inheritText}</p> : null}
       {props.value !== undefined && props.inheritText !== undefined && !props.disabled ? (
         <button type="button" className="text-xs text-muted-foreground hover:underline inline-flex items-center gap-1" onClick={() => props.onChange(undefined)}>
           <RotateCcw className="size-3" />
@@ -190,6 +193,7 @@ export function SharingPanel(props: {
             options={props.agents}
             value={sharing.agents}
             inheritText="同可调用的智能体"
+            inherited={callers}
             onChange={next =>
               setSharing(s => {
                 const updated = { ...s }
@@ -239,6 +243,7 @@ export function SharingPanel(props: {
                       options={props.users}
                       value={rule.users}
                       inheritText="默认员工名单"
+                      inherited={sharing.users}
                       disabled={rule.level === 'private'}
                       onChange={next => setRule(t, { users: next })}
                     />
@@ -249,6 +254,7 @@ export function SharingPanel(props: {
                       options={props.agents}
                       value={rule.agents}
                       inheritText="默认智能体名单"
+                      inherited={sharing.agents ?? callers}
                       disabled={rule.level !== 'agents'}
                       onChange={next => setRule(t, { agents: next })}
                     />

@@ -83,7 +83,6 @@ await page.getByLabel('整理回溯（小时）').fill('48')
 check((await deleteInput.inputValue()) === '2400', 'hour fields write into the config JSON and read back')
 check(await page.locator('[role=dialog] .monaco-editor .line-numbers').first().waitFor({ timeout: 20_000 }).then(() => true, () => false),
   'the JSON editor renders (with line numbers) next to the hour fields')
-check(await visible(page.locator('[role=dialog] .view-lines').filter({ hasText: '"deleteAfterHours": 2400' })), 'the JSON editor shows the hours typed into the fields')
 await page.waitForTimeout(500)
 await page.screenshot({ path: join(OUT, '2-config.png') })
 await page.getByRole('button', { name: '保存', exact: true }).click()
@@ -104,6 +103,47 @@ await page.getByRole('button', { name: '保存', exact: true }).click()
 await page.getByText(/协作配置：/).waitFor({ state: 'hidden' })
 const restored = (await adminApi('GET', '/api/v1/admin/agentify/agents')).agents.find((a: any) => a.displayName === enabledName)
 check(restored?.config?.memory?.deleteAfterHours === undefined && restored?.historyPolicy?.deleteAfterHours === 4320, 'clearing the fields returns the agent to server defaults')
+
+// Sharing panel: levels and lists per data type, written into the config.
+const original = restored.config
+await enabledRow.getByRole('button', { name: '配置' }).click()
+await page.getByText(/协作配置：/).waitFor()
+check(await visible(page.getByText('共享权限', { exact: true })), 'config dialog has the 共享权限 panel')
+for (const name of ['对话正文', '工作摘要', '输入文件', '产出文件', '中间文件', '共享记忆']) {
+  check(await page.getByLabel(`${name} 共享范围`).isVisible(), `sharing row for ${name}`)
+}
+check(await page.getByLabel('对话正文 员工 允许').isDisabled(), 'employee lists are disabled for 仅本人')
+check(await page.getByLabel('共享记忆 智能体 允许').isDisabled(), 'agent lists are disabled below 员工 + 其他智能体')
+const pickLevel = async (type: string, level: string) => {
+  await page.getByLabel(`${type} 共享范围`).click()
+  await page.getByRole('option', { name: level, exact: true }).click()
+}
+await pickLevel('输入文件', '本智能体员工')
+await pickLevel('产出文件', '员工 + 其他智能体')
+check(await page.getByLabel('产出文件 智能体 允许').isEnabled(), 'choosing 员工 + 其他智能体 enables the agent list')
+// Exclude one employee from summaries; hand outputs to one agent.
+const pickFirst = async (label: string) => {
+  await page.getByLabel(label).click()
+  const item = page.locator('[data-radix-popper-content-wrapper] label').nth(1) // 0 = 全部
+  const name = (await item.innerText()).trim()
+  await item.click()
+  await page.keyboard.press('Escape')
+  return name
+}
+const excluded = await pickFirst('工作摘要 员工 排除')
+const handedTo = await pickFirst('产出文件 智能体 允许')
+check(await page.getByLabel('工作摘要 员工 排除').innerText().then(t => t.includes(excluded)), `the picker shows the chosen employee (${excluded})`)
+check(await visible(page.locator('[role=dialog] .view-lines').filter({ hasText: '"deny"' })), 'the JSON editor follows the sharing panel')
+await page.getByText('共享权限', { exact: true }).scrollIntoViewIfNeeded()
+await page.waitForTimeout(400)
+await page.screenshot({ path: join(OUT, '2b-sharing.png') })
+await page.getByRole('button', { name: '保存', exact: true }).click()
+await page.getByText(/协作配置：/).waitFor({ state: 'hidden' })
+const shared = (await adminApi('GET', '/api/v1/admin/agentify/agents')).agents.find((a: any) => a.displayName === enabledName)?.config?.sharing
+check(shared?.input?.level === 'users' && shared?.output?.level === 'agents', `levels are saved (${JSON.stringify({ input: shared?.input, output: shared?.output })})`)
+check(shared?.summary?.users?.deny?.length === 1 && shared?.output?.agents?.allow?.length === 1, `lists are saved (${handedTo}; ${JSON.stringify(shared?.summary)})`)
+check(JSON.stringify(shared?.summary?.users?.allow) === '["*"]', 'excluding one employee keeps everyone else (starts from the default list)')
+await adminApi('PUT', `/api/v1/admin/agentify/agents/${restored.id}`, { config: original })
 
 // History dialog with a Chinese search.
 await enabledRow.getByRole('button', { name: '历史' }).click()

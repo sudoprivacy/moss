@@ -370,10 +370,19 @@ export class A2AService {
       const { reply } = await this.deps.driver.run(sessionId, prompt, call.kind === 'ask' ? ASK_TIMEOUT_MS : TASK_TIMEOUT_MS)
       // Make the work searchable (and collect its files) before reporting back.
       await this.deps.digestSession(sessionId).catch(() => undefined)
-      const files = [
+      // Files made in the session, then saved files handed over; one per name
+      // (an agent may both copy a file into its workspace and hand it over).
+      const files: string[] = []
+      const names = new Set<string>()
+      for (const f of [
         ...(await this.outputFiles(call.orgId, target.row.agentId, sessionId)),
         ...(await this.deps.home.list(handoffDir(call.orgId, target.row.agentId, call.id))).filter(e => !e.isDirectory).map(e => e.path),
-      ]
+      ]) {
+        const name = displayName(f)
+        if (names.has(name)) continue
+        names.add(name)
+        files.push(f)
+      }
       outcome = { status: 'done', resultText: truncateMiddle(reply, MAX_RESULT_CHARS), resultFiles: files }
     } catch (err) {
       outcome = { status: 'failed', error: err instanceof Error ? err.message : String(err) }

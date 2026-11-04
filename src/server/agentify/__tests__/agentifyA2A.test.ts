@@ -120,7 +120,8 @@ describe('agent-to-agent collaboration', () => {
           seen.errors.push(`${p}: ${(err as A2AError).code}`)
         }
       }
-      return { reply: '周报见附件。' }
+      // It also copies the same report into its workspace: the caller gets one weekly.md.
+      return { reply: '周报见附件。', files: { 'weekly.md': '# 返厂周报\n灯具 40 件\n' } }
     })
     const gendan = await callerFor('跟单助手', 'u-gendan')
     const done = await settle((await fx.svc.a2a.ask(gendan, { agent: '售后返厂助手', capability: 'return-stats', question: '发我最近的返厂周报' })).id)
@@ -138,7 +139,7 @@ describe('agent-to-agent collaboration', () => {
     ])
 
     // The handed-over file comes back with the call; only the calling agent can fetch it.
-    assert.ok(done.resultFiles.some(f => f.includes(`/handoffs/${done.id}/weekly.md`)))
+    assert.equal(done.resultFiles.filter(f => f.endsWith('/weekly.md')).length, 1, `one file per name: ${done.resultFiles}`)
     assert.match((await fx.svc.a2a.callFile(gendan, done.id, 'weekly.md')).buf.toString(), /灯具 40 件/)
     await rejects(fx.svc.a2a.callFile(gendan, done.id, '司机名单.csv'), 'file_not_found')
     await fx.svc.configure(ORG, 'other', { a2a: { callers: ['*'] } })
