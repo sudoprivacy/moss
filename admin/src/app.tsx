@@ -30,6 +30,7 @@ const RotationAlertsPage = lazy(() => import('./pages/secrets/rotation-alerts-pa
 const CronJobsPage = lazy(() => import('./pages/cron-jobs-page'))
 const EventTriggersPage = lazy(() => import('./pages/event-triggers-page'))
 const AgentifyPage = lazy(() => import('./pages/agentify-page'))
+const AgentifyConfirmationsPage = lazy(() => import('./pages/agentify-confirmations-page'))
 const McpServersPage = lazy(() => import('./pages/mcp/mcp-servers-page'))
 const McpEnterpriseServersPage = lazy(() => import('./pages/mcp/mcp-enterprise-servers-page'))
 const McpDepartmentServersPage = lazy(() => import('./pages/mcp/mcp-department-servers-page'))
@@ -295,6 +296,14 @@ export default function App() {
           element={
             <SuspendedRoute>
               <AgentifyPage />
+            </SuspendedRoute>
+          }
+        />
+        <Route
+          path="/agentify/confirmations"
+          element={
+            <SuspendedRoute>
+              <AgentifyConfirmationsPage />
             </SuspendedRoute>
           }
         />

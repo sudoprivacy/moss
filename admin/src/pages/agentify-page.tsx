@@ -13,9 +13,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { SharingPanel, type PickOption } from '@/components/agentify/sharing-panel'
+import { CapabilitiesPanel, capabilityProblems } from '@/components/agentify/capabilities-panel'
 import { getUsers } from '@/lib/api/auth'
 import {
   DEFAULT_CONFIG,
+  SHARE_TYPES,
   confirmCall,
   digestNow,
   disableAgentify,
@@ -54,6 +56,15 @@ const KIND_LABEL: Record<string, string> = {
   a2a: '协作',
   artifact: '产出',
   input: '输入',
+}
+
+const SHARE_TYPE_SHORT: Record<(typeof SHARE_TYPES)[number], string> = {
+  conversation: '对话',
+  summary: '摘要',
+  input: '输入',
+  output: '产出',
+  intermediate: '中间文件',
+  sharedMemory: '共享记忆',
 }
 
 const NEXUS_LABEL: Record<NexusUpgradeReport['status'], string> = {
@@ -102,7 +113,8 @@ function readHours(configText: string, key: HourKey): { valid: boolean; value: n
   }
 }
 
-const CONFIG_HELP = `a2a.capabilities: 本智能体对外提供的能力（kind=ask 只读问答；kind=task 委派任务，可设 requiresConfirmation / allowOutbound；callers 可为单个能力另设可调用的智能体）
+const CONFIG_HELP = `所有设置都可以在前面几页填写；这里是同一份配置的 JSON。
+a2a.capabilities: 本智能体对外提供的能力（kind=ask 只读问答；kind=task 委派任务，可设 requiresConfirmation / allowOutbound；callers 可为单个能力另设可调用的智能体）
 a2a.callers: 可调用本智能体的其他智能体 { allow, deny }（名称 / ID，"*" 表示全部已开启协作的智能体；排除优先）
 sharing: 每类数据的共享范围与名单，见下方「共享权限」。其他智能体不能直接读取本智能体的数据，只能提问，由本智能体交给它
 a2a.confirmers: 可以确认委派任务的员工 ID（管理员始终可以）
@@ -120,6 +132,7 @@ export default function AgentifyPage() {
   const [configText, setConfigText] = useState('')
   const [saving, setSaving] = useState(false)
   const [userOptions, setUserOptions] = useState<PickOption[] | null>(null)
+  const [configTab, setConfigTab] = useState('general')
 
   const [memoryAgent, setMemoryAgent] = useState<AgentifyAgent | null>(null)
   const [memoryText, setMemoryText] = useState('')
@@ -168,6 +181,7 @@ export default function AgentifyPage() {
 
   const openConfig = (agent: AgentifyAgent) => {
     setConfigAgent(agent)
+    setConfigTab('general')
     setConfigText(JSON.stringify(agent.config ?? DEFAULT_CONFIG, null, 2))
     if (userOptions === null) {
       getUsers()
@@ -214,6 +228,13 @@ export default function AgentifyPage() {
       parsed = JSON.parse(configText)
     } catch {
       toast.error('配置不是合法的 JSON')
+      setConfigTab('json')
+      return
+    }
+    const problems = capabilityProblems(parsed?.a2a?.capabilities ?? [])
+    if (problems.length > 0) {
+      toast.error(problems[0]!)
+      setConfigTab('capabilities')
       return
     }
     setSaving(true)
@@ -340,13 +361,14 @@ export default function AgentifyPage() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
               <Input className="pl-9" placeholder="搜索智能体..." value={filter} onChange={e => setFilter(e.target.value)} />
             </div>
-            <div className="border rounded-lg">
+            <div className="border rounded-lg overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>智能体</TableHead>
                     <TableHead>协作</TableHead>
                     <TableHead>对外能力</TableHead>
+                    <TableHead title="共享范围为「员工 + 其他智能体」的数据">交给其他智能体</TableHead>
                     <TableHead>历史记录</TableHead>
                     <TableHead className="text-right">操作</TableHead>
                   </TableRow>
@@ -355,12 +377,12 @@ export default function AgentifyPage() {
                   {loading && agents.length === 0
                     ? Array.from({ length: 4 }).map((_, i) => (
                         <TableRow key={i}>
-                          <TableCell colSpan={5}><Skeleton className="h-6" /></TableCell>
+                          <TableCell colSpan={6}><Skeleton className="h-6" /></TableCell>
                         </TableRow>
                       ))
                     : shown.map(agent => (
                         <TableRow key={agent.id}>
-                          <TableCell className="max-w-[420px]">
+                          <TableCell className="max-w-[300px]">
                             <div className="font-medium truncate">{agent.displayName}</div>
                             <div className="text-xs text-muted-foreground truncate" title={agent.description}>
                               {agent.name}{agent.description ? ` · ${agent.description}` : ''}
@@ -369,9 +391,14 @@ export default function AgentifyPage() {
                           <TableCell>
                             {agent.agentified ? <Badge>已开启</Badge> : <Badge variant="secondary">未开启</Badge>}
                           </TableCell>
-                          <TableCell className="text-sm max-w-[220px] truncate">
+                          <TableCell className="text-sm max-w-[180px] truncate" title={agent.config?.a2a.capabilities.map(c => c.id).join("、")}>
                             {agent.config?.a2a.capabilities.length
                               ? agent.config.a2a.capabilities.map(c => c.id).join('、')
+                              : '—'}
+                          </TableCell>
+                          <TableCell className="text-sm max-w-[140px] truncate" title="共享范围为「员工 + 其他智能体」的数据">
+                            {agent.agentified && agent.config
+                              ? SHARE_TYPES.filter(t => agent.config!.sharing?.[t]?.level === 'agents').map(t => SHARE_TYPE_SHORT[t]).join('、') || '—'
                               : '—'}
                           </TableCell>
                           <TableCell>{agent.documents}</TableCell>
@@ -405,7 +432,7 @@ export default function AgentifyPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="border rounded-lg">
+            <div className="border rounded-lg overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -427,7 +454,7 @@ export default function AgentifyPage() {
                       <TableCell>{call.kind === 'ask' ? '查询' : '委派'} · {call.capability}</TableCell>
                       <TableCell>{call.actor?.name ?? '—'}</TableCell>
                       <TableCell><Badge variant={statusVariant(call.status)}>{STATUS_LABEL[call.status] ?? call.status}</Badge></TableCell>
-                      <TableCell className="max-w-md truncate text-sm">{call.result ?? call.error ?? '—'}</TableCell>
+                      <TableCell className="max-w-[360px] truncate text-sm" title={call.result ?? call.error ?? undefined}>{call.result ?? call.error ?? '—'}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -457,40 +484,72 @@ export default function AgentifyPage() {
       </div>
 
       <Dialog open={configAgent !== null} onOpenChange={open => !open && setConfigAgent(null)}>
-        <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-6xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>协作配置：{configAgent?.displayName}</DialogTitle>
-            <DialogDescription className="whitespace-pre-line text-xs">{CONFIG_HELP}</DialogDescription>
+            <DialogDescription className="text-xs">
+              开启后，此智能体的会话会整理为可检索的历史与记忆；其他智能体只能通过下方开放的能力向它提问或委派任务，数据按「共享权限」交接。
+            </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-3 sm:grid-cols-3">
-            {HOUR_FIELDS.map(f => {
-              const { valid, value } = readHours(configText, f.key)
-              const def = historyDefaults?.[f.key]
-              return (
-                <label key={f.key} className="space-y-1 text-sm">
-                  <span className="font-medium whitespace-nowrap">{f.label}</span>
-                  <Input
-                    type="number"
-                    min={0}
-                    step={1}
-                    aria-label={f.label}
-                    disabled={!valid}
-                    value={value ?? ''}
-                    placeholder={def !== undefined ? `默认 ${def}` : '服务器默认'}
-                    onChange={e => setHours(f.key, e.target.value)}
-                  />
-                  <span className="block text-xs text-muted-foreground">{f.help}{def !== undefined ? `（默认 ${hoursText(def, f.key)}）` : ''}</span>
-                </label>
-              )
-            })}
-          </div>
-          {configAgent?.agentified ? (
-            <p className="text-xs text-muted-foreground" data-testid="history-policy">
-              当前生效：回溯 {hoursText(configAgent.historyPolicy.digestLookbackHours, 'digestLookbackHours')} · 衰减半衰期 {hoursText(configAgent.historyPolicy.decayHalfLifeHours, 'decayHalfLifeHours')} · 删除期限 {hoursText(configAgent.historyPolicy.deleteAfterHours, 'deleteAfterHours')}（回溯不会超过删除期限）
-            </p>
-          ) : null}
-          <SharingPanel config={parsedConfig} onChange={updateConfig} users={userOptions ?? []} agents={agentOptions} />
-          <JsonEditor value={configText} onChange={setConfigText} height="260px" />
+          <Tabs value={configTab} onValueChange={setConfigTab}>
+            <TabsList>
+              <TabsTrigger value="general">常规</TabsTrigger>
+              <TabsTrigger value="capabilities">对外能力{parsedConfig?.a2a?.capabilities?.length ? `（${parsedConfig.a2a.capabilities.length}）` : ''}</TabsTrigger>
+              <TabsTrigger value="sharing">共享权限</TabsTrigger>
+              <TabsTrigger value="json">JSON</TabsTrigger>
+            </TabsList>
+            <TabsContent value="general" className="space-y-3 pt-2">
+              <div className="grid gap-3 sm:grid-cols-3">
+                {HOUR_FIELDS.map(f => {
+                  const { valid, value } = readHours(configText, f.key)
+                  const def = historyDefaults?.[f.key]
+                  return (
+                    <label key={f.key} className="space-y-1 text-sm">
+                      <span className="font-medium whitespace-nowrap">{f.label}</span>
+                      <Input
+                        type="number"
+                        min={0}
+                        step={1}
+                        aria-label={f.label}
+                        disabled={!valid}
+                        value={value ?? ''}
+                        placeholder={def !== undefined ? `默认 ${def}` : '服务器默认'}
+                        onChange={e => setHours(f.key, e.target.value)}
+                      />
+                      <span className="block text-xs text-muted-foreground">{f.help}{def !== undefined ? `（默认 ${hoursText(def, f.key)}）` : ''}</span>
+                    </label>
+                  )
+                })}
+              </div>
+              {configAgent?.agentified ? (
+                <p className="text-xs text-muted-foreground" data-testid="history-policy">
+                  当前生效：回溯 {hoursText(configAgent.historyPolicy.digestLookbackHours, 'digestLookbackHours')} · 衰减半衰期 {hoursText(configAgent.historyPolicy.decayHalfLifeHours, 'decayHalfLifeHours')} · 删除期限 {hoursText(configAgent.historyPolicy.deleteAfterHours, 'deleteAfterHours')}（回溯不会超过删除期限）
+                </p>
+              ) : null}
+              <label className="block space-y-1 text-sm max-w-xs">
+                <span className="font-medium">记忆注入字数</span>
+                <Input
+                  type="number"
+                  min={1}
+                  aria-label="记忆注入字数"
+                  disabled={!parsedConfig}
+                  value={parsedConfig?.memory?.injectChars ?? ''}
+                  onChange={e => updateConfig(c => ({ ...c, memory: { ...c.memory, injectChars: e.target.value === '' ? (undefined as unknown as number) : Number(e.target.value) } }))}
+                />
+                <span className="block text-xs text-muted-foreground">新会话开头带入的记忆与最近工作的字数上限（默认 4000）</span>
+              </label>
+            </TabsContent>
+            <TabsContent value="capabilities" className="pt-2">
+              <CapabilitiesPanel config={parsedConfig} onChange={updateConfig} users={userOptions ?? []} agents={agentOptions} />
+            </TabsContent>
+            <TabsContent value="sharing" className="pt-2">
+              <SharingPanel config={parsedConfig} onChange={updateConfig} users={userOptions ?? []} agents={agentOptions} />
+            </TabsContent>
+            <TabsContent value="json" className="space-y-2 pt-2">
+              <p className="whitespace-pre-line text-xs text-muted-foreground">{CONFIG_HELP}</p>
+              <JsonEditor value={configText} onChange={setConfigText} height="420px" />
+            </TabsContent>
+          </Tabs>
           <DialogFooter className="gap-2">
             {configAgent?.agentified ? <Button variant="outline" onClick={() => void turnOff()}>关闭协作</Button> : null}
             <Button onClick={() => void saveConfig()} disabled={saving}>{configAgent?.agentified ? '保存' : '开启协作'}</Button>
@@ -499,7 +558,7 @@ export default function AgentifyPage() {
       </Dialog>
 
       <Dialog open={memoryAgent !== null} onOpenChange={open => !open && setMemoryAgent(null)}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>共享记忆：{memoryAgent?.displayName}</DialogTitle>
             <DialogDescription>按「共享权限」中共享记忆的设置提供给员工（及其他智能体提问时的回答）。每行一条，格式「- [时间 记录人] 内容」。</DialogDescription>
@@ -512,7 +571,7 @@ export default function AgentifyPage() {
       </Dialog>
 
       <Dialog open={historyAgent !== null} onOpenChange={open => !open && setHistoryAgent(null)}>
-        <DialogContent className="max-w-5xl">
+        <DialogContent className="sm:max-w-6xl">
           <DialogHeader>
             <DialogTitle>历史与产出：{historyAgent?.displayName}</DialogTitle>
             <DialogDescription>会话结束后自动整理为摘要、对话与产出清单；关键词与语义混合检索。</DialogDescription>
@@ -541,6 +600,9 @@ export default function AgentifyPage() {
                 >
                   <div className="text-xs text-muted-foreground">{KIND_LABEL[doc.kind] ?? doc.kind} · {fmt(doc.activeAt ?? doc.createdAt)}</div>
                   <div className="text-sm font-medium truncate">{doc.title}</div>
+                  {(doc.origin ?? doc.meta?.origin) ? (
+                    <div className="text-xs text-muted-foreground truncate" title={String(doc.origin ?? doc.meta?.origin)}>来自：{String(doc.origin ?? doc.meta?.origin)}</div>
+                  ) : null}
                   {doc.snippet ? <div className="text-xs text-muted-foreground line-clamp-2">{doc.snippet}</div> : null}
                 </button>
               ))}
@@ -560,7 +622,7 @@ export default function AgentifyPage() {
       </Dialog>
 
       <Dialog open={callDetail !== null} onOpenChange={open => !open && setCallDetail(null)}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>{callDetail?.caller.name} → {callDetail?.target.name}（{callDetail?.capability}）</DialogTitle>
             <DialogDescription>

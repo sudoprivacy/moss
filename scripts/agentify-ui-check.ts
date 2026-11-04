@@ -30,7 +30,15 @@ const db = new DatabaseSync(arg('db'), { readOnly: true })
 const cfg = (k: string) => (db.prepare('SELECT value FROM server_config WHERE key = ?').get(k) as { value?: string } | undefined)?.value
 const admin = db.prepare(`SELECT id FROM users WHERE role = 'super_admin' LIMIT 1`).get() as { id: string }
 const token = issueAccessToken({ iss: cfg('issuer') ?? 'moss-server', sub: admin.id, org_id: ORG, role: 'super_admin', scopes: ['*'], key_id: randomUUID() }, cfg('jwt_secret')!, 3600).token
+const jwtSecret = cfg('jwt_secret')!
+const issuer = cfg('issuer') ?? 'moss-server'
 db.close()
+// A plain employee (one the end-to-end run created, found through the API) for the confirmations page.
+const usersList = (await (await fetch(`${BASE}/api/v1/users`, { headers: { authorization: `Bearer ${token}` } })).json()) as { users?: Array<{ id: string; name: string; role: string; createdAt: number }> }
+const employee = (usersList.users ?? []).filter(u => u.role === 'user' && u.name.startsWith('e2e_gendan1_')).sort((a, b) => b.createdAt - a.createdAt)[0]
+const employeeToken = employee
+  ? issueAccessToken({ iss: issuer, sub: employee.id, org_id: ORG, role: 'user', scopes: [], key_id: randomUUID() }, jwtSecret, 3600).token
+  : null
 
 let failures = 0
 const check = (ok: boolean, what: string) => {
@@ -72,7 +80,14 @@ const enabledRow = page.locator('table tbody tr', { hasText: '已开启' }).firs
 const enabledName = (await enabledRow.locator('td').first().innerText()).split('\n')[0]!.trim()
 await enabledRow.getByRole('button', { name: '配置' }).click()
 await page.getByText(/协作配置：/).waitFor()
-check(await page.getByText(/capabilities/).first().isVisible(), 'config dialog explains the fields')
+const dialogWidth = (await page.locator('[role=dialog]').boundingBox())?.width ?? 0
+check(dialogWidth >= 1000, `the config dialog uses the screen width (${Math.round(dialogWidth)} px)`)
+const tabs = ['常规', '对外能力', '共享权限', 'JSON']
+check((await Promise.all(tabs.map(t => page.getByRole('tab', { name: new RegExp(`^${t}`) }).isVisible()))).every(Boolean), 'config dialog has tabs 常规 / 对外能力 / 共享权限 / JSON')
+const openTab = async (name: string) => {
+  await page.getByRole('tab', { name: new RegExp(`^${name}`) }).click()
+  await page.waitForTimeout(300)
+}
 const deleteInput = page.getByLabel('删除期限（小时）')
 check(await page.getByLabel('整理回溯（小时）').isVisible() && await page.getByLabel('检索衰减半衰期（小时）').isVisible() && await deleteInput.isVisible(),
   'config dialog has lookback / decay / deletion hour fields')
@@ -81,10 +96,15 @@ check(await visible(page.getByTestId('history-policy').filter({ hasText: '删除
 await deleteInput.fill('2400')
 await page.getByLabel('整理回溯（小时）').fill('48')
 check((await deleteInput.inputValue()) === '2400', 'hour fields write into the config JSON and read back')
-check(await page.locator('[role=dialog] .monaco-editor .line-numbers').first().waitFor({ timeout: 20_000 }).then(() => true, () => false),
-  'the JSON editor renders (with line numbers) next to the hour fields')
-await page.waitForTimeout(500)
+await page.waitForTimeout(300)
 await page.screenshot({ path: join(OUT, '2-config.png') })
+await openTab('JSON')
+check(await page.locator('[role=dialog] .monaco-editor .line-numbers').first().waitFor({ timeout: 20_000 }).then(() => true, () => false),
+  'the JSON tab renders the editor (with line numbers)')
+check(await page.getByText(/capabilities/).first().isVisible(), 'the JSON tab explains the fields')
+// The editor draws only the lines on screen; read its whole text.
+const editorText = () => page.evaluate(() => ((window as any).monaco?.editor?.getModels?.() ?? []).map((m: any) => m.getValue()).join('\n')) as Promise<string>
+check(/"deleteAfterHours": 2400/.test(await editorText()), 'the JSON shows the hours typed on the first tab')
 await page.getByRole('button', { name: '保存', exact: true }).click()
 await page.getByText(/协作配置：/).waitFor({ state: 'hidden' })
 const adminApi = async (method: string, path: string, body?: unknown) => {
@@ -108,7 +128,7 @@ check(restored?.config?.memory?.deleteAfterHours === undefined && restored?.hist
 const original = restored.config
 await enabledRow.getByRole('button', { name: '配置' }).click()
 await page.getByText(/协作配置：/).waitFor()
-check(await visible(page.getByText('共享权限', { exact: true })), 'config dialog has the 共享权限 panel')
+await openTab('共享权限')
 for (const name of ['对话正文', '工作摘要', '输入文件', '产出文件', '中间文件', '共享记忆']) {
   check(await page.getByLabel(`${name} 共享范围`).isVisible(), `sharing row for ${name}`)
 }
@@ -133,21 +153,66 @@ const pickFirst = async (label: string) => {
 const excluded = await pickFirst('工作摘要 员工 排除')
 const handedTo = await pickFirst('产出文件 智能体 允许')
 check(await page.getByLabel('工作摘要 员工 排除').innerText().then(t => t.includes(excluded)), `the picker shows the chosen employee (${excluded})`)
-check(await visible(page.locator('[role=dialog] .view-lines').filter({ hasText: '"deny"' })), 'the JSON editor follows the sharing panel')
-await page.getByText('共享权限', { exact: true }).scrollIntoViewIfNeeded()
-await page.waitForTimeout(400)
+await page.waitForTimeout(300)
+const sharingTable = await page.locator('[role=dialog] table').boundingBox()
+const dialogBox = await page.locator('[role=dialog]').boundingBox()
+check(!!sharingTable && !!dialogBox && sharingTable.x >= dialogBox.x && sharingTable.x + sharingTable.width <= dialogBox.x + dialogBox.width + 1, 'the sharing table fits inside the dialog')
 await page.screenshot({ path: join(OUT, '2b-sharing.png') })
+await openTab('JSON')
+check(/"deny": \[\s*"/.test(await editorText()), 'the JSON tab follows the sharing panel')
 await page.getByRole('button', { name: '保存', exact: true }).click()
 await page.getByText(/协作配置：/).waitFor({ state: 'hidden' })
 const shared = (await adminApi('GET', '/api/v1/admin/agentify/agents')).agents.find((a: any) => a.displayName === enabledName)?.config?.sharing
 check(shared?.input?.level === 'users' && shared?.output?.level === 'agents', `levels are saved (${JSON.stringify({ input: shared?.input, output: shared?.output })})`)
-check(shared?.summary?.users?.deny?.length === 1 && shared?.output?.agents?.allow?.length === 1, `lists are saved (${handedTo}; ${JSON.stringify(shared?.summary)})`)
+const inheritedAgents = (original.sharing?.agents ?? original.a2a.callers).allow.length
+check(shared?.summary?.users?.deny?.length === 1 && shared?.output?.agents?.allow?.length === inheritedAgents + 1, `lists are saved (${handedTo}; ${JSON.stringify({ summary: shared?.summary, output: shared?.output })})`)
 check(JSON.stringify(shared?.summary?.users?.allow) === '["*"]', 'excluding one employee keeps everyone else (starts from the default list)')
+await adminApi('PUT', `/api/v1/admin/agentify/agents/${restored.id}`, { config: original })
+
+// Capabilities form: add a task that acts outward, pick a confirmer, save.
+await page.reload()
+await page.getByRole('heading', { name: '协作智能体' }).waitFor({ timeout: 30_000 })
+await page.waitForSelector('table tbody tr')
+await page.locator('table tbody tr', { hasText: enabledName }).first().getByRole('button', { name: '配置' }).click()
+await page.getByText(/协作配置：/).waitFor()
+await openTab('对外能力')
+const capCount = original.a2a.capabilities.length
+check(await page.getByTestId('capability-0').isVisible() === capCount > 0, `existing capabilities are listed (${capCount})`)
+await page.getByRole('button', { name: '添加能力' }).click()
+const n = capCount + 1
+check(await page.getByTestId('capability-problems').isVisible(), 'a new capability without a description is flagged')
+await page.getByLabel(`能力 ${n} ID`).fill('Bad Id')
+check(await visible(page.getByTestId('capability-problems').filter({ hasText: 'ID 只能用小写字母' })), 'an invalid id is flagged')
+await page.getByLabel(`能力 ${n} ID`).fill('ui-check-notify')
+await page.getByLabel(`能力 ${n} 说明`).fill('界面检查：通知供应商')
+check(await page.getByRole('checkbox', { name: '需要人工确认', exact: true }).nth(n - 1).isDisabled(), 'a read-only question cannot require confirmation')
+await page.getByLabel(`能力 ${n} 类型`).click()
+await page.getByRole('option', { name: '委派任务' }).click()
+await page.getByRole('checkbox', { name: '允许对外动作', exact: true }).nth(n - 1).click()
+check(await page.getByRole('checkbox', { name: '需要人工确认', exact: true }).nth(n - 1).isChecked(), 'allowing outward actions turns on confirmation')
+check(await visible(page.getByText('建议指定确认人')), 'an outward task without confirmers is pointed out')
+await page.getByLabel('任务确认人').click()
+const confirmer = page.locator('[data-radix-popper-content-wrapper] label').first()
+const confirmerName = (await confirmer.innerText()).trim()
+check(confirmerName !== '全部', `the confirmer list has no 全部 entry (first: ${confirmerName})`)
+await confirmer.click()
+await page.keyboard.press('Escape')
+await page.getByLabel('每日调用上限').fill('77')
+await page.waitForTimeout(300)
+await page.screenshot({ path: join(OUT, '2c-capabilities.png'), fullPage: true })
+await page.getByRole('button', { name: '保存', exact: true }).click()
+await page.getByText(/协作配置：/).waitFor({ state: 'hidden' })
+const capsSaved = (await adminApi('GET', '/api/v1/admin/agentify/agents')).agents.find((a: any) => a.displayName === enabledName)?.config?.a2a
+const added = capsSaved?.capabilities?.find((c: any) => c.id === 'ui-check-notify')
+check(added?.kind === 'task' && added?.allowOutbound === true && added?.requiresConfirmation === true, `the new capability is saved (${JSON.stringify(added)})`)
+check(capsSaved?.confirmers?.length === 1 && capsSaved?.dailyCallLimit === 77, `confirmer and daily limit are saved (${JSON.stringify({ confirmers: capsSaved?.confirmers, limit: capsSaved?.dailyCallLimit })})`)
 await adminApi('PUT', `/api/v1/admin/agentify/agents/${restored.id}`, { config: original })
 
 // History dialog with a Chinese search.
 await enabledRow.getByRole('button', { name: '历史' }).click()
 await page.getByText(/历史与产出：/).waitFor()
+const historyWidth = (await page.locator('[role=dialog]').boundingBox())?.width ?? 0
+check(historyWidth >= 1000, `the history dialog uses the screen width (${Math.round(historyWidth)} px)`)
 await page.getByPlaceholder(/用中文提问/).fill('第44周 返厂')
 await page.getByRole('button', { name: '检索' }).click()
 await page.waitForTimeout(2500)
@@ -184,6 +249,28 @@ await page.getByRole('tab', { name: /待确认/ }).click()
 await page.waitForTimeout(800)
 await page.screenshot({ path: join(OUT, '6-pending.png') })
 check(true, 'pending confirmations tab renders')
+
+// A confirmer who is not an administrator: 待确认任务 is in their menu and loads.
+if (employeeToken) {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+  const p2 = await ctx.newPage()
+  await p2.goto(`${BASE}/admin/login`)
+  await p2.evaluate(([t, org]) => {
+    localStorage.setItem('moss_access_token', t)
+    localStorage.setItem('moss_token_expires_at', String(Date.now() + 3600_000))
+    localStorage.setItem('moss_preferred_org_id', org)
+  }, [employeeToken, ORG])
+  await p2.goto(`${BASE}/admin/`)
+  await p2.waitForTimeout(2500)
+  check(await p2.getByRole('link', { name: '待确认任务' }).isVisible(), 'a plain employee sees 待确认任务 in the menu')
+  check(!(await p2.getByRole('link', { name: '协作智能体' }).isVisible()), 'but not the 协作智能体 administration')
+  await p2.getByRole('link', { name: '待确认任务' }).click()
+  check(await p2.getByText(/没有需要你确认的任务|任务内容/).first().waitFor({ timeout: 20_000 }).then(() => true, () => false), 'the confirmations page loads for a plain employee')
+  await p2.screenshot({ path: join(OUT, '7-confirmations-employee.png') })
+  await ctx.close()
+} else {
+  check(false, 'no end-to-end employee found for the confirmations page check')
+}
 
 const relevant = consoleErrors.filter(e => !/favicon|Failed to load resource: the server responded with a status of 404/.test(e))
 check(relevant.length === 0, `no browser console errors${relevant.length ? `: ${relevant.slice(0, 3).join(' | ')}` : ''}`)

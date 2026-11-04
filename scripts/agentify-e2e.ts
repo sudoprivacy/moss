@@ -118,8 +118,18 @@ async function chat(token: string, sessionId: string, text: string): Promise<str
       ws.terminate()
       reject(new Error(`turn timed out after ${TURN_TIMEOUT_MS / 1000}s`))
     }, TURN_TIMEOUT_MS)
-    ws.on('open', () => ws.send(text))
+    // The server starts listening for input only once it is connected to the
+    // session runner, which then says hello: send after the first message from
+    // the server (or after 10 s), not on open, or the message can be lost.
+    let sent = false
+    const send = () => {
+      if (sent) return
+      sent = true
+      ws.send(text)
+    }
+    ws.on('open', () => setTimeout(send, 10_000))
     ws.on('message', data => {
+      send()
       for (const line of data.toString().split('\n')) {
         if (!line.trim()) continue
         try {

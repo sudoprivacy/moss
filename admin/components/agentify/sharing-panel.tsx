@@ -35,24 +35,26 @@ const LEVEL_LABEL: Record<ShareLevel, string> = {
   agents: '员工 + 其他智能体',
 }
 
-const EMPTY: AccessList = { allow: [], deny: [] }
+export const EMPTY: AccessList = { allow: [], deny: [] }
 
-/** A multi-select of names with search; `*` stands for everyone. */
-function ListPicker(props: {
+/** A multi-select of names with search; `*` stands for everyone unless `allowAll` is false. */
+export function ListPicker(props: {
   options: PickOption[]
   value: string[]
   onChange: (next: string[]) => void
   placeholder: string
   disabled?: boolean
   label: string
+  allowAll?: boolean
 }) {
   const [q, setQ] = useState('')
   const labelOf = (v: string) => (v === '*' ? '全部' : props.options.find(o => o.value === v)?.label ?? v)
   // Names typed into the JSON that are not in the list still show up.
   const all = useMemo(() => {
     const known = new Set(props.options.map(o => o.value))
-    return [{ value: '*', label: '全部' }, ...props.options, ...props.value.filter(v => v !== '*' && !known.has(v)).map(v => ({ value: v, label: v }))]
-  }, [props.options, props.value])
+    const extra = props.value.filter(v => v !== '*' && !known.has(v)).map(v => ({ value: v, label: v }))
+    return [...(props.allowAll === false ? [] : [{ value: '*', label: '全部' }]), ...props.options, ...extra]
+  }, [props.options, props.value, props.allowAll])
   const shown = q.trim() ? all.filter(o => `${o.label} ${o.value}`.toLowerCase().includes(q.trim().toLowerCase())) : all
   const text = props.value.length === 0 ? props.placeholder : props.value.map(labelOf).join('、')
   const toggle = (v: string, on: boolean) => props.onChange(on ? [...props.value, v] : props.value.filter(x => x !== v))
@@ -64,7 +66,7 @@ function ListPicker(props: {
           size="sm"
           disabled={props.disabled}
           aria-label={props.label}
-          className="w-full justify-between font-normal h-8 px-2"
+          className="flex-1 min-w-0 w-full justify-between font-normal h-8 px-2"
         >
           <span className={`truncate text-left ${props.value.length === 0 ? 'text-muted-foreground' : ''}`}>{text}</span>
           <ChevronDown className="size-3 shrink-0 opacity-60" />
@@ -87,7 +89,7 @@ function ListPicker(props: {
 }
 
 /** Allow + deny pickers for one list. Unset = uses `inherited` (shown, and copied on the first edit). */
-function AccessPickers(props: {
+export function AccessPickers(props: {
   options: PickOption[]
   value: AccessList | undefined
   onChange: (next: AccessList | undefined) => void
@@ -104,7 +106,7 @@ function AccessPickers(props: {
     props.onChange({ allow: [...v.allow], deny: [...v.deny], [part]: names })
   }
   return (
-    <div className="space-y-1 min-w-[180px]">
+    <div className="space-y-1 min-w-0 w-full">
       <div className="flex items-center gap-1">
         <span className="text-xs text-muted-foreground w-8 shrink-0">允许</span>
         <ListPicker
@@ -149,7 +151,7 @@ export function SharingPanel(props: {
   agents: PickOption[]
 }) {
   const cfg = props.config
-  if (!cfg) return <p className="text-xs text-destructive">配置 JSON 无效，修正后可使用下方的共享设置。</p>
+  if (!cfg) return <p className="text-xs text-destructive">配置 JSON 无效，请在「JSON」页修正后再使用此页。</p>
   const sharing = cfg.sharing
   const callers = cfg.a2a?.callers ?? EMPTY
   const setSharing = (fn: (s: AgentifyConfig['sharing']) => AgentifyConfig['sharing']) => props.onChange(c => ({ ...c, sharing: fn(c.sharing) }))
@@ -165,23 +167,10 @@ export function SharingPanel(props: {
 
   return (
     <div className="space-y-3 text-sm">
-      <div>
-        <div className="font-medium">共享权限</div>
-        <p className="text-xs text-muted-foreground">
-          每类数据归本智能体所有。「仅本人」= 只有产生它的员工；「本智能体员工」= 还包括下方员工名单中的人；「员工 + 其他智能体」= 其他智能体提问时，本智能体可以查看并交给它（不能直接读取）。管理员始终可见全部。排除优先于允许。
-        </p>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-3 rounded-lg border p-3">
-        <div className="space-y-1">
-          <div className="text-xs font-medium">可调用本智能体的智能体</div>
-          <AccessPickers
-            label="可调用的智能体"
-            options={props.agents}
-            value={callers}
-            onChange={next => props.onChange(c => ({ ...c, a2a: { ...c.a2a, callers: next ?? EMPTY } }))}
-          />
-          <p className="text-xs text-muted-foreground">单个能力可在 JSON 中用 callers 另设名单</p>
-        </div>
+      <p className="text-xs text-muted-foreground">
+        每类数据归本智能体所有。「仅本人」= 只有产生它的员工；「本智能体员工」= 还包括员工名单中的人；「员工 + 其他智能体」= 其他智能体提问时，本智能体可以查看并交给它（对方不能直接读取）。管理员始终可见全部。排除优先于允许。
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2 rounded-lg border p-3">
         <div className="space-y-1">
           <div className="text-xs font-medium">默认员工名单</div>
           <AccessPickers label="默认员工名单" options={props.users} value={sharing.users} onChange={next => setSharing(s => ({ ...s, users: next ?? { allow: ['*'], deny: [] } }))} />
@@ -192,7 +181,7 @@ export function SharingPanel(props: {
             label="默认智能体名单"
             options={props.agents}
             value={sharing.agents}
-            inheritText="同可调用的智能体"
+            inheritText="可调用本智能体的智能体（见「对外能力」）"
             inherited={callers}
             onChange={next =>
               setSharing(s => {
@@ -206,13 +195,13 @@ export function SharingPanel(props: {
         </div>
       </div>
       <div className="border rounded-lg overflow-x-auto">
-        <Table>
+        <Table className="table-fixed">
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[150px]">数据</TableHead>
-              <TableHead className="w-[170px]">共享范围</TableHead>
-              <TableHead>员工</TableHead>
-              <TableHead>其他智能体</TableHead>
+              <TableHead className="w-[160px]">数据</TableHead>
+              <TableHead className="w-[180px]">共享范围</TableHead>
+              <TableHead className="w-[38%]">员工</TableHead>
+              <TableHead className="w-[38%]">其他智能体</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -221,11 +210,11 @@ export function SharingPanel(props: {
               const levels: ShareLevel[] = t === 'sharedMemory' ? ['users', 'agents'] : ['private', 'users', 'agents']
               return (
                 <TableRow key={t}>
-                  <TableCell className="align-top">
+                  <TableCell className="align-top whitespace-normal">
                     <div className="font-medium">{TYPE_LABEL[t].name}</div>
                     <div className="text-xs text-muted-foreground whitespace-normal">{TYPE_LABEL[t].help}</div>
                   </TableCell>
-                  <TableCell className="align-top">
+                  <TableCell className="align-top whitespace-normal">
                     <Select value={rule.level} onValueChange={v => setRule(t, { level: v as ShareLevel })}>
                       <SelectTrigger className="h-8" aria-label={`${TYPE_LABEL[t].name} 共享范围`}>
                         <SelectValue />
@@ -237,7 +226,7 @@ export function SharingPanel(props: {
                       </SelectContent>
                     </Select>
                   </TableCell>
-                  <TableCell className="align-top">
+                  <TableCell className="align-top whitespace-normal">
                     <AccessPickers
                       label={`${TYPE_LABEL[t].name} 员工`}
                       options={props.users}
@@ -248,7 +237,7 @@ export function SharingPanel(props: {
                       onChange={next => setRule(t, { users: next })}
                     />
                   </TableCell>
-                  <TableCell className="align-top">
+                  <TableCell className="align-top whitespace-normal">
                     <AccessPickers
                       label={`${TYPE_LABEL[t].name} 智能体`}
                       options={props.agents}

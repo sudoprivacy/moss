@@ -95,6 +95,9 @@ export interface HistoryDoc {
   snippet?: string
   score?: number
   docId?: string
+  /** How the work came about (search hits). */
+  origin?: string | null
+  meta?: Record<string, unknown>
 }
 
 export interface A2ACallView {
