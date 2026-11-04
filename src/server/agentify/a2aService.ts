@@ -6,8 +6,10 @@
  *  - task:  agent A hands B a piece of work. It runs asynchronously, waits for
  *           a human confirmer first when the capability says so, and may be
  *           allowed outbound actions only in that case.
- *  - history / files: A reads B's shared history and finished outputs
- *           directly, when B lists A as a history reader.
+ *  - handoff: A never reads B's home. B's answering session sees only what
+ *           B shares with A (sharing level `agents`), and hands files over:
+ *           files it creates in that session, and saved files it passes with
+ *           `agentctl handoff`. A fetches them from the finished call.
  *
  * Every rule is checked on the server from records it owns (the caller's
  * session, the target's config); nothing the calling agent sends can widen
@@ -15,12 +17,13 @@
  */
 import path from 'path'
 import { mkdir } from 'fs/promises'
-import { listAdmitsAgent, type CapabilityConfig, type HistoryShare } from './config.js'
+import { capabilityCallers, listAdmitsAgent, type AgentIdentity, type CapabilityConfig, type ShareType } from './config.js'
 import { displayName } from './artifacts.js'
 import type { AgentRef, AgentRegistry } from './agentRegistry.js'
 import type { AgentHomeStore } from './agentHome.js'
-import { a2aLogPath, agentRoot } from './agentHome.js'
-import { canSeeDoc, type HistoryIndex, type SearchHit } from './historyIndex.js'
+import { a2aLogPath, agentRoot, handoffDir, safeSegment } from './agentHome.js'
+import { canAccessType, docShareType, viewerLabel, type Viewer } from './access.js'
+import type { HistoryIndex } from './historyIndex.js'
 import type { A2ACall, A2ACallStatus, AgentifyStore, AgentRow } from './store.js'
 import { A2A_TERMINAL } from './store.js'
 import type { SessionDriver } from './sessionDriver.js'
@@ -55,6 +58,8 @@ export interface CallerContext {
   depth: number
   /** Agent ids from the original caller down to this caller. */
   chain: string[]
+  /** Set when this session answers another agent's call: what it sees is scoped to that agent. */
+  serving: { callId: string; callerAgent: AgentIdentity } | null
 }
 
 export interface A2ADeps {
@@ -80,7 +85,6 @@ export interface CallableAgent {
   displayName: string
   description: string
   capabilities: CapabilityConfig[]
-  canReadHistory: boolean
 }
 
 function startOfDay(now: number): number {
@@ -97,6 +101,8 @@ export function buildCallPrompt(input: { kind: 'ask' | 'task'; callerName: strin
       : `You are doing a task handed to you by the agent "${input.callerName}" on behalf of a colleague.`,
     `Capability: ${input.capability.id} — ${input.capability.description}`,
     'First search your history with `agentctl recall "<keywords>"` (and `agentctl history show <id>` for details) before saying you do not know.',
+    `While answering, you see only what you share with "${input.callerName}"; do not try to reach anything else, and do not pass on personal data (ID numbers, phone numbers, bank details, passwords, keys) unless the capability is about exactly that.`,
+    `To hand over a saved file, run \`agentctl handoff <path or file name>\`. Files you create in this workspace are handed over automatically.`,
     input.readonly
       ? 'This session is read-only: do not send messages, start approvals or change anything outside this workspace. Such calls will be refused.'
       : 'Outbound actions are allowed for this task because a person confirmed it. Do only what the task asks.',
@@ -168,21 +174,19 @@ export class A2AService {
     const out: CallableAgent[] = []
     for (const row of this.deps.store.listAgents(caller.orgId)) {
       if (!row.config.enabled || row.agentId === caller.agent.agentId) continue
-      const callable = listAdmitsAgent(row.config.a2a.allowCallers, this.callerIdentity(caller))
-      const reader = listAdmitsAgent(row.config.a2a.historyReaders, this.callerIdentity(caller))
-      if (!callable && !reader) continue
+      const open = row.config.a2a.capabilities.filter(c => listAdmitsAgent(capabilityCallers(row.config, c), this.callerIdentity(caller)))
+      if (open.length === 0) continue
       const ref = await this.deps.registry.resolve(row.agentId)
+      const capabilities = open.filter(
+        c => !c.requireCallerVisibility || (ref !== null && this.deps.isAgentUsableBy(ref, caller.userId, caller.orgId)),
+      )
+      if (capabilities.length === 0) continue
       out.push({
         id: row.agentId,
         name: row.agentName,
         displayName: row.displayName,
         description: ref?.description ?? '',
-        capabilities: callable
-          ? row.config.a2a.capabilities.filter(
-              c => !c.requireCallerVisibility || (ref !== null && this.deps.isAgentUsableBy(ref, caller.userId, caller.orgId)),
-            )
-          : [],
-        canReadHistory: reader,
+        capabilities,
       })
     }
     return out
@@ -192,11 +196,15 @@ export class A2AService {
 
   private admit(caller: CallerContext, target: { row: AgentRow; ref: AgentRef }, capabilityId: string, kind: 'ask' | 'task'): CapabilityConfig {
     if (target.row.agentId === caller.agent.agentId) throw new A2AError(400, 'self_call', 'an agent cannot call itself')
-    if (!listAdmitsAgent(target.row.config.a2a.allowCallers, this.callerIdentity(caller))) {
+    const cap = target.row.config.a2a.capabilities.find(c => c.id === capabilityId)
+    const anyOpen = target.row.config.a2a.capabilities.some(c => listAdmitsAgent(capabilityCallers(target.row.config, c), this.callerIdentity(caller)))
+    if (!anyOpen) {
       throw new A2AError(403, 'not_allowed', `${target.row.displayName} does not accept calls from ${caller.agent.displayName}`)
     }
-    const cap = target.row.config.a2a.capabilities.find(c => c.id === capabilityId)
     if (!cap) throw new A2AError(404, 'capability_not_found', `${target.row.displayName} has no capability ${capabilityId}`)
+    if (!listAdmitsAgent(capabilityCallers(target.row.config, cap), this.callerIdentity(caller))) {
+      throw new A2AError(403, 'not_allowed', `${target.row.displayName} does not open ${cap.id} to ${caller.agent.displayName}`)
+    }
     if (cap.kind !== kind) {
       throw new A2AError(400, 'wrong_kind', `capability ${capabilityId} is a ${cap.kind}; use ${cap.kind === 'ask' ? 'ask' : 'delegate'}`)
     }
@@ -362,7 +370,10 @@ export class A2AService {
       const { reply } = await this.deps.driver.run(sessionId, prompt, call.kind === 'ask' ? ASK_TIMEOUT_MS : TASK_TIMEOUT_MS)
       // Make the work searchable (and collect its files) before reporting back.
       await this.deps.digestSession(sessionId).catch(() => undefined)
-      const files = await this.outputFiles(call.orgId, target.row.agentId, sessionId)
+      const files = [
+        ...(await this.outputFiles(call.orgId, target.row.agentId, sessionId)),
+        ...(await this.deps.home.list(handoffDir(call.orgId, target.row.agentId, call.id))).filter(e => !e.isDirectory).map(e => e.path),
+      ]
       outcome = { status: 'done', resultText: truncateMiddle(reply, MAX_RESULT_CHARS), resultFiles: files }
     } catch (err) {
       outcome = { status: 'failed', error: err instanceof Error ? err.message : String(err) }
@@ -433,81 +444,104 @@ export class A2AService {
     }
   }
 
-  // ------------------------------------------------------- direct reading
+  // -------------------------------------------------------- files & handoff
 
-  private async readerTarget(caller: CallerContext, nameOrId: string): Promise<{ row: AgentRow; ref: AgentRef }> {
-    const target = await this.targetFor(caller.orgId, nameOrId)
-    if (target.row.agentId === caller.agent.agentId) return target
-    if (!listAdmitsAgent(target.row.config.a2a.historyReaders, this.callerIdentity(caller))) {
-      throw new A2AError(403, 'not_reader', `${target.row.displayName} does not share its history with ${caller.agent.displayName}`)
-    }
-    return target
-  }
-
-  /** Search another agent's shared history (summaries, outputs, logs). */
-  async searchOtherHistory(caller: CallerContext, input: { agent: string; query: string; limit?: number }): Promise<SearchHit[]> {
-    const target = await this.readerTarget(caller, input.agent)
-    return this.deps.index.search({
-      orgId: caller.orgId,
-      agentId: target.row.agentId,
-      query: input.query,
-      // Another agent reads as nobody in particular: shared documents, plus
-      // input files when the target agent shares full history.
-      viewerUserId: null,
-      share: target.row.config.memory.share,
-      kinds: ['summary', 'artifact', 'a2a', 'memory', ...(target.row.config.memory.share === 'full' ? (['input'] as const) : [])],
-      limit: input.limit,
-    })
-  }
-
-  /** Read a file from another agent's home (outputs, summaries, logs). */
-  async readOtherFile(caller: CallerContext, input: { agent: string; path: string }): Promise<Buffer> {
-    const target = await this.readerTarget(caller, input.agent)
-    const root = agentRoot(caller.orgId, target.row.agentId)
-    if (input.path.split(/[\\/]/).some(seg => seg === '..')) throw new A2AError(403, 'outside_agent', 'path is outside that agent home')
-    const p = input.path.startsWith('/') ? input.path : `${root}/${input.path}`
-    if (!p.startsWith(`${root}/`)) throw new A2AError(403, 'outside_agent', 'path is outside that agent home')
+  /**
+   * Which rule covers a file in an agent home, and whose it is. Null = not a
+   * file anyone but an administrator may read this way.
+   */
+  private fileRule(orgId: string, agentId: string, p: string): { type: ShareType | 'personal'; owner: string | null } | null {
+    const root = agentRoot(orgId, agentId)
     const rel = p.slice(root.length + 1)
-    const self = target.row.agentId === caller.agent.agentId
-    // Private parts of another agent's home are never readable this way.
-    if (!self && (rel.startsWith('memory/users/') || rel.endsWith('/conversation.md'))) {
-      throw new A2AError(403, 'private', 'that file is private to the agent')
+    // The JSON copy of a file follows the file.
+    const base = p.replace(/\.extract\.json$/, '')
+    const doc = this.deps.store.getDocByPath(orgId, agentId, base)
+    if (doc) return { type: docShareType(doc), owner: doc.userId }
+    // Files without their own document (not extractable): their session's file list says what they are.
+    const unit = rel.match(/^(?:artifacts|inputs)\/([^/]+)\//)?.[1]
+    if (unit) {
+      const list = this.deps.store.getDocByKey(orgId, agentId, `artifacts:${unit}`)
+      const entry = ((list?.meta.files as Array<{ homePath: string | null; role: string }> | undefined) ?? []).find(f => f.homePath === base)
+      if (!list || !entry) return null
+      return { type: entry.role === 'input' ? 'input' : entry.role === 'intermediate' ? 'intermediate' : 'output', owner: list.userId }
     }
-    // The same rules as search: an employee's conversation and input files are
-    // theirs unless the agent shares full history (other agents never get
-    // conversations). The JSON copy of a file follows the file.
-    const viewer = self ? caller.userId : null
-    const share = target.row.config.memory.share
-    const doc = this.deps.store.getDocByPath(caller.orgId, target.row.agentId, p.replace(/\.extract\.json$/, ''))
-    if (doc && !canSeeDoc(doc, viewer, share)) throw new A2AError(403, 'private', 'that file belongs to another employee')
-    if (!doc && rel.startsWith('inputs/')) {
-      const owner = this.deps.store.getSessionAgentInfo(rel.split('/')[1] ?? '')?.userId
-      if (share !== 'full' && !(viewer && owner === viewer)) throw new A2AError(403, 'private', 'that file belongs to another employee')
-    }
-    const buf = (await this.deps.home.read(p)) ?? (await this.findOutputByName(caller.orgId, target.row.agentId, input.path, viewer, share))
-    if (!buf) throw new A2AError(404, 'file_not_found', 'no such file')
-    return buf
+    if (rel === 'memory/shared.md') return { type: 'sharedMemory', owner: null }
+    const personal = rel.match(/^memory\/users\/([^/]+)\.md$/)
+    if (personal) return { type: 'personal', owner: personal[1]! }
+    return null
   }
 
   /**
-   * Agents usually ask for a file by the name they were told ("returns-week44.md"),
-   * not its home path: resolve it to the newest saved output with that path or name.
+   * Read a file of `agent`'s home as `viewer` may see it: by its home path, a
+   * path relative to the home, or the name it was given (newest match).
    */
-  private async findOutputByName(orgId: string, agentId: string, wanted: string, viewer: string | null, share: HistoryShare): Promise<Buffer | null> {
-    const name = wanted.replace(/^\.\//, '')
-    if (!name || name.startsWith('/')) return null
-    const docs = this.deps.store.listDocs({ orgId, agentId, kinds: ['artifact'], limit: 100 })
+  async readHomeFile(orgId: string, agent: AgentRow, wanted: string, viewer: Viewer): Promise<{ buf: Buffer; path: string }> {
+    const root = agentRoot(orgId, agent.agentId)
+    const cleaned = wanted.trim().replace(/^\.\//, '')
+    if (!cleaned) throw new A2AError(400, 'invalid_input', 'path is required')
+    if (cleaned.split(/[\\/]/).some(seg => seg === '..')) throw new A2AError(403, 'outside_agent', 'path is outside this agent home')
+    const p = cleaned.startsWith('/') ? cleaned : `${root}/${cleaned}`
+    if (!p.startsWith(`${root}/`)) throw new A2AError(403, 'outside_agent', 'path is outside this agent home')
+    const rule = this.fileRule(orgId, agent.agentId, p)
+    if (rule) {
+      if (!canAccessType(rule.type, rule.owner, viewer, agent.config)) {
+        throw new A2AError(403, 'private', `that file is not shared with ${viewerLabel(viewer)}`)
+      }
+      const buf = await this.deps.home.read(p)
+      if (buf) return { buf, path: p }
+    }
+    if (!cleaned.startsWith('/')) {
+      const byName = await this.findFileByName(orgId, agent, cleaned, viewer)
+      if (byName) return byName
+    }
+    throw new A2AError(404, 'file_not_found', 'no such file')
+  }
+
+  /**
+   * Agents usually name a file as they were told ("returns-week44.md"), not by
+   * its home path: the newest saved file with that path or name this viewer may see.
+   */
+  private async findFileByName(orgId: string, agent: AgentRow, wanted: string, viewer: Viewer): Promise<{ buf: Buffer; path: string } | null> {
+    const docs = this.deps.store.listDocs({ orgId, agentId: agent.agentId, kinds: ['artifact'], limit: 300 }).filter(d => d.docKey.startsWith('artifacts:'))
     for (const doc of docs) {
       const files = (doc.meta.files as Array<{ path: string; homePath: string | null; role?: string }> | undefined) ?? []
-      // Inputs only for the employee who gave them (or with full sharing).
-      const inputOk = share === 'full' || (viewer !== null && doc.userId === viewer)
-      const hit = files.find(f => f.homePath && (f.role !== 'input' || inputOk) && (f.path === name || f.path.split('/').pop() === name || displayName(f.path) === name))
-      if (hit?.homePath) {
-        const buf = await this.deps.home.read(hit.homePath)
-        if (buf) return buf
+      for (const f of files) {
+        if (!f.homePath) continue
+        if (f.path !== wanted && f.path.split('/').pop() !== wanted && displayName(f.path) !== wanted) continue
+        const type: ShareType = f.role === 'input' ? 'input' : f.role === 'intermediate' ? 'intermediate' : 'output'
+        if (!canAccessType(type, doc.userId, viewer, agent.config)) continue
+        const buf = await this.deps.home.read(f.homePath)
+        if (buf) return { buf, path: f.homePath }
       }
     }
     return null
+  }
+
+  /**
+   * A session answering another agent hands over one of this agent's saved
+   * files. Only what this agent shares with the calling agent can be handed
+   * over; the copy is kept with the call and returned with its result.
+   */
+  async handoff(caller: CallerContext, wanted: string): Promise<{ name: string; path: string; bytes: number }> {
+    if (!caller.serving) throw new A2AError(400, 'not_serving', 'handoff is only available while answering another agent')
+    const call = this.deps.store.getCall(caller.serving.callId)
+    if (!call || call.status !== 'running') throw new A2AError(409, 'not_running', 'the call this session answers is no longer running')
+    const { buf, path: src } = await this.readHomeFile(caller.orgId, caller.agent, wanted, { kind: 'agent', agent: caller.serving.callerAgent })
+    const name = safeSegment(displayName(src))
+    const dest = `${handoffDir(caller.orgId, caller.agent.agentId, call.id)}/${name}`
+    await this.deps.home.write(dest, buf)
+    return { name, path: dest, bytes: buf.length }
+  }
+
+  /** The calling agent fetches a file that came back with its call. */
+  async callFile(caller: CallerContext, callId: string, wanted: string): Promise<{ buf: Buffer; name: string }> {
+    const call = this.callVisibleTo(caller, callId)
+    if (call.callerAgentId !== caller.agent.agentId) throw new A2AError(403, 'not_caller', 'only the calling agent receives the files of a call')
+    const file = call.resultFiles.find(f => f === wanted || f.split('/').pop() === wanted || displayName(f) === wanted)
+    if (!file) throw new A2AError(404, 'file_not_found', 'that file did not come back with this call')
+    const buf = await this.deps.home.read(file)
+    if (!buf) throw new A2AError(404, 'file_not_found', 'that file has been deleted')
+    return { buf, name: displayName(file) }
   }
 
   isTerminal(status: A2ACallStatus): boolean {

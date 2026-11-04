@@ -12,6 +12,8 @@ export interface ConversationTurn {
   role: 'user' | 'assistant' | 'tool'
   text: string
   timestamp: string | null
+  /** Tool turns: the tool's name. */
+  tool?: string
 }
 
 export interface ParsedConversation {
@@ -98,13 +100,26 @@ export function parseTranscript(jsonl: string): ParsedConversation {
     } else if (entry.type === 'tool_use') {
       const name = typeof entry.name === 'string' ? entry.name : 'tool'
       toolNames.add(name)
-      turns.push({ role: 'tool', text: toolLine(entry), timestamp: ts })
+      turns.push({ role: 'tool', text: toolLine(entry), timestamp: ts, tool: name })
     }
   }
   return { turns, firstUserText, lastAssistantText, toolNames: [...toolNames], startedAt, endedAt }
 }
 
 /** Keep the head and tail of an over-long text; the middle is least useful. */
+/** The part of a conversation made of these turns (one scheduled run of a reused session). */
+export function sliceConversation(turns: ConversationTurn[]): ParsedConversation {
+  const stamped = turns.filter(t => t.timestamp)
+  return {
+    turns,
+    firstUserText: turns.find(t => t.role === 'user')?.text ?? null,
+    lastAssistantText: [...turns].reverse().find(t => t.role === 'assistant')?.text ?? null,
+    toolNames: [...new Set(turns.filter(t => t.role === 'tool').map(t => t.tool ?? 'tool'))],
+    startedAt: stamped[0]?.timestamp ?? null,
+    endedAt: stamped[stamped.length - 1]?.timestamp ?? null,
+  }
+}
+
 export function truncateMiddle(text: string, max: number): string {
   if (text.length <= max) return text
   const head = Math.floor(max * 0.6)

@@ -12,7 +12,60 @@
  * agent's stable id survives renames and re-installs.
  */
 
-export type HistoryShare = 'summary' | 'full'
+/**
+ * Who may see one kind of data an agent keeps:
+ *   private — only the employee whose session produced it
+ *   users   — also other employees of this agent (subject to the users lists)
+ *   agents  — also other agents, but only through a handoff: the other agent
+ *             asks, and this agent's answering session can see and hand over
+ *             only data at this level (subject to the agents lists)
+ * Administrators see everything.
+ */
+export type ShareLevel = 'private' | 'users' | 'agents'
+
+export const SHARE_TYPES = ['conversation', 'summary', 'input', 'output', 'intermediate', 'sharedMemory'] as const
+/**
+ * conversation  the cleaned conversation text of a session
+ * summary       session summaries, and the records of calls between agents
+ * input         files employees gave a session
+ * output        files a session produced, and each session's file list
+ * intermediate  working files a session left in .drafts/
+ * sharedMemory  the agent's shared memory notes
+ * An employee's personal memory notes are always private.
+ */
+export type ShareType = (typeof SHARE_TYPES)[number]
+
+/** Names, ids or `*`. Deny wins over allow; an empty allow list admits nobody. */
+export interface AccessList {
+  allow: string[]
+  deny: string[]
+}
+
+export interface ShareRule {
+  level: ShareLevel
+  /** Employees of this agent who may see it; absent = sharing.users. */
+  users?: AccessList
+  /** Other agents that may receive it; absent = sharing.agents. */
+  agents?: AccessList
+}
+
+export type SharingConfig = {
+  /** Default employee list for every type. Default: everyone who can use the agent. */
+  users: AccessList
+  /** Default agent list for every type. Absent = the agents allowed to call (a2a.callers). */
+  agents?: AccessList
+} & Record<ShareType, ShareRule>
+
+export const LEVEL_RANK: Record<ShareLevel, number> = { private: 0, users: 1, agents: 2 }
+
+export const DEFAULT_SHARE_LEVELS: Record<ShareType, ShareLevel> = {
+  conversation: 'private',
+  summary: 'users',
+  input: 'private',
+  output: 'users',
+  intermediate: 'private',
+  sharedMemory: 'users',
+}
 
 export interface CapabilityConfig {
   /** Stable id other agents use, e.g. `return-stats`. */
@@ -30,6 +83,8 @@ export interface CapabilityConfig {
   requiresConfirmation?: boolean
   /** Task capabilities only: allow outbound actions (corpapp send etc.). */
   allowOutbound?: boolean
+  /** Agents allowed to use this capability; absent = a2a.callers. */
+  callers?: AccessList
   /**
    * When true, the employee behind the calling session must also be allowed
    * to use this agent directly (its visible_to). Use for capabilities whose
@@ -41,13 +96,9 @@ export interface CapabilityConfig {
 
 export interface AgentifyConfig {
   enabled: boolean
+  /** Who sees which kind of data. */
+  sharing: SharingConfig
   memory: {
-    /**
-     * What a new session of this agent can see from sessions other employees
-     * started: `summary` = summaries, conclusions and outputs; `full` = also
-     * the cleaned conversation text. An employee always sees their own.
-     */
-    share: HistoryShare
     /** Characters of agent memory injected into a new session. */
     injectChars: number
     /**
@@ -69,11 +120,10 @@ export interface AgentifyConfig {
     capabilities: CapabilityConfig[]
     /**
      * Agents (ids or names) allowed to call this agent. `*` = any agentified
-     * agent in the same organization. Empty = nobody.
+     * agent in the same organization. Empty allow = nobody. A capability can
+     * narrow or replace this with its own `callers`.
      */
-    allowCallers: string[]
-    /** Agents allowed to read this agent's shared history and outputs directly. */
-    historyReaders: string[]
+    callers: AccessList
     /** User ids who may confirm tasks that require confirmation. */
     confirmers: string[]
     /** Per-day ceiling on calls this agent accepts. */
@@ -81,10 +131,16 @@ export interface AgentifyConfig {
   }
 }
 
+export function defaultSharing(): SharingConfig {
+  const rules = Object.fromEntries(SHARE_TYPES.map(t => [t, { level: DEFAULT_SHARE_LEVELS[t] }])) as Record<ShareType, ShareRule>
+  return { users: { allow: ['*'], deny: [] }, ...rules }
+}
+
 export const DEFAULT_AGENTIFY_CONFIG: AgentifyConfig = {
   enabled: true,
-  memory: { share: 'summary', injectChars: 4000 },
-  a2a: { capabilities: [], allowCallers: [], historyReaders: [], confirmers: [], dailyCallLimit: 200 },
+  sharing: defaultSharing(),
+  memory: { injectChars: 4000 },
+  a2a: { capabilities: [], callers: { allow: [], deny: [] }, confirmers: [], dailyCallLimit: 200 },
 }
 
 export interface HistoryPolicy {
@@ -164,6 +220,69 @@ function stringList(value: unknown, field: string): string[] {
   return out
 }
 
+/** `["a","b"]` (allow only) or `{ allow: [...], deny: [...] }`. */
+function accessList(value: unknown, field: string): AccessList | undefined {
+  if (value === undefined || value === null) return undefined
+  if (Array.isArray(value)) return { allow: stringList(value, field), deny: [] }
+  if (typeof value !== 'object') throw new AgentifyConfigError(`${field} must be a list of names or { allow, deny }`)
+  const r = value as Record<string, unknown>
+  for (const k of Object.keys(r)) {
+    if (k !== 'allow' && k !== 'deny') throw new AgentifyConfigError(`${field}.${k} is not a known field (use allow / deny)`)
+  }
+  return { allow: stringList(r.allow, `${field}.allow`), deny: stringList(r.deny, `${field}.deny`) }
+}
+
+function parseSharing(raw: unknown, legacy: { share: unknown; historyReaders: string[] }): SharingConfig {
+  const sharing = defaultSharing()
+  if (raw === undefined || raw === null) {
+    // Configs saved before per-type sharing: `memory.share: full` opened
+    // conversations and inputs to other employees; history readers could
+    // read summaries and outputs directly, which is now a handoff.
+    if (legacy.share === 'full') {
+      sharing.conversation.level = 'users'
+      sharing.input.level = 'users'
+    }
+    if (legacy.historyReaders.length > 0) {
+      for (const t of ['summary', 'output'] as const) sharing[t] = { level: 'agents', agents: { allow: legacy.historyReaders, deny: [] } }
+    }
+    return sharing
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new AgentifyConfigError('sharing must be an object')
+  const r = raw as Record<string, unknown>
+  for (const k of Object.keys(r)) {
+    if (k !== 'users' && k !== 'agents' && !(SHARE_TYPES as readonly string[]).includes(k)) {
+      throw new AgentifyConfigError(`sharing.${k} is not a known field (types: ${SHARE_TYPES.join(', ')}; lists: users, agents)`)
+    }
+  }
+  sharing.users = accessList(r.users, 'sharing.users') ?? sharing.users
+  const agents = accessList(r.agents, 'sharing.agents')
+  if (agents) sharing.agents = agents
+  for (const t of SHARE_TYPES) {
+    const ruleRaw = r[t]
+    if (ruleRaw === undefined || ruleRaw === null) continue
+    // Shorthand: `"summary": "users"`.
+    const obj = (typeof ruleRaw === 'string' ? { level: ruleRaw } : ruleRaw) as Record<string, unknown>
+    if (typeof obj !== 'object' || Array.isArray(obj)) throw new AgentifyConfigError(`sharing.${t} must be an object`)
+    for (const k of Object.keys(obj)) {
+      if (k !== 'level' && k !== 'users' && k !== 'agents') throw new AgentifyConfigError(`sharing.${t}.${k} is not a known field (use level / users / agents)`)
+    }
+    const level = obj.level === undefined ? DEFAULT_SHARE_LEVELS[t] : obj.level
+    if (level !== 'private' && level !== 'users' && level !== 'agents') {
+      throw new AgentifyConfigError(`sharing.${t}.level must be "private", "users" or "agents"`)
+    }
+    if (t === 'sharedMemory' && level === 'private') {
+      throw new AgentifyConfigError('sharing.sharedMemory.level must be "users" or "agents" (personal notes are always private)')
+    }
+    const rule: ShareRule = { level }
+    const users = accessList(obj.users, `sharing.${t}.users`)
+    const ruleAgents = accessList(obj.agents, `sharing.${t}.agents`)
+    if (users) rule.users = users
+    if (ruleAgents) rule.agents = ruleAgents
+    sharing[t] = rule
+  }
+  return sharing
+}
+
 function positiveInt(value: unknown, fallback: number, field: string, max: number): number {
   if (value === undefined || value === null || value === '') return fallback
   const n = Number(value)
@@ -211,6 +330,8 @@ function parseCapability(raw: unknown, index: number): CapabilityConfig {
     throw new AgentifyConfigError(`a2a.capabilities[${index}] (${id}): ask capabilities are read-only`)
   }
   if (r.requireCallerVisibility === true) cap.requireCallerVisibility = true
+  const callers = accessList(r.callers, `a2a.capabilities[${index}].callers`)
+  if (callers) cap.callers = callers
   return cap
 }
 
@@ -224,8 +345,9 @@ export function parseAgentifyConfig(raw: unknown): AgentifyConfig {
   if (typeof memoryRaw !== 'object' || Array.isArray(memoryRaw)) throw new AgentifyConfigError('memory must be an object')
   if (typeof a2aRaw !== 'object' || Array.isArray(a2aRaw)) throw new AgentifyConfigError('a2a must be an object')
 
-  const share = memoryRaw.share === undefined ? 'summary' : memoryRaw.share
-  if (share !== 'summary' && share !== 'full') throw new AgentifyConfigError('memory.share must be "summary" or "full"')
+  if (memoryRaw.share !== undefined && memoryRaw.share !== 'summary' && memoryRaw.share !== 'full') {
+    throw new AgentifyConfigError('memory.share must be "summary" or "full" (replaced by sharing; kept for old configs)')
+  }
 
   const capsRaw = a2aRaw.capabilities ?? []
   if (!Array.isArray(capsRaw)) throw new AgentifyConfigError('a2a.capabilities must be an array')
@@ -237,7 +359,6 @@ export function parseAgentifyConfig(raw: unknown): AgentifyConfig {
   }
 
   const memory: AgentifyConfig['memory'] = {
-    share,
     injectChars: positiveInt(memoryRaw.injectChars, DEFAULT_AGENTIFY_CONFIG.memory.injectChars, 'memory.injectChars', 20000),
   }
   const lookback = optionalHours(memoryRaw.digestLookbackHours, 'memory.digestLookbackHours', false)
@@ -250,23 +371,43 @@ export function parseAgentifyConfig(raw: unknown): AgentifyConfig {
     throw new AgentifyConfigError('memory.digestLookbackHours cannot be longer than memory.deleteAfterHours')
   }
 
+  // `allowCallers` is the name used before allow/deny lists.
+  const callers = accessList(a2aRaw.callers, 'a2a.callers') ?? { allow: stringList(a2aRaw.allowCallers, 'a2a.allowCallers'), deny: [] }
+  const sharing = parseSharing(r.sharing, { share: memoryRaw.share, historyReaders: stringList(a2aRaw.historyReaders, 'a2a.historyReaders') })
+
   return {
     enabled: r.enabled === undefined ? true : r.enabled === true,
+    sharing,
     memory,
     a2a: {
       capabilities,
-      allowCallers: stringList(a2aRaw.allowCallers, 'a2a.allowCallers'),
-      historyReaders: stringList(a2aRaw.historyReaders, 'a2a.historyReaders'),
+      callers,
       confirmers: stringList(a2aRaw.confirmers, 'a2a.confirmers'),
       dailyCallLimit: positiveInt(a2aRaw.dailyCallLimit, DEFAULT_AGENTIFY_CONFIG.a2a.dailyCallLimit, 'a2a.dailyCallLimit', 100000),
     },
   }
 }
 
+export interface AgentIdentity {
+  id: string
+  name: string
+  displayName: string
+}
+
+/** Does an access list admit someone known by these names? Deny wins; `*` matches everyone. */
+export function listAdmits(list: AccessList, names: Array<string | null | undefined>): boolean {
+  const known = names.filter((n): n is string => typeof n === 'string' && n.length > 0)
+  const hit = (entry: string) => entry === '*' || known.includes(entry)
+  if (list.deny.some(hit)) return false
+  return list.allow.some(hit)
+}
+
 /** Does `list` (ids, names, display names or `*`) admit this agent? */
-export function listAdmitsAgent(
-  list: string[],
-  agent: { id: string; name: string; displayName: string },
-): boolean {
-  return list.some(entry => entry === '*' || entry === agent.id || entry === agent.name || entry === agent.displayName)
+export function listAdmitsAgent(list: AccessList, agent: AgentIdentity): boolean {
+  return listAdmits(list, [agent.id, agent.name, agent.displayName])
+}
+
+/** The callers list in effect for one capability. */
+export function capabilityCallers(config: AgentifyConfig, cap: CapabilityConfig): AccessList {
+  return cap.callers ?? config.a2a.callers
 }

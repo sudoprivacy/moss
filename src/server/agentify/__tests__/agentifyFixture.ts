@@ -48,7 +48,8 @@ export const echoSummarizer: Summarizer = {
   },
 }
 
-export type ScriptedAgent = (input: { prompt: string; session: CreateAgentSessionInput & { sessionId: string } }) => { reply: string; files?: Record<string, string> }
+type ScriptedReply = { reply: string; files?: Record<string, string> }
+export type ScriptedAgent = (input: { prompt: string; session: CreateAgentSessionInput & { sessionId: string } }) => ScriptedReply | Promise<ScriptedReply>
 
 export interface Fixture {
   dir: string
@@ -148,7 +149,7 @@ export function createFixture(agentMetas: Array<AssistantStoreMeta & { id: strin
       call.prompt = prompt
       const script = scripts.get(call.input.assistantName)
       if (!script) throw new Error(`no scripted agent for ${call.input.assistantName}`)
-      const out = script({ prompt, session: { ...call.input, sessionId } })
+      const out = await script({ prompt, session: { ...call.input, sessionId } })
       // Like scode: the prompt arrives and the agent starts, then writes files.
       const tp = store.getSession(sessionId)!.transcriptPath
       const now = Date.now()
@@ -258,24 +259,26 @@ export function createFixture(agentMetas: Array<AssistantStoreMeta & { id: strin
   }
 }
 
-/** Configure two cooperating agents the way an admin would. */
-export async function configurePair(fx: Fixture, opts: { askerCanRead?: boolean } = {}) {
+/**
+ * Configure two cooperating agents the way an admin would. The returns agent
+ * shares summaries and outputs with the follow-up agent unless told not to.
+ */
+export async function configurePair(fx: Fixture, opts: { shareWithAsker?: boolean } = {}) {
   await fx.svc.configure(ORG, 'gendan', {
     a2a: {
       capabilities: [{ id: 'order-status', kind: 'ask', description: '查询订单跟单进度' }],
-      allowCallers: ['shouhou'],
+      callers: ['shouhou'],
     },
   })
   await fx.svc.configure(ORG, 'shouhou', {
-    memory: { share: 'summary' },
+    sharing: opts.shareWithAsker === false ? {} : { summary: 'agents', output: 'agents' },
     a2a: {
       capabilities: [
         { id: 'return-stats', kind: 'ask', description: '查询退货/返厂统计与结论' },
         { id: 'return-report', kind: 'task', description: '生成返厂分析报表' },
         { id: 'notify-supplier', kind: 'task', description: '通知供应商处理返厂', requiresConfirmation: true, allowOutbound: true },
       ],
-      allowCallers: ['gendan'],
-      historyReaders: opts.askerCanRead === false ? [] : ['gendan'],
+      callers: ['gendan'],
       confirmers: ['u-boss'],
       dailyCallLimit: 50,
     },

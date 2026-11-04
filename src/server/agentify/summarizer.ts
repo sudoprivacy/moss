@@ -13,6 +13,8 @@ export interface SummaryInput {
   artifacts: string[]
   /** Who started the session and how (cron / web / another agent). */
   origin: string
+  /** Input files are kept more privately than summaries: name them, do not copy their content. */
+  inputsPrivate?: boolean
   /** Returned when the model cannot be used. */
   fallbackText: string
 }
@@ -37,11 +39,15 @@ const SYSTEM_PROMPT = `你是企业智能体的工作记录员。根据一次会
   ### 关键数据
   ### 产出文件
   ### 未完成事项
+- 不要写入身份证号、手机号、银行卡号、密码、密钥、令牌等个人或敏感信息；如对话涉及，只写“已提供”。
 - 总长度不超过 800 字。`
 
 export function buildSummaryUserPrompt(input: SummaryInput): string {
   const artifacts = input.artifacts.length > 0 ? input.artifacts.map(a => `- ${a}`).join('\n') : '（无）'
-  return `智能体：${input.agentDisplayName}\n会话来源：${input.origin}\n\n产出文件：\n${artifacts}\n\n对话记录：\n\n${input.conversation}`
+  const note = input.inputsPrivate
+    ? '\n注意：员工提供的输入文件只有提供者本人能看到。摘要中输入文件只写文件名和用途，不要摘抄其中的明细数据。\n'
+    : ''
+  return `智能体：${input.agentDisplayName}\n会话来源：${input.origin}\n${note}\n产出文件：\n${artifacts}\n\n对话记录：\n\n${input.conversation}`
 }
 
 function messagesUrl(base: string): string {

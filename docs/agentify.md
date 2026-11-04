@@ -1,6 +1,6 @@
 # 协作智能体（agentify）
 
-让一个智能体成为长期存在的“岗位数字分身”：它的会话、产出和记忆属于智能体本身，跨会话、跨员工沉淀；智能体之间可以查询、委派任务、读取对方已完成的工作。岗位不在 moss 中建模——谁能用某个智能体，仍由它的可见范围决定。
+让一个智能体成为长期存在的“岗位数字分身”：它的会话、产出和记忆属于智能体本身，跨会话、跨员工沉淀；智能体之间可以查询、委派任务，并由对方把它愿意共享的文件交过来（不能直接读取对方的数据）。岗位不在 moss 中建模——谁能用某个智能体，仍由它的可见范围决定。
 
 ## 开启
 
@@ -8,7 +8,13 @@
 
 ```json
 {
-  "memory": { "share": "summary", "injectChars": 4000 },
+  "sharing": {
+    "users":   { "allow": ["*"], "deny": ["<员工 ID>"] },
+    "summary": "agents",
+    "output":  { "level": "agents", "agents": { "allow": ["gendan"], "deny": [] } },
+    "input":   { "level": "users", "users": ["<员工 ID>", "<员工 ID>"] }
+  },
+  "memory": { "injectChars": 4000 },
   "a2a": {
     "capabilities": [
       { "id": "return-stats", "kind": "ask", "description": "查询返厂统计、原因和结论" },
@@ -16,8 +22,7 @@
       { "id": "notify-supplier", "kind": "task", "description": "通知供应商处理返厂",
         "requiresConfirmation": true, "allowOutbound": true }
     ],
-    "allowCallers": ["gendan"],
-    "historyReaders": ["gendan"],
+    "callers": { "allow": ["gendan", "catem"], "deny": [] },
     "confirmers": ["<员工 ID>"],
     "dailyCallLimit": 200
   }
@@ -26,15 +31,15 @@
 
 | 字段 | 含义 |
 |---|---|
-| `memory.share` | `summary`：其他员工的会话只共享摘要、结论和产出；`full`：也共享对话正文。员工本人始终能看到自己的。个人记忆永不共享 |
+| `sharing` | 每类数据的共享范围与名单，见下方「共享权限」 |
 | `memory.injectChars` | 新会话开头注入的记忆字数上限 |
 | `memory.digestLookbackHours` | 整理回溯（小时）：最近活动在此时间内的会话会被整理、建索引（有变化时重新整理）。更早的会话不再处理，但已整理的内容保留。不填 = 服务器默认 |
 | `memory.decayHalfLifeHours` | 检索时间衰减半衰期（小时）：按最近活动时间计算，每过一个半衰期，时间权重向 0.7 下降一半（相关性仍是主导）。`0` = 不衰减。不填 = 服务器默认 |
 | `memory.deleteAfterHours` | 历史删除期限（小时）：最近活动早于此时间的摘要、对话、产出副本、协作记录及其索引会被删除（每小时检查一次）。`0` = 永久保留。记忆条目（`memory/`）不按时间删除。不填 = 服务器默认 |
 | `capabilities` | 本智能体对外提供的能力。`ask` 只读问答；`task` 委派任务。`allowOutbound`（可对外发送）必须同时 `requiresConfirmation` |
+| `capabilities[].callers` | 能力级名单 `{allow, deny}`：替代 `a2a.callers`，例如「B 只能问，C 才能委派」 |
 | `requireCallerVisibility` | 能力级开关：发起调用的员工也必须能直接使用本智能体 |
-| `allowCallers` | 允许调用本智能体的智能体（名称、显示名或 ID；`*` = 所有已开启协作的智能体） |
-| `historyReaders` | 允许直接检索本智能体共享历史、读取其产出文件的智能体 |
+| `callers` | 允许调用本智能体的智能体 `{allow, deny}`（名称、显示名或 ID；`*` = 所有已开启协作的智能体；排除优先）。也可写成数组（只有 allow） |
 | `confirmers` | 可以确认委派任务的员工；管理员始终可以 |
 | `dailyCallLimit` | 每天最多接受的调用次数 |
 
@@ -52,6 +57,40 @@
 
 配置存在 `agentify_agents` 表（按智能体稳定 ID），不写入 `_moss_meta.json`。
 
+旧配置照常读取：`allowCallers` → `callers.allow`；`memory.share: full` → 对话正文和输入文件为「本智能体员工」；`historyReaders` 中的智能体 → 摘要和产出为「员工 + 其他智能体」，名单即原来的读取者（它们改为通过交接获得，不再直接读取）。
+
+### 共享权限
+
+智能体主目录里的一切都属于这个智能体。每类数据设一个共享范围：
+
+| 范围 | 谁能看到 |
+|---|---|
+| `private`（仅本人） | 产生它的员工（会话发起人） |
+| `users`（本智能体员工） | 另加员工名单中的、能使用本智能体的员工 |
+| `agents`（员工 + 其他智能体） | 另加智能体名单中的智能体，**只能通过交接**：对方提问，本智能体回答时能看到并交出这些数据；对方不能直接检索或读取 |
+
+管理员始终能看到全部。范围逐级包含。
+
+| 数据类型 | 内容 | 默认 |
+|---|---|---|
+| `conversation` | 对话正文 | `private` |
+| `summary` | 会话摘要；与其他智能体的协作记录 | `users` |
+| `input` | 员工提供的输入文件及其内容 | `private` |
+| `output` | 产出文件、内容及每次会话的文件清单 | `users` |
+| `intermediate` | `.drafts/` 中间文件 | `private` |
+| `sharedMemory` | 共享记忆（不能设为 `private`） | `users` |
+| （个人记忆） | 某员工的个人记忆 | 始终仅本人，不可配置 |
+
+名单（`{ "allow": [...], "deny": [...] }`，也可只写数组 = allow；排除优先；`*` = 全部）：
+
+- `sharing.users`：默认员工名单（员工 ID 或名称），默认 `["*"]`。
+- `sharing.agents`：默认智能体名单；不填 = 与 `a2a.callers` 相同。
+- 每个类型可写自己的 `users` / `agents`，覆盖默认名单。简写：`"summary": "agents"`。
+
+管理端配置对话框的「共享权限」表格与 JSON 同步，可直接选择范围和名单。
+
+摘要不会比它的来源更开放：输入文件比摘要更私密时，摘要只写输入文件名，不写其内容；摘要模型被要求不写身份证号、手机号、银行卡号、密码、密钥等。
+
 ## 智能体在会话里怎么用
 
 开启协作的智能体，首条消息会带上 `[Agent Home & Collaboration]` 区块：它记住的内容、最近的工作、可协作的同事智能体及其能力。容器内用 `agentctl`：
@@ -63,19 +102,23 @@ agentctl memory add "<事实>" [--private]
 agentctl files get <path>
 
 agentctl agents
-agentctl ask --agent <名称> --capability <id> "<问题>"
+agentctl ask --agent <名称> --capability <id> "<问题>"       # 等待回答；交回的文件存到 ./from-<对方>/
 agentctl delegate --agent <名称> --capability <id> "<任务>" [--wait]
-agentctl call <callId> | cancel <callId>
-agentctl recall --agent <名称> "<关键词>"        # 对方共享的历史
-agentctl files get --agent <名称> <path>         # 对方的产出文件
+agentctl call <callId> [--wait] [--save] | cancel <callId>
+
+agentctl handoff <路径或文件名>                  # 回答其他智能体时：把已保存的文件交给对方
 ```
+
+交接：回答其他智能体的会话里，`recall`、`history`、`files get` 只返回共享给对方的数据（范围 `agents` 且对方在名单中），不注入员工的个人记忆和最近工作；`handoff` 只能交出这些数据。本次会话新生成的文件自动交出。对方用 `agentctl call <id> --save` 取回（`ask` 默认自动保存）。交出的副本存在 `handoffs/<call>/`，随协作记录一起按删除期限清理。
 
 ## 规则（全部在服务端校验）
 
 - 调用方身份来自会话令牌（智能体 + 会话），请求内容不能扩大权限。
 - 被问的智能体在全新的会话里回答，**只读**：企业应用的发送、上传、建群、群发队列等接口一律拒绝。只有经人工确认、且能力声明了 `allowOutbound` 的任务才能对外动作。
 - 调用最多嵌套 2 层；调用链中出现过的智能体不能再被调用（防循环）；每日次数上限。
-- 其他智能体只能读共享内容：摘要、产出、协作记录、共享记忆；不能读对话正文和个人记忆。
+- 其他智能体不能直接检索或读取本智能体的主目录（`recall --agent`、`files get --agent` 一律拒绝）。它只能提问或委派，拿到本智能体的回答和交出的文件。
+- 回答其他智能体时，会话按“对方智能体”的身份看数据：只有共享范围为 `agents` 且对方在名单中的数据；任何员工的私有数据（即使发起调用的员工本人拥有）都不可见，因为回答会进入对方的历史。
+- 只有发起调用的智能体能取回该次调用交出的文件。
 - 每次调用都记录在 `a2a_calls`，并写入双方的智能体主目录、可被检索。
 
 ## 数据放在哪里
@@ -91,11 +134,19 @@ agentctl files get --agent <名称> <path>         # 对方的产出文件
                                              <文件>.extract.json          可解析文件的结构化数据（JSON）
 /agent-home/<org>/<agent>/memory/shared.md | users/<员工>.md              记忆
 /agent-home/<org>/<agent>/a2a/<call>.md                                  协作记录
+/agent-home/<org>/<agent>/handoffs/<call>/<文件>                         交给调用方的已保存文件副本
 ```
 
 moss.db 中只有索引：`agentify_docs`、`agentify_chunks`（含向量）、`agentify_chunks_fts`（FTS5 trigram，中文无需分词器）。检索 = 关键词 + 向量（复用知识库的 multilingual-e5-small）RRF 融合 + 时间衰减。原始会话记录仍在主机磁盘，不进主目录。
 
-会话结束、或安静 2 分钟后（`MOSS_AGENTIFY_DIGEST_QUIET_MS`），后台每分钟整理一次：生成摘要（系统模型；不可用时用抽取式摘要）、复制产出文件、建索引。定时任务复用同一会话时，会重新整理并替换。
+会话结束、或安静 2 分钟后（`MOSS_AGENTIFY_DIGEST_QUIET_MS`），后台每分钟整理一次：生成摘要（系统模型；不可用时用抽取式摘要）、复制产出文件、建索引。
+
+### 定时任务
+
+- **按每次运行整理。** 定时任务（尤其“复用会话”模式，一个会话最多承载 50 次运行）的会话按运行记录（`cron_job_runs`）切分，每次运行单独生成摘要、对话、文件清单和文件内容索引，目录为 `history/<yyyy>/<mm>/<会话>@<运行开始时间>-<编号>/`，产出与输入副本同样按运行分开。已整理过的运行不再重复整理，每次新运行只多一次摘要模型调用。
+- **标明来源。** 每次运行的摘要标题为「定时任务「<任务名>」<开始时间>」，所有检索结果（摘要、文件内容、文件清单）都带来源，`agentctl recall` 显示为 `from: 定时任务「类目经营日报」2026-11-04 10:30 的运行（员工 张三名下）`；员工发起的会话显示 `员工 张三发起的对话`，其他智能体的请求显示协作来源。时间按任务的时区（未设置时为 `MOSS_CRON_DEFAULT_TZ`，默认 Asia/Shanghai）。
+- **运行提示。** 开启协作的智能体，每次定时运行的消息前加一行 `【定时任务「<任务名>」本轮运行，开始于 2026-11-04 10:30】`，与历史中的名称一致。未开启协作的智能体，定时任务消息不变。
+- 运行归属执行它的员工（定时触发为任务执行人，手动触发为点击的人）。删除期限按每次运行各自的最后活动时间计算，旧运行删除不影响同一会话中较新的运行。
 
 ### 文件内容检索（输入与产出）
 
@@ -116,10 +167,10 @@ moss.db 中只有索引：`agentify_docs`、`agentify_chunks`（含向量）、`
 
 表格不转成 markdown 表：检索按约 500 字的片段召回，片段离开表头后数字就失去含义；每行带列名可以单独理解。每个文件的完整数据另存为 `<文件>.extract.json`（工作表为按列名的 JSON 行，类型保留），智能体用 `agentctl files get <路径>.extract.json` 即可读取，运行环境无需安装表格库。
 
-可见范围与对话相同：
+可见范围按「共享权限」：
 
-- 产出：所有使用该智能体的员工、以及有 `historyReaders` 权限的其他智能体都可检索和读取。
-- 输入：只有提供它的员工（以及管理员）可见；`memory.share = full` 时对所有员工和有读取权限的智能体开放。
+- 产出（`output`）：默认所有使用该智能体的员工可检索和读取；设为 `agents` 后可交给名单中的智能体。
+- 输入（`input`）：默认只有提供它的员工（以及管理员）可见；可按名单开放给员工或智能体。
 - 会话摘要和文件清单写明「输入文件 → 产出文件」，按任一文件命中都能找到同一会话。
 
 限制（环境变量）：每个工作表索引前 `MOSS_AGENTIFY_EXTRACT_MAX_INDEX_ROWS`（3000）行、JSON 保留前 `MOSS_AGENTIFY_EXTRACT_MAX_JSON_ROWS`（50000）行（概况统计覆盖全部行）；每个文件最多 `MOSS_AGENTIFY_EXTRACT_MAX_EMBEDDED_CHUNKS`（40）个片段做向量，其余行只做关键词检索；每次整理最多解析 `MOSS_AGENTIFY_EXTRACT_MAX_FILES`（20）个文件；单个文件超过 `MOSS_AGENTIFY_ARTIFACT_MAX_FILE_BYTES`（20MB）只登记文件名。图片暂不识别文字。

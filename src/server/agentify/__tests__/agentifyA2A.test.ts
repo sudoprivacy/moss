@@ -83,14 +83,76 @@ describe('agent-to-agent collaboration', () => {
 
     // Both agents keep a searchable record of the exchange.
     for (const agentId of ['agent-gendan-uuid', 'agent-shouhou-uuid']) {
-      const hits = await fx.svc.index.search({ orgId: ORG, agentId, query: '厨卫五金', viewerUserId: 'someone-else', share: 'summary', kinds: ['a2a'] })
+      const hits = await fx.svc.index.search({ orgId: ORG, agentId, query: '厨卫五金', viewer: { kind: 'user', userId: 'someone-else' }, kinds: ['a2a'] })
       assert.equal(hits.length, 1, `exchange logged for ${agentId}`)
     }
   })
 
-  it('reads a colleague agent’s finished work directly, but not its private parts', async () => {
+  it('hands over only what it shares with the asking agent, never its private parts', async () => {
     fx = createFixture(PAIR_AGENTS)
     await configurePair(fx)
+    const s = fx.addSession({
+      agent: 'shouhou',
+      userId: 'u-shouhou',
+      turns: [{ role: 'user', text: '用 司机名单.csv 做返厂周报' }, { role: 'assistant', text: '周报完成：灯具返厂40件。' }],
+      inputs: { '司机名单.csv': '姓名,电话\n张三,13800000000\n' },
+      uploaded: ['司机名单.csv'],
+      files: { 'weekly.md': '# 返厂周报\n灯具 40 件\n' },
+    })
+    await fx.svc.digest.digestSessionById(s)
+    const conv = fx.svc.store.getDocByKey(ORG, 'agent-shouhou-uuid', `conversation:${s}`)!
+    const files = fx.svc.store.getDocByKey(ORG, 'agent-shouhou-uuid', `artifacts:${s}`)!.meta.files as Array<{ path: string; homePath: string; role: string }>
+    const inputPath = files.find(f => f.role === 'input')!.homePath
+
+    // The answering session sees and hands over only what is shared with 跟单助手.
+    const seen: { recall?: string[]; handed?: string; errors: string[] } = { errors: [] }
+    fx.scripts.set('售后返厂助手', async ({ session }) => {
+      const inner = await fx.svc.callerFromAuth({ userId: session.userId, orgId: ORG, role: 'user', scopes: [], assistantId: '售后返厂助手', sessionId: session.sessionId })
+      assert.equal(inner.serving?.callerAgent.displayName, '跟单助手')
+      const viewer = fx.svc.callerViewer(inner)
+      seen.recall = (await fx.svc.index.search({ orgId: ORG, agentId: 'agent-shouhou-uuid', query: '返厂周报 张三 司机名单', viewer })).map(h => h.kind)
+      seen.handed = (await fx.svc.a2a.handoff(inner, 'weekly.md')).name
+      for (const p of [inputPath, `${inputPath}.extract.json`, '司机名单.csv', conv.path, '/agent-home/org-1/agent-gendan-uuid/x', 'artifacts/../../../etc']) {
+        try {
+          await fx.svc.a2a.handoff(inner, p)
+          seen.errors.push(`${p}: handed`)
+        } catch (err) {
+          seen.errors.push(`${p}: ${(err as A2AError).code}`)
+        }
+      }
+      return { reply: '周报见附件。' }
+    })
+    const gendan = await callerFor('跟单助手', 'u-gendan')
+    const done = await settle((await fx.svc.a2a.ask(gendan, { agent: '售后返厂助手', capability: 'return-stats', question: '发我最近的返厂周报' })).id)
+    assert.equal(done.status, 'done', done.error ?? '')
+    assert.ok(seen.recall!.length > 0)
+    assert.ok(seen.recall!.every(k => k === 'summary' || k === 'artifact' || k === 'a2a'), `only shared kinds: ${seen.recall}`)
+    assert.equal(seen.handed, 'weekly.md')
+    assert.deepEqual(seen.errors, [
+      `${inputPath}: private`,
+      `${inputPath}.extract.json: private`,
+      '司机名单.csv: file_not_found',
+      `${conv.path}: private`,
+      '/agent-home/org-1/agent-gendan-uuid/x: outside_agent',
+      'artifacts/../../../etc: outside_agent',
+    ])
+
+    // The handed-over file comes back with the call; only the calling agent can fetch it.
+    assert.ok(done.resultFiles.some(f => f.includes(`/handoffs/${done.id}/weekly.md`)))
+    assert.match((await fx.svc.a2a.callFile(gendan, done.id, 'weekly.md')).buf.toString(), /灯具 40 件/)
+    await rejects(fx.svc.a2a.callFile(gendan, done.id, '司机名单.csv'), 'file_not_found')
+    await fx.svc.configure(ORG, 'other', { a2a: { callers: ['*'] } })
+    await rejects(fx.svc.a2a.callFile(await callerFor('其他助手', 'u-x'), done.id, 'weekly.md'), 'call_not_found')
+    // The answering agent reads its own call's files through its home, not this route.
+    await rejects(fx.svc.a2a.callFile(await callerFor('售后返厂助手', 'u-shouhou'), done.id, 'weekly.md'), 'not_caller')
+
+    // Outside a call there is nothing to hand over to.
+    await rejects(fx.svc.a2a.handoff(await callerFor('售后返厂助手', 'u-shouhou'), 'weekly.md'), 'not_serving')
+  })
+
+  it('hands over nothing when the agent shares nothing with agents', async () => {
+    fx = createFixture(PAIR_AGENTS)
+    await configurePair(fx, { shareWithAsker: false })
     const s = fx.addSession({
       agent: 'shouhou',
       userId: 'u-shouhou',
@@ -98,23 +160,45 @@ describe('agent-to-agent collaboration', () => {
       files: { 'weekly.md': '# 返厂周报\n灯具 40 件\n' },
     })
     await fx.svc.digest.digestSessionById(s)
-    const caller = await callerFor('跟单助手', 'u-gendan')
-    const hits = await fx.svc.a2a.searchOtherHistory(caller, { agent: '售后返厂助手', query: '灯具返厂' })
-    assert.ok(hits.length > 0)
-    assert.ok(hits.every(h => h.kind !== 'conversation'))
-    const artifactDoc = fx.svc.store.getDocByKey(ORG, 'agent-shouhou-uuid', `artifacts:${s}`)!
-    const file = (artifactDoc.meta.files as Array<{ homePath: string }>)[0]!.homePath
-    assert.match((await fx.svc.a2a.readOtherFile(caller, { agent: '售后返厂助手', path: file })).toString(), /灯具 40 件/)
+    const seen: { recall?: number; handoff?: string; block?: string } = {}
+    fx.scripts.set('售后返厂助手', async ({ session }) => {
+      const inner = await fx.svc.callerFromAuth({ userId: session.userId, orgId: ORG, role: 'user', scopes: [], assistantId: '售后返厂助手', sessionId: session.sessionId })
+      seen.recall = (await fx.svc.index.search({ orgId: ORG, agentId: 'agent-shouhou-uuid', query: '灯具 返厂周报', viewer: fx.svc.callerViewer(inner) })).length
+      seen.handoff = await fx.svc.a2a.handoff(inner, 'weekly.md').then(() => 'handed', (err: A2AError) => err.code)
+      seen.block = (await fx.svc.buildSessionBlock({ sessionId: session.sessionId, orgId: ORG, userId: session.userId, role: 'user', scopes: [], assistantName: '售后返厂助手' })) ?? ''
+      return { reply: '没有可以提供的周报。' }
+    })
+    const done = await settle((await fx.svc.a2a.ask(await callerFor('跟单助手', 'u-gendan'), { agent: '售后返厂助手', capability: 'return-stats', question: '发我返厂周报' })).id)
+    assert.equal(done.status, 'done', done.error ?? '')
+    assert.equal(seen.recall, 0)
+    assert.equal(seen.handoff, 'file_not_found', 'asked by name, an unshared file does not exist for the caller')
+    assert.doesNotMatch(seen.block!, /做返厂周报/, 'recent work of employees is not listed while answering another agent')
+    assert.match(seen.block!, /agentctl handoff/)
+    // Its own employees still see it.
+    assert.ok((await fx.svc.index.search({ orgId: ORG, agentId: 'agent-shouhou-uuid', query: '灯具 返厂周报', viewer: { kind: 'user', userId: 'u-li' } })).length > 0)
+  })
 
-    // Agents usually ask for an output by the file name they were told.
-    assert.match((await fx.svc.a2a.readOtherFile(caller, { agent: '售后返厂助手', path: 'weekly.md' })).toString(), /灯具 40 件/)
-    assert.match((await fx.svc.a2a.readOtherFile(caller, { agent: '售后返厂助手', path: './weekly.md' })).toString(), /灯具 40 件/)
-    await rejects(fx.svc.a2a.readOtherFile(caller, { agent: '售后返厂助手', path: 'nope.md' }), 'file_not_found')
-
-    const conv = fx.svc.store.getDocByKey(ORG, 'agent-shouhou-uuid', `conversation:${s}`)!
-    await rejects(fx.svc.a2a.readOtherFile(caller, { agent: '售后返厂助手', path: conv.path }), 'private')
-    await rejects(fx.svc.a2a.readOtherFile(caller, { agent: '售后返厂助手', path: '/agent-home/org-1/agent-gendan-uuid/x' }), 'outside_agent')
-    await rejects(fx.svc.a2a.readOtherFile(caller, { agent: '售后返厂助手', path: 'artifacts/../../../etc' }), 'outside_agent')
+  it('opens each capability to its own callers', async () => {
+    fx = createFixture(PAIR_AGENTS)
+    await fx.svc.configure(ORG, 'gendan', {})
+    await fx.svc.configure(ORG, 'other', {})
+    await fx.svc.configure(ORG, 'shouhou', {
+      a2a: {
+        capabilities: [
+          { id: 'stats', kind: 'ask', description: '统计' },
+          { id: 'report', kind: 'task', description: '报表', callers: { allow: ['其他助手'], deny: [] } },
+        ],
+        callers: { allow: ['*'], deny: ['其他助手'] },
+      },
+    })
+    fx.scripts.set('售后返厂助手', () => ({ reply: 'ok' }))
+    const gendan = await callerFor('跟单助手', 'u')
+    const other = await callerFor('其他助手', 'u')
+    assert.deepEqual((await fx.svc.a2a.listCallable(gendan))[0]!.capabilities.map(c => c.id), ['stats'])
+    assert.deepEqual((await fx.svc.a2a.listCallable(other))[0]!.capabilities.map(c => c.id), ['report'])
+    await rejects(fx.svc.a2a.delegate(gendan, { agent: '售后返厂助手', capability: 'report', input: 'x' }), 'not_allowed')
+    await rejects(fx.svc.a2a.ask(other, { agent: '售后返厂助手', capability: 'stats', question: 'x' }), 'not_allowed')
+    assert.equal((await fx.svc.a2a.delegate(other, { agent: '售后返厂助手', capability: 'report', input: 'x' })).status, 'queued')
   })
 
   it('refuses callers, capabilities and kinds that are not configured', async () => {
@@ -123,7 +207,6 @@ describe('agent-to-agent collaboration', () => {
     await fx.svc.configure(ORG, 'other', {})
     const other = await callerFor('其他助手', 'u-x')
     await rejects(fx.svc.a2a.ask(other, { agent: '售后返厂助手', capability: 'return-stats', question: 'q' }), 'not_allowed')
-    await rejects(fx.svc.a2a.searchOtherHistory(other, { agent: '售后返厂助手', query: 'q' }), 'not_reader')
 
     const gendan = await callerFor('跟单助手', 'u-gendan')
     await rejects(fx.svc.a2a.ask(gendan, { agent: '售后返厂助手', capability: 'nope', question: 'q' }), 'capability_not_found')
@@ -141,7 +224,6 @@ describe('agent-to-agent collaboration', () => {
     const list = await fx.svc.a2a.listCallable(await callerFor('跟单助手', 'u-gendan'))
     assert.deepEqual(list.map(a => a.displayName), ['售后返厂助手'])
     assert.deepEqual(list[0]!.capabilities.map(c => c.id), ['return-stats', 'return-report', 'notify-supplier'])
-    assert.equal(list[0]!.canReadHistory, true)
   })
 
   it('stops cycles and over-deep chains', async () => {
@@ -176,7 +258,7 @@ describe('agent-to-agent collaboration', () => {
     await fx.svc.configure(ORG, 'shouhou', {
       a2a: {
         capabilities: [{ id: 'cost', kind: 'ask', description: '成本数据', requireCallerVisibility: true }, { id: 'stats', kind: 'ask', description: '统计' }],
-        allowCallers: ['*'],
+        callers: ['*'],
         dailyCallLimit: 1,
       },
     })
@@ -256,7 +338,7 @@ describe('agent-to-agent collaboration', () => {
     // Another employee in the same role starts a new session of the same agent.
     const block = await fx.svc.buildSessionBlock({ sessionId: 'new', orgId: ORG, userId: 'u-li', role: 'user', scopes: [], assistantName: '跟单助手' })
     assert.match(block!, /跟进 PO-778 交期/, 'recent work is listed')
-    const hits = await fx.svc.index.search({ orgId: ORG, agentId: 'agent-gendan-uuid', query: 'PO-778 发货', viewerUserId: 'u-li', share: 'summary' })
+    const hits = await fx.svc.index.search({ orgId: ORG, agentId: 'agent-gendan-uuid', query: 'PO-778 发货', viewer: { kind: 'user', userId: 'u-li' } })
     assert.ok(hits.some(h => h.snippet.includes('SF1234')))
   })
 })

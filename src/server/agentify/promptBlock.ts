@@ -37,6 +37,8 @@ export function buildAgentifyBlock(input: AgentifyBlockInput): string {
   lines.push('Search before you redo work or say you do not know. Save durable facts with `memory add`; never save secrets.')
   lines.push('A file hit shows where the file is kept. For its data, `agentctl files get <that path>.extract.json`: every sheet')
   lines.push('as JSON rows keyed by column name (dates as ISO strings), or a document/PDF as text — no spreadsheet library needed.')
+  lines.push('Each hit\'s `from:` line says how that work came about: an employee\'s conversation, another agent\'s request, or a')
+  lines.push('scheduled task run (job name and the run\'s start time). Scheduled runs are kept one per run.')
 
   if (input.collaborators.length > 0) {
     lines.push('')
@@ -49,17 +51,16 @@ export function buildAgentifyBlock(input: AgentifyBlockInput): string {
         const confirm = cap.kind === 'task' && cap.requiresConfirmation ? '; needs human confirmation' : ''
         lines.push(`    ${verb} ${cap.id}: ${cap.description}${cap.input ? ` (input: ${cap.input})` : ''}${confirm}`)
       }
-      if (c.canReadHistory) lines.push('    can read its shared history and outputs directly (--agent)')
     }
     lines.push('')
     lines.push('Commands:')
     lines.push('  agentctl agents                                            # refresh the list above')
     lines.push('  agentctl ask --agent <name> --capability <id> "<question>" # wait for its answer')
     lines.push('  agentctl delegate --agent <name> --capability <id> "<task>" [--wait]')
-    lines.push('  agentctl call <callId>                                     # status / result of a call')
-    lines.push('  agentctl recall --agent <name> "<keywords>"                # search its shared history')
-    lines.push('  agentctl files get --agent <name> <path>                   # fetch one of its outputs')
+    lines.push('  agentctl call <callId> [--save]                            # status / result of a call; --save fetches its files')
     lines.push('Give the other agent a complete, self-contained request: it does not see this conversation.')
+    lines.push('You cannot search or open another agent\'s history yourself. Ask it; files it hands over come back with')
+    lines.push('the answer, and `ask` / `call --wait` save them into ./from-<agent>/ in this workspace.')
   }
 
   if (input.servingCall) {
@@ -68,6 +69,11 @@ export function buildAgentifyBlock(input: AgentifyBlockInput): string {
       `This session serves a request from the agent "${input.servingCall.callerName}".` +
         (input.servingCall.readonly ? ' It is read-only: outbound actions will be refused.' : ''),
     )
+    lines.push(
+      `Recall, history and files show only what you share with "${input.servingCall.callerName}". To hand over a saved file:`,
+    )
+    lines.push('  agentctl handoff <path or file name>                       # it goes back with your answer')
+    lines.push('Files you create in this workspace are handed over automatically.')
   }
   return lines.join('\n')
 }

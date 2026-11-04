@@ -117,6 +117,7 @@ type Hit struct {
 	Path      string  `json:"path"`
 	SessionID *string `json:"sessionId"`
 	CreatedAt int64   `json:"createdAt"`
+	Origin    string  `json:"origin,omitempty"`
 	Score     float64 `json:"score"`
 	Snippet   string  `json:"snippet"`
 }
@@ -128,6 +129,7 @@ type HistoryItem struct {
 	Path      string  `json:"path"`
 	SessionID *string `json:"sessionId"`
 	CreatedAt int64   `json:"createdAt"`
+	Origin    string  `json:"origin,omitempty"`
 	Text      string  `json:"text,omitempty"`
 }
 
@@ -140,12 +142,17 @@ type Capability struct {
 }
 
 type Agent struct {
-	ID             string       `json:"id"`
-	Name           string       `json:"name"`
-	DisplayName    string       `json:"displayName"`
-	Description    string       `json:"description"`
-	Capabilities   []Capability `json:"capabilities"`
-	CanReadHistory bool         `json:"canReadHistory"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name"`
+	DisplayName  string       `json:"displayName"`
+	Description  string       `json:"description"`
+	Capabilities []Capability `json:"capabilities"`
+}
+
+type Handed struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	Bytes int    `json:"bytes"`
 }
 
 type NamedRef struct {
@@ -265,6 +272,19 @@ func (c *Client) File(agent, path string) ([]byte, error) {
 		q.Set("agent", agent)
 	}
 	return c.do(http.MethodGet, "/files", q, nil)
+}
+
+// CallFile downloads one file that came back with a call.
+func (c *Client) CallFile(callID, name string) ([]byte, error) {
+	return c.do(http.MethodGet, "/calls/"+url.PathEscape(callID)+"/files", url.Values{"name": {name}}, nil)
+}
+
+// Handoff passes one of this agent's saved files to the agent whose call this session answers.
+func (c *Client) Handoff(path string) (Handed, error) {
+	var out struct {
+		Handed Handed `json:"handed"`
+	}
+	return out.Handed, c.postJSON("/handoff", map[string]any{"path": path}, &out)
 }
 
 // Wait polls a call until it settles or the deadline passes.

@@ -117,6 +117,15 @@ export interface A2ACall {
   finishedAt: number | null
 }
 
+export interface CronRunInfo {
+  runId: string
+  /** Who the run executed as (the job's executor, or whoever triggered it by hand). */
+  userId: string
+  startedAt: number
+  jobName: string | null
+  timeZone: string | null
+}
+
 export interface SessionAgentInfo {
   sessionId: string
   orgId: string
@@ -450,8 +459,41 @@ export class AgentifyStore {
     this.db.prepare(`DELETE FROM agentify_uploads WHERE session_id = ?`).run(sessionId)
   }
 
-  listUploads(sessionId: string): string[] {
-    return (this.db.prepare(`SELECT path FROM agentify_uploads WHERE session_id = ?`).all(sessionId) as Row[]).map(r => s(r.path))
+  /** Files uploaded into a session; with a time range, only those uploaded within it. */
+  listUploads(sessionId: string, range?: { fromMs: number; toMs: number }): string[] {
+    const rows = range
+      ? this.db
+          .prepare(`SELECT path FROM agentify_uploads WHERE session_id = ? AND uploaded_at >= ? AND uploaded_at <= ?`)
+          .all(sessionId, range.fromMs, range.toMs)
+      : this.db.prepare(`SELECT path FROM agentify_uploads WHERE session_id = ?`).all(sessionId)
+    return (rows as Row[]).map(r => s(r.path))
+  }
+
+  deleteUploadsBefore(sessionId: string, beforeMs: number): void {
+    this.db.prepare(`DELETE FROM agentify_uploads WHERE session_id = ? AND uploaded_at < ?`).run(sessionId, beforeMs)
+  }
+
+  /**
+   * Scheduled-task runs served by a session, oldest first. A job in "reuse"
+   * mode sends many runs into one session; each is digested on its own.
+   */
+  listCronRuns(sessionId: string): CronRunInfo[] {
+    try {
+      return (this.db
+        .prepare(`SELECT r.id, r.user_id, r.started_at, r.created_at, j.name AS job_name, j.schedule_tz
+                  FROM cron_job_runs r LEFT JOIN cron_jobs j ON j.id = r.job_id
+                  WHERE r.session_id = ? ORDER BY COALESCE(r.started_at, r.created_at)`)
+        .all(sessionId) as Row[]).map(r => ({
+        runId: s(r.id),
+        userId: s(r.user_id),
+        startedAt: n(r.started_at ?? r.created_at),
+        jobName: sn(r.job_name),
+        timeZone: sn(r.schedule_tz),
+      }))
+    } catch {
+      // No scheduler tables (some test databases).
+      return []
+    }
   }
 
   /** Documents of one session whose key starts with `prefix` (per-file documents). */

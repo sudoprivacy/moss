@@ -17,7 +17,7 @@ import { AgentifyConfigError, historyPolicy, serverHistoryDefaults } from './con
 import type { AgentAuth, AgentifyService } from './service.js'
 import type { A2ACall, A2ACallStatus, DocKind } from './store.js'
 import { getInstalledAssistants } from '../agentStore.js'
-import { canSeeDoc } from './historyIndex.js'
+import { canAccessDoc, canAccessType } from './access.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -83,9 +83,19 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
   async function docWithText(caller: CallerContext, docId: string) {
     const doc = svc.store.getDoc(docId) ?? svc.store.listDocs({ orgId: caller.orgId, agentId: caller.agent.agentId, limit: 500 }).find(d => d.id.startsWith(docId))
     if (!doc || doc.orgId !== caller.orgId || doc.agentId !== caller.agent.agentId) throw new A2AError(404, 'doc_not_found', 'no such history entry')
-    if (!canSeeDoc(doc, caller.userId, caller.agent.config.memory.share)) throw new A2AError(404, 'doc_not_found', 'no such history entry')
+    if (!canAccessDoc(doc, svc.callerViewer(caller), caller.agent.config)) throw new A2AError(404, 'doc_not_found', 'no such history entry')
     const buf = await svc.home.read(doc.path)
     return { ...doc, text: buf ? buf.toString('utf8') : '' }
+  }
+
+  /** Reading another agent's home is not possible; say what to do instead. */
+  function rejectOtherAgent(caller: CallerContext, other: string | null): void {
+    if (!other || other === caller.agent.agentId || other === caller.agent.agentName || other === caller.agent.displayName) return
+    throw new A2AError(
+      403,
+      'handoff_only',
+      `${other} keeps its history to itself. Ask it with \`agentctl ask\`; files it hands over come back with the answer (\`agentctl call <id> --save\`).`,
+    )
   }
 
   // ---------------------------------------------------------- agent routes
@@ -108,18 +118,15 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
     if (req.method === 'GET' && sub === '/recall') {
       const q = url.searchParams.get('q') ?? ''
       const limit = Number(url.searchParams.get('limit')) || undefined
-      const other = url.searchParams.get('agent')
-      const hits = other && other !== caller.agent.agentId && other !== caller.agent.agentName && other !== caller.agent.displayName
-        ? await svc.a2a.searchOtherHistory(caller, { agent: other, query: q, limit })
-        : await svc.index.search({
-            orgId: caller.orgId,
-            agentId: caller.agent.agentId,
-            query: q,
-            viewerUserId: caller.userId,
-            share: caller.agent.config.memory.share,
-            kinds: kindsParam(url.searchParams.get('kind')),
-            limit,
-          })
+      rejectOtherAgent(caller, url.searchParams.get('agent'))
+      const hits = await svc.index.search({
+        orgId: caller.orgId,
+        agentId: caller.agent.agentId,
+        query: q,
+        viewer: svc.callerViewer(caller),
+        kinds: kindsParam(url.searchParams.get('kind')),
+        limit,
+      })
       writeJson(res, 200, { hits: hits.map(h => ({ ...h, id: h.docId })) })
       return
     }
@@ -128,9 +135,9 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
       const limit = Math.min(Number(url.searchParams.get('limit')) || 20, 100)
       const docs = svc.store
         .listDocs({ orgId: caller.orgId, agentId: caller.agent.agentId, kinds: kindsParam(url.searchParams.get('kind')) ?? ['summary', 'a2a'], limit: limit * 3 })
-        .filter(d => canSeeDoc(d, caller.userId, caller.agent.config.memory.share))
+        .filter(d => canAccessDoc(d, svc.callerViewer(caller), caller.agent.config))
         .slice(0, limit)
-      writeJson(res, 200, { items: docs.map(d => ({ id: d.id, kind: d.kind, title: d.title, path: d.path, sessionId: d.sessionId, createdAt: d.createdAt })) })
+      writeJson(res, 200, { items: docs.map(d => ({ id: d.id, kind: d.kind, title: d.title, path: d.path, sessionId: d.sessionId, createdAt: d.createdAt, origin: typeof d.meta.origin === 'string' ? d.meta.origin : null })) })
       return
     }
 
@@ -142,18 +149,20 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
 
     if (sub === '/memory') {
       if (req.method === 'GET') {
+        const sharedOk = canAccessType('sharedMemory', null, svc.callerViewer(caller), caller.agent.config)
         writeJson(res, 200, {
-          shared: await svc.memory.read(caller.orgId, caller.agent.agentId, 'shared', null),
-          private: await svc.memory.read(caller.orgId, caller.agent.agentId, 'private', caller.userId),
+          shared: sharedOk ? await svc.memory.read(caller.orgId, caller.agent.agentId, 'shared', null) : '',
+          // Personal notes stay with the employee, never with a session answering another agent.
+          private: caller.serving ? '' : await svc.memory.read(caller.orgId, caller.agent.agentId, 'private', caller.userId),
         })
         return
       }
       if (req.method === 'POST') {
         const body = await deps.readJsonBody(req, 64 * 1024)
         const scope = body.scope === 'private' ? 'private' : 'shared'
-        if (svc.isReadonlySession(caller.sessionId) && scope === 'shared') {
-          // A session answering another agent must not rewrite this agent's shared memory.
-          throw new A2AError(403, 'readonly_session', 'this session is read-only')
+        if (caller.serving || (svc.isReadonlySession(caller.sessionId) && scope === 'shared')) {
+          // A session answering another agent must not rewrite this agent's memory.
+          throw new A2AError(403, 'readonly_session', 'this session answers another agent and cannot change memory')
         }
         try {
           const count = await svc.memory.add({
@@ -192,25 +201,41 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
       return
     }
 
-    const callMatch = sub.match(/^\/calls\/([^/]+)(\/cancel)?$/)
+    const callMatch = sub.match(/^\/calls\/([^/]+)(\/cancel|\/files)?$/)
     if (callMatch) {
       const id = decodeURIComponent(callMatch[1]!)
+      if (req.method === 'GET' && callMatch[2] === '/files') {
+        const { buf, name } = await svc.a2a.callFile(caller, id, url.searchParams.get('name') ?? '')
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': buf.length,
+          'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+        })
+        res.end(buf)
+        return
+      }
       if (req.method === 'GET' && !callMatch[2]) {
         writeJson(res, 200, { call: view(svc.a2a.callVisibleTo(caller, id)) })
         return
       }
-      if (req.method === 'POST' && callMatch[2]) {
+      if (req.method === 'POST' && callMatch[2] === '/cancel') {
         writeJson(res, 200, { call: view(svc.a2a.cancel(caller, id)) })
         return
       }
     }
 
     if (req.method === 'GET' && sub === '/files') {
-      const p = url.searchParams.get('path') ?? ''
-      const agent = url.searchParams.get('agent') || caller.agent.agentId
-      const buf = await svc.a2a.readOtherFile(caller, { agent, path: p })
+      rejectOtherAgent(caller, url.searchParams.get('agent'))
+      const { buf } = await svc.a2a.readHomeFile(caller.orgId, caller.agent, url.searchParams.get('path') ?? '', svc.callerViewer(caller))
       res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': buf.length })
       res.end(buf)
+      return
+    }
+
+    if (req.method === 'POST' && sub === '/handoff') {
+      const body = await deps.readJsonBody(req, 16 * 1024)
+      const handed = await svc.a2a.handoff(caller, typeof body.path === 'string' ? body.path : '')
+      writeJson(res, 200, { handed })
       return
     }
 
@@ -339,7 +364,7 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
         const kinds = kindsParam(url.searchParams.get('kind'))
         if (q.trim()) {
           // Administrators see everything, including private documents.
-          const hits = await svc.index.search({ orgId: auth.orgId, agentId: ref.id, query: q, viewerUserId: null, share: 'full', kinds, limit: 30, maxChars: 20_000, includeAll: true })
+          const hits = await svc.index.search({ orgId: auth.orgId, agentId: ref.id, query: q, viewer: { kind: 'admin' }, kinds, limit: 30, maxChars: 20_000 })
           writeJson(res, 200, { hits })
           return
         }

@@ -120,7 +120,7 @@ export class AgentMemory {
    * Text injected into a new session: the newest shared and private entries,
    * within `budget` characters, plus pointers to recent work.
    */
-  async buildInjection(input: { orgId: string; agentId: string; userId: string | null; budget: number; recentWork: string[] }): Promise<string> {
+  async buildInjection(input: { orgId: string; agentId: string; userId: string | null; includeShared?: boolean; budget: number; recentWork: string[] }): Promise<string> {
     const take = (entries: Array<{ header: string; body: string }>, chars: number): string[] => {
       const out: string[] = []
       let used = 0
@@ -132,7 +132,7 @@ export class AgentMemory {
       }
       return out
     }
-    const shared = parseMemoryEntries(await this.read(input.orgId, input.agentId, 'shared', null))
+    const shared = input.includeShared === false ? [] : parseMemoryEntries(await this.read(input.orgId, input.agentId, 'shared', null))
     const mine = input.userId ? parseMemoryEntries(await this.read(input.orgId, input.agentId, 'private', input.userId)) : []
     const sections: string[] = []
     const sharedLines = take(shared, Math.floor(input.budget * 0.55))

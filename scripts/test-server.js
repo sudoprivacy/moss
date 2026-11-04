@@ -73,6 +73,7 @@ const NODE = [
   'agentifyA2A.test.ts',
   'agentifyCore.test.ts',
   'agentifyFiles.test.ts',
+  'agentifyCron.test.ts',
   'agentifyRetention.test.ts',
   // src/server/__tests__
   'authProxySessionToken.test.ts',

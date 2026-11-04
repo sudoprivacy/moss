@@ -226,7 +226,7 @@ async function main(): Promise<void> {
     name: agents.gendan.name,
     display_name: agents.gendan.display,
     description: '采购跟单岗位的数字分身：跟进订单交期、协调售后返厂与供应商',
-    rules: `# ${agents.gendan.display}\n\n你是采购跟单岗位的智能体。涉及返厂、售后的信息，不要自己猜，用 \`agentctl ask\` 问售后返厂智能体，需要对方的报表时用 \`agentctl files get --agent ...\` 取回。\n回答前先用 \`agentctl recall\` 查你以前的工作。所有回复用中文。`,
+    rules: `# ${agents.gendan.display}\n\n你是采购跟单岗位的智能体。涉及返厂、售后的信息，不要自己猜，用 \`agentctl ask\` 问售后返厂智能体；需要对方的报表时，在提问里请对方把文件交给你，交回的文件会自动保存到工作目录的 from-<对方名称>/ 下。\n回答前先用 \`agentctl recall\` 查你以前的工作。所有回复用中文。`,
   })
   const list = await api<any>(admin, 'GET', '/api/v1/admin/agentify/agents')
   const findAgent = (name: string) => list.agents.find((a: any) => a.name === name)
@@ -237,21 +237,21 @@ async function main(): Promise<void> {
   // 3. Agentify them.
   await api(admin, 'PUT', `/api/v1/admin/agentify/agents/${B.id}`, {
     config: {
-      memory: { share: 'summary' },
+      // Summaries and outputs can be handed to the agents that may call it; conversations and inputs stay private.
+      sharing: { summary: 'agents', output: 'agents' },
       a2a: {
         capabilities: [
           { id: 'return-stats', kind: 'ask', description: '查询返厂统计、原因和结论（只读）' },
           { id: 'return-report', kind: 'task', description: '生成返厂分析报表文件' },
           { id: 'notify-supplier', kind: 'task', description: '通知供应商处理返厂（对外动作）', requiresConfirmation: true, allowOutbound: true },
         ],
-        allowCallers: [agents.gendan.name],
-        historyReaders: [agents.gendan.name],
+        callers: [agents.gendan.name],
         dailyCallLimit: 50,
       },
     },
   })
   await api(admin, 'PUT', `/api/v1/admin/agentify/agents/${A.id}`, {
-    config: { a2a: { capabilities: [{ id: 'order-status', kind: 'ask', description: '查询采购订单跟单进度' }], allowCallers: [agents.shouhou.name] } },
+    config: { a2a: { capabilities: [{ id: 'order-status', kind: 'ask', description: '查询采购订单跟单进度' }], callers: [agents.shouhou.name] } },
   })
   log('agents configured')
 
@@ -271,7 +271,7 @@ async function main(): Promise<void> {
   // 5. A follow-up employee asks the follow-up agent, which must consult the returns agent.
   const s2 = await startSession(users.gendan1!.token, A.id)
   const r2 = await chat(users.gendan1!.token, s2,
-    `售后那边第44周返厂最多的是什么品类？主要原因和供应商是谁？请向售后返厂智能体确认（capability: return-stats），并把对方的第44周返厂报表文件取回到当前工作目录。`)
+    `售后那边第44周返厂最多的是什么品类？主要原因和供应商是谁？请向售后返厂智能体确认（capability: return-stats），并请对方把第44周返厂报表文件交给你。`)
   log(`follow-up agent: ${r2.slice(0, 300)}`)
   const callsAfterAsk = (await api<any>(admin, 'GET', `/api/v1/admin/agentify/calls?agentId=${A.id}`)).calls as any[]
   const ask = callsAfterAsk.find(c => c.kind === 'ask' && c.caller.id === A.id && c.target.id === B.id)
@@ -282,12 +282,12 @@ async function main(): Promise<void> {
     check(ask.actor?.id === users.gendan1!.userId || Boolean(ask.actor), 'the call is attributed to the asking employee', ask.actor)
   }
   check(/厨卫/.test(r2), 'the follow-up agent relays the answer to the employee', r2.slice(0, 300))
-  const s2ctx = await api<any>(users.gendan1!.token, 'GET', `/api/v1/sessions/${s2}/context`)
-  const usedFiles = JSON.stringify(s2ctx.context?.messages ?? []).includes('agentctl files get')
-  check(usedFiles, 'the follow-up agent used `agentctl files get` on the returns agent', 'no `agentctl files get` in the transcript')
+  check((ask?.files?.length ?? 0) > 0, 'the returns agent handed files over with its answer', ask?.files)
   const fetched = join(DATA_DIR, 'runtime', 'sessions', s2, 'workspace')
-  const landed = existsSync(fetched) && readdirSync(fetched).some(f => /week44|返厂/.test(f) && readFileSync(join(fetched, f), 'utf8').includes('厨卫'))
-  check(landed, 'the returns agent’s report landed in the follow-up agent’s workspace', existsSync(fetched) ? readdirSync(fetched) : 'no workspace')
+  const workspaceFiles = (dir: string): string[] =>
+    existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).flatMap(e => (e.isDirectory() ? workspaceFiles(join(dir, e.name)) : [join(dir, e.name)])) : []
+  const landed = workspaceFiles(fetched).some(f => /week44|返厂/.test(f) && readFileSync(f, 'utf8').includes('厨卫'))
+  check(landed, 'the handed-over report landed in the follow-up agent’s workspace', workspaceFiles(fetched).map(f => f.slice(fetched.length + 1)))
 
   // 6. Another follow-up employee benefits from the first one's work (cross-employee memory).
   await waitQuiet(25_000)
@@ -355,13 +355,26 @@ async function main(): Promise<void> {
   const asB = agentSessionToken(users.shouhou1!.userId, B.id, s5)
   const extractJson = inputHit ? await api<any>(asB, 'GET', `/api/v1/agent/agentify/files?path=${encodeURIComponent(`${inputHit.path}.extract.json`)}`).catch((e: any) => ({ error: e.status })) : null
   check(Boolean(extractJson?.sheets?.[0]?.rows?.some((r: any) => r.SKU === SKU && r.返厂数量 === 63)), 'the returns agent can load the spreadsheet as JSON rows (no xlsx library needed)', extractJson?.error ?? extractJson?.sheets?.[0]?.rows?.[0])
-  const aRecall = await api<any>(asA, 'GET', `/api/v1/agent/agentify/recall?agent=${B.id}&q=${encodeURIComponent(SKU)}`)
-  check((aRecall.hits as any[]).every(h => h.kind !== 'input'), 'the follow-up agent does not see the employee’s input in search', (aRecall.hits as any[]).map(h => h.kind))
-  const aRead = inputHit ? await api(asA, 'GET', `/api/v1/agent/agentify/files?agent=${B.id}&path=${encodeURIComponent(inputHit.path)}`).then(() => 200, (e: any) => e.status) : 0
-  check(aRead === 403, 'and cannot read the input file', aRead)
+  // The follow-up agent cannot search or open the returns agent's home at all, not even its shared outputs.
+  const aRecall = await api(asA, 'GET', `/api/v1/agent/agentify/recall?agent=${B.id}&q=${encodeURIComponent(SKU)}`).then(() => 200, (e: any) => e.status)
+  check(aRecall === 403, 'the follow-up agent cannot search the returns agent’s history directly', aRecall)
   if (outputDoc) {
     const aOut = await api(asA, 'GET', `/api/v1/agent/agentify/files?agent=${B.id}&path=${encodeURIComponent(outputDoc.path)}`).then(() => 200, (e: any) => e.status)
-    check(aOut === 200, 'but can read the output', aOut)
+    check(aOut === 403, 'nor read its outputs directly', aOut)
+  }
+  // The returns agent's session that answered the follow-up agent sees only what is shared with it.
+  if (ask?.targetSessionId) {
+    const serving = agentSessionToken(ask.actor?.id ?? users.gendan1!.userId, B.id, ask.targetSessionId)
+    const sRecall = await api<any>(serving, 'GET', `/api/v1/agent/agentify/recall?q=${encodeURIComponent(SKU)}`)
+    check((sRecall.hits as any[]).every(h => h.kind !== 'input' && h.kind !== 'conversation'), 'while answering, the returns agent does not see employees’ inputs or conversations', (sRecall.hits as any[]).map(h => h.kind))
+    const sInput = inputHit ? await api(serving, 'GET', `/api/v1/agent/agentify/files?path=${encodeURIComponent(inputHit.path)}`).then(() => 200, (e: any) => e.status) : 0
+    check(sInput === 403, 'and cannot open or hand over the input file', sInput)
+    if (outputDoc) {
+      const sOut = await api(serving, 'GET', `/api/v1/agent/agentify/files?path=${encodeURIComponent(outputDoc.path)}`).then(() => 200, (e: any) => e.status)
+      check(sOut === 200, 'but can open the shared output', sOut)
+    }
+    const late = await api(serving, 'POST', '/api/v1/agent/agentify/handoff', { path: 'week45-summary.md' }).then(() => 200, (e: any) => e.status)
+    check(late === 409, 'nothing can be handed over once the call has finished', late)
   }
 
   // 8. Boundaries visible from outside.
@@ -371,7 +384,7 @@ async function main(): Promise<void> {
   check(notAdmin, 'a plain employee cannot read agentify administration')
 
   // 9. History policy (hours): defaults, validation, and deletion on the live
-  //    server — the returns agent's files in Nexus, read through the follow-up agent.
+  //    server — the returns agent's files in Nexus, read through its own session.
   const policyList = await api<any>(admin, 'GET', '/api/v1/admin/agentify/agents')
   check(JSON.stringify(policyList.historyDefaults) === JSON.stringify({ digestLookbackHours: 720, decayHalfLifeHours: 720, deleteAfterHours: 4320 }),
     'server defaults: 720 h lookback and decay half-life, 4320 h (180 days) deletion', policyList.historyDefaults)
@@ -382,8 +395,8 @@ async function main(): Promise<void> {
   const bSummaries = (await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=summary&limit=200`)).items as any[]
   const bMemoryBefore = ((await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=memory&limit=200`)).items as any[]).length
   const summaryPath = bSummaries[0]?.path as string | undefined
-  const readable = summaryPath ? await api(asA, 'GET', `/api/v1/agent/agentify/files?agent=${B.id}&path=${encodeURIComponent(summaryPath)}`).then(() => true, () => false) : false
-  check(bSummaries.length > 0 && readable, `before deletion the follow-up agent can read the returns agent's summary in Nexus (${bSummaries.length} summaries)`)
+  const readable = summaryPath ? await api(asB, 'GET', `/api/v1/agent/agentify/files?path=${encodeURIComponent(summaryPath)}`).then(() => true, () => false) : false
+  check(bSummaries.length > 0 && readable, `before deletion the returns agent can read its summary in Nexus (${bSummaries.length} summaries)`)
   // 0.001 h = 3.6 s: everything the returns agent did is now "old".
   await api(admin, 'PUT', `/api/v1/admin/agentify/agents/${B.id}`, { config: { ...cfgB, memory: { ...cfgB.memory, deleteAfterHours: 0.001 } } })
   await new Promise(r => setTimeout(r, 5000))
@@ -391,7 +404,7 @@ async function main(): Promise<void> {
   check(purged.sessions >= bSummaries.length && purged.docs >= bSummaries.length, 'purge deletes the returns agent’s digested sessions', purged)
   const bAfter = (await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=summary,conversation,artifact,a2a&limit=200`)).items as any[]
   check(bAfter.length === 0, 'no summaries, conversations, outputs or call logs remain indexed', bAfter.map(d => d.title))
-  const gone = summaryPath ? await api(asA, 'GET', `/api/v1/agent/agentify/files?agent=${B.id}&path=${encodeURIComponent(summaryPath)}`).then(() => false, (e: any) => e.status === 404) : false
+  const gone = summaryPath ? await api(asB, 'GET', `/api/v1/agent/agentify/files?path=${encodeURIComponent(summaryPath)}`).then(() => false, (e: any) => e.status === 404) : false
   check(gone, 'the summary file is gone from Nexus too')
   const bMemoryAfter = ((await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}/history?kind=memory&limit=200`)).items as any[]).length
   check(bMemoryAfter === bMemoryBefore, `curated memory is kept (${bMemoryAfter} entries)`)

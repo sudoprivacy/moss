@@ -11,6 +11,7 @@
  *   /agent-home/<org>/<agent>/memory/shared.md
  *   /agent-home/<org>/<agent>/memory/users/<user>.md
  *   /agent-home/<org>/<agent>/a2a/<call>.md
+ *   /agent-home/<org>/<agent>/handoffs/<call>/<file>                saved files handed to the caller
  *
  * With Nexus enabled the files live in Nexus VFS, next to the secrets vault,
  * so they are backed up and upgraded with it. Without Nexus they live in a
@@ -84,6 +85,11 @@ export function userMemoryPath(orgId: string, agentId: string, userId: string): 
 
 export function a2aLogPath(orgId: string, agentId: string, callId: string): string {
   return `${agentRoot(orgId, agentId)}/a2a/${safeSegment(callId)}.md`
+}
+
+/** Copies of saved files an agent handed over while answering one call. */
+export function handoffDir(orgId: string, agentId: string, callId: string): string {
+  return `${agentRoot(orgId, agentId)}/handoffs/${safeSegment(callId)}`
 }
 
 /** Local filesystem backend (also used by tests). */

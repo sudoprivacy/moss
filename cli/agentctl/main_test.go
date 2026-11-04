@@ -26,7 +26,7 @@ func fakeServer(t *testing.T) (*httptest.Server, *[]string) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/v1/agent/agentify/recall":
-			json.NewEncoder(w).Encode(map[string]any{"hits": []map[string]any{{"id": "doc-123456789", "kind": "summary", "title": "第44周返厂", "snippet": "厨卫五金 128 件", "createdAt": 1793600000000}, {"id": "doc-987654321", "kind": "input", "title": "10月发车.xlsx（输入）", "path": "/agent-home/o/a/inputs/s1/10月发车.xlsx", "snippet": "第3行：日期=2026-10-03", "createdAt": 1793600000000}}})
+			json.NewEncoder(w).Encode(map[string]any{"hits": []map[string]any{{"id": "doc-123456789", "kind": "summary", "title": "第44周返厂", "snippet": "厨卫五金 128 件", "createdAt": 1793600000000, "origin": "定时任务「返厂周报」2026-11-02 10:00 的运行（员工 张三名下）"}, {"id": "doc-987654321", "kind": "input", "title": "10月发车.xlsx（输入）", "path": "/agent-home/o/a/inputs/s1/10月发车.xlsx", "snippet": "第3行：日期=2026-10-03", "createdAt": 1793600000000}}})
 		case r.URL.Path == "/api/v1/agent/agentify/ask" && r.Method == "POST":
 			var body map[string]string
 			json.NewDecoder(r.Body).Decode(&body)
@@ -36,6 +36,22 @@ func fakeServer(t *testing.T) (*httptest.Server, *[]string) {
 			}
 			w.WriteHeader(202)
 			json.NewEncoder(w).Encode(map[string]any{"call": map[string]any{"id": "c1", "kind": "ask", "status": "running", "target": map[string]string{"name": "售后返厂助手"}}})
+		case r.URL.Path == "/api/v1/agent/agentify/calls/c1/files":
+			if r.URL.Query().Get("name") != "/agent-home/o/a/artifacts/s/answer.md" {
+				w.WriteHeader(404)
+				return
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Write([]byte("answer-bytes"))
+		case r.URL.Path == "/api/v1/agent/agentify/handoff" && r.Method == "POST":
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["path"] == "secret.xlsx" {
+				w.WriteHeader(403)
+				json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "private", "message": "that file is not shared with 跟单助手"}})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"handed": map[string]any{"name": body["path"], "path": "/agent-home/o/a/handoffs/c9/" + body["path"], "bytes": 12}})
 		case r.URL.Path == "/api/v1/agent/agentify/calls/c1":
 			polls++
 			status := "running"
@@ -48,6 +64,11 @@ func fakeServer(t *testing.T) (*httptest.Server, *[]string) {
 			w.WriteHeader(403)
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "not_allowed", "message": "售后返厂助手 does not accept calls"}})
 		case r.URL.Path == "/api/v1/agent/agentify/files":
+			if r.URL.Query().Get("agent") != "" {
+				w.WriteHeader(403)
+				json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "handoff_only", "message": "售后返厂助手 keeps its history to itself"}})
+				return
+			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Write([]byte("report-bytes"))
 		case r.URL.Path == "/api/v1/agent/agentify/memory" && r.Method == "POST":
@@ -78,7 +99,8 @@ func TestRecallPrintsHits(t *testing.T) {
 	srv, seen := fakeServer(t)
 	code, out, _ := run(t, srv, "recall", "返厂 品类", "--limit", "3")
 	if code != 0 || !strings.Contains(out, "厨卫五金 128 件") || !strings.Contains(out, "(id doc-1234)") ||
-		!strings.Contains(out, "file: /agent-home/o/a/inputs/s1/10月发车.xlsx") || strings.Count(out, "file: ") != 1 {
+		!strings.Contains(out, "file: /agent-home/o/a/inputs/s1/10月发车.xlsx") || strings.Count(out, "file: ") != 1 ||
+		!strings.Contains(out, "from: 定时任务「返厂周报」2026-11-02 10:00 的运行") || strings.Count(out, "from: ") != 1 {
 		t.Fatalf("code=%d out=%q", code, out)
 	}
 	if !strings.Contains((*seen)[0], "limit=3") || !strings.Contains((*seen)[0], "q=%E8%BF%94") {
@@ -86,14 +108,42 @@ func TestRecallPrintsHits(t *testing.T) {
 	}
 }
 
-func TestAskWaitsForTheAnswer(t *testing.T) {
+func TestAskWaitsForTheAnswerAndSavesItsFiles(t *testing.T) {
 	srv, _ := fakeServer(t)
-	code, out, errOut := run(t, srv, "ask", "--agent", "售后返厂助手", "--capability", "return-stats", "上周", "返厂")
+	dir := filepath.Join(t.TempDir(), "from")
+	code, out, errOut := run(t, srv, "ask", "--agent", "售后返厂助手", "--capability", "return-stats", "上周", "返厂", "--dir", dir)
 	if code != 0 {
 		t.Fatalf("code=%d err=%s", code, errOut)
 	}
 	if !strings.Contains(out, "status=done") || !strings.Contains(out, "厨卫五金最多") || !strings.Contains(out, "answer.md") {
 		t.Fatalf("out=%q", out)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "answer.md"))
+	if err != nil || string(data) != "answer-bytes" || !strings.Contains(out, "saved ") {
+		t.Fatalf("file not saved: %v %q out=%q", err, data, out)
+	}
+}
+
+func TestHandoff(t *testing.T) {
+	srv, seen := fakeServer(t)
+	code, out, errOut := run(t, srv, "handoff", "weekly.md", "report.xlsx")
+	if code != 0 || !strings.Contains(out, "handed over weekly.md") || !strings.Contains(out, "handed over report.xlsx") {
+		t.Fatalf("code=%d out=%q err=%q", code, out, errOut)
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("expected one request per file: %v", *seen)
+	}
+	code, _, errOut = run(t, srv, "handoff", "secret.xlsx")
+	if code != 2 || !strings.Contains(errOut, "not shared") {
+		t.Fatalf("code=%d err=%q", code, errOut)
+	}
+}
+
+func TestOtherAgentsFilesAreRefused(t *testing.T) {
+	srv, _ := fakeServer(t)
+	code, _, errOut := run(t, srv, "files", "get", "--agent", "售后返厂助手", "r.md", "--out", filepath.Join(t.TempDir(), "r.md"))
+	if code != 2 || !strings.Contains(errOut, "handoff_only") {
+		t.Fatalf("code=%d err=%q", code, errOut)
 	}
 }
 
@@ -109,7 +159,7 @@ func TestFilesGetWritesTheFile(t *testing.T) {
 	srv, _ := fakeServer(t)
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "r.md")
-	code, out, errOut := run(t, srv, "files", "get", "--agent", "售后返厂助手", "/agent-home/o/a/artifacts/s/r.md", "--out", dest)
+	code, out, errOut := run(t, srv, "files", "get", "/agent-home/o/a/artifacts/s/r.md", "--out", dest)
 	if code != 0 {
 		t.Fatalf("code=%d err=%s", code, errOut)
 	}

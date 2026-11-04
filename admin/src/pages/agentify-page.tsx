@@ -12,6 +12,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { SharingPanel, type PickOption } from '@/components/agentify/sharing-panel'
+import { getUsers } from '@/lib/api/auth'
 import {
   DEFAULT_CONFIG,
   confirmCall,
@@ -28,6 +30,7 @@ import {
   saveAgentifyConfig,
   type A2ACallView,
   type AgentifyAgent,
+  type AgentifyConfig,
   type HistoryDoc,
   type HistoryPolicy,
   type NexusUpgradeReport,
@@ -99,11 +102,10 @@ function readHours(configText: string, key: HourKey): { valid: boolean; value: n
   }
 }
 
-const CONFIG_HELP = `capabilities: 本智能体对外提供的能力（kind=ask 只读问答；kind=task 委派任务，可设 requiresConfirmation / allowOutbound）
-allowCallers: 允许调用本智能体的其他智能体（名称 / ID，"*" 表示全部已开启协作的智能体）
-historyReaders: 允许直接读取本智能体共享历史与产出的智能体
-confirmers: 可以确认委派任务的员工 ID（管理员始终可以）
-memory.share: summary = 其他员工的会话只共享摘要与产出；full = 也共享对话正文
+const CONFIG_HELP = `a2a.capabilities: 本智能体对外提供的能力（kind=ask 只读问答；kind=task 委派任务，可设 requiresConfirmation / allowOutbound；callers 可为单个能力另设可调用的智能体）
+a2a.callers: 可调用本智能体的其他智能体 { allow, deny }（名称 / ID，"*" 表示全部已开启协作的智能体；排除优先）
+sharing: 每类数据的共享范围与名单，见下方「共享权限」。其他智能体不能直接读取本智能体的数据，只能提问，由本智能体交给它
+a2a.confirmers: 可以确认委派任务的员工 ID（管理员始终可以）
 memory.digestLookbackHours / decayHalfLifeHours / deleteAfterHours: 见上方，留空 = 服务器默认`
 
 export default function AgentifyPage() {
@@ -117,6 +119,7 @@ export default function AgentifyPage() {
   const [configAgent, setConfigAgent] = useState<AgentifyAgent | null>(null)
   const [configText, setConfigText] = useState('')
   const [saving, setSaving] = useState(false)
+  const [userOptions, setUserOptions] = useState<PickOption[] | null>(null)
 
   const [memoryAgent, setMemoryAgent] = useState<AgentifyAgent | null>(null)
   const [memoryText, setMemoryText] = useState('')
@@ -166,7 +169,31 @@ export default function AgentifyPage() {
   const openConfig = (agent: AgentifyAgent) => {
     setConfigAgent(agent)
     setConfigText(JSON.stringify(agent.config ?? DEFAULT_CONFIG, null, 2))
+    if (userOptions === null) {
+      getUsers()
+        .then(r => setUserOptions(r.users.filter(u => u.status === 'active').map(u => ({ value: u.id, label: u.displayName || u.name }))))
+        .catch(() => setUserOptions([]))
+    }
   }
+
+  const parsedConfig = useMemo((): AgentifyConfig | null => {
+    try {
+      const c = JSON.parse(configText) as AgentifyConfig
+      return c && typeof c === 'object' && c.sharing && c.a2a ? c : null
+    } catch {
+      return null
+    }
+  }, [configText])
+
+  const updateConfig = (fn: (c: AgentifyConfig) => AgentifyConfig) => {
+    if (!parsedConfig) return
+    setConfigText(JSON.stringify(fn(parsedConfig), null, 2))
+  }
+
+  const agentOptions = useMemo(
+    (): PickOption[] => agents.filter(a => a.id !== configAgent?.id).map(a => ({ value: a.name, label: a.displayName })),
+    [agents, configAgent],
+  )
 
   const setHours = (key: HourKey, raw: string) => {
     try {
@@ -430,7 +457,7 @@ export default function AgentifyPage() {
       </div>
 
       <Dialog open={configAgent !== null} onOpenChange={open => !open && setConfigAgent(null)}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>协作配置：{configAgent?.displayName}</DialogTitle>
             <DialogDescription className="whitespace-pre-line text-xs">{CONFIG_HELP}</DialogDescription>
@@ -462,7 +489,8 @@ export default function AgentifyPage() {
               当前生效：回溯 {hoursText(configAgent.historyPolicy.digestLookbackHours, 'digestLookbackHours')} · 衰减半衰期 {hoursText(configAgent.historyPolicy.decayHalfLifeHours, 'decayHalfLifeHours')} · 删除期限 {hoursText(configAgent.historyPolicy.deleteAfterHours, 'deleteAfterHours')}（回溯不会超过删除期限）
             </p>
           ) : null}
-          <JsonEditor value={configText} onChange={setConfigText} height="320px" />
+          <SharingPanel config={parsedConfig} onChange={updateConfig} users={userOptions ?? []} agents={agentOptions} />
+          <JsonEditor value={configText} onChange={setConfigText} height="260px" />
           <DialogFooter className="gap-2">
             {configAgent?.agentified ? <Button variant="outline" onClick={() => void turnOff()}>关闭协作</Button> : null}
             <Button onClick={() => void saveConfig()} disabled={saving}>{configAgent?.agentified ? '保存' : '开启协作'}</Button>
@@ -474,7 +502,7 @@ export default function AgentifyPage() {
         <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>共享记忆：{memoryAgent?.displayName}</DialogTitle>
-            <DialogDescription>所有员工的会话都会看到这些内容。每行一条，格式「- [时间 记录人] 内容」。</DialogDescription>
+            <DialogDescription>按「共享权限」中共享记忆的设置提供给员工（及其他智能体提问时的回答）。每行一条，格式「- [时间 记录人] 内容」。</DialogDescription>
           </DialogHeader>
           <Textarea rows={16} value={memoryText} onChange={e => setMemoryText(e.target.value)} className="font-mono text-sm" />
           <DialogFooter>

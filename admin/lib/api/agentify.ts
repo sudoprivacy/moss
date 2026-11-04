@@ -5,6 +5,12 @@ import { dcClient } from './client'
  * agent-to-agent collaboration. See src/server/agentify/routes.ts.
  */
 
+/** Names, ids or `*`; deny wins over allow. */
+export interface AccessList {
+  allow: string[]
+  deny: string[]
+}
+
 export interface AgentifyCapability {
   id: string
   kind: 'ask' | 'task'
@@ -13,12 +19,32 @@ export interface AgentifyCapability {
   requiresConfirmation?: boolean
   allowOutbound?: boolean
   requireCallerVisibility?: boolean
+  /** Agents allowed to use this capability; absent = a2a.callers. */
+  callers?: AccessList
 }
+
+/** private = the employee whose session it is; users = also this agent's employees; agents = also other agents, by handoff. */
+export type ShareLevel = 'private' | 'users' | 'agents'
+
+export const SHARE_TYPES = ['conversation', 'summary', 'input', 'output', 'intermediate', 'sharedMemory'] as const
+export type ShareType = (typeof SHARE_TYPES)[number]
+
+export interface ShareRule {
+  level: ShareLevel
+  users?: AccessList
+  agents?: AccessList
+}
+
+export type SharingConfig = {
+  users: AccessList
+  /** Absent = the agents allowed to call (a2a.callers). */
+  agents?: AccessList
+} & Record<ShareType, ShareRule>
 
 export interface AgentifyConfig {
   enabled: boolean
+  sharing: SharingConfig
   memory: {
-    share: 'summary' | 'full'
     injectChars: number
     /** Hours; absent = server default. */
     digestLookbackHours?: number
@@ -29,8 +55,7 @@ export interface AgentifyConfig {
   }
   a2a: {
     capabilities: AgentifyCapability[]
-    allowCallers: string[]
-    historyReaders: string[]
+    callers: AccessList
     confirmers: string[]
     dailyCallLimit: number
   }
@@ -109,10 +134,23 @@ export interface NexusUpgradeReport {
 const BASE = '/api/v1/admin/agentify'
 const enc = encodeURIComponent
 
+export const DEFAULT_SHARE_LEVELS: Record<ShareType, ShareLevel> = {
+  conversation: 'private',
+  summary: 'users',
+  input: 'private',
+  output: 'users',
+  intermediate: 'private',
+  sharedMemory: 'users',
+}
+
 export const DEFAULT_CONFIG: AgentifyConfig = {
   enabled: true,
-  memory: { share: 'summary', injectChars: 4000 },
-  a2a: { capabilities: [], allowCallers: [], historyReaders: [], confirmers: [], dailyCallLimit: 200 },
+  sharing: {
+    users: { allow: ['*'], deny: [] },
+    ...(Object.fromEntries(SHARE_TYPES.map(t => [t, { level: DEFAULT_SHARE_LEVELS[t] }])) as Record<ShareType, ShareRule>),
+  },
+  memory: { injectChars: 4000 },
+  a2a: { capabilities: [], callers: { allow: [], deny: [] }, confirmers: [], dailyCallLimit: 200 },
 }
 
 export const listAgentifyAgents = () =>

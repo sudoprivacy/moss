@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'fs'
 import path from 'path'
 import { AgentifyConfigError, listAdmitsAgent, parseAgentifyConfig } from '../config.js'
-import { buildQueryTerms, canSeeDoc } from '../historyIndex.js'
+import { buildQueryTerms } from '../historyIndex.js'
+import { canAccessDoc, canAccessType, docShareType, type DocLike } from '../access.js'
 import { extractiveSummary, parseTranscript, renderConversation, truncateMiddle } from '../transcriptDigest.js'
 import { replyAfterPrompt } from '../sessionDriver.js'
 import { ModelSummarizer } from '../summarizer.js'
@@ -17,8 +18,49 @@ describe('agentify config', () => {
   it('fills defaults', () => {
     const c = parseAgentifyConfig({})
     assert.equal(c.enabled, true)
-    assert.equal(c.memory.share, 'summary')
-    assert.deepEqual(c.a2a.allowCallers, [])
+    assert.deepEqual(c.a2a.callers, { allow: [], deny: [] })
+    assert.deepEqual(c.sharing.users, { allow: ['*'], deny: [] })
+    assert.equal(c.sharing.agents, undefined, 'agents default to the callers list')
+    assert.deepEqual(
+      Object.fromEntries((['conversation', 'summary', 'input', 'output', 'intermediate', 'sharedMemory'] as const).map(t => [t, c.sharing[t].level])),
+      { conversation: 'private', summary: 'users', input: 'private', output: 'users', intermediate: 'private', sharedMemory: 'users' },
+    )
+  })
+
+  it('parses sharing levels and lists, with shorthands', () => {
+    const c = parseAgentifyConfig({
+      sharing: {
+        users: { allow: ['*'], deny: ['王五'] },
+        agents: ['B', 'C'],
+        summary: 'agents',
+        output: { level: 'agents', agents: { allow: ['C'], deny: [] } },
+        input: { level: 'users', users: ['张三', '李四'] },
+      },
+      a2a: { callers: { allow: ['*'], deny: ['D'] }, capabilities: [{ id: 'r', kind: 'task', description: 'd', callers: ['C'] }] },
+    })
+    assert.deepEqual(c.sharing.users, { allow: ['*'], deny: ['王五'] })
+    assert.deepEqual(c.sharing.agents, { allow: ['B', 'C'], deny: [] })
+    assert.equal(c.sharing.summary.level, 'agents')
+    assert.deepEqual(c.sharing.output.agents, { allow: ['C'], deny: [] })
+    assert.deepEqual(c.sharing.input, { level: 'users', users: { allow: ['张三', '李四'], deny: [] } })
+    assert.equal(c.sharing.conversation.level, 'private')
+    assert.deepEqual(c.a2a.callers, { allow: ['*'], deny: ['D'] })
+    assert.deepEqual(c.a2a.capabilities[0]!.callers, { allow: ['C'], deny: [] })
+    assert.throws(() => parseAgentifyConfig({ sharing: { summary: 'everyone' } }), AgentifyConfigError)
+    assert.throws(() => parseAgentifyConfig({ sharing: { sharedMemory: 'private' } }), AgentifyConfigError)
+    assert.throws(() => parseAgentifyConfig({ sharing: { secrets: 'users' } }), AgentifyConfigError)
+    assert.throws(() => parseAgentifyConfig({ sharing: { users: { allow: ['*'], block: ['x'] } } }), AgentifyConfigError)
+  })
+
+  it('reads configs saved before per-type sharing', () => {
+    const old = parseAgentifyConfig({ memory: { share: 'full' }, a2a: { allowCallers: ['gendan'], historyReaders: ['gendan'] } })
+    assert.deepEqual(old.a2a.callers, { allow: ['gendan'], deny: [] })
+    assert.equal(old.sharing.conversation.level, 'users')
+    assert.equal(old.sharing.input.level, 'users')
+    // History readers used to read summaries and outputs directly; now those are handed over to them.
+    assert.deepEqual(old.sharing.summary, { level: 'agents', agents: { allow: ['gendan'], deny: [] } })
+    assert.deepEqual(old.sharing.output, { level: 'agents', agents: { allow: ['gendan'], deny: [] } })
+    assert.equal(parseAgentifyConfig({ memory: { share: 'summary' } }).sharing.conversation.level, 'private')
   })
 
   it('rejects outbound tasks without confirmation and read-only asks with flags', () => {
@@ -38,13 +80,17 @@ describe('agentify config', () => {
     assert.throws(() => parseAgentifyConfig({ memory: { share: 'everything' } }), AgentifyConfigError)
   })
 
-  it('admits agents by id, name, display name or *', () => {
+  it('admits agents by id, name, display name or *; deny wins', () => {
     const agent = { id: 'u1', name: 'gendan', displayName: '跟单助手' }
-    assert.equal(listAdmitsAgent(['gendan'], agent), true)
-    assert.equal(listAdmitsAgent(['跟单助手'], agent), true)
-    assert.equal(listAdmitsAgent(['u1'], agent), true)
-    assert.equal(listAdmitsAgent(['*'], agent), true)
-    assert.equal(listAdmitsAgent(['other'], agent), false)
+    const allow = (...a: string[]) => ({ allow: a, deny: [] })
+    assert.equal(listAdmitsAgent(allow('gendan'), agent), true)
+    assert.equal(listAdmitsAgent(allow('跟单助手'), agent), true)
+    assert.equal(listAdmitsAgent(allow('u1'), agent), true)
+    assert.equal(listAdmitsAgent(allow('*'), agent), true)
+    assert.equal(listAdmitsAgent(allow('other'), agent), false)
+    assert.equal(listAdmitsAgent(allow(), agent), false, 'empty allow = nobody')
+    assert.equal(listAdmitsAgent({ allow: ['*'], deny: ['跟单助手'] }, agent), false)
+    assert.equal(listAdmitsAgent({ allow: ['gendan'], deny: ['*'] }, agent), false)
   })
 })
 
@@ -180,20 +226,23 @@ describe('history index and digest', () => {
     assert.ok(!existsSync(path.join(home, 'artifacts', s1, '.scode')))
 
     const agentId = 'agent-shouhou-uuid'
-    const kw = await fx.svc.index.search({ orgId: ORG, agentId, query: '厨卫五金', viewerUserId: 'u-b', share: 'summary' })
+    const kw = await fx.svc.index.search({ orgId: ORG, agentId, query: '厨卫五金', viewer: { kind: 'user', userId: 'u-b' } })
     assert.ok(kw.length > 0)
     assert.ok(kw.every(h => h.kind !== 'conversation'), 'another employee must not see the raw conversation')
-    const short = await fx.svc.index.search({ orgId: ORG, agentId, query: '阀芯', viewerUserId: 'u-b', share: 'summary' })
+    const short = await fx.svc.index.search({ orgId: ORG, agentId, query: '阀芯', viewer: { kind: 'user', userId: 'u-b' } })
     assert.ok(short.some(h => h.snippet.includes('阀芯')))
     // The report's content is its own document, ranked first.
-    const report = await fx.svc.index.search({ orgId: ORG, agentId, query: '灯具 40 件', viewerUserId: 'u-b', share: 'summary', kinds: ['artifact'] })
+    const report = await fx.svc.index.search({ orgId: ORG, agentId, query: '灯具 40 件', viewer: { kind: 'user', userId: 'u-b' }, kinds: ['artifact'] })
     assert.equal(report[0]?.title, 'week44.md（产出）')
     assert.match(report[0]!.snippet, /灯具 40 件/)
 
-    const own = await fx.svc.index.search({ orgId: ORG, agentId, query: '统计第44周', viewerUserId: 'u-a', share: 'summary', kinds: ['conversation'] })
+    const own = await fx.svc.index.search({ orgId: ORG, agentId, query: '统计第44周', viewer: { kind: 'user', userId: 'u-a' }, kinds: ['conversation'] })
     assert.equal(own.length, 1, 'the employee who ran the session sees its conversation')
-    const full = await fx.svc.index.search({ orgId: ORG, agentId, query: '统计第44周', viewerUserId: 'u-b', share: 'full', kinds: ['conversation'] })
-    assert.equal(full.length, 1, 'share=full opens conversations to other employees')
+    await fx.svc.configure(ORG, 'shouhou', { ...fx.svc.store.getAgent(ORG, agentId)!.config, sharing: { conversation: 'users' } })
+    const opened = await fx.svc.index.search({ orgId: ORG, agentId, query: '统计第44周', viewer: { kind: 'user', userId: 'u-b' }, kinds: ['conversation'] })
+    assert.equal(opened.length, 1, 'conversation level "users" opens conversations to other employees')
+    const toAgent = await fx.svc.index.search({ orgId: ORG, agentId, query: '统计第44周', viewer: { kind: 'agent', agent: { id: 'agent-gendan-uuid', name: 'gendan', displayName: '跟单助手' } }, kinds: ['conversation'] })
+    assert.equal(toAgent.length, 0, 'but not to other agents')
   })
 
   it('digests an agent on demand even while the background sweep is busy', async () => {
@@ -204,7 +253,7 @@ describe('history index and digest', () => {
     ;(fx.svc.digest as unknown as { running: boolean }).running = true
     assert.equal(await fx.svc.digest.sweepOnce(), 0)
     assert.equal((await fx.svc.digest.digestAgent(ORG, 'agent-shouhou-uuid')).digested, 1)
-    const hits = await fx.svc.index.search({ orgId: ORG, agentId: 'agent-shouhou-uuid', query: '灯具返厂', viewerUserId: 'x', share: 'summary' })
+    const hits = await fx.svc.index.search({ orgId: ORG, agentId: 'agent-shouhou-uuid', query: '灯具返厂', viewer: { kind: 'user', userId: 'x' } })
     assert.ok(hits.some(h => h.kind === 'summary'))
   })
 
@@ -246,8 +295,11 @@ describe('history index and digest', () => {
     assert.match(forA, /表格/)
     const forB = await fx.svc.memory.buildInjection({ orgId: ORG, agentId: base.agentId, userId: 'u-b', budget: 2000, recentWork: [] })
     assert.doesNotMatch(forB, /表格/)
-    const hitsB = await fx.svc.index.search({ orgId: ORG, agentId: base.agentId, query: '表格形式', viewerUserId: 'u-b', share: 'full' })
-    assert.equal(hitsB.length, 0, 'private memory never leaks, even with share=full')
+    await fx.svc.configure(ORG, 'gendan', { sharing: { conversation: 'agents', input: 'agents', summary: 'agents', output: 'agents', intermediate: 'agents', sharedMemory: 'agents' }, a2a: { callers: ['*'] } })
+    const hitsB = await fx.svc.index.search({ orgId: ORG, agentId: base.agentId, query: '表格形式', viewer: { kind: 'user', userId: 'u-b' } })
+    assert.equal(hitsB.length, 0, 'personal memory never leaks, even with everything else open')
+    const hitsAgent = await fx.svc.index.search({ orgId: ORG, agentId: base.agentId, query: '表格形式', viewer: { kind: 'agent', agent: { id: 'x', name: 'x', displayName: 'x' } } })
+    assert.equal(hitsAgent.length, 0)
   })
 
   it('builds the first-message block only for agentified agents', async () => {
@@ -261,12 +313,42 @@ describe('history index and digest', () => {
     assert.equal(await fx.svc.buildSessionBlock({ sessionId: 'x', orgId: ORG, userId: 'u', role: 'user', scopes: [], assistantName: '其他助手' }), null)
   })
 
-  it('canSeeDoc rules', () => {
-    assert.equal(canSeeDoc({ visibility: 'shared', userId: 'a', kind: 'summary' }, 'b', 'summary'), true)
-    assert.equal(canSeeDoc({ visibility: 'private', userId: 'a', kind: 'conversation' }, 'b', 'summary'), false)
-    assert.equal(canSeeDoc({ visibility: 'private', userId: 'a', kind: 'conversation' }, 'a', 'summary'), true)
-    assert.equal(canSeeDoc({ visibility: 'private', userId: 'a', kind: 'conversation' }, null, 'full'), false)
-    assert.equal(canSeeDoc({ visibility: 'private', userId: 'a', kind: 'memory' }, 'b', 'full'), false)
+  it('access rules: levels, owners and lists for each data type', () => {
+    const doc = (kind: DocLike['kind'], userId: string | null, extra: Partial<DocLike> = {}): DocLike => ({ kind, userId, docKey: `${kind}:s1`, meta: {}, ...extra })
+    const user = (userId: string, userName?: string) => ({ kind: 'user' as const, userId, userName })
+    const agent = (name: string) => ({ kind: 'agent' as const, agent: { id: `id-${name}`, name, displayName: name } })
+    const cfg = parseAgentifyConfig({
+      sharing: {
+        users: { allow: ['*'], deny: ['王五'] },
+        summary: 'agents',
+        output: { level: 'agents', agents: { allow: ['C'], deny: [] } },
+        input: { level: 'users', users: ['u-li'] },
+      },
+      a2a: { callers: ['B', 'C', 'D'] },
+    })
+    // Types.
+    assert.equal(docShareType(doc('a2a', 'a')), 'summary')
+    assert.equal(docShareType(doc('artifact', 'a', { docKey: 'artifacts:s1' })), 'output')
+    assert.equal(docShareType(doc('artifact', 'a', { docKey: 'file:s1:x', meta: { role: 'intermediate' } })), 'intermediate')
+    assert.equal(docShareType(doc('memory', null, { docKey: 'memory:shared' })), 'sharedMemory')
+    assert.equal(docShareType(doc('memory', 'a', { docKey: 'memory:user:a' })), 'personal')
+    // Employees: owner always; others by level and the users list (by id or name); deny wins.
+    assert.equal(canAccessDoc(doc('conversation', 'a'), user('a'), cfg), true)
+    assert.equal(canAccessDoc(doc('conversation', 'a'), user('b'), cfg), false)
+    assert.equal(canAccessDoc(doc('summary', 'a'), user('b'), cfg), true)
+    assert.equal(canAccessDoc(doc('summary', 'a'), user('u-w', '王五'), cfg), false)
+    assert.equal(canAccessDoc(doc('summary', 'u-w'), user('u-w', '王五'), cfg), true, 'own work stays visible')
+    assert.equal(canAccessDoc(doc('input', 'a'), user('u-li'), cfg), true)
+    assert.equal(canAccessDoc(doc('input', 'a'), user('b'), cfg), false)
+    assert.equal(canAccessDoc(doc('memory', 'a', { docKey: 'memory:user:a' }), user('b'), cfg), false)
+    // Agents: only level "agents", by the type's list, else the default, else the callers.
+    assert.equal(canAccessDoc(doc('summary', 'a'), agent('B'), cfg), true, 'callers list by default')
+    assert.equal(canAccessDoc(doc('summary', 'a'), agent('E'), cfg), false)
+    assert.equal(canAccessDoc(doc('artifact', 'a', { meta: { role: 'output' } }), agent('C'), cfg), true)
+    assert.equal(canAccessDoc(doc('artifact', 'a', { meta: { role: 'output' } }), agent('B'), cfg), false)
+    assert.equal(canAccessDoc(doc('input', 'a'), agent('C'), cfg), false, 'level users never reaches agents')
+    assert.equal(canAccessType('sharedMemory', null, agent('B'), cfg), false)
+    assert.equal(canAccessDoc(doc('conversation', 'a'), { kind: 'admin' }, cfg), true)
   })
 
   it('reads its own summary files back', async () => {

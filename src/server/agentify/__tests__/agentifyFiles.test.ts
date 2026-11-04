@@ -15,6 +15,7 @@ import iconv from 'iconv-lite'
 import { classifyFile, displayName } from '../artifacts.js'
 import { extractFile, type ExtractData, type SheetData } from '../fileExtract.js'
 import { A2AError } from '../a2aService.js'
+import type { Viewer } from '../access.js'
 import { DIGEST_VERSION } from '../digestService.js'
 import { createFixture, ORG, PAIR_AGENTS, configurePair, type Fixture } from './agentifyFixture.js'
 
@@ -322,22 +323,27 @@ describe('searchable session files', () => {
     assert.match(summary, /- 产出文件：(十月分析.docx、summary.md|summary.md、十月分析.docx)/)
     const list = fx.svc.store.getDocByKey(ORG, SHOUHOU, `artifacts:${sid}`)!
     assert.equal(list.visibility, 'shared')
+    // Inputs are private while summaries are shared: the summary names them but carries none of their content.
+    const inputOutline = fx.svc.store.listSessionDocs(ORG, SHOUHOU, sid, 'file:').find(d => d.kind === 'input' && d.title.startsWith('2026'))!.meta.outline as string
+    assert.ok(inputOutline.length > 10)
+    assert.ok(!summary.includes(inputOutline), 'no input outline in the summary')
 
     // A value that exists only inside the spreadsheet: the employee who gave it finds the row.
-    const mine = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: 'FCBC26100400000007', viewerUserId: 'u-a', share: 'summary' })
+    const mine = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: 'FCBC26100400000007', viewer: { kind: 'user', userId: 'u-a' } })
     assert.equal(mine[0]?.kind, 'input')
     assert.match(mine[0]!.snippet, /第4行：日期=2026-10-04｜出发地=上虞｜目的地=南京｜运费含税=1305.8/)
-    // Another employee does not, unless the agent shares full history.
-    const other = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: 'FCBC26100400000007', viewerUserId: 'u-b', share: 'summary' })
+    // Another employee does not, unless the agent shares inputs with its employees.
+    const other = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: 'FCBC26100400000007', viewer: { kind: 'user', userId: 'u-b' } })
     assert.ok(other.every(h => h.kind !== 'input'))
-    const full = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: 'FCBC26100400000007', viewerUserId: 'u-b', share: 'full' })
-    assert.equal(full[0]?.kind, 'input')
+    await fx.svc.configure(ORG, 'shouhou', { ...fx.svc.store.getAgent(ORG, SHOUHOU)!.config, sharing: { input: 'users' } })
+    const opened = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: 'FCBC26100400000007', viewer: { kind: 'user', userId: 'u-b' } })
+    assert.equal(opened[0]?.kind, 'input')
     // Outputs are shared: the table inside the Word report is searchable by anyone.
-    const report = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: '雨天延误', viewerUserId: 'u-b', share: 'summary' })
+    const report = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: '雨天延误', viewer: { kind: 'user', userId: 'u-b' } })
     assert.equal(report[0]?.title, '十月分析.docx（产出）')
     assert.match(report[0]!.snippet, /线路=上虞-温州｜准点率=96%/)
     // Meaning, not just keywords: the profile chunk is embedded.
-    const profile = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: '十月份发车明细表有哪些列', viewerUserId: 'u-a', share: 'summary', kinds: ['input'] })
+    const profile = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: '十月份发车明细表有哪些列', viewer: { kind: 'user', userId: 'u-a' }, kinds: ['input'] })
     assert.ok(profile.length > 0)
   })
 
@@ -356,44 +362,53 @@ describe('searchable session files', () => {
     assert.deepEqual(after, before, 'same documents, not re-extracted')
   })
 
-  it('applies the same rules when agents read the files', async () => {
+  it('applies the same rules to reading files, for employees and for agents being answered', async () => {
     fx = createFixture(PAIR_AGENTS)
     await configurePair(fx)
     const sid = await analysisSession()
     await fx.svc.digest.digestSessionById(sid)
     const inputPath = fx.svc.store.listSessionDocs(ORG, SHOUHOU, sid, 'file:').find(d => d.kind === 'input' && d.title.startsWith('2026'))!.path
     const outputPath = fx.svc.store.listSessionDocs(ORG, SHOUHOU, sid, 'file:').find(d => d.title.startsWith('十月分析'))!.path
-    const caller = (name: string, userId: string) => fx.svc.callerFromAuth({ userId, orgId: ORG, role: 'user', scopes: [], assistantId: name, sessionId: null })
-    const denied = async (p: Promise<unknown>) => {
-      await assert.rejects(p, (err: unknown) => err instanceof A2AError && err.code === 'private')
-    }
+    const convPath = fx.svc.store.getDocByKey(ORG, SHOUHOU, `conversation:${sid}`)!.path
+    const row = () => fx.svc.store.getAgent(ORG, SHOUHOU)!
+    const read = (path: string, viewer: Viewer) => fx.svc.a2a.readHomeFile(ORG, row(), path, viewer).then(r => r.buf.toString())
+    const code = (path: string, viewer: Viewer) => read(path, viewer).then(() => 'ok', (err: A2AError) => err.code)
+    const userA: Viewer = { kind: 'user', userId: 'u-a' }
+    const userB: Viewer = { kind: 'user', userId: 'u-b' }
+    const gendan: Viewer = { kind: 'agent', agent: { id: 'agent-gendan-uuid', name: 'gendan', displayName: '跟单助手' } }
+    const other: Viewer = { kind: 'agent', agent: { id: 'agent-other-uuid', name: 'other', displayName: '其他助手' } }
 
-    // The returns agent itself: for the employee who gave the input, and not for a colleague.
-    const forA = await caller('售后返厂助手', 'u-a')
-    const forB = await caller('售后返厂助手', 'u-b')
-    assert.ok((await fx.svc.a2a.readOtherFile(forA, { agent: '售后返厂助手', path: inputPath })).length > 0)
-    assert.match((await fx.svc.a2a.readOtherFile(forA, { agent: '售后返厂助手', path: `${inputPath}.extract.json` })).toString(), /FCBC26100400000007/)
-    await denied(fx.svc.a2a.readOtherFile(forB, { agent: '售后返厂助手', path: inputPath }))
-    await denied(fx.svc.a2a.readOtherFile(forB, { agent: '售后返厂助手', path: `${inputPath}.extract.json` }))
-    await denied(fx.svc.a2a.readOtherFile(forB, { agent: '售后返厂助手', path: fx.svc.store.getDocByKey(ORG, SHOUHOU, `conversation:${sid}`)!.path }))
-    await assert.rejects(fx.svc.a2a.readOtherFile(forB, { agent: '售后返厂助手', path: '司机名单.csv' }), (err: unknown) => err instanceof A2AError && err.code === 'file_not_found')
-    assert.ok((await fx.svc.a2a.readOtherFile(forA, { agent: '售后返厂助手', path: '司机名单.csv' })).toString().includes('张三'), 'found by its name for the employee who gave it')
+    // Employees of the returns agent: the input for the employee who gave it, not for a colleague.
+    assert.equal(await code(inputPath, userA), 'ok')
+    assert.match(await read(`${inputPath}.extract.json`, userA), /FCBC26100400000007/)
+    assert.equal(await code(inputPath, userB), 'private')
+    assert.equal(await code(`${inputPath}.extract.json`, userB), 'private')
+    assert.equal(await code(convPath, userB), 'private')
+    assert.equal(await code('司机名单.csv', userB), 'file_not_found')
+    assert.match(await read('司机名单.csv', userA), /张三/, 'found by its name for the employee who gave it')
 
-    // The follow-up agent (a history reader): outputs and their data yes, inputs no.
-    const gendan = await caller('跟单助手', 'u-g')
-    assert.match((await fx.svc.a2a.readOtherFile(gendan, { agent: '售后返厂助手', path: `${outputPath}.extract.json` })).toString(), /上虞-南京/)
-    await denied(fx.svc.a2a.readOtherFile(gendan, { agent: '售后返厂助手', path: inputPath }))
-    const hits = await fx.svc.a2a.searchOtherHistory(gendan, { agent: '售后返厂助手', query: 'FCBC26100400000007 雨天延误' })
+    // While answering 跟单助手 (outputs shared with it): outputs and their data yes, inputs no; 其他助手 nothing.
+    assert.match(await read(`${outputPath}.extract.json`, gendan), /上虞-南京/)
+    assert.equal(await code(inputPath, gendan), 'private')
+    assert.equal(await code(convPath, gendan), 'private')
+    assert.equal(await code(`${outputPath}.extract.json`, other), 'private')
+    const hits = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: 'FCBC26100400000007 雨天延误', viewer: gendan })
     assert.ok(hits.some(h => h.title === '十月分析.docx（产出）'))
     assert.ok(hits.every(h => h.kind !== 'input'))
 
-    // With full sharing the inputs open up to colleagues and reading agents.
-    const cfg = fx.svc.store.getAgent(ORG, SHOUHOU)!.config
-    await fx.svc.configure(ORG, 'shouhou', { ...cfg, memory: { ...cfg.memory, share: 'full' } })
-    assert.ok((await fx.svc.a2a.readOtherFile(await caller('售后返厂助手', 'u-b'), { agent: '售后返厂助手', path: inputPath })).length > 0)
-    assert.ok((await fx.svc.a2a.readOtherFile(await caller('跟单助手', 'u-g'), { agent: '售后返厂助手', path: inputPath })).length > 0)
-    const fullHits = await fx.svc.a2a.searchOtherHistory(await caller('跟单助手', 'u-g'), { agent: '售后返厂助手', query: 'FCBC26100400000007' })
-    assert.equal(fullHits[0]?.kind, 'input')
+    // Inputs opened to employees only: colleagues yes, agents still no.
+    await fx.svc.configure(ORG, 'shouhou', { ...row().config, sharing: { ...row().config.sharing, input: { level: 'users' } } })
+    assert.equal(await code(inputPath, userB), 'ok')
+    assert.equal(await code(inputPath, gendan), 'private')
+    // Opened to agents: the agents that may call it.
+    await fx.svc.configure(ORG, 'shouhou', { ...row().config, sharing: { ...row().config.sharing, input: { level: 'agents' } } })
+    assert.equal(await code(inputPath, gendan), 'ok')
+    const inputHits = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: 'FCBC26100400000007', viewer: gendan })
+    assert.equal(inputHits[0]?.kind, 'input')
+    // A colleague left out by name, while the rest keep access.
+    await fx.svc.configure(ORG, 'shouhou', { ...row().config, sharing: { ...row().config.sharing, input: { level: 'users', users: { allow: ['*'], deny: ['u-b'] } } } })
+    assert.equal(await code(inputPath, userB), 'private')
+    assert.equal(await code(inputPath, { kind: 'user', userId: 'u-c' }), 'ok')
   })
 
   it('deletes input and output copies with the session', async () => {

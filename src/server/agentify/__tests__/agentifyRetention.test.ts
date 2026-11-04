@@ -107,7 +107,7 @@ describe('history policy in action', () => {
     const old = fx.addSession({ agent: 'shouhou', userId: 'u', ageMs: 60 * DAY, turns: returns('陶瓷洗手盆裂纹返厂 9 件') })
     assert.equal((await fx.svc.digest.digestAgent(ORG, SHOUHOU)).digested, 2)
 
-    const search = () => fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: '陶瓷洗手盆裂纹', viewerUserId: 'u', share: 'summary', kinds: ['summary'] })
+    const search = () => fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: '陶瓷洗手盆裂纹', viewer: { kind: 'user', userId: 'u' }, kinds: ['summary'] })
     const decayed = await search()
     assert.equal(decayed.length, 2)
     assert.equal(decayed[0]!.sessionId, fresh, 'the recent session ranks first')
@@ -168,7 +168,7 @@ describe('history policy in action', () => {
     assert.ok(fx.svc.store.getDocByKey(ORG, SHOUHOU, `summary:${fresh}`))
     assert.ok(existsSync(path.join(home, 'artifacts', fresh, 'new.md')))
     assert.ok(fx.svc.store.getDocByKey(ORG, SHOUHOU, 'memory:shared'))
-    const hits = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: '马桶盖', viewerUserId: 'u', share: 'summary' })
+    const hits = await fx.svc.index.search({ orgId: ORG, agentId: SHOUHOU, query: '马桶盖', viewer: { kind: 'user', userId: 'u' } })
     assert.ok(hits.some(h => h.kind === 'memory'), 'the memory note is still found')
     assert.ok(hits.every(h => h.sessionId !== old && !h.snippet.includes('马桶盖松动')), 'nothing from the deleted session')
 

@@ -28,12 +28,15 @@ Memory and history:
 
 Colleague agents:
   agentctl agents
-  agentctl ask --agent <name> --capability <id> "<question>" [--timeout 600]
+  agentctl ask --agent <name> --capability <id> "<question>" [--timeout 600] [--save=false] [--dir <dir>]
   agentctl delegate --agent <name> --capability <id> "<task>" [--wait] [--timeout 1800]
-  agentctl call <callId> [--wait]
+  agentctl call <callId> [--wait] [--save] [--dir <dir>]
   agentctl cancel <callId>
-  agentctl recall --agent <name> "<keywords>"      # its shared history
-  agentctl files get --agent <name> <path> [--out <file>]
+Another agent's history is not readable directly: ask it. Files it hands over come
+back with the call; ask and call --wait save them into ./from-<agent>/ (or --dir).
+
+While answering another agent:
+  agentctl handoff <path or file name>...          # hand a saved file to the caller
 
 Every command accepts --json for machine-readable output.
 
@@ -107,11 +110,47 @@ func printCall(w io.Writer, call Call) {
 		fmt.Fprintf(w, "\nerror: %s\n", *call.Error)
 	}
 	if len(call.Files) > 0 {
-		fmt.Fprintln(w, "\nfiles (fetch with `agentctl files get --agent "+call.Target.Name+" <path>`):")
+		fmt.Fprintln(w, "\nfiles (save with `agentctl call "+call.ID+" --save`):")
 		for _, f := range call.Files {
-			fmt.Fprintf(w, "  %s\n", f)
+			fmt.Fprintf(w, "  %s\n", filepath.Base(f))
 		}
 	}
+}
+
+// saveCallFiles downloads the files that came back with a finished call.
+func saveCallFiles(c *Client, w io.Writer, call Call, dir string) error {
+	if call.Status != "done" || len(call.Files) == 0 {
+		return nil
+	}
+	if dir == "" {
+		name := call.Target.Name
+		if name == "" {
+			name = call.Target.ID
+		}
+		dir = "from-" + strings.Map(func(r rune) rune {
+			if r == '/' || r == '\\' || r == ':' || r < ' ' {
+				return '_'
+			}
+			return r
+		}, name)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	fmt.Fprintln(w)
+	for _, f := range call.Files {
+		data, err := c.CallFile(call.ID, f)
+		if err != nil {
+			fmt.Fprintf(w, "could not save %s: %v\n", filepath.Base(f), err)
+			continue
+		}
+		dest := filepath.Join(dir, filepath.Base(f))
+		if err := os.WriteFile(dest, data, 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "saved %s (%d bytes)\n", dest, len(data))
+	}
+	return nil
 }
 
 func joinText(positional []string) string {
@@ -150,6 +189,10 @@ func dispatch(args []string, c *Client, out io.Writer, sleep func(time.Duration)
 		}
 		for _, h := range hits {
 			fmt.Fprintf(out, "[%s] %s  %s  (id %s)\n", h.Kind, day(h.CreatedAt), h.Title, short(h.ID))
+			if h.Origin != "" {
+				// Who or what produced it: an employee's chat, a scheduled run (with its start time), another agent.
+				fmt.Fprintf(out, "from: %s\n", h.Origin)
+			}
 			if h.Kind == "artifact" || h.Kind == "input" {
 				// File hits: where the file is kept, for `agentctl files get`.
 				fmt.Fprintf(out, "file: %s\n", h.Path)
@@ -178,7 +221,11 @@ func dispatch(args []string, c *Client, out io.Writer, sleep func(time.Duration)
 				return printJSON(out, items)
 			}
 			for _, it := range items {
-				fmt.Fprintf(out, "%s  %s  [%s] %s\n", short(it.ID), day(it.CreatedAt), it.Kind, it.Title)
+				line := fmt.Sprintf("%s  %s  [%s] %s", short(it.ID), day(it.CreatedAt), it.Kind, it.Title)
+				if it.Origin != "" {
+					line += "  — " + it.Origin
+				}
+				fmt.Fprintln(out, line)
 			}
 			return nil
 		case "show":
@@ -289,9 +336,6 @@ func dispatch(args []string, c *Client, out io.Writer, sleep func(time.Duration)
 				}
 				fmt.Fprintf(out, "  %s %s: %s%s\n", verb, cap.ID, cap.Description, extra)
 			}
-			if a.CanReadHistory {
-				fmt.Fprintln(out, "  history: readable with --agent")
-			}
 		}
 		return nil
 
@@ -305,6 +349,8 @@ func dispatch(args []string, c *Client, out io.Writer, sleep func(time.Duration)
 			defTimeout = 1800
 		}
 		timeout := fs.Int("timeout", defTimeout, "")
+		save := fs.Bool("save", true, "")
+		dir := fs.String("dir", "", "")
 		pos, err := parse(fs, rest)
 		if err != nil {
 			return err
@@ -333,6 +379,11 @@ func dispatch(args []string, c *Client, out io.Writer, sleep func(time.Duration)
 			return printJSON(out, call)
 		}
 		printCall(out, call)
+		if *save {
+			if err := saveCallFiles(c, out, call, *dir); err != nil {
+				return err
+			}
+		}
 		if call.Status == "pending_confirmation" {
 			fmt.Fprintln(out, "\nwaiting for a person to confirm; check with `agentctl call "+call.ID+"`")
 		}
@@ -344,6 +395,8 @@ func dispatch(args []string, c *Client, out io.Writer, sleep func(time.Duration)
 	case "call", "cancel":
 		wait := fs.Bool("wait", false, "")
 		timeout := fs.Int("timeout", 1800, "")
+		save := fs.Bool("save", false, "")
+		dir := fs.String("dir", "", "")
 		pos, err := parse(fs, rest)
 		if err != nil {
 			return err
@@ -366,6 +419,32 @@ func dispatch(args []string, c *Client, out io.Writer, sleep func(time.Duration)
 			return printJSON(out, call)
 		}
 		printCall(out, call)
+		if cmd == "call" && (*save || (*wait && *dir != "")) {
+			return saveCallFiles(c, out, call, *dir)
+		}
+		return nil
+
+	case "handoff":
+		pos, err := parse(fs, rest)
+		if err != nil {
+			return err
+		}
+		if len(pos) == 0 {
+			return errors.New("usage: agentctl handoff <path or file name>...")
+		}
+		for _, p := range pos {
+			h, err := c.Handoff(p)
+			if err != nil {
+				return err
+			}
+			if *asJSON {
+				if err := printJSON(out, h); err != nil {
+					return err
+				}
+				continue
+			}
+			fmt.Fprintf(out, "handed over %s (%d bytes)\n", h.Name, h.Bytes)
+		}
 		return nil
 
 	case "whoami":

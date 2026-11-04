@@ -2288,6 +2288,10 @@ export function startServer(
     onSessionCreated: (sessionId, assistantName, source) => agentify.onSessionCreated(sessionId, assistantName, source),
     buildSessionBlock: input => agentify.buildSessionBlock(input),
   }
+  // Scheduled runs of agentified agents start with which job and when the run started.
+  cronService.setRunNote(({ job, startedAt }) =>
+    agentify.cronRunNote({ orgId: job.orgId, assistant: job.assistantId ?? job.assistantName, jobName: job.name, startedAt, timeZone: job.schedule.tz }),
+  )
   const agentifyRoutes = createAgentifyRoutes(agentify, {
     readJsonBody,
     getUserName: resolveUserName,

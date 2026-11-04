@@ -12,7 +12,8 @@
 import { splitMarkdown } from '../wikiIndex/chunkSplitter.js'
 import type { Embedder } from '../wikiIndex/embedder.js'
 import type { AgentifyStore, DocInput, DocKind, DocRow } from './store.js'
-import { historyPolicy, type HistoryShare } from './config.js'
+import { DEFAULT_AGENTIFY_CONFIG, historyPolicy } from './config.js'
+import { canAccessDoc, type Viewer } from './access.js'
 
 export type EmbedderProvider = () => Promise<Embedder | null>
 
@@ -26,6 +27,8 @@ export interface SearchHit {
   createdAt: number
   /** Last activity of what the document describes. */
   activeAt: number
+  /** How the work came about, e.g. 定时任务「日报」2026-11-04 10:30 的运行（员工 张三名下）. */
+  origin: string | null
   score: number
   snippet: string
 }
@@ -34,17 +37,14 @@ export interface SearchOptions {
   orgId: string
   agentId: string
   query: string
-  /** The employee the search is for; null when another agent is reading. */
-  viewerUserId: string | null
-  share: HistoryShare
+  /** Who the search is for: an employee, an agent being answered, or an administrator. */
+  viewer: Viewer
   kinds?: DocKind[]
   limit?: number
   /** Total characters of snippets returned. */
   maxChars?: number
   /** Only documents created at or after this time. */
   sinceMs?: number
-  /** Administrators: skip the per-viewer visibility rules. */
-  includeAll?: boolean
   /** Recency half-life; defaults to the agent's configured policy. 0 = no decay. */
   decayHalfLifeHours?: number
 }
@@ -73,18 +73,6 @@ export function exactWords(query: string): string[] {
     .map(w => w.trim())
     .filter(w => w.length >= 2)
     .slice(0, 8)
-}
-
-/** Can this viewer see this document? */
-export function canSeeDoc(doc: Pick<DocRow, 'visibility' | 'userId' | 'kind'>, viewerUserId: string | null, share: HistoryShare): boolean {
-  if (doc.visibility === 'shared') return true
-  if (viewerUserId && doc.userId === viewerUserId) return true
-  if (share !== 'full') return false
-  // `full` sharing opens other employees' conversations and input files, never
-  // their private memory. Other agents (no viewer) get input files, not
-  // conversations.
-  if (doc.kind === 'input') return true
-  return doc.kind === 'conversation' && viewerUserId !== null
 }
 
 /**
@@ -204,13 +192,15 @@ export class HistoryIndex {
     } else {
       // Empty query: most recent documents, one chunk each.
       const docs = this.store.listDocs({ orgId: opts.orgId, agentId: opts.agentId, kinds: opts.kinds, limit: limit * 4 })
-      return this.recentHits(docs, opts, limit, maxChars)
+      const config = this.store.getAgent(opts.orgId, opts.agentId)?.config ?? DEFAULT_AGENTIFY_CONFIG
+      return this.recentHits(docs.filter(d => canAccessDoc(d, opts.viewer, config)), opts, limit, maxChars)
     }
 
     const rows = this.store.getChunksWithDocs(candidates.map(c => c.chunkId))
     const byId = new Map(rows.map(r => [r.id, r]))
     const now = Date.now()
-    const halfLife = opts.decayHalfLifeHours ?? historyPolicy(this.store.getAgent(opts.orgId, opts.agentId)?.config).decayHalfLifeHours
+    const config = this.store.getAgent(opts.orgId, opts.agentId)?.config ?? DEFAULT_AGENTIFY_CONFIG
+    const halfLife = opts.decayHalfLifeHours ?? historyPolicy(config).decayHalfLifeHours
     const words = exactWords(query)
     const bestPerDoc = new Map<string, SearchHit>()
     for (const c of candidates) {
@@ -219,7 +209,7 @@ export class HistoryIndex {
       const doc = row.doc
       if (opts.kinds && opts.kinds.length > 0 && !opts.kinds.includes(doc.kind)) continue
       if (opts.sinceMs && doc.createdAt < opts.sinceMs) continue
-      if (!opts.includeAll && !canSeeDoc(doc, opts.viewerUserId, opts.share)) continue
+      if (!canAccessDoc(doc, opts.viewer, config)) continue
       const kindBoost = doc.kind === 'summary' || doc.kind === 'memory' ? 1.15 : 1
       // Every word of the query appears verbatim (an id, an order number, a
       // name): that passage beats one that is only similar in meaning.
@@ -237,6 +227,7 @@ export class HistoryIndex {
           userId: doc.userId,
           createdAt: doc.createdAt,
           activeAt: doc.activeAt,
+          origin: typeof doc.meta.origin === 'string' ? doc.meta.origin : null,
           score,
           snippet: row.text,
         })
@@ -247,7 +238,7 @@ export class HistoryIndex {
   }
 
   private recentHits(docs: DocRow[], opts: SearchOptions, limit: number, maxChars: number): SearchHit[] {
-    const visible = docs.filter(d => (opts.includeAll || canSeeDoc(d, opts.viewerUserId, opts.share)) && (!opts.sinceMs || d.createdAt >= opts.sinceMs))
+    const visible = docs.filter(d => !opts.sinceMs || d.createdAt >= opts.sinceMs)
     const hits: SearchHit[] = []
     for (const doc of visible.slice(0, limit)) {
       const chunk = this.store.firstChunk(doc.id)
@@ -260,6 +251,7 @@ export class HistoryIndex {
         userId: doc.userId,
         createdAt: doc.createdAt,
         activeAt: doc.activeAt,
+        origin: typeof doc.meta.origin === 'string' ? doc.meta.origin : null,
         score: 0,
         snippet: chunk ?? '',
       })
