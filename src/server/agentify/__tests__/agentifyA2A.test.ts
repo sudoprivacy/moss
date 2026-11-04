@@ -179,6 +179,48 @@ describe('agent-to-agent collaboration', () => {
     assert.ok((await fx.svc.index.search({ orgId: ORG, agentId: 'agent-shouhou-uuid', query: '灯具 返厂周报', viewer: { kind: 'user', userId: 'u-li' } })).length > 0)
   })
 
+  it('runs a capability on its run-as employee\'s credentials when one is set', async () => {
+    fx = createFixture(PAIR_AGENTS)
+    await configurePair(fx)
+    const cfg = fx.svc.store.getAgent(ORG, 'agent-shouhou-uuid')!.config
+    const withRunAs = (userId: string) => ({
+      ...cfg,
+      a2a: { ...cfg.a2a, capabilities: cfg.a2a.capabilities.map(c => (c.id === 'return-stats' ? { ...c, runAsUserId: userId } : c)) },
+    })
+    // Only active users of the organization can be chosen.
+    await assert.rejects(fx.svc.configure(ORG, 'shouhou', withRunAs('gone-1')), /not an active user/)
+    await fx.svc.configure(ORG, 'shouhou', withRunAs('u-tms'))
+    assert.equal(fx.svc.store.getAgent(ORG, 'agent-shouhou-uuid')!.config.a2a.capabilities[0]!.runAsUserId, 'u-tms')
+
+    fx.scripts.set('售后返厂助手', () => ({ reply: 'TMS 显示第44周返厂 128 件。' }))
+    const gendan = await callerFor('跟单助手', 'u-gendan')
+    const done = await settle((await fx.svc.a2a.ask(gendan, { agent: '售后返厂助手', capability: 'return-stats', question: '查 TMS 返厂数' })).id)
+    assert.equal(done.status, 'done', done.error ?? '')
+    assert.equal(done.actorUserId, 'u-gendan', 'the call still belongs to the employee who asked')
+    assert.equal(done.runAsUserId, 'u-tms')
+    const session = fx.driverCalls.find(c => c.sessionId === done.targetSessionId)!
+    assert.equal(session.input.userId, 'u-tms', 'the answering session runs as the run-as employee')
+    assert.equal(fx.svc.isReadonlySession(done.targetSessionId), true, 'and stays read-only')
+    // The history says who asked and whose credentials were used.
+    const summary = fx.svc.store.getDocByKey(ORG, 'agent-shouhou-uuid', `summary:${done.targetSessionId}`)!
+    assert.match(String(summary.meta.origin), /背后员工 用户u-gendan，以员工 用户u-tms 的凭据执行/)
+    const log = fx.svc.store.getDocByKey(ORG, 'agent-gendan-uuid', `a2a:${done.id}`)!
+    assert.match((await fx.svc.home.read(log.path))!.toString(), /执行身份：用户u-tms/)
+
+    // Without run-as, the answering session runs as the employee who asked.
+    await fx.svc.configure(ORG, 'shouhou', cfg)
+    const plain = await settle((await fx.svc.a2a.ask(gendan, { agent: '售后返厂助手', capability: 'return-stats', question: '再查一次' })).id)
+    assert.equal(plain.runAsUserId, null)
+    assert.equal(fx.driverCalls.find(c => c.sessionId === plain.targetSessionId)!.input.userId, 'u-gendan')
+
+    // A run-as user who has since left: the call fails and says why.
+    const stored = fx.svc.store.getAgent(ORG, 'agent-shouhou-uuid')!
+    fx.svc.store.upsertAgent({ orgId: ORG, agentId: stored.agentId, agentName: stored.agentName, displayName: stored.displayName, config: withRunAs('gone-2') as typeof cfg })
+    const failed = await settle((await fx.svc.a2a.ask(gendan, { agent: '售后返厂助手', capability: 'return-stats', question: '再查' })).id)
+    assert.equal(failed.status, 'failed')
+    assert.match(failed.error!, /run-as user of capability return-stats is no longer an active user/)
+  })
+
   it('opens each capability to its own callers', async () => {
     fx = createFixture(PAIR_AGENTS)
     await fx.svc.configure(ORG, 'gendan', {})

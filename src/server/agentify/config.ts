@@ -86,6 +86,14 @@ export interface CapabilityConfig {
   /** Agents allowed to use this capability; absent = a2a.callers. */
   callers?: AccessList
   /**
+   * Whose credentials the answering session uses (stored logins for rbox,
+   * TMS, enterprise apps …). Absent = the employee behind the call. A user id
+   * = that employee, chosen by an administrator: the caller then gets what
+   * this agent can reach on that employee's access, through this capability
+   * only. Stored data is still limited to what is shared with the caller.
+   */
+  runAsUserId?: string
+  /**
    * When true, the employee behind the calling session must also be allowed
    * to use this agent directly (its visible_to). Use for capabilities whose
    * answers carry data the caller's employee should only see if they could
@@ -332,6 +340,12 @@ function parseCapability(raw: unknown, index: number): CapabilityConfig {
   if (r.requireCallerVisibility === true) cap.requireCallerVisibility = true
   const callers = accessList(r.callers, `a2a.capabilities[${index}].callers`)
   if (callers) cap.callers = callers
+  if (r.runAsUserId !== undefined && r.runAsUserId !== null && r.runAsUserId !== '') {
+    if (typeof r.runAsUserId !== 'string' || !r.runAsUserId.trim()) {
+      throw new AgentifyConfigError(`a2a.capabilities[${index}] (${id}): runAsUserId must be a user id`)
+    }
+    cap.runAsUserId = r.runAsUserId.trim()
+  }
   return cap
 }
 

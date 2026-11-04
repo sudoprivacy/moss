@@ -626,7 +626,7 @@ export default function AgentifyPage() {
           <DialogHeader>
             <DialogTitle>{callDetail?.caller.name} → {callDetail?.target.name}（{callDetail?.capability}）</DialogTitle>
             <DialogDescription>
-              {callDetail ? `${STATUS_LABEL[callDetail.status] ?? callDetail.status} · 层级 ${callDetail.depth} · 员工 ${callDetail.actor?.name ?? '—'} · ${fmt(callDetail.createdAt)}` : ''}
+              {callDetail ? `${STATUS_LABEL[callDetail.status] ?? callDetail.status} · 层级 ${callDetail.depth} · 员工 ${callDetail.actor?.name ?? '—'}${callDetail.runAs ? ` · 以 ${callDetail.runAs.name ?? callDetail.runAs.id} 的凭据执行` : ''} · ${fmt(callDetail.createdAt)}` : ''}
             </DialogDescription>
           </DialogHeader>
           {callDetail ? (

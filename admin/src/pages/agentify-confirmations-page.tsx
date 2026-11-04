@@ -74,6 +74,11 @@ export default function AgentifyConfirmationsPage() {
                 <Badge variant="outline">{call.capability}</Badge>
                 <span className="text-xs text-muted-foreground">发起员工：{call.actor?.name ?? '—'} · {fmt(call.createdAt)}</span>
               </div>
+              {call.runAs ? (
+                <p className="text-xs text-amber-600" data-testid="run-as">
+                  将以员工 {call.runAs.name ?? call.runAs.id} 的凭据执行（能力指定），不是发起员工本人的凭据。
+                </p>
+              ) : null}
               <div>
                 <div className="text-xs text-muted-foreground mb-1">任务内容</div>
                 <pre className="whitespace-pre-wrap text-sm bg-muted rounded p-3">{call.input}</pre>

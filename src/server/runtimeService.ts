@@ -424,6 +424,8 @@ export class RuntimeService {
   agentifyHooks: {
     onSessionCreated(sessionId: string, assistantName: string | null | undefined, source: string | null | undefined): Promise<void>
     buildSessionBlock(input: { sessionId: string; orgId: string; userId: string; role: string; scopes: string[]; assistantName: string | null | undefined }): Promise<string | null>
+    /** The session answers another agent and may only read through stored credentials. */
+    isReadonlySession?(sessionId: string): boolean
   } | null = null
 
   constructor(private readonly options: RuntimeServiceOptions) {
@@ -1144,6 +1146,7 @@ export class RuntimeService {
       // Admins/super_admins bypass the department-credential policy gate in
       // the auth proxy (full privileges within org / across orgs).
       isAdmin: user.role === 'admin' || user.role === 'super_admin',
+      ...(this.agentifyHooks?.isReadonlySession?.(session.sessionId) ? { readOnly: true } : {}),
     }
   }
 

@@ -119,7 +119,11 @@ export function describeOrigin(source: string | null, userName: string | undefin
   const kind = parsed?.source ?? source
   if (kind === 'cron') return `定时任务「${String(parsed?.cronJobName ?? '')}」（${who}名下）`
   if (kind === 'event_trigger') return `事件触发「${String(parsed?.triggerName ?? '')}」`
-  if (kind === 'a2a') return `智能体「${String(parsed?.callerAgentName ?? '')}」通过协作调用（${String(parsed?.capability ?? '')}），背后员工 ${userName ?? ''}`
+  if (kind === 'a2a') {
+    const actorName = typeof parsed?.actorName === 'string' ? parsed.actorName : userName ?? ''
+    const runAs = typeof parsed?.runAsName === 'string' ? `，以员工 ${parsed.runAsName} 的凭据执行` : ''
+    return `智能体「${String(parsed?.callerAgentName ?? '')}」通过协作调用（${String(parsed?.capability ?? '')}），背后员工 ${actorName}${runAs}`
+  }
   if (kind === 'wecom') return `企业微信对话（${who}）`
   return `${who}发起的对话`
 }

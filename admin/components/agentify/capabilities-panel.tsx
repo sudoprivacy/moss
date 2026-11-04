@@ -188,6 +188,25 @@ export function CapabilitiesPanel(props: {
                   disabled={cap.kind === 'ask'}
                   onChange={v => setCap(i, { allowOutbound: v || undefined })}
                 />
+                <div className="space-y-1">
+                  <span className="text-xs text-muted-foreground">执行身份（回答时使用谁的凭据访问后台系统）</span>
+                  <ListPicker
+                    label={`能力 ${i + 1} 执行身份`}
+                    allowAll={false}
+                    single
+                    options={props.users}
+                    value={cap.runAsUserId ? [cap.runAsUserId] : []}
+                    onChange={names => setCap(i, { runAsUserId: names[0] || undefined })}
+                    placeholder="发起调用的员工（默认）"
+                  />
+                  {cap.runAsUserId ? (
+                    <p className="text-xs text-amber-600">
+                      其他智能体通过此能力获得的信息，以该员工在后台系统中的权限为准，即使发起调用的员工自己没有权限。只读的回答只能读取后台数据，不能修改；经人工确认的对外任务除外。
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">默认使用发起调用的员工自己的凭据；对方没有权限的系统将无法访问。</p>
+                  )}
+                </div>
                 <CheckboxField
                   label="限本智能体的使用者"
                   help="发起调用的员工也必须能直接使用本智能体"

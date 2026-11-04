@@ -46,6 +46,8 @@ export function ListPicker(props: {
   disabled?: boolean
   label: string
   allowAll?: boolean
+  /** Pick at most one name (choosing another replaces it). */
+  single?: boolean
 }) {
   const [q, setQ] = useState('')
   const labelOf = (v: string) => (v === '*' ? '全部' : props.options.find(o => o.value === v)?.label ?? v)
@@ -57,7 +59,8 @@ export function ListPicker(props: {
   }, [props.options, props.value, props.allowAll])
   const shown = q.trim() ? all.filter(o => `${o.label} ${o.value}`.toLowerCase().includes(q.trim().toLowerCase())) : all
   const text = props.value.length === 0 ? props.placeholder : props.value.map(labelOf).join('、')
-  const toggle = (v: string, on: boolean) => props.onChange(on ? [...props.value, v] : props.value.filter(x => x !== v))
+  const toggle = (v: string, on: boolean) =>
+    props.onChange(on ? (props.single ? [v] : [...props.value, v]) : props.value.filter(x => x !== v))
   return (
     <Popover>
       <PopoverTrigger asChild>

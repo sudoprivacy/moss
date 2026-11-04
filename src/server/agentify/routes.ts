@@ -70,6 +70,14 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
       error: call.error,
       depth: call.depth,
       actor: call.actorUserId ? { id: call.actorUserId, name: deps.getUserName(call.actorUserId) ?? null } : null,
+      /**
+       * Whose credentials the answering session used (or, before it starts,
+       * will use per the capability); null = the actor's.
+       */
+      runAs: (() => {
+        const id = call.runAsUserId ?? (call.startedAt === null ? target?.config.a2a.capabilities.find(c => c.id === call.capability)?.runAsUserId ?? null : null)
+        return id ? { id, name: deps.getUserName(id) ?? null } : null
+      })(),
       requiresConfirmation: call.requiresConfirmation,
       confirmedBy: call.confirmedBy,
       targetSessionId: call.targetSessionId,

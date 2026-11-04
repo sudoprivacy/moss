@@ -340,8 +340,14 @@ export class A2AService {
       const callerName = callerRow?.displayName ?? call.callerAgentId
       const readonly = !(call.kind === 'task' && cap.allowOutbound && call.requiresConfirmation && call.confirmedBy)
       const actor = call.actorUserId ?? ''
-      const auth = this.deps.getUserAuth(actor, call.orgId)
-      if (!auth) throw new Error('the employee behind this call no longer exists')
+      // Whose credentials the session uses: the capability's run-as employee
+      // (set by an administrator) or the employee behind the call.
+      const runAs = cap.runAsUserId ?? actor
+      const auth = this.deps.getUserAuth(runAs, call.orgId)
+      if (!auth) {
+        throw new Error(cap.runAsUserId ? `the run-as user of capability ${cap.id} is no longer an active user` : 'the employee behind this call no longer exists')
+      }
+      this.deps.store.updateCall(call.id, { runAsUserId: cap.runAsUserId ?? null })
       const cwd = path.join(this.deps.runtimeDir, 'agentify', target.row.agentId.replace(/[^\w.-]/g, '_'), call.id, 'workspace')
       await mkdir(cwd, { recursive: true })
       const source = JSON.stringify({
@@ -354,10 +360,13 @@ export class A2AService {
         depth: call.depth,
         readonly,
         agentMode: 'remote',
+        // Who asked, and whose credentials the session uses when that differs.
+        actorName: this.deps.getUserName(actor) ?? actor,
+        ...(cap.runAsUserId ? { runAsName: this.deps.getUserName(cap.runAsUserId) ?? cap.runAsUserId } : {}),
       })
       sessionId = await this.deps.driver.createAgentSession({
         orgId: call.orgId,
-        userId: actor,
+        userId: runAs,
         role: auth.role,
         scopes: auth.scopes,
         assistantName: target.ref.displayName,
@@ -416,6 +425,7 @@ export class A2AService {
         `- 类型：${call.kind === 'ask' ? '查询' : '委派任务'}（${call.capability}）`,
         `- 状态：${call.status}`,
         `- 发起员工：${actor}`,
+        ...(call.runAsUserId ? [`- 执行身份：${this.deps.getUserName(call.runAsUserId) ?? call.runAsUserId}（能力指定的员工凭据）`] : []),
         `- 时间：${new Date(call.createdAt).toISOString()}`,
         ...(call.confirmedBy ? [`- 确认人：${this.deps.getUserName(call.confirmedBy) ?? call.confirmedBy}`] : []),
         '',

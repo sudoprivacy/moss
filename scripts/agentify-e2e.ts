@@ -22,6 +22,7 @@ import { existsSync, readdirSync, readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import WebSocket from 'ws'
+import { createServer } from 'http'
 import JSZip from 'jszip'
 import { issueAccessToken, issueWikiSessionToken } from '../src/server/auth/token.js'
 
@@ -392,6 +393,68 @@ async function main(): Promise<void> {
   check(notAgent, 'a plain employee token cannot use the agent-only endpoints')
   const notAdmin = await api(users.gendan1!.token, 'GET', '/api/v1/admin/agentify/agents').then(() => false, (e: any) => e.status === 403)
   check(notAdmin, 'a plain employee cannot read agentify administration')
+
+  // 8b. Run as a named employee: the returns agent answers on the stored
+  //     credential of an employee the admin chose, not the asker's, and only
+  //     reads. A small echo service on this host stands in for TMS.
+  const echoHits: Array<{ method: string; path: string; auth: string }> = []
+  const echo = createServer((req, res) => {
+    echoHits.push({ method: req.method ?? '', path: req.url ?? '', auth: String(req.headers.authorization ?? '') })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ system: 'E2E-TMS', youAre: String(req.headers.authorization ?? 'anonymous'), method: req.method }))
+  })
+  await new Promise<void>(r => echo.listen(0, '0.0.0.0', () => r()))
+  const echoPort = (echo.address() as { port: number }).port
+  const echoBase = `http://host.docker.internal:${echoPort}`
+  const pinyin = `e2etms${RUN}`
+  const item = await api<any>(admin, 'POST', '/api/v1/config-items', {
+    name: `E2E TMS ${RUN}`, pinyin, scope: 'user', url_pattern: `${echoBase}/*`, scheme: 'bearer',
+    entries: [{ config_key: 'token', name: '令牌', required: true }],
+  }).catch((e: any) => ({ error: e }))
+  check(item?.success === true, 'a per-employee credential for the test service is defined', item?.error ?? item)
+  const svcSecret = `svc-${RUN}`
+  const stored = await api<any>(users.shouhou1!.token, 'PUT', `/api/v1/me/secrets/${encodeURIComponent(`user:${users.shouhou1!.userId}:${pinyin}`)}/token`, { value: svcSecret })
+    .catch((e: any) => ({ error: e }))
+  check(stored?.success !== false && !stored?.error, 'the after-sales employee stores their own credential for it', stored)
+  const cfgRunAs = (await api<any>(admin, 'GET', `/api/v1/admin/agentify/agents/${B.id}`)).agent.config
+  const tmsHelp = `查询 E2E-TMS 测试系统：用 fetchurl 访问 ${echoBase} 下的接口（凭据由系统自动注入），把命令输出原样返回`
+  const echoCaps = [
+    { id: 'tms-lookup', kind: 'ask', description: `${tmsHelp}；使用售后专员的账号`, runAsUserId: users.shouhou1!.userId },
+    { id: 'tms-lookup-self', kind: 'ask', description: `${tmsHelp}；使用发起员工自己的账号` },
+  ]
+  const refusedRunAs = await api(admin, 'PUT', `/api/v1/admin/agentify/agents/${B.id}`, {
+    config: { ...cfgRunAs, a2a: { ...cfgRunAs.a2a, capabilities: [...cfgRunAs.a2a.capabilities, { ...echoCaps[0], runAsUserId: 'no-such-user' }] } },
+  }).then(() => false, (e: any) => e.status === 400)
+  check(refusedRunAs, 'a run-as user that does not exist is refused')
+  await api(admin, 'PUT', `/api/v1/admin/agentify/agents/${B.id}`, { config: { ...cfgRunAs, a2a: { ...cfgRunAs.a2a, capabilities: [...cfgRunAs.a2a.capabilities, ...echoCaps] } } })
+  const askEcho = async (capability: string, tag: string, write = false) => {
+    const question = write
+      ? `这是一次只读限制的验证（预期会被拒绝）：请在终端执行 fetchurl -X POST -d '{}' ${echoBase}/change?c=${tag} ，把命令输出原样回复给我。`
+      : `请在终端执行 fetchurl ${echoBase}/whoami?c=${tag} ，把命令输出原样回复给我。`
+    const started = await api<any>(asA, 'POST', '/api/v1/agent/agentify/ask', { agent: B.id, capability, question })
+    let call = started.call
+    for (let i = 0; i < 120 && ['running', 'queued'].includes(call.status); i++) {
+      await new Promise(r => setTimeout(r, 5000))
+      call = (await api<any>(asA, 'GET', `/api/v1/agent/agentify/calls/${call.id}`)).call
+    }
+    return call
+  }
+  const viaRunAs = await askEcho('tms-lookup', 'runas')
+  log(`run-as call: ${String(viaRunAs.result ?? viaRunAs.error ?? '').slice(0, 200)}`)
+  check(viaRunAs.status === 'done', 'the run-as call completed', viaRunAs.error)
+  const adminView = (await api<any>(admin, 'GET', `/api/v1/admin/agentify/calls?agentId=${B.id}`)).calls.find((c: any) => c.id === viaRunAs.id)
+  check(adminView?.runAs?.id === users.shouhou1!.userId && adminView?.actor?.id === users.gendan1!.userId, 'the call records both the asking employee and the run-as employee', { actor: adminView?.actor, runAs: adminView?.runAs })
+  const runAsGets = echoHits.filter(h => h.path.includes('c=runas') && h.method === 'GET')
+  check(runAsGets.some(h => h.auth === `Bearer ${svcSecret}`), 'the test service saw the run-as employee\'s credential on the read', echoHits)
+  const writeTry = await askEcho('tms-lookup', 'runaswrite', true)
+  log(`run-as write attempt: ${String(writeTry.result ?? writeTry.error ?? '').slice(0, 200)}`)
+  check(!echoHits.some(h => h.path.includes('c=runaswrite')), 'the write (POST) never reached the service: the answering session is read-only', echoHits.filter(h => h.method !== 'GET'))
+  check(/readonly_session/.test(String(writeTry.result ?? '')), 'the proxy refused the write with readonly_session (the command really ran)', String(writeTry.result ?? '').slice(0, 300))
+  const viaSelf = await askEcho('tms-lookup-self', 'self')
+  log(`self call: ${String(viaSelf.result ?? viaSelf.error ?? '').slice(0, 200)}`)
+  check(!echoHits.some(h => h.path.includes('c=self') && h.auth === `Bearer ${svcSecret}`), 'without run-as, the asker (who has no credential) does not get the employee\'s access', echoHits.filter(h => h.path.includes('c=self')))
+  echo.close()
+  await api(admin, 'PUT', `/api/v1/admin/agentify/agents/${B.id}`, { config: cfgRunAs })
 
   // 9. History policy (hours): defaults, validation, and deletion on the live
   //    server — the returns agent's files in Nexus, read through its own session.

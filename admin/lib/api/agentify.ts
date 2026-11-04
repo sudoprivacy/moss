@@ -21,6 +21,8 @@ export interface AgentifyCapability {
   requireCallerVisibility?: boolean
   /** Agents allowed to use this capability; absent = a2a.callers. */
   callers?: AccessList
+  /** Whose credentials the answering session uses; absent = the employee behind the call. */
+  runAsUserId?: string
 }
 
 /** private = the employee whose session it is; users = also this agent's employees; agents = also other agents, by handoff. */
@@ -113,6 +115,8 @@ export interface A2ACallView {
   error: string | null
   depth: number
   actor: { id: string; name: string | null } | null
+  /** Whose credentials the answering session used; null = the actor's. */
+  runAs: { id: string; name: string | null } | null
   requiresConfirmation: boolean
   confirmedBy: string | null
   targetSessionId: string | null

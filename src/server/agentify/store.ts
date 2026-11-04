@@ -107,6 +107,8 @@ export interface A2ACall {
   depth: number
   chain: string[]
   actorUserId: string | null
+  /** Whose credentials the answering session ran with (null = the actor). */
+  runAsUserId: string | null
   requiresConfirmation: boolean
   confirmedBy: string | null
   confirmedAt: number | null
@@ -272,6 +274,9 @@ export class AgentifyStore {
     }
     if (!this.hasColumn('sessions', 'a2a_depth')) {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN a2a_depth INTEGER NOT NULL DEFAULT 0`)
+    }
+    if (!this.hasColumn('a2a_calls', 'run_as_user_id')) {
+      this.db.exec(`ALTER TABLE a2a_calls ADD COLUMN run_as_user_id TEXT`)
     }
     if (!this.hasColumn('sessions', 'a2a_readonly')) {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN a2a_readonly INTEGER NOT NULL DEFAULT 0`)
@@ -720,7 +725,7 @@ export class AgentifyStore {
 
   // ------------------------------------------------------------- a2a calls
 
-  createCall(input: Omit<A2ACall, 'id' | 'createdAt' | 'startedAt' | 'finishedAt' | 'resultText' | 'resultFiles' | 'targetSessionId' | 'confirmedBy' | 'confirmedAt' | 'error'>): A2ACall | null {
+  createCall(input: Omit<A2ACall, 'id' | 'createdAt' | 'startedAt' | 'finishedAt' | 'resultText' | 'resultFiles' | 'targetSessionId' | 'confirmedBy' | 'confirmedAt' | 'error' | 'runAsUserId'>): A2ACall | null {
     const id = randomUUID()
     try {
       this.db
@@ -749,7 +754,7 @@ export class AgentifyStore {
     return r ? this.mapCall(r) : null
   }
 
-  updateCall(id: string, patch: Partial<Pick<A2ACall, 'status' | 'resultText' | 'resultFiles' | 'targetSessionId' | 'confirmedBy' | 'confirmedAt' | 'error' | 'startedAt' | 'finishedAt'>>): A2ACall | null {
+  updateCall(id: string, patch: Partial<Pick<A2ACall, 'status' | 'resultText' | 'resultFiles' | 'targetSessionId' | 'confirmedBy' | 'confirmedAt' | 'error' | 'startedAt' | 'finishedAt' | 'runAsUserId'>>): A2ACall | null {
     const sets: string[] = []
     const args: Array<string | number | null> = []
     const map: Record<string, string> = {
@@ -761,6 +766,7 @@ export class AgentifyStore {
       error: 'error',
       startedAt: 'started_at',
       finishedAt: 'finished_at',
+      runAsUserId: 'run_as_user_id',
     }
     for (const [k, col] of Object.entries(map)) {
       if (k in patch) {
@@ -863,6 +869,7 @@ export class AgentifyStore {
       depth: n(r.depth),
       chain: jsonOr<string[]>(r.chain_json, []),
       actorUserId: sn(r.actor_user_id),
+      runAsUserId: sn(r.run_as_user_id),
       requiresConfirmation: n(r.requires_confirmation) === 1,
       confirmedBy: sn(r.confirmed_by),
       confirmedAt: r.confirmed_at === null || r.confirmed_at === undefined ? null : n(r.confirmed_at),

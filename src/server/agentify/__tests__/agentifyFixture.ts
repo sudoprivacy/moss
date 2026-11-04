@@ -179,7 +179,8 @@ export function createFixture(agentMetas: Array<AssistantStoreMeta & { id: strin
     modelGateway: () => null,
     driver,
     getUserName: id => `用户${id}`,
-    getUserAuth: () => ({ role: 'user', scopes: [] }),
+    // Every user exists except ids starting with `gone-`.
+    getUserAuth: id => (id.startsWith('gone-') ? null : { role: 'user', scopes: [] }),
     isAdmin: id => admins.has(id),
     isAgentUsableBy: (ref, userId) => usable.has(`${ref.id}:${userId}`),
     summarizer: echoSummarizer,

@@ -268,6 +268,11 @@ export class AgentifyService {
     const ref = await this.registry.resolve(nameOrId)
     if (!ref) throw new AgentifyConfigError(`agent ${nameOrId} not found`)
     const config: AgentifyConfig = parseAgentifyConfig(raw)
+    for (const cap of config.a2a.capabilities) {
+      if (cap.runAsUserId && !this.opts.getUserAuth(cap.runAsUserId, orgId)) {
+        throw new AgentifyConfigError(`capability ${cap.id}: run-as user ${cap.runAsUserId} is not an active user of this organization`)
+      }
+    }
     const row = this.store.upsertAgent({ orgId, agentId: ref.id, agentName: ref.name, displayName: ref.displayName, config })
     this.registry.invalidate()
     // Existing sessions of this agent become searchable on the next sweep.

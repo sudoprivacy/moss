@@ -2287,6 +2287,7 @@ export function startServer(
   runtime.agentifyHooks = {
     onSessionCreated: (sessionId, assistantName, source) => agentify.onSessionCreated(sessionId, assistantName, source),
     buildSessionBlock: input => agentify.buildSessionBlock(input),
+    isReadonlySession: sessionId => agentify.isReadonlySession(sessionId),
   }
   // Scheduled runs of agentified agents start with which job and when the run started.
   cronService.setRunNote(({ job, startedAt }) =>
@@ -11503,6 +11504,28 @@ export function startServer(
           throw error
         }
         wss.handleUpgrade(req, socket, head, ws => {
+          // Listen from the moment the socket opens: clients send their first
+          // message as soon as it does, before the runner connection below is
+          // up. Messages that arrive early wait in `early` and go out, in
+          // order, once it is.
+          const early: string[] = []
+          let deliver: ((text: string) => void) | null = null
+          let clientGone = false
+          ws.on('message', data => {
+            const text =
+              typeof data === 'string'
+                ? data
+                : Buffer.from(data).toString('utf8')
+            process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+            if (deliver) deliver(text)
+            else early.push(text)
+          })
+          ws.on('close', () => {
+            clientGone = true
+          })
+          ws.on('error', () => {
+            clientGone = true
+          })
           void runtime.connectToAttempt(ready.attempt).then((runnerSocket: net.Socket) => {
             let buffer = ''
             const sendToRunner = (payload: Record<string, unknown>) => {
@@ -11513,18 +11536,17 @@ export function startServer(
                 process.stderr.write(`[WS Message] Runner socket destroyed, cannot send\n`)
               }
             }
+            if (clientGone) {
+              runnerSocket.destroy()
+              return
+            }
 
-            ws.on('message', data => {
-              const text =
-                typeof data === 'string'
-                  ? data
-                  : Buffer.from(data).toString('utf8')
-              process.stderr.write(`[WS Message] Received: ${text.slice(0, 200)}...\n`)
+            deliver = text =>
               sendToRunner({
                 type: 'stdin',
                 data: text.endsWith('\n') ? text : `${text}\n`,
               })
-            })
+            for (const text of early.splice(0)) deliver(text)
             ws.on('close', () => {
               runnerSocket.destroy()
             })
