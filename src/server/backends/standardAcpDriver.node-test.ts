@@ -171,3 +171,13 @@ void test('authentication required at session setup is returned without a login 
   assert.equal(f.requests('session/new').length, 1)
   assert.equal(f.requests('authenticate').length, 0)
 })
+
+void test('a malformed completion cannot prove an accepted input stopped', async t => {
+  const f = await fixture(t), id = await f.driver.open({ cwd: '/workspace' })
+  const result = f.driver.prompt(id, 'An accepted operation')
+  const rejection = assert.rejects(result, AcpOutcomeUnknown)
+  f.finish({})
+  await rejection
+  assert.deepEqual(f.driver.status(id), { connected: false, pending: true, outcomeUnknown: true })
+  assert.equal(f.requests('session/prompt').length, 1)
+})

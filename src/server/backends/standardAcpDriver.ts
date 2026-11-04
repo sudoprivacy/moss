@@ -153,7 +153,12 @@ export class StandardAcpDriver {
       this.#requests.track(id, {
         onReply: result => {
           try { const value = parse(result); settled(); resolve(value); this.#completion({ requestId: id, method, result, late }) }
-          catch (error) { this.#disconnect(error); reject(error) }
+          catch (error) {
+            timedOut()
+            const failure = new AcpOutcomeUnknown(id, method, error)
+            this.#disconnect(failure); reject(failure)
+            this.#completion({ requestId: id, method, error: failure, late })
+          }
         },
         onError: error => {
           const failure = error instanceof AcpRpcError ? error : new AcpOutcomeUnknown(id, method, error)
