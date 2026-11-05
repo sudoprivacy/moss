@@ -1708,7 +1708,7 @@ export class DirectConnectStore {
       JSON.stringify(input.scopes),
       input.cwd,
       input.runtime.type,
-      input.runtime.engine,
+      input.runtime.engine ?? 'scode',
       input.runtime.standardAcpProfileId ?? null,
       input.runtime.dockerImage ?? null,
       (input.runtime.type === 'docker'

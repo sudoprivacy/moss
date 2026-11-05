@@ -49,6 +49,7 @@ export class RuntimeBackend implements SessionBackend {
 
   async spawn(options: BackendSpawnOptions): Promise<BackendHandle> {
     const engine = options.runtime?.engine ?? this.#defaultRuntime.engine ?? 'scode'
+    if (engine !== 'scode' && engine !== 'standard_acp') throw new Error('Unknown native execution engine')
     if (engine === 'standard_acp') {
       if (!this.#standardAcpBackend) throw new Error('Standard ACP execution is not registered by this trusted host')
       return this.#standardAcpBackend.spawn({ ...options, runtime: { ...this.#defaultRuntime, ...options.runtime, engine } })

@@ -167,6 +167,8 @@ void test('canonical daemon uses the native backend over its real input socket a
   } })
   const { SessionRunnerDaemon } = await (async () => { try { return await import('../sessionRunnerDaemon.js') } finally { alias.deregister() } })()
   const f = await fixture(), options = await f.options()
+  const { RuntimeBackend } = await import('./runtimeBackend.js')
+  await assert.rejects(new RuntimeBackend().spawn(options), /not registered/)
   const reader = new DirectConnectStore(join(f.root, 'state.db'))
   const config = { heartbeatTimeoutMs: 30000, idleTimeoutMs: 0, instanceId: 'server' } as ServerConfig
   const attachPath = process.platform === 'win32' ? getAttachPath(config, 'session', 1) : join(f.root, 'r.sock')
