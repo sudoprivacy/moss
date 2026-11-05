@@ -47,6 +47,25 @@ type AcpBridgeOptions = {
   mcpServers?: any[]
   agents?: any[]
   instructions?: string
+  /**
+   * End a turn whose model has sent nothing for this long while no tool is
+   * running (a provider stream that only sends keep-alives never trips scode's
+   * own idle timeout). Default: MOSS_TURN_STALL_TIMEOUT_SEC, else 600 s; 0 turns
+   * the watchdog off.
+   */
+  turnStallTimeoutMs?: number
+  /** How long to wait for scode to confirm the cancel before ending the turn here. Default 30 s. */
+  turnStallCancelGraceMs?: number
+}
+
+const DEFAULT_TURN_STALL_TIMEOUT_SEC = 600
+const TOOL_DONE_STATUSES = new Set(['completed', 'failed', 'error', 'cancelled'])
+
+function resolveTurnStallTimeoutMs(option: number | undefined): number {
+  if (option !== undefined) return Math.max(0, option)
+  const raw = process.env.MOSS_TURN_STALL_TIMEOUT_SEC
+  const seconds = raw === undefined || raw.trim() === '' ? DEFAULT_TURN_STALL_TIMEOUT_SEC : Number(raw)
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : DEFAULT_TURN_STALL_TIMEOUT_SEC * 1000
 }
 
 export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle {
@@ -294,6 +313,103 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     }
   }
 
+  // ---------------------------------------------------------------- turn watchdog
+  // A turn ends only when scode answers session/prompt. If the model provider
+  // keeps a stream open without sending anything (keep-alives only), or scode
+  // rejects the prompt with a JSON-RPC error, nothing ends it and every client
+  // waits forever (an IM reply, an agent-to-agent call, a cron run). The
+  // watchdog cancels a turn whose model has been silent for turnStallTimeoutMs
+  // while no tool runs, and ends it here if scode does not confirm the cancel.
+  const turnStallTimeoutMs = resolveTurnStallTimeoutMs(options.turnStallTimeoutMs)
+  const turnStallCancelGraceMs = Math.max(0, options.turnStallCancelGraceMs ?? 30_000)
+  let activePromptId: string | null = null
+  let lastTurnProgressAt = 0
+  const openToolCalls = new Set<string>()
+  let stallCancelSentAt = 0
+  let turnFailure: string | null = null
+  /** Prompts ended here; scode's late answer to one of them is dropped. */
+  const abandonedPromptIds = new Set<string>()
+  let turnWatchdog: NodeJS.Timeout | null = null
+
+  const stopTurnWatchdog = (): void => {
+    if (turnWatchdog) clearInterval(turnWatchdog)
+    turnWatchdog = null
+  }
+
+  const resetTurnState = (): void => {
+    activePromptId = null
+    openToolCalls.clear()
+    stallCancelSentAt = 0
+    turnFailure = null
+    stopTurnWatchdog()
+  }
+
+  const noteTurnProgress = (): void => {
+    lastTurnProgressAt = Date.now()
+  }
+
+  /** End the active turn without scode's answer: tell the clients it failed. */
+  const endTurnHere = (error: string, subtype: 'turn_stalled' | 'turn_failed'): void => {
+    if (!activePromptId) return
+    process.stderr.write(`[AcpBridge] Ending turn ${activePromptId} here: ${error}\n`)
+    abandonedPromptIds.add(activePromptId)
+    resetTurnState()
+    if (currentAssistantText) {
+      const assistantUuid = randomUUID()
+      void writeTranscript({
+        type: 'assistant',
+        sessionId,
+        uuid: assistantUuid,
+        parentUuid: lastPersistedUuid,
+        isSidechain: false,
+        timestamp: new Date().toISOString(),
+        cwd,
+        userType: 'external',
+        version: 'unknown',
+        message: { role: 'assistant', content: [{ type: 'text', text: currentAssistantText }], partial: true },
+      })
+      lastPersistedUuid = assistantUuid
+    }
+    void writeTranscript({ type: 'system', subtype, error, sessionId, timestamp: new Date().toISOString() })
+    currentAssistantText = ''
+    currentThoughtText = ''
+    currentTurnUsedSendUserMessage = false
+    emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: 'error', error }) + '\n')
+    reevaluateBusy()
+  }
+
+  const checkTurnStall = (): void => {
+    if (!activePromptId) return stopTurnWatchdog()
+    const now = Date.now()
+    if (stallCancelSentAt) {
+      if (now - stallCancelSentAt >= turnStallCancelGraceMs) endTurnHere(turnFailure ?? 'model_stalled', 'turn_stalled')
+      return
+    }
+    // A running tool or a question to the user is not the model being silent.
+    if (openToolCalls.size > 0 || pendingAskUserQuestions.size > 0) return
+    if (now - lastTurnProgressAt < turnStallTimeoutMs) return
+    const minutes = Math.round(turnStallTimeoutMs / 60_000)
+    turnFailure = `model_stalled: no reply from the model for ${minutes >= 1 ? `${minutes} min` : `${Math.round(turnStallTimeoutMs / 1000)} s`}; the turn was cancelled, please send it again`
+    process.stderr.write(`[AcpBridge] Turn ${activePromptId} stalled; sending session/cancel\n`)
+    stallCancelSentAt = now
+    if (acpSessionId && child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: acpSessionId } }) + '\n')
+    }
+    if (turnStallCancelGraceMs === 0) endTurnHere(turnFailure, 'turn_stalled')
+  }
+
+  const sendPrompt = (params: any): void => {
+    resetTurnState()
+    // Known before the request goes out, so even an immediate answer finds it.
+    activePromptId = `m-prompt-${randomUUID()}`
+    noteTurnProgress()
+    if (turnStallTimeoutMs > 0) {
+      turnWatchdog = setInterval(checkTurnStall, Math.max(50, Math.min(15_000, Math.floor(turnStallTimeoutMs / 4))))
+      turnWatchdog.unref?.()
+    }
+    sendRpc('session/prompt', params, activePromptId)
+  }
+
   const processUserMessage = async (data: string) => {
     let cleanText = data
     let userUuid = randomUUID()
@@ -349,6 +465,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       // stopReason will flip it back to false.
 
       process.stderr.write(`[AcpBridge] Processing AskUserQuestion response for toolCallId=${pendingQuestionKey}, answer=${trimmedText}\n`)
+      // Time spent waiting for the person is not model silence.
+      noteTurnProgress()
 
       // Build the answer payload for scode
       // The answer format expected by scode: { answers: [{ id, value, label }] }
@@ -425,7 +543,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       void writeTranscript(userEvent)
       lastPersistedUuid = userUuid
 
-      sendRpc('session/prompt', {
+      sendPrompt({
         sessionId: acpSessionId,
         prompt: structuredContent,
       })
@@ -509,7 +627,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
     // 发送给 agent 的是包含系统提示词的 finalText。若用户消息附带图片，
     // 将图片块与文本一起发送，scode 会把它们作为 vision 输入交给模型。
-    sendRpc('session/prompt', {
+    sendPrompt({
       sessionId: acpSessionId,
       prompt: [...imageBlocks, { type: 'text', text: finalText }],
     })
@@ -557,6 +675,20 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
       try {
         const parsed = JSON.parse(line)
+
+        // Turn watchdog: scode's answer to a prompt this bridge already ended.
+        if (typeof parsed.id === 'string' && abandonedPromptIds.has(parsed.id) && !parsed.method) {
+          abandonedPromptIds.delete(parsed.id)
+          process.stderr.write(`[AcpBridge] Dropping late answer to ended prompt ${parsed.id}\n`)
+          continue
+        }
+        // scode rejected the prompt: without this the turn would never end.
+        if (activePromptId && parsed.id === activePromptId && parsed.error && !parsed.method) {
+          const message = typeof parsed.error?.message === 'string' ? parsed.error.message : JSON.stringify(parsed.error)
+          endTurnHere(`prompt_failed: ${message}`, 'turn_failed')
+          continue
+        }
+        if (parsed.method === 'session/update' || parsed.method === '_scode/ask_user_question') noteTurnProgress()
 
         if (parsed.id === 'm-init') {
           if (options.resumeSessionId) {
@@ -765,10 +897,15 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             lastPersistedUuid = assistantUuid
           }
 
+          // A turn the watchdog cancelled ends as a failure, so callers do not
+          // take the partial answer for a finished one.
+          const stalled = turnFailure
+          resetTurnState()
           const resultEvent = JSON.stringify({
             type: 'result',
             session_id: sessionId,
-            status: 'success',
+            status: stalled ? 'error' : 'success',
+            ...(stalled ? { error: stalled } : {}),
             usage,
           })
           void cleanupIntermediateFiles(cwd)
@@ -866,6 +1003,8 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           if (sessionUpdate === 'tool_call' && update) {
             const toolUuid = randomUUID()
             const toolCallId = update.toolCallId
+            // A running tool is not a silent model (see the turn watchdog).
+            if (toolCallId && !TOOL_DONE_STATUSES.has(String(update.status ?? ''))) openToolCalls.add(toolCallId)
             const toolName = update.title || update.rawInput?.path || 'tool'
             const sendUserMessageText = toolName === 'SendUserMessage'
               ? getSendUserMessageText(update.rawInput)
@@ -944,6 +1083,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             const toolCallId = update.toolCallId
             if (toolCallId) {
               const status = typeof update.status === 'string' ? update.status : undefined
+              if (status && TOOL_DONE_STATUSES.has(status)) openToolCalls.delete(toolCallId)
               const isError = status === 'failed' || status === 'error'
               const captured = extractToolResultContent(update.content)
               // Only overwrite once we actually have content (or a terminal
@@ -1081,6 +1221,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
   child.on('close', (code, signal) => {
     setBusy(false)
+    stopTurnWatchdog()
     for (const l of exitListeners) l(code, signal)
   })
 
@@ -1251,6 +1392,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       }
     },
     destroy(force = false) {
+      stopTurnWatchdog()
       if (child.killed) return
 
       if (containerMode === 'user') {

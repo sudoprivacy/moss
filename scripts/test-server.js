@@ -64,6 +64,8 @@ const BUN = [
   'queueSweep.test.ts',
   'wecomClientToken.test.ts',
   'wikiAccess.test.ts',
+  'acpBridgeTurnStall.test.ts',
+  'msgauditSdkHint.test.ts',
 ]
 
 /** Need Node: either they reach `node:sqlite` (Bun lacks it), or they pin the
