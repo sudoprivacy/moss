@@ -11,8 +11,11 @@ import { NexusClient } from '../nexus/nexusClient.js'
 import { resolveNexusConfigFromEnv } from '../nexus/nexusEnvConfig.js'
 import { McpOntologyContextPorts } from './mcpContextPorts.js'
 import { McpOntologyReviewPorts } from './mcpReviewPorts.js'
+import type { StandardAcpLauncher } from '../backends/standardAcpBackend.js'
 
 export interface SessionRunnerHost {
+  /** Native host-provided implementation; not serialized or selected by an A2A payload. */
+  standardAcpLauncher?: StandardAcpLauncher
   ontologyContext?: OntologyContextPorts
   close?(): Promise<void>
 }

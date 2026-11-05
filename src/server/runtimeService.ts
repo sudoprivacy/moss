@@ -653,6 +653,9 @@ export class RuntimeService {
 
   private async createAdmittedSession(input: SessionCreateInput): Promise<SessionRecord> {
     if (this.draining) throw new ServerDrainingError()
+    if (input.runtime?.engine === 'standard_acp') {
+      throw new ResourceAccessError(503, 'Standard ACP deployment admission is not registered on this host')
+    }
     parseOntologyProjectId(input.ontologyProjectId)
     if (this.upgradingOwners.has(input.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
     return withOrganizationResources(await this.resourceScope(input), async () => {
@@ -2328,6 +2331,9 @@ export class RuntimeService {
   ): Promise<AttemptRecord> {
     session = (await this.store.getSession(session.sessionId)) ?? session
     if (this.draining) throw new ServerDrainingError()
+    if (session.runtime.engine === 'standard_acp') {
+      throw new ResourceAccessError(503, 'Standard ACP deployment admission is not registered on this host')
+    }
     if (this.upgradingOwners.has(session.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
     if (session.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
     if (session.runtime?.type === 'external' || session.runtime?.type === 'hosted') throw new ResourceAccessError(409, 'Use the task API for this session')

@@ -4,6 +4,7 @@ import { MOSS_IM_IDENTITY_SCHEMA } from '../mossImIdentity.js'
 import { ACCOUNT_MEMBERSHIP_SCHEMA, ACCOUNT_MEMBERSHIP_BACKFILL } from '../identity/accountMemberships.js'
 import { ORGANIZATION_RESOURCE_PG_SCHEMA } from '../catalog/organizationResourceSchema.js'
 import { COHOST_SESSION_SCHEMA } from '../storage/cohostSessionSchema.js'
+import { STANDARD_ACP_SESSION_SCHEMA } from '../storage/standardAcpSessionSchema.js'
 import { COHOST_AGENT_HOME_SCHEMA } from '../storage/cohostAgentHomeSchema.js'
 import { ONTOLOGY_PROJECT_SCHEMA } from '../ontology/projectSchema.js'
 import { ONTOLOGY_REVIEW_STORE_SCHEMA } from '../ontology/reviewStoreSchema.js'
@@ -2044,6 +2045,11 @@ export const MIGRATIONS: PgMigration[] = [
   { version: 26, name: 'canonical-review-delivery-bookkeeping', sql: ONTOLOGY_REVIEW_STORE_SCHEMA },
   { version: 27, name: 'canonical-review-browser-grants', sql: ONTOLOGY_REVIEW_GRANT_SCHEMA },
   { version: 28, name: 'canonical-review-dispatch-reservations', sql: ONTOLOGY_REVIEW_DISPATCH_SCHEMA },
+  { version: 29, name: 'standard-acp-runtime-bindings', sql: `
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS execution_engine TEXT NOT NULL DEFAULT 'scode';
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS execution_profile_id TEXT;
+    ${STANDARD_ACP_SESSION_SCHEMA}
+  ` },
 ]
 
 /** Version bookkeeping table (created out-of-band; itself always idempotent). */

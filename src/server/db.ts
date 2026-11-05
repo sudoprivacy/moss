@@ -35,6 +35,8 @@ import { ALIVE_ATTEMPT_STATES } from './attemptLiveness.js'
 import { runInTransaction } from './storage/sqliteUnitOfWork.js'
 import { COHOST_SESSION_SCHEMA } from './storage/cohostSessionSchema.js'
 import { CohostSessionRepository } from './runtime/cohostSessionRepository.js'
+import { STANDARD_ACP_SESSION_SCHEMA } from './storage/standardAcpSessionSchema.js'
+import { StandardAcpSessionRepository } from './runtime/standardAcpSessionRepository.js'
 import { COHOST_AGENT_HOME_SCHEMA } from './storage/cohostAgentHomeSchema.js'
 import { CohostAgentHomeRepository } from './runtime/cohostAgentHomeRepository.js'
 import { sessionAttemptFenceSql, type SessionAttemptFence } from './storage/sessionAttemptFence.js'
@@ -75,6 +77,8 @@ function mapRuntime(row: SqlRow): SessionRuntimeInfo {
   const rawType = String(row.runtime_type)
   if (rawType === 'hosted') return { type: 'hosted', engine: 'hosted_artifact' }
   if (rawType === 'external') return { type: 'external', engine: 'external_provider' }
+  const engine = row.execution_engine ?? 'scode'
+  if (engine !== 'scode' && engine !== 'standard_acp') throw new Error('Unknown native execution engine')
   const type: SessionRuntimeInfo['type'] =
     rawType === 'docker'
       ? 'docker'
@@ -91,7 +95,8 @@ function mapRuntime(row: SqlRow): SessionRuntimeInfo {
         : undefined
   return {
     type,
-    engine: String(row.engine) === 'scode' ? 'scode' : 'scode',
+    engine,
+    ...(engine === 'standard_acp' ? { standardAcpProfileId: String(row.execution_profile_id ?? '') } : {}),
     dockerImage: typeof row.docker_image === 'string' ? row.docker_image : undefined,
     dockerMode: type === 'docker' ? mode : undefined,
     containerName:
@@ -191,6 +196,8 @@ function migrateLegacyRuntimeTables(db: DatabaseSync): void {
   const attemptColumns = db.prepare('PRAGMA table_info(session_attempts)').all() as SqliteColumnInfo[]
   const attemptNames = new Set(attemptColumns.map(column => column.name))
   const statements: string[] = []
+  if (!sessionNames.has('execution_engine')) statements.push("ALTER TABLE sessions ADD COLUMN execution_engine TEXT NOT NULL DEFAULT 'scode'")
+  if (!sessionNames.has('execution_profile_id')) statements.push('ALTER TABLE sessions ADD COLUMN execution_profile_id TEXT')
 
   if (!sessionNames.has('runtime_type')) {
     statements.push(
@@ -296,6 +303,7 @@ export class DirectConnectStore {
       const initialize = (): void => {
         this.initializeSqliteTables()
         this.db!.exec(COHOST_SESSION_SCHEMA)
+        this.db!.exec(STANDARD_ACP_SESSION_SCHEMA)
         this.db!.exec(COHOST_AGENT_HOME_SCHEMA)
       }
       if (isFreshDatabase) runInTransaction(this.db, initialize)
@@ -1668,6 +1676,9 @@ export class DirectConnectStore {
     managementActorId?: string
     managementAgent?: { name: string; displayName: string; ownerName: string }
   }): Promise<SessionRecord> {
+    if (input.runtime.engine === 'standard_acp' && !input.runtime.standardAcpProfileId?.trim()) {
+      throw new Error('Standard ACP sessions require an approved execution profile')
+    }
     const ts = now()
     const clientMetadata = JSON.stringify({
       implicit_task_id: randomUUID(),
@@ -1683,11 +1694,11 @@ export class DirectConnectStore {
     await this.driver.run(`
       INSERT INTO sessions (
         session_id, transcript_session_id, org_id, user_id, role, scopes_json,
-        cwd, runtime_type, docker_image, docker_mode, config_dir, container_name,
+        cwd, runtime_type, execution_engine, execution_profile_id, docker_image, docker_mode, config_dir, container_name,
         status, desired_state, current_attempt_id, transcript_path, title, summary, assistant_name,
         source, channel_chat_id, client_metadata,
         created_at, last_active_at, ended_at, deleted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL)
     `, [
       input.sessionId,
       input.transcriptSessionId,
@@ -1697,6 +1708,8 @@ export class DirectConnectStore {
       JSON.stringify(input.scopes),
       input.cwd,
       input.runtime.type,
+      input.runtime.engine,
+      input.runtime.standardAcpProfileId ?? null,
       input.runtime.dockerImage ?? null,
       (input.runtime.type === 'docker'
         ? input.runtime.dockerMode
@@ -1953,6 +1966,10 @@ export class DirectConnectStore {
 
   get cohostSessions(): CohostSessionRepository {
     return new CohostSessionRepository(this.driver)
+  }
+
+  get standardAcpSessions(): StandardAcpSessionRepository {
+    return new StandardAcpSessionRepository(this.driver)
   }
 
   get ontologyProjects(): OntologyProjectRegistry {

@@ -8,7 +8,8 @@ export type SessionRuntimeType = 'host' | 'docker' | 'k8s' | 'cohost' | 'externa
 
 export type SessionRuntimeOptions = {
   type?: SessionRuntimeType
-  engine?: 'scode'
+  engine?: 'scode' | 'standard_acp'
+  standardAcpProfileId?: string
   scodePath?: string
   model?: string
   dockerImage?: string
@@ -53,7 +54,8 @@ export type SessionRuntimeOptions = {
 
 export type SessionRuntimeInfo = {
   type: SessionRuntimeType
-  engine: 'scode' | 'external_provider' | 'hosted_artifact'
+  engine: 'scode' | 'standard_acp' | 'external_provider' | 'hosted_artifact'
+  standardAcpProfileId?: string
   scodePath?: string
   model?: string
   dockerImage?: string
@@ -103,6 +105,8 @@ export type BackendHostContextResolver = (binding: { sessionId: string; nativeSe
 
 export type BackendSpawnOptions = {
   sessionId: string
+  /** Server-owned canonical Attempt fence; never supplied by a chat message. */
+  attemptFence?: { attemptId: string; ownerInstanceId?: string }
   /** Cancel pending execution recovery when its runner stops. Never serialized. */
   signal?: AbortSignal
   resumeSessionId?: string
