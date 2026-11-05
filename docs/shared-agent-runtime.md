@@ -104,6 +104,27 @@ the historical template and personal Agent endpoints retain their behavior.
 Disabled owners remain visible for inspection. New conversations and runtime
 upgrades remain unavailable until the owner is active again.
 
+## Agent deletion
+
+`DELETE /api/v1/agent-manager/agents/:name?owner_id=` deletes one of an owner's
+Agents. Owners delete their own Agents; settings administrators delete the
+Agents of owners they manage. The owner's default Agent and Moss Agent stay.
+`DELETE /api/v1/user-agents/:id` is the same deletion for an Agent the caller
+made.
+
+Deletion runs through the owner runtime in the allocation that holds the
+Agent's home. A stopped runtime starts so its retained data can be removed. Idle
+managed executions are cancelled; any other live execution refuses the deletion
+before anything changes. The Agent's `/agents/<name>` directory (memory, chat
+list and session records) is deleted, its home and native session bindings are
+forgotten together, its Moss sessions are terminated and removed, and a personal
+Agent's identity row goes last. Pair conversations stay with the peers that
+share them. New traffic for the owner waits out the deletion, as during an
+upgrade. Each deletion is recorded as an `AGENT_DELETED` operation audit event.
+
+The Agent detail page offers deletion when the server reports `canDelete`, after
+the person types the Agent's name.
+
 ## Shared release and upgrades
 
 Sudostack publishes the common lifecycle implementation as `@sudo/user-runtime`.
@@ -151,6 +172,53 @@ Owners with session creation and attachment permission may reload their own
 runtime after changing a model credential. Changing another owner's runtime
 requires `admin:settings`, followed by the organization visibility check. The
 detail page uses the same authorization rule as the upgrade endpoint.
+
+The admin 运行环境 page and `/api/v1/agent-runtimes` manage owner runtimes as
+a fleet. Settings administrators see the owners of their organization; the
+deployment's `super_admin` also sees every organization. Each row reports the
+owner's account status, Pod phase, release drift and upgrade lock. Upgrade,
+stop and lock recovery each require a confirmation and are written to the
+operation audit as `RUNTIME_*` actions.
+
+A disabled or locked owner's runtime stops automatically: an account status
+change triggers it, and the controller checks every owner a minute after it
+starts and every ten minutes after that.
+Stopping detaches the owner's native sessions, then removes only the Pod by its
+observed UID. The volume, Service, Secret and durable histories remain; a
+re-enabled owner's next session starts on the same volume. Pods whose owner has
+no account are listed for the platform administrator and stopped only on
+request.
+
+The platform administrator upgrades drifted owners together from the same
+page. The plan lists every active owner whose present runtime differs from the
+controller's release; starting it requires the reviewed owner list and its
+count, and a plan that changed in the meantime must be reviewed again. The
+controller upgrades one owner at a time, starting each when its anonymous
+memory is below 35% of host memory, waiting up to five minutes for it to fall,
+and stopping the rollout at 60%. Owners with active work are reported as busy.
+
+Fleet upgrades from host automation use a host-only operator route. It exists
+only when `MOSS_OPERATOR_TOKEN_FILE` names a private file (mode 600, at least 32
+characters) and accepts only direct loopback requests carrying
+`X-Moss-Operator-Token`; requests through a reverse proxy never qualify.
+`deploy/operator-upgrade-runtimes.py` lists owner Pods by their runtime-owner
+annotation, inspects each and upgrades drifted owners one at a time through the
+same owner lock, active-work refusal and rollback. Busy owners are reported for
+a later run. Each completed operator upgrade is logged as
+`agent_runtime_upgraded` with actor `operator`.
+
+An upgrade resumes the owner's sessions in the controller after it returns.
+Back-to-back upgrades of 13 owners once drove the controller service's memory to
+5.9 GB on an 8 GB host and hung it, so the script starts each owner only when
+the controller's anonymous memory (its cgroup `memory.stat`) is below
+`--pause-memory` (default 35% of host memory), waits up to `--settle-seconds`
+for it to fall, and stops the run at `--stop-memory` (default 60%).
+
+An interrupted upgrade can leave its `<pod>-upgrade` lock Secret; while it
+exists the controller refuses that owner's runtime connections. 清除升级锁 on the
+运行环境 page removes it by its observed UID when the lock names the owner, was
+created before the current controller process started, is not held by this
+controller, and no peer controller is live. Then upgrade the owner again.
 
 Role changes invalidate existing access tokens. SudoWork checks access before
 each conversation control frame and terminal input, including established

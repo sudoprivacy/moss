@@ -378,6 +378,7 @@ const REVOKED_TOKENS_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 
 export class AuthService {
   readonly mossAgents: MossAgentAccess
+  private readonly runtimeOwnerStatusListeners: Array<(userId: string) => void> = []
   readonly mossIm: MossImIdentity
   private readonly cleanupTimer: ReturnType<typeof setInterval>
   private readonly oauth2Bridge: OAuth2Bridge
@@ -506,11 +507,11 @@ export class AuthService {
         : undefined,
       // 高②：role/status 实际变化同样使既有 delegation（及 registry 里按旧
       // revision 缓存的条目）失效——与低-6 同模式 revoke（best-effort）。
-      this.zoneDelegation
-        ? (orgId: string, userId: string) => {
-            void this.zoneDelegation?.revokeForUser(orgId, userId).catch(() => {})
-          }
-        : undefined,
+      // The owner's runtime follows a status change.
+      (orgId: string, userId: string) => {
+        void this.zoneDelegation?.revokeForUser(orgId, userId).catch(() => {})
+        this.runtimeOwnerStatusChanged(userId)
+      },
     )
   }
 
@@ -2035,6 +2036,40 @@ export class AuthService {
       scopes: defaultScopesForRole(user.role) } : null
   }
 
+  /** The organization of an active runtime owner, for host-only operator upgrades. */
+  async getRuntimeOwnerOrganization(userId: string): Promise<string | null> {
+    const user = await this.db.getUserById(userId)
+    return user && (user.status || 'active') === 'active' ? user.orgId : null
+  }
+
+  /** A runtime owner's account in any status, for fleet management; null when none exists. */
+  async getRuntimeOwner(userId: string): Promise<{ orgId: string; orgName: string; name: string; status: string } | null> {
+    const user = await this.db.getUserById(userId)
+    if (!user) return null
+    const organization = await this.db.getOrganization(user.orgId)
+    return { orgId: user.orgId, orgName: organization?.name || user.orgId, name: user.displayName?.trim() || user.name,
+      status: user.status || 'active' }
+  }
+
+  /** Called with the user ID after an account's status changes, so its runtime can follow. */
+  onRuntimeOwnerStatusChanged(listener: (userId: string) => void): void {
+    this.runtimeOwnerStatusListeners.push(listener)
+  }
+
+  private runtimeOwnerStatusChanged(userId: string): void {
+    for (const listener of this.runtimeOwnerStatusListeners) listener(userId)
+  }
+
+  async recordRuntimeAudit(event: { actorUserId: string | null; orgId: string; action: string; ownerId: string | null;
+    resource?: 'agent_runtime' | 'agent'; details?: unknown }): Promise<void> {
+    const id = randomUUID()
+    await this.identityRepository.insertOperationAudit({
+      id, idempotencyKey: id, orgId: event.orgId, actorUserId: event.actorUserId,
+      actorName: event.actorUserId ? null : 'controller',
+      action: event.action, resource: event.resource ?? 'agent_runtime', resourceId: event.ownerId, requestData: event.details,
+    })
+  }
+
   /** Internal policy delivery inventory; authenticated admin routes select its scope. */
   async listEgressPolicyOwners(organizationId?: string) {
     const organizationIds = organizationId ? [organizationId] : (await this.db.listOrganizations()).map(org => org.id)
@@ -2828,6 +2863,7 @@ export class AuthService {
     if (this.zoneDelegation && (patch.role !== undefined || patch.status !== undefined)) {
       void this.zoneDelegation.revokeForUser(nextOrgId, user.id).catch(() => {})
     }
+    if (patch.status !== undefined && patch.status !== user.status) this.runtimeOwnerStatusChanged(user.id)
     return {
       user: sanitizeUser((await this.db.getUserByIdAndOrg(user.id, nextOrgId)) ?? user),
     }

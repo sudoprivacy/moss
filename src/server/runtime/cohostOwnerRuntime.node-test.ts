@@ -30,7 +30,7 @@ void test('execution, native Agent adoption and discovery retain the same SQL ho
         find: async ownerId => configurations.get(key(ownerId)),
         inspect: async ownerId => ({ ownerId, allocationId, isPresent: configurations.has(key(ownerId)),
           isDrifted: drift.has(key(ownerId)), phase: 'Running', expectedImage: 'runtime:verified',
-          observedImageDigest: null, releaseId: 'verified-release' }),
+          observedImageDigest: null, releaseId: 'verified-release', upgradeLock: null }),
         upgrade: async (ownerId, drain) => { await drain(configurations.get(key(ownerId))); return resolve(ownerId) },
       }
     },
@@ -87,4 +87,51 @@ void test('execution, native Agent adoption and discovery retain the same SQL ho
   await assert.rejects(runtime.namespace('alice'), /multiple runtime allocations/)
   namespaces.set(third.runtimeEndpoint!, snapshot('bob', ['agent-c']))
   await assert.rejects(runtime.namespace('alice'), /another owner/)
+})
+
+void test('removing an Agent deletes it in its home allocation and forgets the home and its bindings', async t => {
+  const store = new DirectConnectStore(':memory:')
+  t.after(() => store.close())
+  const running = new Map<string, UserRuntimeConnectionConfig>()
+  const resolved: Array<{ allocationId: string; configuration?: Record<string, string> }> = []
+  type Pods = ConstructorParameters<typeof CohostOwnerRuntime>[0]
+  const pods: Pods = {
+    forAllocation(allocationId) {
+      const config = { endpoint: `https://runtime.invalid/${allocationId}`, authToken: '',
+        tls: { ca: '/ca', cert: '/owner-alice', key: '/key' }, runtimeEndpoint: `http://runtime.invalid/${allocationId}` }
+      return {
+        find: async () => running.get(allocationId),
+        resolve: async (_ownerId, configuration) => {
+          resolved.push({ allocationId, configuration })
+          running.set(allocationId, config)
+          return config
+        },
+        inspect: async () => { throw new Error('unused') },
+        upgrade: async () => { throw new Error('unused') },
+      }
+    },
+  }
+  const removed: string[] = []
+  const runtime = new CohostOwnerRuntime(pods, store.cohostAgentHomes, 1, undefined,
+    async (config, ownerId, agentName) => {
+      removed.push(`${config.runtimeEndpoint} ${ownerId} ${agentName}`)
+      return true
+    })
+  await runtime.resolveHome('alice', 'agent-a')
+  const secondary = await runtime.resolveHome('alice', 'agent-b')
+  assert.notEqual(secondary.allocationId, 'primary')
+  running.set(secondary.allocationId, (await pods.forAllocation(secondary.allocationId).resolve('alice')))
+  resolved.length = 0
+  let configurations = 0
+  const configuration = async () => { configurations++; return { 'sudocode.json': '{}' } }
+  assert.equal(await runtime.removeAgent('alice', 'agent-b', configuration), true)
+  assert.deepEqual(removed, [`http://runtime.invalid/${secondary.allocationId} alice agent-b`])
+  assert.equal(configurations, 0, 'a running allocation needs no new configuration')
+  assert.equal(await store.cohostAgentHomes.find('alice', 'agent-b'), undefined)
+  // A stopped runtime starts with the owner's configuration; a pre-routing
+  // Agent without a home is removed from primary.
+  assert.equal(await runtime.removeAgent('alice', 'legacy-session-agent', configuration), true)
+  assert.deepEqual(resolved, [{ allocationId: 'primary', configuration: { 'sudocode.json': '{}' } }])
+  assert.equal(removed[1], 'http://runtime.invalid/primary alice legacy-session-agent')
+  assert.ok(await store.cohostAgentHomes.find('alice', 'agent-a'), 'other Agents keep their homes')
 })

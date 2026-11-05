@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   scopes_json TEXT NOT NULL,
   cwd TEXT NOT NULL,
   runtime_type TEXT NOT NULL,
+  execution_engine TEXT NOT NULL DEFAULT 'scode',
+  execution_profile_id TEXT,
   docker_image TEXT,
   docker_mode TEXT,
   config_dir TEXT,

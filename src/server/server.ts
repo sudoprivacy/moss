@@ -10,9 +10,11 @@ import { handleCorsPreflight, setCorsHeaders } from './httpCors.js'
 import { SessionStartupError } from './sessionStartup.js'
 import { AgentManager } from './agentManager.js'
 import { AgentManagementOperations } from './agentManagementOperations.js'
+import { OperatorAccess, serveOperatorRuntime, type OperatorRuntimeDependencies } from './operatorRuntime.js'
+import { RuntimeFleet, controllerMemory } from './runtimeFleet.js'
 import { DeviceDeployClient } from './agentControl/deviceDeploy.js'
 import { dispatchAgentControl, isAgentControlPath } from './agentControl/routes.js'
-import { isMossRuntimeAgentName, mossAgentName, sessionAgentName } from './agentIdentity.js'
+import { isMossRuntimeAgentName, mossAgentName, sessionAgentName, userCreatedAgentName } from './agentIdentity.js'
 import { agentWorkspaceUrl } from './agentWorkspaceUrl.js'
 import { dispatchOrganizationBilling } from './billing/organizationBillingRoutes.js'
 import { dispatchOrganizationRecharge, parseOrganizationPaymentCallback } from './billing/organizationRechargeRoutes.js'
@@ -271,6 +273,7 @@ import { listMyAgents } from './myAgents.js'
 import {
   InvalidAgentNameError,
   createUserAgent,
+  deleteUserAgent,
   initUserAgentStore,
   listUserAgents,
 } from './userAgentStore.js'
@@ -2081,7 +2084,38 @@ export function startServer(
     sessions: (orgId, ownerId) => runtime.store.listUserSessions(orgId, ownerId),
     workspaceUrl: (sessionId, orgId) => agentWorkspaceUrl(sessionId, undefined, orgId),
     record: event => logger.info(`${event.name} ${JSON.stringify(event.fields)}`),
+    deleteUserAgent,
+    audit: event => authService.recordRuntimeAudit({ actorUserId: event.actorUserId, orgId: event.orgId,
+      action: 'AGENT_DELETED', ownerId: event.ownerId, resource: 'agent',
+      details: { agentName: event.agentName, ...event.details } }),
   })
+  const operatorAccess = OperatorAccess.load(config.operatorTokenFile)
+  const operatorRuntime: OperatorRuntimeDependencies = {
+    inspect: ownerId => runtime.inspectUserRuntime(ownerId),
+    ownerOrganization: ownerId => authService.getRuntimeOwnerOrganization(ownerId),
+    upgrade: (ownerId, orgId) => runtime.upgradeUserRuntime(ownerId, orgId),
+    record: event => logger.info(`${event.name} ${JSON.stringify(event.fields)}`),
+  }
+  const runtimeFleet = new RuntimeFleet({
+    placements: () => runtime.listUserRuntimes(),
+    inspect: ownerId => runtime.inspectUserRuntime(ownerId),
+    owner: ownerId => authService.getRuntimeOwner(ownerId),
+    upgrade: (ownerId, orgId) => runtime.upgradeUserRuntime(ownerId, orgId),
+    retire: (ownerId, orgId) => runtime.retireUserRuntime(ownerId, orgId),
+    recoverLock: ownerId => runtime.recoverUserRuntimeLock(ownerId),
+    memory: controllerMemory,
+    audit: event => authService.recordRuntimeAudit({ actorUserId: event.actor?.userId ?? null, orgId: event.orgId,
+      action: event.action, ownerId: event.ownerId, details: event.details }),
+  })
+  // A disabled or locked owner's runtime stops promptly; the periodic pass
+  // also covers status changes made while this controller was not running.
+  const reconcileRuntimes = (ownerId?: string) => void (ownerId ? runtimeFleet.reconcileOwner(ownerId) : runtimeFleet.reconcile())
+    .catch(error => logger.warn(`[runtime-fleet] reconcile failed: ${error instanceof Error ? error.message : String(error)}`))
+  authService.onRuntimeOwnerStatusChanged(ownerId => reconcileRuntimes(ownerId))
+  const firstRuntimeReconciliation = setTimeout(() => reconcileRuntimes(), 60_000)
+  const runtimeReconciliation = setInterval(() => reconcileRuntimes(), 10 * 60_000)
+  firstRuntimeReconciliation.unref()
+  runtimeReconciliation.unref()
   const agentControl = process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID
     ? authService.createAgentControlService(process.env.MOSS_AGENT_CONTROL_DEPLOYMENT_ID, {
       actor: (sessionId, userId, orgId) => runtime.inspectManagedControlActor(sessionId, userId, orgId),
@@ -2655,6 +2689,8 @@ export function startServer(
         writeJson(res, 200, { ok: true, ready: true })
         return
       }
+
+      if (await serveOperatorRuntime(req, res, pathname, operatorAccess, operatorRuntime)) return
 
       if ((req.method === 'GET' || isHead) && pathname === '/readyz') {
         const readiness = await computeReadiness(config, runtime, {
@@ -7695,7 +7731,40 @@ export function startServer(
       const runtimeUpgradeMatch = pathname.match(/^\/api\/v1\/agent-runtimes\/([^/]+)\/upgrade$/)
       if (req.method === 'POST' && runtimeUpgradeMatch) {
         const ownerId = runtimeUpgradeMatch[1]!
-        writeJson(res, 200, await agentOperations.upgrade(auth, ownerId))
+        // Settings administrators upgrade the owners they manage, with an
+        // audit record; an owner may reload their own runtime.
+        writeJson(res, 200, hasScope(auth.scopes, 'admin:settings')
+          ? await runtimeFleet.upgrade(auth, ownerId) : await agentOperations.upgrade(auth, ownerId))
+        return
+      }
+
+      // Runtime fleet: organization admins manage their organization's owner
+      // runtimes; the platform administrator sees every organization and runs
+      // paced rollouts. Each change is written to the operation audit.
+      if (req.method === 'GET' && pathname === '/api/v1/agent-runtimes') {
+        const scope = url.searchParams.get('scope') === 'all' ? 'all' : 'org'
+        writeJson(res, 200, { runtimes: await runtimeFleet.list(auth, scope) })
+        return
+      }
+      if (pathname === '/api/v1/agent-runtimes/rollout') {
+        if (req.method === 'GET') {
+          writeJson(res, 200, { rollout: runtimeFleet.current(auth), plan: await runtimeFleet.plan(auth) })
+          return
+        }
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req)
+          const reviewed = Array.isArray(body.owner_ids) && body.owner_ids.every((id: unknown) => typeof id === 'string')
+            ? body.owner_ids as string[] : null
+          if (!reviewed) throw new HttpError(400, 'owner_ids must list the reviewed owners')
+          writeJson(res, 202, { rollout: await runtimeFleet.startRollout(auth, reviewed) })
+          return
+        }
+      }
+      const runtimeActionMatch = pathname.match(/^\/api\/v1\/agent-runtimes\/([^/]+)\/(retire|recover-lock)$/)
+      if (req.method === 'POST' && runtimeActionMatch) {
+        const ownerId = runtimeActionMatch[1]!
+        writeJson(res, 200, runtimeActionMatch[2] === 'retire'
+          ? await runtimeFleet.retire(auth, ownerId) : await runtimeFleet.recoverLock(auth, ownerId))
         return
       }
 
@@ -7710,10 +7779,15 @@ export function startServer(
 
       // The canonical management path also permits names reserved by legacy template aliases.
       const managedAgentMatch = pathname.match(/^\/api\/v1\/(?:agent-manager\/agents|agents)\/([^/]+)(\/sessions)?$/)
-      if (managedAgentMatch && (req.method === 'GET' || req.method === 'POST')) {
+      if (managedAgentMatch && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE')) {
         let name: string
         try { name = decodeURIComponent(managedAgentMatch[1]!) }
         catch { throw new HttpError(400, 'Invalid Agent name') }
+        if (req.method === 'DELETE' && !managedAgentMatch[2]) {
+          const ownerId = url.searchParams.get('owner_id') || auth.userId
+          writeJson(res, 200, await agentOperations.deleteAgent(auth, ownerId, name))
+          return
+        }
         if (req.method === 'GET' && !managedAgentMatch[2]) {
           const ownerId = url.searchParams.get('owner_id') || auth.userId
           writeJson(res, 200, await agentOperations.detail(auth, ownerId, name))
@@ -7726,6 +7800,14 @@ export function startServer(
           writeJson(res, 201, await agentOperations.start(auth, ownerId, name))
           return
         }
+      }
+
+      // A person deletes an agent they made; the same deletion the Agent manager runs.
+      const userAgentMatch = pathname.match(/^\/api\/v1\/user-agents\/([0-9a-f-]{36})$/)
+      if (req.method === 'DELETE' && userAgentMatch) {
+        const agentName = sessionAgentName(auth.userId, userCreatedAgentName(userAgentMatch[1]!))
+        writeJson(res, 200, { success: true, data: await agentOperations.deleteAgent(auth, auth.userId, agentName) })
+        return
       }
 
       if (pathname === '/api/v1/user-agents') {
@@ -12078,6 +12160,8 @@ export function startServer(
     ready,
     stop: async () => {
       isStopped = true
+      clearTimeout(firstRuntimeReconciliation)
+      clearInterval(runtimeReconciliation)
       await modelReviewReady.catch(() => {})
       await modelReview?.close()
       await hostedReady.catch(() => {})

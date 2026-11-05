@@ -38,6 +38,14 @@ export interface ManagedAgentDetail {
   isWorkspaceAvailable: boolean
   runtime: UserRuntimeState
   canUpgrade: boolean
+  canDelete: boolean
+}
+
+export interface DeletedManagedAgent {
+  name: string
+  sessions: number
+  isNativeDeleted: boolean
+  isIdentityDeleted: boolean
 }
 
 function agentUrl(ownerId: string, name: string): string {
@@ -58,4 +66,8 @@ export function getManagedAgent(ownerId: string, name: string): Promise<ManagedA
 
 export function startManagedAgent(ownerId: string, name: string): Promise<{ sessionId: string; workspaceUrl: string }> {
   return dcClient.post(`/api/v1/agent-manager/agents/${encodeURIComponent(name)}/sessions`, { owner_id: ownerId })
+}
+
+export function deleteManagedAgent(ownerId: string, name: string): Promise<DeletedManagedAgent> {
+  return dcClient.delete<DeletedManagedAgent>(agentUrl(ownerId, name))
 }

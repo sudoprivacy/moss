@@ -34,6 +34,15 @@ export class CohostSessionRepository {
     return row ? parseCohostSessionBinding({ ownerId: row.owner_user_id, agentId: row.native_agent_id, durableSessionId: row.durable_session_id, repositoryPath: row.repository_path }) : undefined
   }
 
+  /** Every native session Moss has bound for this owner, whatever its Moss session's state. */
+  async listForOwner(ownerId: string): Promise<CohostSessionBinding[]> {
+    const rows = await this.driver.all<{ owner_user_id: string; native_agent_id: string; durable_session_id: string; repository_path: string }>(`
+      SELECT owner_user_id, native_agent_id, durable_session_id, repository_path FROM cohost_sessions WHERE owner_user_id = ?
+    `, [ownerId])
+    return rows.map(row => parseCohostSessionBinding({ ownerId: row.owner_user_id, agentId: row.native_agent_id,
+      durableSessionId: row.durable_session_id, repositoryPath: row.repository_path }))
+  }
+
   /** Publish once, before runner readiness, and refuse stale attempts or changed history. */
   async bind(sessionId: string, attemptId: string, input: CohostSessionBinding, ownerInstanceId?: string): Promise<boolean> {
     const binding = parseCohostSessionBinding(input)

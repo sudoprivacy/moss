@@ -82,6 +82,7 @@ import { createEgressPolicy, EgressPolicyRepository, POLICY_FILENAME, readEgress
 import { EgressPolicyService, type EgressRuntimeReceipt, type EgressRuntimeTarget } from './configuration/egressPolicyService.js'
 import type { EgressPolicy } from '@sudo/egress-policy'
 import { CohostOwnerRuntime } from './runtime/cohostOwnerRuntime.js'
+import { isMossOwnedExecution } from './runtime/mossOwnedExecution.js'
 import type { NexusSessionEndpoint } from '@nexus-ai-fs/vfs-client'
 import { assertRuntimePlacement } from './runtime/runtimePlacementPolicy.js'
 import { readRuntimeRelease } from '@sudo/user-runtime/release'
@@ -652,6 +653,9 @@ export class RuntimeService {
 
   private async createAdmittedSession(input: SessionCreateInput): Promise<SessionRecord> {
     if (this.draining) throw new ServerDrainingError()
+    if (input.runtime?.engine === 'standard_acp') {
+      throw new ResourceAccessError(503, 'Standard ACP deployment admission is not registered on this host')
+    }
     parseOntologyProjectId(input.ontologyProjectId)
     if (this.upgradingOwners.has(input.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
     return withOrganizationResources(await this.resourceScope(input), async () => {
@@ -831,6 +835,59 @@ export class RuntimeService {
     return this.ownerRuntime ? this.ownerRuntime.inspect(ownerId) : { ownerId, isPresent: false, isDrifted: false, phase: 'legacy' }
   }
 
+  /** Owner allocations that currently have a Pod; nothing is provisioned. */
+  async listUserRuntimes(): Promise<Array<{ ownerId: string; allocationId: string }>> {
+    return this.userPods ? this.userPods.runtimes() : []
+  }
+
+  /**
+   * Stop an owner's runtime in every allocation, e.g. after the owner is
+   * disabled. Their native sessions are detached first, so nothing reconnects
+   * and recreates the Pod; volumes, Services and durable histories remain.
+   */
+  async retireUserRuntime(ownerId: string, orgId: string | null): Promise<boolean> {
+    return this.workAdmission.run(async () => {
+      const ownerRuntime = this.ownerRuntime
+      if (!ownerRuntime) throw new ResourceAccessError(409, 'User runtime placement is not enabled')
+      if (this.upgradingOwners.has(ownerId)) throw new ResourceAccessError(409, 'An owner upgrade is already in progress')
+      if (await this.countLiveOtherInstances()) throw new ResourceAccessError(409, 'Drain peer Moss controllers before stopping this owner')
+      this.upgradingOwners.add(ownerId)
+      try {
+        const sessions = orgId ? (await this.store.listUserSessions(orgId, ownerId))
+          .filter(session => session.runtime.type === 'cohost' && session.desiredState === 'active') : []
+        for (const session of sessions) await this.terminateSession(session.sessionId, true)
+        let isRetired = false
+        for (const placement of await ownerRuntime.placements(ownerId)) {
+          if (!placement.service.retire) throw new ResourceAccessError(409, 'Runtime retirement is unavailable')
+          isRetired = await placement.service.retire(ownerId) || isRetired
+        }
+        return isRetired
+      } finally {
+        this.upgradingOwners.delete(ownerId)
+      }
+    })
+  }
+
+  /**
+   * Remove an upgrade lock an interrupted controller left behind. Only a lock
+   * created before this process started can be removed, and only while no
+   * peer controller is live and this controller is not changing the owner.
+   */
+  async recoverUserRuntimeLock(ownerId: string): Promise<boolean> {
+    const ownerRuntime = this.ownerRuntime
+    if (!ownerRuntime) throw new ResourceAccessError(409, 'User runtime placement is not enabled')
+    if (this.upgradingOwners.has(ownerId)) throw new ResourceAccessError(409, 'An owner upgrade is already in progress')
+    if (await this.countLiveOtherInstances()) throw new ResourceAccessError(409, 'Drain peer Moss controllers before recovering this owner')
+    const started = new Date(Date.now() - process.uptime() * 1000)
+    let isRecovered = false
+    for (const placement of await ownerRuntime.placements(ownerId)) {
+      if (!placement.service.recoverUpgradeLock) throw new ResourceAccessError(409, 'Runtime lock recovery is unavailable')
+      try { isRecovered = await placement.service.recoverUpgradeLock(ownerId, started) || isRecovered }
+      catch (error) { throw new ResourceAccessError(409, error instanceof Error ? error.message : String(error)) }
+    }
+    return isRecovered
+  }
+
   /** Reject new traffic while this controller drains an owner's native runtime. */
   isUserRuntimeUpgrading(ownerId: string): boolean {
     return this.upgradingOwners.has(ownerId)
@@ -839,6 +896,52 @@ export class RuntimeService {
   /** Drain only tracked idle native sessions, replace placement, then resume their durable histories. */
   async upgradeUserRuntime(ownerId: string, orgId: string, configuration?: Record<string, string>) {
     return this.workAdmission.run(() => this.upgradeAdmittedUserRuntime(ownerId, orgId, configuration))
+  }
+
+  /** The model transport and egress policy a replacement or restarted owner runtime receives. */
+  private async ownerRuntimeConfiguration(ownerId: string, orgId: string,
+    owner: { role: string; scopes: string[] }, configuration?: Record<string, string>): Promise<Record<string, string>> {
+    configuration ??= await withOrganizationResources(await this.resourceScope({ orgId, userId: ownerId,
+      role: owner.role, scopes: owner.scopes }), async () => {
+      const context = await this.resolveRunnerModelContext({ userId: ownerId, orgId,
+        sessionId: 'owner-runtime-upgrade', runtime: { type: 'cohost', engine: 'scode' } })
+      // Replacing a runtime configures its authorized transport; it does not
+      // execute the user's selected model. Model admission stays at session start.
+      const environment = this.buildModelEnvironment(context)
+      return buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
+        environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!,
+        cohostModelName(environment.MOSS_DEFAULT_MODEL!, environment.MOSS_MODEL_PROVIDER_ID, environment.MOSS_COHOST_MODEL_ROUTING))
+    })
+    return { ...configuration, [POLICY_FILENAME]: JSON.stringify(await this.egressPolicies.policy(orgId)) }
+  }
+
+  /**
+   * Delete one of an owner's Agents: its native presence and home through the
+   * owner runtime, then its Moss sessions. Its pair conversations stay with
+   * the peers that share them. Refuses while the Agent has active work.
+   */
+  async deleteOwnerAgent(ownerId: string, orgId: string, agentName: string): Promise<{ sessions: number; isNativeDeleted: boolean }> {
+    return this.workAdmission.run(async () => {
+      if (this.upgradingOwners.has(ownerId)) throw new ResourceAccessError(409, 'An owner upgrade is already in progress')
+      const owner = await this.authService.getAgentOwner(ownerId, orgId)
+      if (!owner || owner.status !== 'active') throw new ResourceAccessError(409, 'Agent owner is unavailable')
+      // New traffic for this owner waits out the deletion, as during an upgrade.
+      this.upgradingOwners.add(ownerId)
+      try {
+        const isNativeDeleted = this.ownerRuntime
+          ? await this.ownerRuntime.removeAgent(ownerId, agentName, () => this.ownerRuntimeConfiguration(ownerId, orgId, owner))
+          : false
+        const sessions = (await this.store.listUserSessions(orgId, ownerId))
+          .filter(session => sessionAgentName(ownerId, session.assistantName) === agentName)
+        for (const session of sessions) {
+          if (session.desiredState === 'active') await this.terminateSession(session.sessionId)
+          await this.store.deleteSession(session.sessionId)
+        }
+        return { sessions: sessions.length, isNativeDeleted }
+      } finally {
+        this.upgradingOwners.delete(ownerId)
+      }
+    })
   }
 
   private async upgradeAdmittedUserRuntime(ownerId: string, orgId: string, configuration?: Record<string, string>) {
@@ -852,23 +955,15 @@ export class RuntimeService {
     this.upgradingOwners.add(ownerId)
     const paused = new Set<string>()
     try {
-      configuration ??= await withOrganizationResources(await this.resourceScope({ orgId, userId: ownerId,
-        role: owner.role, scopes: owner.scopes }), async () => {
-        const context = await this.resolveRunnerModelContext({ userId: ownerId, orgId,
-          sessionId: 'owner-runtime-upgrade', runtime: { type: 'cohost', engine: 'scode' } })
-        // Replacing a runtime configures its authorized transport; it does not
-        // execute the user's selected model. Model admission stays at session start.
-        const environment = this.buildModelEnvironment(context)
-        return buildCohostProxyConfig(environment.ANTHROPIC_BASE_URL || '',
-          environment.ANTHROPIC_API_KEY || environment.ANTHROPIC_AUTH_TOKEN || '', environment.MOSS_DEFAULT_MODEL!,
-          cohostModelName(environment.MOSS_DEFAULT_MODEL!, environment.MOSS_MODEL_PROVIDER_ID, environment.MOSS_COHOST_MODEL_ROUTING))
-      })
-      configuration = { ...configuration, [POLICY_FILENAME]: JSON.stringify(await this.egressPolicies.policy(orgId)) }
+      configuration = await this.ownerRuntimeConfiguration(ownerId, orgId, owner, configuration)
       const sessions = (await this.store.listUserSessions(orgId, ownerId))
         .filter(session => session.runtime.type === 'cohost' && session.desiredState === 'active')
       const bindings = await Promise.all(sessions.map(async session => ({ session,
         binding: await this.store.cohostSessions.get(session.sessionId),
         home: await ownerRuntime.resolveHome(ownerId, sessionAgentName(ownerId, session.assistantName)) })))
+      // A ready execution of an ended Moss session stays up as its Agent's
+      // standby receiver. Moss started it, so the upgrade may cancel it.
+      const knownBindings = await this.store.cohostSessions.listForOwner(ownerId)
       for (const placement of await ownerRuntime.placements(ownerId)) {
         const allocationBindings = bindings.filter(({ home }) => home.allocationId === placement.allocationId)
         const allocationSessions = allocationBindings.map(({ session }) => session)
@@ -886,8 +981,7 @@ export class RuntimeService {
                   throw new ResourceAccessError(409, 'Finish active Agent work before upgrading this owner')
                 }
                 const snapshot = await agent.getSession(execution.processId)
-                if (!snapshot.session_endpoint || snapshot.owner_id !== ownerId || !allocationBindings.some(({ binding }) => binding?.ownerId === ownerId &&
-                  binding.agentId === snapshot.agent_id && binding.durableSessionId === snapshot.durable_session_id)) {
+                if (!isMossOwnedExecution(snapshot, ownerId, [...allocationBindings.map(({ binding }) => binding), ...knownBindings])) {
                   throw new ResourceAccessError(409, 'An external Agent session must drain before this upgrade')
                 }
                 processes.push({ id: execution.processId, endpoint: snapshot.session_endpoint })
@@ -2237,6 +2331,9 @@ export class RuntimeService {
   ): Promise<AttemptRecord> {
     session = (await this.store.getSession(session.sessionId)) ?? session
     if (this.draining) throw new ServerDrainingError()
+    if (session.runtime?.engine === 'standard_acp') {
+      throw new ResourceAccessError(503, 'Standard ACP deployment admission is not registered on this host')
+    }
     if (this.upgradingOwners.has(session.userId)) throw new ResourceAccessError(409, 'User runtime is draining for an upgrade')
     if (session.desiredState === 'terminated') throw new ResourceAccessError(409, 'Session was terminated')
     if (session.runtime?.type === 'external' || session.runtime?.type === 'hosted') throw new ResourceAccessError(409, 'Use the task API for this session')

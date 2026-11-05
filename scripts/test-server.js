@@ -48,6 +48,7 @@ const BUN = [
   'mossToolApprovals.test.ts',
   'crashSeedRecovery.test.ts',
   'untrustedText.test.ts',
+  'channelPluginRetry.test.ts',
   // src/server/__tests__
   'applicationHelloReplay.test.ts',
   'contractsActivation.test.ts',
