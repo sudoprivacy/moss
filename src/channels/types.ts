@@ -387,6 +387,10 @@ export interface IUnifiedOutgoingMessage {
   replyToMessageId?: string;
   silent?: boolean;
   noStreaming?: boolean;
+  /** Send as a standalone message outside any reply in progress (WeCom: proactive
+   *  push instead of a reply stream). Used for answers that arrive after their
+   *  turn's reply was already closed. Plugins that have no such split ignore it. */
+  proactive?: boolean;
 }
 
 /**

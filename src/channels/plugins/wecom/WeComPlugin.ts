@@ -267,10 +267,15 @@ export class WeComPlugin extends BasePlugin {
     // limit applies per stream update, and updates carry the full text).
     const truncatedContent = content.length > WECOM_MESSAGE_LIMIT ? content.slice(0, WECOM_MESSAGE_LIMIT - 3) + '...' : content;
 
-    // If we have a reqId (responding to an incoming message), use stream mode
-    if (reqId) {
+    // If we have a reqId (responding to an incoming message), use stream mode.
+    // A proactive message skips it: opening a stream here would replace the chat's
+    // current stream and hijack the edits of a reply still in progress.
+    if (reqId && !message.proactive) {
       const streamId = this.generateStreamId();
-      console.log(`[WeComPlugin] sendMessage: using stream mode, streamId=${streamId}`);
+      // A final message (replyMarkup, as on editMessage) must close its own stream,
+      // or WeCom keeps showing it as still typing.
+      const isFinal = !!message.replyMarkup;
+      console.log(`[WeComPlugin] sendMessage: using stream mode, streamId=${streamId}, final=${isFinal}`);
 
       // Send initial stream message
       this.send({
@@ -280,7 +285,7 @@ export class WeComPlugin extends BasePlugin {
           msgtype: 'stream',
           stream: {
             id: streamId,
-            finish: false,
+            finish: isFinal,
             content: truncatedContent,
           },
         },
@@ -291,7 +296,7 @@ export class WeComPlugin extends BasePlugin {
       this.streamSessions.set(chatId, {
         streamId,
         reqId,
-        isFinished: false,
+        isFinished: isFinal,
       });
 
       return messageId;
