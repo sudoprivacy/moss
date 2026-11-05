@@ -116,8 +116,13 @@ function toEditableSettings(settings: SystemSettings): EditableSystemSettings {
     workspaceUploadLimitBytes: settings.workspaceUploadLimitBytes,
     cronReuseMaxRuns: settings.cronReuseMaxRuns,
     imReuseMaxTurns: settings.imReuseMaxTurns,
+    imResponseTimeoutSec: settings.imResponseTimeoutSec,
   }
 }
+
+/** Bounds the server applies to imResponseTimeoutSec. */
+const IM_RESPONSE_TIMEOUT_MIN_SEC = 30
+const IM_RESPONSE_TIMEOUT_MAX_SEC = 86400
 
 function buildSystemSettingsPatch(
   settings: SystemSettings,
@@ -139,6 +144,14 @@ function buildSystemSettingsPatch(
   }
   if (draft.imReuseMaxTurns !== settings.imReuseMaxTurns) {
     patch.imReuseMaxTurns = draft.imReuseMaxTurns
+  }
+  // A value below the minimum is mid-typing (or about to be clamped on blur):
+  // saving it would have the server clamp it and overwrite what is being typed.
+  if (
+    draft.imResponseTimeoutSec !== settings.imResponseTimeoutSec &&
+    draft.imResponseTimeoutSec >= IM_RESPONSE_TIMEOUT_MIN_SEC
+  ) {
+    patch.imResponseTimeoutSec = draft.imResponseTimeoutSec
   }
   if (draft.thinkingMode !== settings.thinkingMode) {
     patch.thinkingMode = draft.thinkingMode
@@ -999,6 +1012,43 @@ export default function SystemSettingsPage() {
                       }
                     : current,
                 )
+              }}
+            />
+          </SettingField>
+
+          <SettingField
+            label="IM 应答超时（秒）"
+            description="IM 消息等待 agent 回复的最长时间。超过后先把已有进度发给用户并提示仍在处理，agent 完成后再把结果另发一条消息。企业微信的流式回复约 6 分钟后失效，建议不超过 300。范围 30–86400，默认 300。"
+          >
+            <Input
+              type="number"
+              min={IM_RESPONSE_TIMEOUT_MIN_SEC}
+              max={IM_RESPONSE_TIMEOUT_MAX_SEC}
+              // 0 means "cleared": show an empty box so typing does not start after a 0.
+              value={draft.imResponseTimeoutSec || ''}
+              onChange={(event) => {
+                const parsed = Number.parseInt(event.target.value, 10)
+                const next = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), IM_RESPONSE_TIMEOUT_MAX_SEC) : 0
+                setDraft(current =>
+                  current
+                    ? {
+                        ...current,
+                        imResponseTimeoutSec: next,
+                      }
+                    : current,
+                )
+              }}
+              onBlur={() => {
+                // Empty goes back to the saved value; anything else below the minimum becomes the minimum.
+                setDraft(current => {
+                  if (!current || current.imResponseTimeoutSec >= IM_RESPONSE_TIMEOUT_MIN_SEC) return current
+                  return {
+                    ...current,
+                    imResponseTimeoutSec: current.imResponseTimeoutSec === 0
+                      ? (settingsRef.current?.imResponseTimeoutSec ?? 300)
+                      : IM_RESPONSE_TIMEOUT_MIN_SEC,
+                  }
+                })
               }}
             />
           </SettingField>

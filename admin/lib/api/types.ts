@@ -225,6 +225,10 @@ export interface SystemSettings {
    *  Bounds the same transcript growth as cronReuseMaxRuns, measured in chat
    *  turns. Default 200; 0 disables rotation. */
   imReuseMaxTurns: number
+  /** Seconds an IM reply waits for the agent's turn before sending the progress
+   *  so far; a turn that finishes later is sent as a follow-up message.
+   *  Default 300; the server clamps it to 30-86400. */
+  imResponseTimeoutSec: number
   /** Directory (inside the moss-server container) holding the per-service login
    *  scripts run by the token minter. For a script-type config item with pinyin
    *  `<pinyin>`, the minter runs `<mintScriptsDir>/<pinyin>_mint.sh`. Default
@@ -252,6 +256,7 @@ export interface UpdateSystemSettingsRequest {
   workspaceUploadLimitBytes?: number
   cronReuseMaxRuns?: number
   imReuseMaxTurns?: number
+  imResponseTimeoutSec?: number
 }
 
 // Direct Connect Server Types
