@@ -102,7 +102,10 @@ export class StandardAcpBackend implements SessionBackend {
       active = false
       shutdown = (async () => {
         let error = failure
-        try { await driver?.close() } catch (cause) { error ??= cause instanceof Error ? cause : new Error(String(cause)) }
+        try {
+          if (driver) await driver.close()
+          else await execution?.transport.close(true)
+        } catch (cause) { error ??= cause instanceof Error ? cause : new Error(String(cause)) }
         try { await turn } catch (cause) { error ??= cause instanceof Error ? cause : new Error(String(cause)) }
         try {
           if (execution) { await execution.confirmStopped(); await repo.release(claim) }

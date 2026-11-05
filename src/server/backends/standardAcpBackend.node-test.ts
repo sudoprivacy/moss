@@ -143,6 +143,22 @@ void test('a lost first-open response never launches a replacement history autom
   assert.equal(f.launches(), 1)
 })
 
+void test('startup cancellation closes a launched transport before the driver exists', { timeout: 10000 }, async t => {
+  const f = await fixture(); t.after(f.close)
+  const controller = new AbortController()
+  const launcher: StandardAcpLauncher = { prepare: async options => {
+    const plan = await f.launcher.prepare(options)
+    return { ...plan, start: async signal => {
+      const execution = await plan.start(signal)
+      controller.abort(new Error('Startup revoked'))
+      return execution
+    } }
+  } }
+  await assert.rejects(new StandardAcpBackend(f.store, launcher).spawn({ ...await f.options(), signal: controller.signal }), /Startup revoked/)
+  assert.equal(f.children[0].exitCode, 0)
+  assert.equal((await f.store.standardAcpSessions.read('session', 'alice', 'org'))?.writerReleased, true)
+})
+
 void test('disconnect during a turn retains partial output and unknown outcome without replay', { timeout: 10000 }, async t => {
   const f = await fixture(); t.after(f.close); f.crashTurn()
   const backend = new StandardAcpBackend(f.store, f.launcher), handle = await backend.spawn(await f.options()); f.handles.push(handle)
