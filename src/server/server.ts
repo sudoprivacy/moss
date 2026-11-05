@@ -43,6 +43,7 @@ import { RuntimeInputBarrier } from './runtime/runtimeInputBarrier.js'
 import { RuntimeAdmissionPauses } from './runtime/runtimeAdmissionPauses.js'
 import { dispatchRuntimeAdmission, isRuntimeAdmissionRoute } from './api/runtimeAdmission.js'
 import { getSessionProject, listProjectSessions, listSessionProjects, parseOntologyProjectId } from './ontology/sessionProjects.js'
+import { createDeployedCloudReview, reviewBrowserEpochs } from './ontology/cloudReviewDeployment.js'
 import type { ServerConfig, SessionRecord } from './types.js'
 import { saveUploadedIcon } from './utils/iconUpload.js'
 import { getTenantAssistantAvatarFilename, removeTenantAssistantAvatar, saveTenantAssistantAvatar, validateTenantAssistantAvatar } from './utils/tenantAssistantAvatar.js'
@@ -2109,6 +2110,16 @@ export function startServer(
 
   const externalProviders = nexusClient ? authService.createExternalProviderService(nexusClient, runtime.serverInstanceId) : null
   let isStopped = false
+  let modelReview: Awaited<ReturnType<typeof createDeployedCloudReview>> = null
+  const modelReviewReady = createDeployedCloudReview({
+    store: runtime.store, runtime, browser: browserWorkers, secrets: secretsApi,
+    isUserActive: async owner => (await authService.getUserOrNull(owner.userId, owner.orgId))?.status === 'active',
+    origin: config.publicBaseUrl, shareoneOrigin: process.env.MOSS_SHAREONE_ORIGIN || 'https://shareone.vip',
+    assetsDirectory: process.env.MOSS_MODEL_REVIEW_ASSETS_DIR,
+  }).then(async value => {
+    if (isStopped) { await value?.close(); return }
+    modelReview = value
+  })
   let hostedEvaluations: Awaited<ReturnType<typeof authService.createHostedEvaluationRuntime>>
   let agentInventory = authService.createAgentInventoryService(nexusClient ?? undefined, undefined, externalProviders?.releases)
   const hostedReady = authService.createHostedEvaluationRuntime(runtime.serverInstanceId, externalProviders?.releases).then(async value => {
@@ -2578,6 +2589,14 @@ export function startServer(
       await seedBuiltinsReady
       const url = new URL(req.url || '/', 'http://localhost')
       const pathname = canonicalAgentTemplatePath(url.pathname)
+      // The host validates its private cookie and current model access on every
+      // request. This page does not receive the user's Moss bearer credential.
+      if (pathname.startsWith('/review/')) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (!modelReview) throw new HttpError(503, 'model_review_not_configured')
+        if (!await modelReview.handleRequest(req, res)) throw new HttpError(404, 'Not found')
+        return
+      }
       if (pathname.startsWith('/api/v1/auth/') || pathname === '/api/v1/client/local-runtime') res.setHeader('Cache-Control', 'no-store')
       const isHead = req.method === 'HEAD'
 
@@ -4109,6 +4128,16 @@ export function startServer(
         res.setHeader('Cache-Control', 'no-store')
         if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed')
         writeJson(res, 200, await getSessionProject(runtime.store, sessionProjectMatch[1]!, auth))
+        return
+      }
+
+      const sessionReviewMatch = pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/ontology-review$/)
+      if (sessionReviewMatch) {
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed')
+        if (!modelReview) throw new HttpError(503, 'model_review_not_configured')
+        const epochs = reviewBrowserEpochs(await readJsonBody(req))
+        writeJson(res, 200, await modelReview.open(auth, sessionReviewMatch[1]!, epochs))
         return
       }
 
@@ -11921,13 +11950,14 @@ export function startServer(
       resolvePort(port)
     })
     // Refuse legacy task stores before listening; cutover requires a maintenance window.
-    void externalStoreReady.then(() => {
+    void Promise.all([externalStoreReady, modelReviewReady]).then(() => {
       if (isStopped) throw new Error('Server stopped before initialization completed')
       server.listen(config.port, config.host)
     }).catch(error => {
       void agentInventory.close().catch(() => {})
       void hostedEvaluations?.close().catch(() => {})
       void externalProviders?.close().catch(() => {})
+      void modelReview?.close().catch(() => {})
       onError(error instanceof Error ? error : new Error('External provider task store initialization failed'))
     })
   })
@@ -12048,6 +12078,8 @@ export function startServer(
     ready,
     stop: async () => {
       isStopped = true
+      await modelReviewReady.catch(() => {})
+      await modelReview?.close()
       await hostedReady.catch(() => {})
       await agentInventory.close()
       await hostedEvaluations?.close()

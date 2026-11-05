@@ -39,7 +39,7 @@ export async function createCloudModelReviewService(options: {
     await ports.ontologyReview.authorize(binding)
     return binding
   }
-  const providers = new Map<string, Promise<{ comments: SudographReviewComments; delivery: ReturnType<typeof createNativeConversationReview> }>>()
+  const providers = new Map<string, Promise<{ comments: SudographReviewComments; delivery: ReturnType<typeof createNativeConversationReview>; watching: Set<string> }>>()
   const provider = async (input: ISudographReviewBinding) => {
     const binding = await resolve(input)
     const owner = Object.freeze({ orgId: binding.orgId, userId: binding.userId })
@@ -65,7 +65,7 @@ export async function createCloudModelReviewService(options: {
               return await ports.ontologyReview.read(await resolve({ workspaceId, conversationId }, owner), { operation: 'head' }) as { revision: string; context_digest: string }
             },
           })
-          return { comments, delivery }
+          return { comments, delivery, watching: new Set<string>() }
         } catch (error) { delivery.close(); throw error }
       })()
       providers.set(key, current)
@@ -73,11 +73,24 @@ export async function createCloudModelReviewService(options: {
     }
     return current
   }
+  const prepare = async (binding: ISudographReviewBinding) => {
+    const value = await provider(binding)
+    const space = await value.comments.prepare(binding.workspaceId, binding.conversationId)
+    if (space) value.watching.add(JSON.stringify([binding.workspaceId, binding.conversationId]))
+    return space
+  }
   const comments: NonNullable<ISudographReviewHostOptions['comments']> = {
     assets: options.assets,
-    prepare: async binding => (await provider(binding)).comments.prepare(binding.workspaceId, binding.conversationId),
+    prepare,
     proxy: async (binding, route, method, body) => (await provider(binding)).comments.proxy(binding, route, method, body),
-    status: async binding => (await provider(binding)).comments.status(binding.workspaceId, binding.conversationId),
+    status: async binding => {
+      const value = await provider(binding)
+      // A durable page grant can already contain its ShareOne space after host
+      // replacement. Restore this process's watcher without caching credentials
+      // or repeatedly preparing it on every delivery-status poll.
+      if (!value.watching.has(JSON.stringify([binding.workspaceId, binding.conversationId]))) await prepare(binding)
+      return value.comments.status(binding.workspaceId, binding.conversationId)
+    },
   }
   let host: Awaited<ReturnType<typeof createSharedModelReviewHost>>
   try { host = await createSharedModelReviewHost(store, { origin: options.origin, comments, isUserActive: options.isUserActive }) }
@@ -87,8 +100,9 @@ export async function createCloudModelReviewService(options: {
     open: async (owner: BrowserPrincipal, sessionId: string, epochs: BrowserEpochs) => {
       await authorizeOwner(owner)
       const launch = await host.open(owner, sessionId)
-      return openSessionAuthorizedPage({ getSession: id => store.getSession(id),
+      await openSessionAuthorizedPage({ getSession: id => store.getSession(id),
         isUserActive: options.isUserActive, worker: options.browser }, owner, sessionId, launch, epochs)
+      return { surface: 'viewer' as const, conversationId: sessionId }
     },
     close: async () => {
       if (isClosed) return

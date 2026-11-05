@@ -33,13 +33,14 @@ export async function createReviewHostFixture(t: TestContext, humanReview = fals
       if (humanReview && req.url === '/review') {
         const chunks: Buffer[] = []
         for await (const chunk of req) chunks.push(Buffer.from(chunk))
-        const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { resource: string }
+        const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { resource: string; operation: string }
         state.reviewCalls++
         await state.beforeReply?.()
         res.setHeader('Content-Type', 'application/json')
         res.end(JSON.stringify({ format: WORKER_REVIEW_PROFILE, authority_ref: 'authority', model_ref: 'model',
           resource_ref: input.resource, source_refs: ['source'], scope: 'full-registered-model',
-          result: { revision: state.revision, context_digest: 'b'.repeat(64) } }))
+          result: input.operation === 'document' ? { html: '<!doctype html><p>Registered model transport fixture</p>', revision: state.revision }
+            : { revision: state.revision, context_digest: 'b'.repeat(64) } }))
         return
       }
       const sdk = new McpServer({ name: 'registered-worker', version: '1.0.0' })

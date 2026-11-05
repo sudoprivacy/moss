@@ -29,9 +29,41 @@ missing conversation identity returns an explicit upgrade error. Native recovery
 also requires the runner's advertised receipt protocol before any control input.
 Unknown outcomes retain their reservation and require reconciliation.
 
-The service is a host composition API. The production HTTP route, installed
-frontend packaging, SDK adoption and Desktop/WebUI client entry still need to be
-connected before enabling it for users. Its HTTP/MCP/SQL transport acceptance uses
-credential and browser ports and a minimal asset fixture; it does not establish
-live Nexus/ShareOne storage, actual browser interaction, or comment-to-live-LLM
-acceptance. Those remain separate deployment acceptance work.
+## HTTP deployment
+
+The normal Moss listener mounts the private `/review/{grant}/` surface before
+bearer authentication. The shared host instead verifies its grant cookie,
+deployed origin, current owner and reviewed model access on every request.
+No Moss access token is embedded in the page. Other API routes retain ordinary
+authentication.
+
+`POST /api/v1/sessions/{conversationId}/ontology-review` accepts exactly
+`{ "controlEpoch": 3, "targetEpoch": 4 }`, the generations observed in the
+existing browser panel. It uses the authenticated account and registered session
+binding, opens the page through the private browser gateway and returns only
+`{ "surface": "viewer", "conversationId": "..." }`. It cannot select a model,
+source, URL, asset directory, credential or another owner. The existing browser
+must already belong to this conversation; stale generations and uncertain
+navigation revoke the new grant instead of falling back to public navigation.
+
+Set `MOSS_MODEL_REVIEW_ASSETS_DIR` to the installed, pinned ShareOne review-shell
+directory, and set `MOSS_PUBLIC_BASE_URL` to the deployed HTTPS origin. The
+existing Nexus personal Secrets API is required. `MOSS_SHAREONE_ORIGIN` defaults
+to `https://shareone.vip`. Asset, origin or credential-service configuration
+errors prevent the configured server from listening. With no asset directory,
+the feature is disabled and review requests return an explicit 503.
+
+Host replacement retains page grants, subscriptions, inbox state and execution
+reservations in the shared database. Delivery-status polling restores the new
+process's comment watcher even when the page already has its ShareOne identity.
+Repeated polls reuse that watcher. Neither account credentials nor model contents
+are cached as a substitute for their authoritative services.
+
+The adopted SDK is the verified official 0.1.4 release. Registered acceptance
+exercises real HTTP, reviewed MCP access, SQL grants/inbox/reservations, native
+TCP input, the ordinary ACP bridge and transcript, provider reply routing,
+duplicate events and host replacement. ShareOne, engine output, browser and
+credential ports remain fixtures in that acceptance; its minimal frontend is
+explicitly a transport fixture. Installed frontend distribution, Desktop/WebUI
+client wiring, live Nexus/ShareOne access and comment-to-live-LLM browser
+acceptance remain deployment work before enabling this experience for users.
