@@ -77,6 +77,11 @@ export type SystemSettingsPayload = {
    *  far smaller than a cron run, hence the higher default. Admin-editable;
    *  default 200. 0 (or negative) disables rotation (reuse forever). */
   imReuseMaxTurns: number
+  /** Seconds an IM reply waits for the agent's turn to finish before it sends
+   *  what it has so far. A turn that finishes later still has its answer sent
+   *  to the chat as a follow-up message. Default 300; clamped to 30-86400.
+   *  Set in settings.json (no admin form yet). */
+  imResponseTimeoutSec: number
   /** Directory (inside the moss-server container) holding the per-service login
    *  scripts run by the token minter. For a script-type config item with pinyin
    *  `<pinyin>`, the minter runs `<mintScriptsDir>/<pinyin>_mint.sh`. Empty/null
@@ -131,6 +136,7 @@ const DEFAULT_SYSTEM_SETTINGS: Omit<
   workspaceUploadLimitBytes: 20 * 1024 * 1024,
   cronReuseMaxRuns: 50,
   imReuseMaxTurns: 200,
+  imResponseTimeoutSec: 300,
   mintScriptsDir: DEFAULT_MINT_SCRIPTS_DIR,
 })
 
@@ -227,6 +233,17 @@ function normalizeSystemSettings(
     }
   } else if (result.imReuseMaxTurns === undefined) {
     result.imReuseMaxTurns = DEFAULT_SYSTEM_SETTINGS.imReuseMaxTurns
+  }
+
+  if (source.imResponseTimeoutSec !== undefined) {
+    const seconds = Number.parseInt(String(source.imResponseTimeoutSec), 10)
+    // A floor keeps a typo from cutting every reply off immediately; a turn
+    // that outlives the wait is still delivered later as a follow-up.
+    result.imResponseTimeoutSec = Number.isFinite(seconds)
+      ? Math.min(Math.max(seconds, 30), 86_400)
+      : DEFAULT_SYSTEM_SETTINGS.imResponseTimeoutSec
+  } else if (result.imResponseTimeoutSec === undefined) {
+    result.imResponseTimeoutSec = DEFAULT_SYSTEM_SETTINGS.imResponseTimeoutSec
   }
 
   if (source.thinkingMode !== undefined) {
@@ -416,6 +433,7 @@ function toSystemSettingsPayload(
     workspaceUploadLimitBytes: state.value.workspaceUploadLimitBytes ?? DEFAULT_SYSTEM_SETTINGS.workspaceUploadLimitBytes,
     cronReuseMaxRuns: state.value.cronReuseMaxRuns ?? DEFAULT_SYSTEM_SETTINGS.cronReuseMaxRuns,
     imReuseMaxTurns: state.value.imReuseMaxTurns ?? DEFAULT_SYSTEM_SETTINGS.imReuseMaxTurns,
+    imResponseTimeoutSec: state.value.imResponseTimeoutSec ?? DEFAULT_SYSTEM_SETTINGS.imResponseTimeoutSec,
     mintScriptsDir: state.value.mintScriptsDir || DEFAULT_SYSTEM_SETTINGS.mintScriptsDir,
     settingsPath: state.path,
     settingsExists: state.exists,
@@ -526,6 +544,7 @@ async function performUpdateSystemSettings(patch: unknown): Promise<SystemSettin
     workspaceUploadLimitBytes: nextSettings.workspaceUploadLimitBytes,
     cronReuseMaxRuns: nextSettings.cronReuseMaxRuns ?? DEFAULT_SYSTEM_SETTINGS.cronReuseMaxRuns,
     imReuseMaxTurns: nextSettings.imReuseMaxTurns ?? DEFAULT_SYSTEM_SETTINGS.imReuseMaxTurns,
+    imResponseTimeoutSec: nextSettings.imResponseTimeoutSec ?? DEFAULT_SYSTEM_SETTINGS.imResponseTimeoutSec,
     mintScriptsDir: nextSettings.mintScriptsDir || DEFAULT_SYSTEM_SETTINGS.mintScriptsDir,
     settingsPath: SYSTEM_SETTINGS_PATH,
     settingsExists: true,

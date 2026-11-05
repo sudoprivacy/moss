@@ -32,6 +32,7 @@ const BUN = [
   'nexusUpgrade.test.ts',
   // src/channels/__tests__
   'agentUnavailableRecovery.test.ts',
+  'imReplyDelivery.test.ts',
   'connectionScope.test.ts',
   'crashSeedRecovery.test.ts',
   'untrustedText.test.ts',

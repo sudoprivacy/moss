@@ -22,6 +22,12 @@ import { getSystemSettings } from '../../server/systemSettings.js';
 
 type Platform = 'telegram' | 'lark' | 'dingtalk' | 'wechat' | 'wecom';
 
+const REPLY_STILL_RUNNING = '⏳ 处理时间较长，仍在继续。完成后会把结果另发到这里，无需重复发送。';
+const REPLY_DISCONNECTED = '❌ 会话连接已中断，回复可能不完整。';
+
+/** How long a reply waits for a history-seed turn to finish before sending the user's message. */
+const SEED_TURN_WAIT_MS = 60_000;
+
 interface ChannelSessionState {
   sessionId: string;
   socket: net.Socket | null;
@@ -31,6 +37,23 @@ interface ChannelSessionState {
   isProcessing: boolean;
   /** One-off message for the chat about how this session came to be (sent once). */
   notice?: string;
+  /** Set when the runner connection closed or exited during a turn, which ends the wait at once. */
+  isDisconnected?: boolean;
+  /** Resolves when a seed turn written just before the user's message finishes. Its result
+   *  must not be taken as the end of the user's turn. */
+  seedTurn?: Promise<void>;
+  resolveSeedTurn?: () => void;
+  /** A turn whose reply already went out on timeout; its answer is sent when it finishes. */
+  lateReply?: LateReply | null;
+}
+
+interface LateReply {
+  /** Length of responseText the user has already seen. */
+  shownLength: number;
+  /** The turn's result has arrived. */
+  isComplete: boolean;
+  /** Installed once the timeout reply is out, so the follow-up cannot overtake it. */
+  deliver?: (text: string) => Promise<unknown>;
 }
 
 /** The runtime refused the session's agent (disabled, or no longer usable by this user). */
@@ -355,10 +378,26 @@ export class MossActionExecutor {
       } catch { /* best-effort */ }
     }
 
-    // Reset response state
+    // A seed turn written just before this message replies on its own. Let it finish
+    // first, or its result would end this turn and its reply would be sent as the answer.
+    await this.waitForSeedTurn(channelState, channelUserKey);
+    if (!channelState.socket || channelState.socket.destroyed) {
+      // The runner dropped while the seed turn ran.
+      try {
+        channelState = await this.reconnectRuntimeSession(channelUserKey, channelState.sessionId);
+      } catch (error) {
+        console.error(`[MossActionExecutor] Failed to reconnect runtime session:`, error);
+        await sendFn({ type: 'text', text: '❌ Session disconnected. Please try again.', parseMode: 'HTML' });
+        return;
+      }
+    }
+
+    // Reset response state. A new turn supersedes any late reply still pending.
     channelState.responseText = '';
     channelState.lastMsgId = thinkingMsgId;
     channelState.isProcessing = true;
+    channelState.isDisconnected = false;
+    channelState.lateReply = null;
 
     // Send message to runner
     const payload = JSON.stringify({ type: 'stdin', data: `${text}\n` });
@@ -369,17 +408,29 @@ export class MossActionExecutor {
 
     console.log(`[MossActionExecutor] Sent message to runner for ${channelUserKey}`);
 
-    // Wait for response with timeout (5 min)
+    // Wait for the turn to finish, the runner connection to drop, or the timeout.
+    let isTimedOut = false;
+    let isDisconnected = false;
     const responsePromise = new Promise<string>((resolve) => {
       const timeout = setTimeout(() => {
+        isTimedOut = true;
         channelState!.isProcessing = false;
-        resolve(channelState!.responseText || 'Response timed out. Please try again.');
-      }, 5 * 60 * 1000);
+        // The turn keeps running. Remember what the user has seen, so its answer can
+        // follow once the turn's result arrives.
+        channelState!.lateReply = { shownLength: channelState!.responseText.length, isComplete: false };
+        resolve([channelState!.responseText, REPLY_STILL_RUNNING].filter(Boolean).join('\n\n'));
+      }, MossActionExecutor.responseTimeoutMs());
 
       const checkInterval = setInterval(() => {
         if (!channelState!.isProcessing) {
           clearTimeout(timeout);
           clearInterval(checkInterval);
+          if (isTimedOut) return;
+          if (channelState!.isDisconnected) {
+            isDisconnected = true;
+            resolve([channelState!.responseText, REPLY_DISCONNECTED].filter(Boolean).join('\n\n'));
+            return;
+          }
           resolve(channelState!.responseText || '');
         }
       }, 200);
@@ -424,8 +475,10 @@ export class MossActionExecutor {
           // WeCom stream that carried the "thinking" placeholder; omit for other platforms.
           ...(platform === 'dingtalk' || platform === 'wecom' ? { replyMarkup: {} } : {}),
         }).catch(() => {
-          // Edit failed, send as new message
-          void sendFn({ type: 'text', text: finalText, parseMode: 'HTML' });
+          // Edit failed, send as new message. On WeCom it opens a stream of its own,
+          // which must be closed too (replyMarkup); DingTalk would turn replyMarkup into a card.
+          void sendFn({ type: 'text', text: finalText, parseMode: 'HTML',
+            ...(platform === 'wecom' ? { replyMarkup: {} } : {}) });
         });
       } else {
         await sendFn({
@@ -436,7 +489,88 @@ export class MossActionExecutor {
       }
     }
 
-    console.log(`[MossActionExecutor] Response sent for ${channelUserKey} (${finalText.length} chars)`);
+    // The timeout reply is out; now the turn's answer may follow it.
+    // Set by the timeout callback, which narrowing after the reset above cannot see.
+    const lateReply = channelState.lateReply as LateReply | null | undefined;
+    if (isTimedOut && lateReply) {
+      lateReply.deliver = (late: string) => sendFn({
+        type: 'text', text: late, parseMode: 'HTML', noStreaming: true, proactive: true,
+      });
+      this.flushLateReply(channelState);
+    }
+
+    console.log(`[MossActionExecutor] Response sent for ${channelUserKey} (${finalText.length} chars)` +
+      `${isTimedOut ? ' after timeout' : isDisconnected ? ' after disconnect' : ''}`);
+  }
+
+  /** Bounded wait for a seed turn written ahead of the user's message. */
+  private async waitForSeedTurn(state: ChannelSessionState, channelUserKey: string): Promise<void> {
+    if (!state.seedTurn) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const isFinished = await Promise.race([
+      state.seedTurn.then(() => true),
+      new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), SEED_TURN_WAIT_MS); }),
+    ]);
+    clearTimeout(timer);
+    if (!isFinished) console.warn(`[MossActionExecutor] [session-seed] seed turn for ${channelUserKey} still running; sending the message anyway`);
+    state.seedTurn = undefined;
+    state.resolveSeedTurn = undefined;
+  }
+
+  /** Send the rest of a timed-out turn once it has finished and its timeout reply is out. */
+  private flushLateReply(state: ChannelSessionState): void {
+    const late = state.lateReply;
+    if (!late?.isComplete || !late.deliver) return;
+    state.lateReply = null;
+    const text = state.responseText.slice(late.shownLength).trim();
+    if (!text) return;
+    console.log(`[MossActionExecutor] Sending late reply for session ${state.sessionId} (${text.length} chars)`);
+    late.deliver(text).catch(error => console.error(`[MossActionExecutor] Late reply for session ${state.sessionId} failed:`, error));
+  }
+
+  /** A turn ended (result/finish). Decide which turn it belongs to. */
+  private onTurnResult(state: ChannelSessionState): void {
+    if (!state.isProcessing && state.resolveSeedTurn) {
+      // The seed turn finished. Its reply is context for the session, not an answer.
+      state.resolveSeedTurn();
+      state.resolveSeedTurn = undefined;
+      state.responseText = '';
+      return;
+    }
+    if (!state.isProcessing && state.lateReply) {
+      state.lateReply.isComplete = true;
+      this.flushLateReply(state);
+      return;
+    }
+    state.isProcessing = false;
+  }
+
+  /** The runner connection closed or the runner exited. An open turn can no longer finish. */
+  private onRunnerGone(state: ChannelSessionState): void {
+    state.socket = null;
+    if (state.isProcessing) {
+      state.isDisconnected = true;
+      state.isProcessing = false;
+    }
+    // A timed-out turn told the user its answer would follow. It won't now, so send
+    // what did arrive and say why the rest is missing.
+    if (state.lateReply && !state.lateReply.isComplete) {
+      state.responseText += `\n\n${REPLY_DISCONNECTED}`;
+      state.lateReply.isComplete = true;
+      this.flushLateReply(state);
+    }
+    // A seed turn on a dead runner never finishes; stop waiting for it.
+    state.resolveSeedTurn?.();
+    state.resolveSeedTurn = undefined;
+  }
+
+  /** IM reply wait (imResponseTimeoutSec); 5 minutes when settings are unavailable. */
+  private static responseTimeoutMs(): number {
+    try {
+      const seconds = Number(getSystemSettings().imResponseTimeoutSec);
+      if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+    } catch { /* fall through to the default */ }
+    return 5 * 60 * 1000;
   }
 
   /**
@@ -638,12 +772,12 @@ export class MossActionExecutor {
 
         socket.on('close', () => {
           console.log(`[MossActionExecutor] Runner socket closed for ${channelUserKey}`);
-          state.socket = null;
+          this.onRunnerGone(state);
         });
 
         socket.on('error', (err) => {
           console.error(`[MossActionExecutor] Runner socket error for ${channelUserKey}:`, err);
-          state.socket = null;
+          this.onRunnerGone(state);
         });
 
         this.channelSessions.set(channelUserKey, state);
@@ -721,12 +855,12 @@ export class MossActionExecutor {
 
     socket.on('close', () => {
       console.log(`[MossActionExecutor] Runner socket closed for ${channelUserKey}`);
-      state.socket = null;
+      this.onRunnerGone(state);
     });
 
     socket.on('error', (err) => {
       console.error(`[MossActionExecutor] Runner socket error for ${channelUserKey}:`, err);
-      state.socket = null;
+      this.onRunnerGone(state);
     });
 
     this.channelSessions.set(channelUserKey, state);
@@ -734,8 +868,8 @@ export class MossActionExecutor {
     // Seed the fresh session with a summary of the conversation it replaces, so a
     // rotation (turn cap), a stuck-session reset, or a crashed runtime does not read
     // to the user as total amnesia. Sent as a plain turn before the user's message; the runtime
-    // answers it, but processMessage is not waiting on this write, so the reply is
-    // absorbed as context rather than delivered to the chat.
+    // answers it, and processMessage waits (bounded) for that turn to end before sending
+    // the user's message, so the reply is absorbed as context rather than delivered to the chat.
     if (agentUnavailable) {
       const current = activeAgent ? `「${activeAgent.displayName || activeAgent.name}」` : '通用助手'
       state.notice =
@@ -745,12 +879,16 @@ export class MossActionExecutor {
 
     if (effectiveSeed) {
       try {
+        // Registered before the write: a failed write reports through 'error' at once.
+        state.seedTurn = new Promise<void>(resolve => { state.resolveSeedTurn = resolve; });
         socket.write(`${JSON.stringify({ type: 'stdin', data: `${effectiveSeed}\n` })}\n`);
         console.log(
           `[MossActionExecutor] [session-seed] seeded ${sessionId} with ${effectiveSeed.length} chars of prior context`,
         );
       } catch (error) {
         // A failed seed costs continuity, not correctness — the session still works.
+        state.seedTurn = undefined;
+        state.resolveSeedTurn = undefined;
         console.warn(`[MossActionExecutor] failed to seed session ${sessionId}:`, error);
       }
     }
@@ -791,12 +929,12 @@ export class MossActionExecutor {
     });
 
     socket.on('close', () => {
-      state.socket = null;
+      this.onRunnerGone(state);
     });
 
     socket.on('error', (err) => {
       console.error(`[MossActionExecutor] Reconnect socket error:`, err);
-      state.socket = null;
+      this.onRunnerGone(state);
     });
 
     this.channelSessions.set(channelUserKey, state);
@@ -821,8 +959,7 @@ export class MossActionExecutor {
         if (parsed.type === 'stdout' && typeof parsed.line === 'string') {
           this.handleRunnerMessage(state, parsed.line);
         } else if (parsed.type === 'exit') {
-          state.isProcessing = false;
-          state.socket = null;
+          this.onRunnerGone(state);
         }
       } catch {
         // Not valid JSON, try as raw text
@@ -859,11 +996,13 @@ export class MossActionExecutor {
       } else if (msg.type === 'tips' && msg.content?.content) {
         text = msg.content.content;
       } else if (msg.type === 'finish' || msg.type === 'result') {
-        state.isProcessing = false;
+        this.onTurnResult(state);
         return;
       } else if (msg.type === 'error') {
         state.responseText = `❌ Error: ${msg.message || msg.error || 'Unknown error'}`;
-        state.isProcessing = false;
+        // An error ends a timed-out turn too; send the error, not a slice of it.
+        if (!state.isProcessing && state.lateReply) state.lateReply.shownLength = 0;
+        this.onTurnResult(state);
         return;
       }
 
