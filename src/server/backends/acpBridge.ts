@@ -15,6 +15,7 @@ import { ensureDraftsDirectory } from '../draftsCleanup.js'
 import { ArtifactTracker, artifactManifestPath } from '../artifacts.js'
 import { readAcpExecutionWorkspace, type ExecutionWorkspace } from './executionWorkspace.js'
 import { readNativeInputReceipt } from './nativeInputReceipt.js'
+import { AcpRequestTracker } from './acpRequestTracker.js'
 
 type AcpBridgeOptions = {
   child?: ChildProcess
@@ -145,7 +146,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const currentTurnToolOutput = new Map<string, { content: string; isError: boolean }>()
 
   // Pending RPC requests waiting for response
-  const pendingRpcRequests = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timeoutId: NodeJS.Timeout }>()
+  const pendingRpcRequests = new AcpRequestTracker(reevaluateBusy)
   const pendingPromptIds = new Set<string>()
 
   const pendingPermissions = new Map<string, {
@@ -368,15 +369,11 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
 
   const failPendingRequests = (failure: Error): void => {
     isContextClosed = true
-    const requests = [...pendingRpcRequests.values()]
-    pendingRpcRequests.clear()
-    for (const pending of requests) clearTimeout(pending.timeoutId)
     // A failed transport cannot safely carry another copy of a pending mutation.
     void (async () => transport.close())().catch(error => {
       for (const listener of stderrListeners) listener(`${String(error)}\n`)
     })
-    reevaluateBusy()
-    for (const pending of requests) pending.reject(failure)
+    pendingRpcRequests.failAll(failure)
     for (const listener of stderrListeners) listener(`${failure.message}\n`)
   }
 
@@ -453,13 +450,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const id = `m-${rpcId++}`
     const msg: SessionRpcMessage = { jsonrpc: '2.0', id, method, params }
     process.stderr.write(`[AcpBridge] Sending RPC (wait): ${JSON.stringify({ id, method })}\n`)
-    const timeoutId = setTimeout(() => {
-      // A deadline does not prove that the execution refused the operation.
-      // Keep its callback and activity until a definitive reply or stream close.
-      if (pendingRpcRequests.has(id)) callbacks.onTimeout()
-    }, timeoutMs)
-    pendingRpcRequests.set(id, { resolve: callbacks.onReply, reject: callbacks.onError, timeoutId })
-    reevaluateBusy()
+    pendingRpcRequests.track(id, callbacks, timeoutMs)
     sendMessage(msg)
   }
 
@@ -911,22 +902,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           } else return
         }
 
-        if (typeof parsed.id === 'string' && !parsed.method && (parsed.result !== undefined || parsed.error !== undefined)) {
-          const pending = pendingRpcRequests.get(parsed.id)
-          if (pending) {
-            clearTimeout(pending.timeoutId)
-            pendingRpcRequests.delete(parsed.id)
-            reevaluateBusy()
-            if (parsed.error) {
-              process.stderr.write(`[AcpBridge] Model switch failed: ${JSON.stringify(parsed.error)}\n`)
-              pending.reject(new Error(parsed.error.message || JSON.stringify(parsed.error)))
-            } else {
-              process.stderr.write(`[AcpBridge] Model switch succeeded\n`)
-              pending.resolve(parsed.result)
-            }
-            return
-          }
-        }
+        if (pendingRpcRequests.handleResponse(parsed)) return
 
         if (typeof parsed.id === 'string' && pendingPromptIds.has(parsed.id) && (parsed.result || parsed.error)) {
           inputEpoch += 1
@@ -1398,11 +1374,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       }
       setBusy(false)
       const failure = error ?? new Error('ACP connection closed')
-      for (const pending of pendingRpcRequests.values()) {
-        clearTimeout(pending.timeoutId)
-        pending.reject(failure)
-      }
-      pendingRpcRequests.clear()
+      pendingRpcRequests.failAll(failure)
       pendingPromptIds.clear()
       pendingPermissions.clear()
       pendingAskUserQuestions.clear()
