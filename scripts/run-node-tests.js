@@ -145,6 +145,8 @@ const nodeTestFiles = [
   'src/server/backends/acpRequestTracker.node-test.ts',
   'src/server/backends/standardAcpDriver.node-test.ts',
   'src/server/backends/standardAcpStdio.node-test.ts',
+  'src/server/backends/standardAcpBackend.node-test.ts',
+  'src/server/storage/standardAcpSessionBinding.node-test.ts',
   'src/server/backends/acpHostContext.node-test.ts',
   'src/server/backends/acpModelChange.node-test.ts',
   'src/server/browser/browserGateway.node-test.ts',

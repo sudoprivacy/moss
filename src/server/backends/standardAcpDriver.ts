@@ -10,6 +10,7 @@ export type StandardAcpDriverOptions = {
   onNotification?(message: SessionRpcMessage): void
   onCompletion?(completion: Completion): void
   onStderr?(line: string): void
+  onDisconnect?(cause: unknown): void
   /** Without an authorized host decision, permission is cancelled. */
   requestPermission?(request: JsonObject): Promise<string | null>
   timeoutMs?: number
@@ -190,6 +191,7 @@ export class StandardAcpDriver {
     this.#requests.failAll(cause instanceof Error ? cause : new Error('ACP execution disconnected'))
     this.#closing = Promise.resolve().then(() => this.transport.close(force))
     void this.#closing.catch(() => this.#diagnostic('ACP transport cleanup failed\n'))
+    try { this.options.onDisconnect?.(cause) } catch { this.#diagnostic('ACP disconnect observer failed\n') }
   }
 
   async #reverseRequest(message: SessionRpcMessage): Promise<void> {

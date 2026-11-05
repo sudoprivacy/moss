@@ -3,6 +3,7 @@ import net from 'net'
 import { appendFile, mkdir, unlink, writeFile } from 'fs/promises'
 import { dirname } from 'path'
 import { RuntimeBackend } from './backends/runtimeBackend.js'
+import { StandardAcpBackend } from './backends/standardAcpBackend.js'
 import { ApplicationHelloReplayBuffer } from './applicationHelloReplay.js'
 import { DirectConnectStore } from './db.js'
 import { getTranscriptPath, isNamedPipePath } from './runtimePaths.js'
@@ -143,9 +144,9 @@ export class SessionRunnerDaemon {
       manifest.session.sessionId,
     )
     this.#backend = new RuntimeBackend({
-      engine: manifest.session.runtime.engine,
+      standardAcpBackend: host.standardAcpLauncher ? new StandardAcpBackend(store, host.standardAcpLauncher) : undefined,
       scodePath: manifest.session.runtime.scodePath,
-      defaultRuntime: { ...manifest.session.runtime, engine: 'scode' },
+      defaultRuntime: { ...manifest.session.runtime, engine: manifest.session.runtime.engine === 'standard_acp' ? 'standard_acp' : 'scode' },
       docker: {
         image: manifest.session.runtime.dockerImage,
         mode: manifest.session.runtime.dockerMode,
@@ -213,6 +214,7 @@ export class SessionRunnerDaemon {
         snapshot: this.manifest.session.resources ?? { orgId: this.manifest.session.orgId, resources: [] },
       }, async () => this.#backend.spawn({
         sessionId: this.manifest.session.sessionId,
+        attemptFence: this.attemptFence,
         signal: this.#spawnController.signal,
         cohostSessionBinding,
         isUninitializedCohostSession: this.manifest.session.runtime.type === 'cohost' &&
@@ -228,7 +230,7 @@ export class SessionRunnerDaemon {
         orgId: this.manifest.session.orgId,
         role: this.manifest.session.role,
         scopes: this.manifest.session.scopes,
-        runtime: { ...this.manifest.session.runtime, engine: 'scode' },
+        runtime: { ...this.manifest.session.runtime, engine: this.manifest.session.runtime.engine === 'standard_acp' ? 'standard_acp' : 'scode' },
         assistantName: this.manifest.session.assistantName,
         assistantDisplayName: this.manifest.session.assistantDisplayName,
         sessionToken: this.manifest.session.sessionToken,
@@ -602,7 +604,11 @@ export class SessionRunnerDaemon {
       }
       process.stderr.write(`[SessionRunnerDaemon] RECEIVED STDIN: ${parsed.data?.slice(0, 100)}...\n`)
       if (this.#handle) {
-        this.#handle.writeStdin(parsed.data)
+        try { this.#handle.writeStdin(parsed.data) }
+        catch (error) {
+          this.#send(socket, { type: 'error', message: error instanceof Error ? error.message : 'runtime_input_rejected' })
+          return
+        }
       } else {
         process.stderr.write(`[SessionRunnerDaemon] Handle not ready, buffering message (${this.#pendingStdin.length} pending)\n`)
         this.#pendingStdin.push(parsed.data)
