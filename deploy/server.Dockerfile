@@ -148,13 +148,19 @@ ENV MOSS_MODELS_DIR=/app/models
 # 发布的原生 C 库里，官方仅提供 linux/amd64。本镜像本身已是 amd64-only
 # (上方 /lib/x86_64-linux-gnu 符号链接)，故不引入新约束。
 #
-# 该库不在仓库中：需自行从企微后台下载并放到 deploy/wework-finance-sdk/。
+# 该库以 Git LFS 存在仓库的 deploy/wework-finance-sdk/ 下：构建前必须 `git lfs pull`，
+# 否则检出的只是 132 字节的 LFS 指针文件——下面会让构建直接失败，而不是把指针装进镜像。
 # 这里 COPY 整个 deploy/ 而不是直接 COPY 该文件：COPY 缺失路径会让构建失败，
 # 而通配符也救不了「目录不存在」的情况（已实测）。故整目录拷入后再判断。
 # 缺失时此层跳过，镜像照常构建 —— 只是会话存档拉取不可用（连接器会在
 # 运行时报出可读的错误），其余功能不受影响。
 COPY deploy/ /tmp/deploy-src/
-RUN if [ -f /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so ]; then \
+RUN if [ -f /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so ] \
+        && head -c 64 /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so | grep -q 'git-lfs'; then \
+        echo "ERROR: deploy/wework-finance-sdk/libWeWorkFinanceSdk_C.so is a Git LFS pointer, not the library." >&2; \
+        echo "       Run 'git lfs pull' in the checkout and build again (an image with the pointer cannot pull 会话存档)." >&2; \
+        exit 1; \
+    elif [ -f /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so ]; then \
         cp /tmp/deploy-src/wework-finance-sdk/libWeWorkFinanceSdk_C.so /usr/local/lib/ \
         && ldconfig \
         && echo "WeCom finance SDK installed"; \

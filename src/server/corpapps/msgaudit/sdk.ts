@@ -26,6 +26,7 @@
  * NOTE: koffi is marked --external in scripts/build.js and installed via
  * deploy/runtime-deps.package.json, like better-sqlite3.
  */
+import { readFileSync } from 'fs'
 
 export type SdkHandle = {
   getChatData(seq: number, limit: number): Promise<RawChatRecord[]>
@@ -83,6 +84,19 @@ export function sdkLibraryPath(): string {
   return process.env.WEWORK_FINANCE_SDK_PATH || '/usr/local/lib/libWeWorkFinanceSdk_C.so'
 }
 
+/** Why the library would not load, in words that say what to do about it. */
+export function sdkLoadHint(path: string): string {
+  try {
+    const head = readFileSync(path).subarray(0, 64).toString('latin1')
+    if (head.startsWith('version https://git-lfs')) {
+      return 'The file is a Git LFS pointer, not the library: the image was built from a checkout without `git lfs pull`. Rebuild the server image after `git lfs pull`.'
+    }
+  } catch {
+    return 'The WeCom finance SDK ships linux/amd64 only and is not in this image.'
+  }
+  return 'The WeCom finance SDK ships linux/amd64 only; check that this is a linux/amd64 image with the library from deploy/wework-finance-sdk/.'
+}
+
 /**
  * Open an SDK session for one corp. Throws with an actionable message on
  * any platform where the library cannot be loaded.
@@ -99,7 +113,7 @@ export function openSdk(corpId: string, secret: string): SdkHandle {
   } catch (err) {
     throw new Error(
       `msgaudit: cannot load ${sdkLibraryPath()} (${err instanceof Error ? err.message : String(err)}). ` +
-        'The WeCom finance SDK ships linux/amd64 only and is not in this image.',
+        sdkLoadHint(sdkLibraryPath()),
     )
   }
 
