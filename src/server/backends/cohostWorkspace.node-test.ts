@@ -303,6 +303,7 @@ void test('workspace I/O uses the verified execution descriptor and closes every
   let closes = 0
   let connections = 0
   let entryName = root+'/result.txt'
+  const metadataBatches: string[][] = []
   const client = {
     async call(method: string, raw: string, token: string) {
       assert.equal(token, 'user-token');assert.equal(method, 'managed_agent.get_session_v1')
@@ -310,6 +311,11 @@ void test('workspace I/O uses the verified execution descriptor and closes every
       return JSON.stringify(descriptor)
     },
     async stat(path: string) { return path.endsWith('/reports') ? null : { size: 5, entryType: path.endsWith('/link') ? 6 : 0, isDirectory: false } },
+    async batchStat(paths: string[], token: string) {
+      assert.equal(token, 'user-token')
+      metadataBatches.push(paths)
+      return Promise.all(paths.map(path => client.stat(path, token)))
+    },
     async readdir(path: string) { calls.push('list:'+path);return [{ name: entryName, entryType: 0 }] },
     async read(path: string) { calls.push('read:'+path);return Buffer.from('hello') },
     async mkdir(path: string) { calls.push('mkdir:'+path) },
@@ -334,6 +340,7 @@ void test('workspace I/O uses the verified execution descriptor and closes every
       },
     })
     assert.equal((await access.listTree(2))[0]?.relativePath, 'result.txt')
+    assert.deepEqual(metadataBatches, [[root+'/result.txt']])
     assert.equal((await access.readFile('result.txt')).toString(), 'hello')
     await access.writeFile('reports/new.txt', Buffer.from('bytes'))
     assert.deepEqual(calls, ['list:'+root, 'read:'+root+'/result.txt', 'mkdir:'+root+'/reports', 'write:'+root+'/reports/new.txt:bytes'])
@@ -350,6 +357,7 @@ void test('workspace I/O uses the verified execution descriptor and closes every
     await assert.rejects(access.listTree(2), /Invalid cohost workspace entry/)
     entryName = root+'/nested/private.txt'
     await assert.rejects(access.listTree(2), /Invalid cohost workspace entry/)
+    assert.equal(metadataBatches.length, 1, 'invalid directory entries must be refused before metadata reads')
     assert.equal(closes, 9)
     const repositoryPath = cohostRepositoryPath(descriptor.agent_id, session.sessionId)
     binding.repositoryPath = repositoryPath

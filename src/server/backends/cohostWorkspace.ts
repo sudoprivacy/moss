@@ -52,11 +52,16 @@ export function createCohostWorkspaceAccess(
         if (depth >= maxDepth || entries.length >= 5000) return
         const directory = cohostWorkspacePath(root, relativePath)
         const children = await client.readdir(directory, token)
-        for (const child of children.slice(0, 500)) {
-          if (entries.length >= 5000) break
+        if (!children.length) return
+        const candidates = children.slice(0, 500).map(child => {
           const name = cohostWorkspaceEntryName(directory, child.name)
           const path = posix.join(relativePath, name)
-          const info = await client.stat(cohostWorkspacePath(root, path), token)
+          return { child, name, path, absolutePath: cohostWorkspacePath(root, path) }
+        })
+        const metadata = await client.batchStat(candidates.map(entry => entry.absolutePath), token)
+        for (const [index, { child, name, path }] of candidates.entries()) {
+          if (entries.length >= 5000) break
+          const info = metadata[index]
           if (!info) continue
           const isSymbolicLink = child.entryType === 6
           const isDir = info.isDirectory && !isSymbolicLink

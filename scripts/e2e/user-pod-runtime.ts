@@ -28,6 +28,14 @@ let agent: ManagedAgentClient | undefined
 let other: Awaited<ReturnType<typeof connectSessionRuntime>> | undefined
 let impostor: NexusVfsClient | undefined
 let misplaced: Awaited<ReturnType<typeof connectSessionRuntime>> | undefined
+
+/** Preserve the daemon's authorization refusal through either client error format. */
+function isPermissionDenied(error: unknown): boolean {
+  if (error instanceof NexusRpcError) return error.code === 7
+  if (!(error instanceof Error)) return false
+  try { return JSON.parse(error.message).code === -32003 }
+  catch { return false }
+}
 await mkdir(evidence, { recursive: true })
 await writeFile(join(evidence, 'fixture.json'), JSON.stringify({ owner, otherOwner, agentId,
   pods: [userPodName(owner), userPodName(otherOwner)], image: options.image,
@@ -51,20 +59,22 @@ try {
   const marker = `PRIVATE_${randomUUID()}`
   await connection.client.mkdir(`/agents/${agentId}/memory`, '', { parents: true, existOk: true })
   await connection.client.write(privatePath, Buffer.from(marker), '')
-  await assert.rejects(impostor.read(privatePath, ''), (error: unknown) => {
-    if (error instanceof NexusRpcError) return error.code === 7
-    if (!(error instanceof Error)) return false
-    try {
-      return JSON.parse(error.message).code === -32003
-    } catch {
-      return false
-    }
-  }, 'a foreign owner must receive permission denied, rather than a transport failure')
+  await assert.rejects(impostor.read(privatePath, ''), isPermissionDenied,
+    'a foreign owner must receive permission denied, rather than a transport failure')
+  const metadata = await connection.client.batchStat([privatePath, privatePath + '.missing', privatePath], '')
+  assert.equal(metadata.length, 3)
+  assert.equal(metadata[0]?.size, Buffer.byteLength(marker))
+  assert.equal(metadata[1], null)
+  assert.deepEqual(metadata[2], metadata[0], 'batch metadata retains request order and duplicate paths')
+  await assert.rejects(impostor.batchStat([privatePath], ''), isPermissionDenied,
+    'batch metadata must preserve the same cross-owner refusal as reading content')
   await assert.rejects(misplaced.client.read(privatePath, ''), (error: unknown) =>
     error instanceof NexusRpcError && [4, 14].includes(error.code),
   'the placement connection must validate its owner-derived runtime server name')
   assert.equal(await other.client.stat(privatePath, ''), null,
     'the other owner box must not contain the private file metadata')
+  assert.deepEqual(await other.client.batchStat([privatePath], ''), [null],
+    'batch reads in the other owner box must not contain private metadata')
   for (const lane of ['left', 'right']) {
     const repository = `/agents/${agentId}/workspaces/${lane}`
     await connection.client.mkdir(repository, '', { parents: true, existOk: true })
@@ -95,6 +105,7 @@ try {
     pods: [userPodName(owner), userPodName(otherOwner)], agentId,
     sameOwnerRuntimeCount: sessions.length, modelReplies: replies.length,
     privateFileIsolated: true, crossOwnerCredentialRefused: true, runtimeTargetBoundToOwner: true,
+    batchMetadataOrderAndAbsenceVerified: true, batchMetadataIsolated: true,
     durableSessionIds: sessions.map(session => session.durableSessionId),
   }, null, 2))
   process.stdout.write('User Pod mTLS, private storage and two native ACP replies passed\n')
