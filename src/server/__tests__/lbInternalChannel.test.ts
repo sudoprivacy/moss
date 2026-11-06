@@ -4,6 +4,8 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server as HttpServer } from "node:http";
+import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   openInternalSessionChannel,
@@ -13,6 +15,7 @@ import {
 import type { DirectConnectStore } from "../db.js";
 import type { AuthService } from "../auth/service.js";
 import type { ServerConfig } from "../types.js";
+import { readLiveManagedExecution } from '../backends/liveManagedExecution.js';
 
 const closers: Array<() => void> = [];
 
@@ -59,7 +62,81 @@ function makeDeps(port: number, tokenResult: string | null): ChannelDeps {
   };
 }
 
+/** Send the authenticated protocol's upgrade and first messages in one TCP write. */
+async function startCoalescedServer(messages: string[], isClosing = false): Promise<number> {
+  const http = createServer();
+  const sockets = new Set<import('node:stream').Duplex>();
+  http.on('upgrade', (request, socket) => {
+    assert.equal(request.headers.authorization, 'Bearer tok');
+    assert.equal(request.url, '/ws/internal/sessions/s1');
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+    const accept = createHash('sha1')
+      .update(request.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+      .digest('base64');
+    const frames = messages.flatMap(message => {
+      const payload = Buffer.from(message);
+      assert.ok(payload.length < 65_536);
+      const header = payload.length < 126 ? Buffer.from([0x81, payload.length]) : Buffer.alloc(4);
+      if (payload.length >= 126) {
+        header[0] = 0x81;
+        header[1] = 126;
+        header.writeUInt16BE(payload.length, 2);
+      }
+      return [header, payload];
+    });
+    socket.write(Buffer.concat([
+      Buffer.from('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+        'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n'), ...frames,
+      ...(isClosing ? [Buffer.from([0x88, 0x02, 0x03, 0xe8])] : []),
+    ]));
+    if (isClosing) socket.end();
+  });
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  closers.push(() => { for (const socket of sockets) socket.destroy(); http.close(); });
+  return (http.address() as { port: number }).port;
+}
+
 describe("internalSessionChannel (P2-5)", () => {
+  it('reports peer closure without a data subscriber', { timeout: 3000 }, async () => {
+    const port = await startCoalescedServer([], true);
+    const channel = await openInternalSessionChannel(makeDeps(port, 'tok'), 's1');
+    closers.push(() => channel.destroy());
+    if (!channel.destroyed) await once(channel, 'close');
+    assert.equal(channel.destroyed, true);
+  });
+
+  it('preserves a coalesced hello through the real workspace execution reader', { timeout: 3000 }, async () => {
+    const binding = { ownerId: 'owner', agentId: 'agent', durableSessionId: 'durable', repositoryPath: '/workspace' };
+    const port = await startCoalescedServer([JSON.stringify({ type: 'hello', sessionId: 's1',
+      attemptId: 'attempt', runtimeType: 'cohost', state: 'running', managedProcessId: 'pid',
+      cohostSessionBinding: binding })]);
+    const channel = await openInternalSessionChannel(makeDeps(port, 'tok'), 's1');
+    closers.push(() => channel.destroy());
+    assert.deepEqual(await readLiveManagedExecution(channel, 's1'), { processId: 'pid', binding });
+  });
+
+  it('retains ordered lines while a late consumer crosses the readable buffer boundary', { timeout: 3000 }, async () => {
+    const messages = Array.from({ length: 24 }, (_, index) => JSON.stringify({ index, text: '界'.repeat(2048) }));
+    const port = await startCoalescedServer(messages.map((line, index) => line + (index % 2 ? '\n' : '')));
+    const channel = await openInternalSessionChannel(makeDeps(port, 'tok'), 's1');
+    closers.push(() => channel.destroy());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    let buffer = '';
+    const complete = new Promise<void>(resolve => {
+      channel.on('data', (line: string) => {
+        buffer += line;
+        if (buffer.split('\n').length === messages.length + 1) resolve();
+      });
+    });
+    await complete;
+    assert.deepEqual(buffer.trimEnd().split('\n'), messages);
+    channel.end();
+    if (!channel.destroyed) await once(channel, 'close');
+    assert.equal(channel.destroyed, true);
+  });
+
   it("delivers line protocol both ways against a real WS endpoint", async () => {
     const server = await startEchoWsServer();
     const { url } = server;

@@ -16,7 +16,8 @@
  * The wire is bare newline-delimited runnerProtocol JSON both ways (the
  * internal endpoint passes messages through unfiltered — stdin_ack included).
  */
-import { EventEmitter } from 'node:events'
+import type { EventEmitter } from 'node:events'
+import { Readable } from 'node:stream'
 import WebSocket from 'ws'
 import type { AuthService } from './auth/service.js'
 import type { DirectConnectStore } from './db.js'
@@ -206,7 +207,6 @@ export async function revokeInternalSessionToken(
 
 function connectOnce(url: string, token: string, handshakeTimeoutMs?: number, admissionContinuation?: string): Promise<InternalSessionChannel> {
   return new Promise((resolve, reject) => {
-    const emitter = new EventEmitter() as InternalSessionChannel & { destroyed: boolean }
     let settled = false
     let ws: WebSocket
     try {
@@ -217,27 +217,42 @@ function connectOnce(url: string, token: string, handshakeTimeoutMs?: number, ad
       return
     }
 
+    const emitter = new Readable({
+      encoding: 'utf8',
+      read() { if (ws.isPaused) ws.resume() },
+      destroy(error, callback) {
+        try { ws.terminate() } catch { /* already closed */ }
+        callback(error)
+      },
+    }) as Readable & InternalSessionChannel
+
     const fail = (error: unknown) => {
       if (settled) return
       settled = true
-      try { ws.terminate() } catch { /* ignore */ }
+      emitter.destroy()
       reject(error)
     }
+
+    // Keep complete protocol lines until their consumer starts reading.
+    ws.on('message', (data: unknown) => {
+      const line = String(data)
+      if (!emitter.push(line.endsWith('\n') ? line : `${line}\n`)) ws.pause()
+    })
+    ws.on('close', () => emitter.destroy())
+    emitter.on('error', fail)
 
     ws.on('unexpected-response', (_req: unknown, res: { statusCode?: number }) => {
       const error = new Error(`internal channel handshake failed: ${res.statusCode}`) as Error & { status?: number }
       error.status = res.statusCode ?? undefined
       fail(error)
     })
-    ws.on('error', (error: unknown) => fail(error))
+    ws.on('error', (error: Error) => {
+      if (settled) emitter.destroy(error)
+      else fail(error)
+    })
     ws.on('open', () => {
       if (settled) return
       settled = true
-      ws.on('message', (data: unknown) => {
-        const line = String(data)
-        emitter.emit('data', line.endsWith('\n') ? line : `${line}\n`)
-      })
-      ws.on('close', () => emitter.emit('close'))
       resolve(emitter)
     })
 
@@ -254,10 +269,5 @@ function connectOnce(url: string, token: string, handshakeTimeoutMs?: number, ad
       return false
     }
     emitter.end = () => emitter.destroy()
-    emitter.destroy = () => {
-      emitter.destroyed = true
-      try { ws.terminate() } catch { /* ignore */ }
-    }
-    ws.on('close', () => { emitter.destroyed = true })
   })
 }
