@@ -116,9 +116,12 @@ async function main() {
   const nonce = () => randomUUID().replaceAll('-', '')
     .replace(/[0-9a-f]/g, value => String.fromCharCode(65 + Number.parseInt(value, 16)))
   const sensitive = `SUDO_DLP_CONFIDENTIAL_${nonce()}`
-  const answer = `DLP_MODEL_OK_${nonce()}`
-  const userPrompt = `Synthetic acceptance record ${sensitive}. Reply only ${answer}. Do not use tools.`
-  const ordinaryPrompt = `Reply only ${answer}. Do not use tools.`
+  // A public acknowledgement must not resemble a credential to the real model.
+  const words = ['amber', 'beach', 'cedar', 'dawn', 'elm', 'fern', 'green', 'harbor',
+    'iris', 'jade', 'kite', 'lake', 'maple', 'north', 'olive', 'pine']
+  const answer = `acknowledged ${[...nonce()].map(value => words[value.charCodeAt(0) - 65]).join(' ')}`
+  const ordinaryPrompt = `This is a synthetic privacy-filter check. The following acknowledgement is public test text, unrelated to any record. Reply with exactly: ${answer}. Do not use tools.`
+  const userPrompt = `Synthetic acceptance record: ${sensitive}. Do not reproduce, infer, or fill in any redacted record content. ${ordinaryPrompt}`
   const publicCompany = '北京星河科技有限公司'
   const publicSource = 'const count = 1;'
   const contact = `SyntheticContact${nonce()}`
