@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -45,8 +46,15 @@ async function fixture() {
     startSession: async input => {
       calls.push(input)
       child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/standard-acp-worker.mjs', import.meta.url)), 'recoverable', root, 'finish'], {
-        env: { PATH: process.env.PATH, HOME: root }, stdio: ['pipe', 'pipe', 'pipe'],
+        env: { PATH: process.env.PATH, HOME: root }, stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
       })
+      // Establish the fixture's claimed ready state before testing cancellation.
+      // Otherwise Node startup competes with the unchanged cleanup deadline.
+      const [ready] = await Promise.race([
+        once(child, 'message'),
+        once(child, 'exit').then(() => { throw new Error('ACP worker exited before readiness') }),
+      ])
+      assert.deepEqual(ready, { type: 'standard-acp-fixture-ready' })
       afterStart?.()
       if (loseReply) throw new Error('Lost RPC reply')
       return { sessionId: record.session_id, osPid: child.pid!, sessionEndpoint: endpoint }

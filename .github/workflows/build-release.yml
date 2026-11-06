@@ -57,6 +57,21 @@ jobs:
       - name: Lint server and node tests
         run: bun run lint
 
+      - name: Verify the installed review frontend through the bundled host loader
+        run: |
+          node scripts/prepare-model-review-assets.mjs
+          bun build src/server/ontology/reviewAssetsVerificationCli.ts \
+            --outfile=bin/verify-model-review-assets.mjs --target=node --format=esm
+          node bin/verify-model-review-assets.mjs bin/model-review-assets \
+            > "$RUNNER_TEMP/moss-packaged-review-assets.json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installed-review-frontend
+          path: ${{ runner.temp }}/moss-packaged-review-assets.json
+          if-no-files-found: warn
+
       # Z-1: the PG suite's only switch is `{ skip: !MOSS_PG_TEST_URL }`
       # (pgBackend.test.ts). Without this gate an env rename/removal would
       # silently skip every PG case and the job would stay green.
@@ -501,6 +516,9 @@ jobs:
           grep -Fxq 'moss-server/app/bin/moss-qualify-sqlite-upgrade.mjs' dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/moss-inspect-existing-product.mjs' dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/artifact-mcp.mjs' dist/server-contents.txt
+          grep -Fxq 'moss-server/app/bin/sudograph-context-worker.mjs' dist/server-contents.txt
+          grep -Fxq 'moss-server/app/bin/verify-model-review-assets.mjs' dist/server-contents.txt
+          grep -Fxq 'moss-server/app/bin/model-review-assets/review-assets.json' dist/server-contents.txt
           grep -Fxq 'moss-server/node/bin/node' dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/nexus/nexusd' dist/server-contents.txt
           grep -Fxq 'moss-server/app/bin/nexus/plugins/libnexus_vault.so' dist/server-contents.txt
@@ -509,6 +527,11 @@ jobs:
           package_check_dir="$(mktemp -d)"
           tar -xzf "dist/moss-server-$VERSION-linux-$ARCH.tar.gz" -C "$package_check_dir"
           test -x "$package_check_dir/moss-server/app/bin/scode"
+          mkdir -p "$RUNNER_TEMP/moss-server-e2e"
+          "$package_check_dir/moss-server/node/bin/node" \
+            "$package_check_dir/moss-server/app/bin/verify-model-review-assets.mjs" \
+            "$package_check_dir/moss-server/app/bin/model-review-assets" \
+            > "$RUNNER_TEMP/moss-server-e2e/packaged-review-assets.json"
           "$package_check_dir/moss-server/node/bin/node" scripts/e2e/packaged-upgrade-tools-smoke.mjs \
             "$package_check_dir/moss-server" \
             "$RUNNER_TEMP/moss-server-e2e/packaged-upgrade-tools.json"

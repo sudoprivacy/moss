@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -94,7 +95,11 @@ void test('real HTTP: deleting an Agent removes its sessions and identity, withi
     })
     assert.doesNotMatch(errors, /AGENT_TEST_ERROR/)
   } finally {
-    child.kill()
+    if (child.exitCode === null) {
+      const closed = once(child, 'close')
+      child.kill()
+      await closed
+    }
     await rm(root, { recursive: true, force: true })
   }
 })

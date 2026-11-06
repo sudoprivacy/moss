@@ -123,6 +123,8 @@ COPY bin/moss-qualify-sqlite-upgrade.mjs bin/moss-inspect-existing-product.mjs .
 COPY bin/msgaudit-pull-child.js ./bin/
 COPY bin/direct-connect-session-runner.mjs ./bin/
 COPY bin/artifact-mcp.mjs ./bin/
+COPY bin/sudograph-context-worker.mjs bin/verify-model-review-assets.mjs ./bin/
+COPY bin/model-review-assets/ ./bin/model-review-assets/
 COPY admin/dist/ ./admin/dist/
 COPY assistants/ ./assistants/
 COPY skills/ ./skills/
