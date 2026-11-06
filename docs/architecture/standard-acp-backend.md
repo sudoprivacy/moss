@@ -65,6 +65,33 @@ are not yet qualified.
 
 ## Qualification and remaining work
 
+### Owner-authenticated Nexus launch composition
+
+`NexusStandardAcpLauncher` is the managed-host implementation of the launch
+plan. A trusted resolver supplies the approved binding, private connection and
+subprocess spec. It uses the existing owner-delegated runtime connection,
+`ManagedAgentClient.startSession` and `NexusAcpTransport`; provider requests,
+account login and text rewriting remain outside this component. The ACP driver
+owns official session/new/load; no official history ID is passed as a Nexus
+native-scode resume ID. The start RPC is sent once, with no body owner override.
+
+The product's scheduler must supply a fenced account/PVC-wide lease with live
+authorization, quarantine and supervisor confirmation. This is an authority
+port, not a second queue or lease database. Neither the start receipt nor a
+registry `terminated`/not-found response alone proves the physical writer is
+gone. The launcher keeps control-plane reads available after transport closure
+and releases the lease only after the bound execution is retired and the
+supervisor attests termination. Missing replies, changed identity, failed reads
+and incomplete cleanup retain exclusion for operator reconciliation. Foreign
+execution replies are never cancelled by this controller.
+
+`nexusStandardAcpLauncher.node-test.ts` combines a controlled managed control
+plane with actual stdio producer processes. These tests qualify the composition
+and failure boundaries; they are not a live Nexus daemon, installed Claude
+runtime or gVisor qualification. The production resolver, scheduler lease port
+and supervisor attestation are still not registered, and public admission stays
+closed. Scode transport callers retain the existing default close behavior.
+
 `standardAcpBackend.node-test.ts` uses real stdio processes and runner sockets;
 `standardAcpSessionBinding.node-test.ts` exercises SQLite and, when
 `MOSS_PG_TEST_URL` is set, actual PostgreSQL with two independent pools. Both are
