@@ -1,0 +1,50 @@
+{
+  "recordedAt": "2026-11-06T05:21:22.296265+00:00",
+  "scope": "Installed public SDK with the private Moss worker adapter and original real Chrome tests",
+  "sdk": {
+    "version": "0.58.17",
+    "sourceCommit": "72b9351df77c67a214ad8b4302de3eece24496ee",
+    "wheelSha256": "265d24a6d108507e1c1aba99dd25358ff2fd86ca8d6a0b37decd88edee9236f3",
+    "installedWithoutSourceOverlay": true
+  },
+  "sourceBase": "7178f49401ed946a1ad28cf0f77e7bd43d2b0ca1",
+  "testInputs": {
+    "deploy/browser/worker.py": "0b749e981242472c6700deb9d8efd2ef6cd84a015374ac004bad334c342d4e5a",
+    "deploy/browser/mcp-tools.json": "8f073f8f685638b207c737f9c5363aa3005bd752e13d46b4ba46b81f6ca5c2e3",
+    "deploy/browser/test_public_worker.py": "ac95e83137c5981eee5480e9a0e98e965cd517da242c0790a6ce7e0210489023",
+    "deploy/browser/test_lifecycle_live.py": "6fda74491832ee5998e912da5840655f62ada6c2bcf550fdeed45e9d84c6d0fc",
+    "deploy/browser/test_files_live.py": "c530384441ae4cacb87636edb0627803f29e88647e76186140d1e2577d396b6b"
+  },
+  "results": {
+    "passed": 6,
+    "failed": 0,
+    "testSeconds": 98.02,
+    "totalSeconds": 107.86,
+    "publicCatalogMatches": true,
+    "transports": [
+      "cdp",
+      "extension"
+    ],
+    "headful": true,
+    "nonRoot": true,
+    "network": "none",
+    "cpuLimit": 1,
+    "memoryMiB": 1536,
+    "pidsLimit": 384,
+    "ownedContainerRemoved": true,
+    "oomKilled": false
+  },
+  "verified": [
+    "Persistent login and acknowledged human stop survive browser restart in both transports",
+    "Actual upload/download ownership follows the human input lease in both transports",
+    "Recovered workers report recovery while retaining human control",
+    "Allocation-free discovery matches all five installed public SDK tools"
+  ],
+  "privateReceiptSha256": "a945c68c89660ff5a529f10c484244475e6fb0831143f2d596475b73785a2169",
+  "coverageLimits": [
+    "Uses the qualified local Chrome test image plus the installed public wheel and private adapter, rather than a rebuilt complete production image.",
+    "Complete pinned-Chrome image, signed-extension upgrade, per-owner canary and production promotion remain separate required gates.",
+    "No real account, model provider, merchant transaction or production profile was used."
+  ],
+  "reproduction": ".github/workflows/managed-browser.yml"
+}

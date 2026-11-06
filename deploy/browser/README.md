@@ -6,13 +6,13 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.58.14 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.58.17 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
 the consumer test verifies it against the installed public package.
 
-The managed-browser workflow builds the SDK v0.58.14 base, applies
+The managed-browser workflow builds the SDK v0.58.17 base, applies
 `chrome-version.Dockerfile`, then builds this worker. The Chrome layer downloads
 the versioned official package, verifies its SHA-256 before installation and
 checks the installed package version. The current runtime uses Chrome
@@ -31,6 +31,22 @@ Land this update only after the public SDK release is available and its
 exact artifact has passed qualification. A candidate image test does not publish
 the package or upgrade the running Moss service.
 
+The public [v0.58.17 release](https://github.com/sudoprivacy/ai-dev-browser/releases/tag/v0.58.17)
+flushes the last held pointer movement before release, including when the user
+releases before the remote press acknowledgement arrives. The installed public
+wheel passed six real Chrome page/window journeys across CDP, signed extension,
+mouse and touch input. The managed workflow runs that same regression against
+this image, alongside persistent-profile upgrade, crash recovery, input leases
+and file transfer. Image qualification and the production owner canary remain
+separate rollout gates.
+
+The private worker adapter also passed six original actual Chrome cases with
+the installed public 0.58.17 wheel: catalog discovery, CDP/extension login and
+human-stop persistence across restart, CDP/extension file ownership, and
+recovery retaining human control. The non-root fixture used no network and
+removed its owned container. See [the recorded inputs and limits](acceptance-20261106.json).
+The complete pinned-Chrome image and production profile canary remain pending.
+
 The integrated source `2926e25` includes the merged extension readiness and
 explicit consent recovery from SDK #48, plus SDK #47's frame tools. Its combined
 extension is versioned `0.4.8`. Installed Chrome 156.0.8078.73 passed twenty actual
@@ -46,8 +62,8 @@ changes, supplies a terminal input acknowledgement barrier, and sequences the
 initial-document/profile-network readiness probes. Its extension assets remain
 0.4.8. A prior full CI retained a Windows startup CookieManager timeout; the
 ordering regression, 316 unit cases and 20 actual Windows startup/scroll cases
-passed locally. Public v0.58.14, the complete managed image and production
-promotion require their own acceptance.
+passed locally. This historical source-stage record does not replace the
+current public-package, complete-image and production acceptance gates.
 
 This patch adds bounded selection drag, selection text and multiline paste over
 the existing authenticated input channel. Copy reads the active page selection;
