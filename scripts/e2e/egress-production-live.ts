@@ -1,6 +1,6 @@
 /** Qualify an isolated organization's deployed Moss -> cohost -> Nexus -> real model path. */
 import assert from 'node:assert/strict'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomInt, randomUUID } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -116,9 +116,12 @@ async function main() {
   const nonce = () => randomUUID().replaceAll('-', '')
     .replace(/[0-9a-f]/g, value => String.fromCharCode(65 + Number.parseInt(value, 16)))
   const sensitive = `SUDO_DLP_CONFIDENTIAL_${nonce()}`
-  const answer = `DLP_MODEL_OK_${nonce()}`
-  const userPrompt = `Synthetic acceptance record ${sensitive}. Reply only ${answer}. Do not use tools.`
-  const ordinaryPrompt = `Reply only ${answer}. Do not use tools.`
+  // Check a fresh calculation without asking the model to echo a token or seed phrase.
+  const left = randomInt(10, 100)
+  const right = randomInt(10, 100)
+  const answer = String(left + right)
+  const ordinaryPrompt = `Compute ${left} + ${right}. Reply with only the decimal sum. Do not use tools.`
+  const userPrompt = `Synthetic acceptance record: ${sensitive}. Do not repeat or infer the record. ${ordinaryPrompt}`
   const publicCompany = '北京星河科技有限公司'
   const publicSource = 'const count = 1;'
   const contact = `SyntheticContact${nonce()}`
@@ -179,18 +182,20 @@ async function main() {
     z.string().uuid().parse(created.session_id)
     proof.createdSessions.push(created.session_id); save()
     let stream: ReturnType<typeof productConversation> | undefined
+    let clarificationRequested = false
     try {
       assert.equal(created.runtime.type, 'cohost')
       assertProductConversationUrl(created.ws_url, origin.origin, origin.origin, created.session_id, 'moss_route')
       stream = productConversation(created.ws_url, input.accessToken, input.outputDirectory, label)
       await stream.ready()
       if (isDenied) await assert.rejects(stream.turn(text))
-      else {
+      else if (isWholeRecord) {
+        const outcome = await stream.turnWithClarification(text)
+        clarificationRequested = outcome.kind === 'clarification'
+        if (outcome.kind === 'reply') assert(outcome.text.trim().length > 0, 'The real model must respond to the redacted record')
+      } else {
         const reply = (await stream.turn(text)).trim()
-        // Whole-record protection also removes prose instructions from the
-        // outbound request. Verify a real reply without requesting hidden text.
-        if (isWholeRecord) assert(reply.length > 0, 'The real model must answer the redacted record')
-        else assert.equal(reply, answer, 'The real model must return the fresh requested marker')
+        assert.equal(reply, answer, 'The real model must return the fresh requested marker')
       }
       const context = await request<{ context: { messages: unknown[] } }>(`/api/v1/sessions/${created.session_id}/context`)
       assert(JSON.stringify(context.context.messages).includes(JSON.stringify(text).slice(1, -1)), 'The local original must remain in persisted HTTP context')
@@ -201,6 +206,7 @@ async function main() {
       const events = readFileSync(join(input.outputDirectory, `${label}.private.json`), 'utf8')
       assert(/egress|classif|redact|hook|出口|脱敏|检测/i.test(events), 'The caller must receive a content-gate failure, not an unrelated transport error')
     }
+    return { clarificationRequested }
   }
   try {
     await request('/api/v1/users/me/model', 'PUT', { modelId: input.modelId })
@@ -246,7 +252,7 @@ async function main() {
       await applied(current.policy)
       const before = await prompts()
       const text = business?.text ?? (scenario === 'allow' ? ordinaryPrompt : userPrompt)
-      await conversation(scenario, text, isDenied, isWholeRecord)
+      const response = await conversation(scenario, text, isDenied, isWholeRecord)
       const added = [...await prompts()].filter(value => !before.has(value))
       assert.equal(added.length, isDenied ? 0 : 1, 'Native model cache must agree with the allowed or denied call')
       const requestDigests: string[] = []
@@ -263,7 +269,8 @@ async function main() {
       }
       assert.deepEqual(await snapshot(), initialPod, 'A hot policy update must not replace or restart the owner runtime')
       proof.rows.push({ scenario, revision: current.policy.revision, nativeApplied: true,
-        modelRequests: added.length, requestDigests, realModelAnswered: !isDenied, callerGateFailure: isDenied,
+        modelRequests: added.length, requestDigests, realModelAnswered: !isDenied && !response.clarificationRequested, callerGateFailure: isDenied,
+        clarificationRequested: response.clarificationRequested,
         originalRetained: true, sameOwnerPod: true, freshReplyMarkerRequired: !isDenied && !isWholeRecord,
         ...(business ? { businessFamily: business.family, wholeRecordRedacted: isWholeRecord,
           publicContentPreserved: business.preserved.length > 0 } : {}) })
