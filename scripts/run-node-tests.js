@@ -148,6 +148,7 @@ const nodeTestFiles = [
   'src/server/backends/standardAcpDriver.node-test.ts',
   'src/server/backends/standardAcpStdio.node-test.ts',
   'src/server/backends/standardAcpBackend.node-test.ts',
+  'src/server/backends/nexusStandardAcpLauncher.node-test.ts',
   'src/server/storage/standardAcpSessionBinding.node-test.ts',
   'src/server/backends/acpHostContext.node-test.ts',
   'src/server/backends/acpModelChange.node-test.ts',

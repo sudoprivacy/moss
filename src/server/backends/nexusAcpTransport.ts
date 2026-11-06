@@ -11,7 +11,8 @@ export class NexusAcpTransport implements AcpMessageTransport {
   private events?: AcpTransportEvents
   private closeError?: Error
   private isCloseReported = false
-  constructor(private readonly agent: ManagedAgentClient, readonly session: StartSessionResult) {}
+  constructor(private readonly agent: Pick<ManagedAgentClient, 'openSession' | 'verifySessionEndpoint' | 'cancel' | 'close'>, readonly session: StartSessionResult,
+    private readonly lifecycle: { closeAgent?: boolean } = {}) {}
   get connected(): boolean { return this.mailbox?.connected ?? false }
   /** Foreground readiness cannot be inferred from a retained mailbox stream. */
   checkReady(): Promise<boolean> {
@@ -55,7 +56,7 @@ export class NexusAcpTransport implements AcpMessageTransport {
     catch (error) { recordFailure(error) }
     try { await this.agent.cancel(this.session.sessionId, this.session.sessionEndpoint) }
     catch (error) { if (!isUnknownManagedSession(error, this.session.sessionId)) recordFailure(error) }
-    try { this.agent.close() }
+    try { if (this.lifecycle.closeAgent !== false) this.agent.close() }
     catch (error) { recordFailure(error) }
     if (this.closeError && !failures.includes(this.closeError)) failures.unshift(this.closeError)
     const failure = failures.length > 1
