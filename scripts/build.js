@@ -138,6 +138,11 @@ if (onlyNode && ['win32', 'darwin'].includes(process.platform) && !process.env.C
 
 
 // admin/dist（由 moss server 直接挂载到 /admin）
+build('bin/model-review-assets', ['run', 'scripts/prepare-model-review-assets.mjs'])
+build('bin/verify-model-review-assets.mjs', [
+  'build', 'src/server/ontology/reviewAssetsVerificationCli.ts',
+  '--outfile=bin/verify-model-review-assets.mjs', '--target=node', '--format=esm',
+])
 ensureAdminBuildDependencies()
 build('admin/dist', [
   'run',

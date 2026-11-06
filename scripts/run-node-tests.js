@@ -2,9 +2,11 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { testShellEnvironment } from './test-shell-environment.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
+  'scripts/contracts/model-review-assets.test.mjs',
   'scripts/contracts/registry-source.test.mjs',
   'scripts/contracts/nexus-prewrite-source.test.mjs',
   'scripts/e2e/workspace-proof.test.mjs',
@@ -332,6 +334,7 @@ if (concurrency !== undefined && (!/^[1-9][0-9]*$/.test(concurrency) || !Number.
 const result = spawnSync(process.execPath, [tsxCli, '--test', ...(concurrency ? [`--test-concurrency=${concurrency}`] : []), ...selected], {
   cwd: repoRoot,
   stdio: 'inherit',
+  env: testShellEnvironment(),
 })
 if (result.error) {
   console.error(result.error)

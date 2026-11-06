@@ -122,6 +122,8 @@ COPY bin/moss-server.mjs ./bin/
 COPY bin/msgaudit-pull-child.js ./bin/
 COPY bin/direct-connect-session-runner.mjs ./bin/
 COPY bin/artifact-mcp.mjs ./bin/
+COPY bin/sudograph-context-worker.mjs bin/verify-model-review-assets.mjs ./bin/
+COPY bin/model-review-assets/ ./bin/model-review-assets/
 COPY bin/nexus/ ./bin/nexus/
 RUN chmod +x ./bin/nexus/nexusd
 COPY admin/dist/ ./admin/dist/

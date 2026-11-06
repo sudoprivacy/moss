@@ -248,6 +248,8 @@ COPY --from=js-builder /src/bin/moss-server.mjs ./bin/
 COPY --from=js-builder /src/bin/moss-qualify-sqlite-upgrade.mjs /src/bin/moss-inspect-existing-product.mjs ./bin/
 COPY --from=js-builder /src/bin/direct-connect-session-runner.mjs ./bin/
 COPY --from=js-builder /src/bin/artifact-mcp.mjs ./bin/
+COPY --from=js-builder /src/bin/sudograph-context-worker.mjs /src/bin/verify-model-review-assets.mjs ./bin/
+COPY --from=js-builder /src/bin/model-review-assets/ ./bin/model-review-assets/
 # 会话存档 pull child: forked by MsgAuditWorker so a crash inside the native
 # WeCom SDK kills only that process. Spawned by path, so it needs its own bundle.
 COPY --from=js-builder /src/bin/msgaudit-pull-child.js ./bin/
@@ -344,6 +346,8 @@ COPY --from=host-node-runtime /opt/node ./node
 COPY --from=js-builder /src/bin/moss-server.mjs /src/bin/direct-connect-session-runner.mjs ./app/bin/
 COPY --from=js-builder /src/bin/moss-qualify-sqlite-upgrade.mjs /src/bin/moss-inspect-existing-product.mjs ./app/bin/
 COPY --from=js-builder /src/bin/artifact-mcp.mjs ./app/bin/
+COPY --from=js-builder /src/bin/sudograph-context-worker.mjs /src/bin/verify-model-review-assets.mjs ./app/bin/
+COPY --from=js-builder /src/bin/model-review-assets/ ./app/bin/model-review-assets/
 COPY --from=js-builder --chmod=0755 /src/deploy/operator-upgrade-runtimes.py ./app/bin/moss-operator-upgrade-runtimes.py
 COPY --from=js-builder /src/admin/dist ./app/admin/dist
 COPY --from=js-builder /src/assistants ./app/assistants

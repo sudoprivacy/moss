@@ -23,7 +23,7 @@ as Desktop. A current access failure cannot return a cached key or fall back to
 a shared enterprise credential. ShareOne continues to enforce its own current
 owner/collaborator policy.
 
-Comment dispatch requires the published SDK 0.1.4 bound-conversation head and
+Comment dispatch requires the published SDK 0.1.4 or newer bound-conversation head and
 atomic reservation protocol. An older SDK cannot dispatch through this service:
 missing conversation identity returns an explicit upgrade error. Native recovery
 also requires the runner's advertised receipt protocol before any control input.
@@ -53,17 +53,31 @@ to `https://shareone.vip`. Asset, origin or credential-service configuration
 errors prevent the configured server from listening. With no asset directory,
 the feature is disabled and review requests return an explicit 503.
 
+The normal host build stages the original frontend from the locked SDK into
+`bin/model-review-assets/`. Container and host-release packages carry that same
+directory, the registered compiler worker and a bundled asset verifier. For the
+container, the configured resource path is `/app/bin/model-review-assets`; for
+an extracted host archive, use the absolute path to `app/bin/model-review-assets`.
+Bundling the server does not resolve a second frontend through `import.meta.url`
+or require a ShareOne source checkout in production. The build validates hashes
+before replacing its prior output and includes only manifest-listed assets and
+their source receipt. Archive acceptance runs the bundled verifier against the
+extracted resource bytes. Carrying resources does not enable the feature or grant
+access; the existing deployment, current-owner and Nexus requirements still apply.
+
 Host replacement retains page grants, subscriptions, inbox state and execution
 reservations in the shared database. Delivery-status polling restores the new
 process's comment watcher even when the page already has its ShareOne identity.
 Repeated polls reuse that watcher. Neither account credentials nor model contents
 are cached as a substitute for their authoritative services.
 
-The adopted SDK is the verified official 0.1.4 release. Registered acceptance
-exercises real HTTP, reviewed MCP access, SQL grants/inbox/reservations, native
-TCP input, the ordinary ACP bridge and transcript, provider reply routing,
+The adopted SDK is the verified official 0.1.5 release, including the original
+pinned ShareOne frontend. Packaging checks load its installed bytes through the
+same bundled verifier used for the extracted host archive. Registered acceptance
+also exercises real HTTP, reviewed MCP access, SQL grants/inbox/reservations,
+native TCP input, the ordinary ACP bridge and transcript, provider reply routing,
 duplicate events and host replacement. ShareOne, engine output, browser and
-credential ports remain fixtures in that acceptance; its minimal frontend is
-explicitly a transport fixture. Installed frontend distribution, Desktop/WebUI
-client wiring, live Nexus/ShareOne access and comment-to-live-LLM browser
-acceptance remain deployment work before enabling this experience for users.
+credential ports remain fixtures in that service acceptance; its minimal frontend
+is explicitly a transport fixture. The client entry is implemented, while live
+Nexus/ShareOne access and comment-to-live-LLM browser acceptance remain deployment
+work before enabling this experience for users.

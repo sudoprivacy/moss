@@ -18,6 +18,9 @@
  */
 import { existsSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { testShellEnvironment } from './test-shell-environment.mjs'
+
+const testEnvironment = testShellEnvironment()
 
 /**
  * Suites this gates, by directory. Adding a directory here is what makes its
@@ -201,6 +204,7 @@ function run(label, command, leadingArgs, names) {
   const paths = names.map(name => `${present.get(name)}/${name}`)
   const { status } = spawnSync(command, [...leadingArgs, ...paths], {
     stdio: 'inherit',
+    env: testEnvironment,
     shell: process.platform === 'win32',
   })
   return status === 0
@@ -211,6 +215,7 @@ function runPaths(label, command, leadingArgs, paths) {
   console.log(`\n=== ${label} (${paths.length} files) ===`)
   const { status } = spawnSync(command, [...leadingArgs, ...paths], {
     stdio: 'inherit',
+    env: testEnvironment,
     shell: process.platform === 'win32',
   })
   return status === 0
