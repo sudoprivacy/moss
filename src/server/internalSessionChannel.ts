@@ -238,7 +238,7 @@ function connectOnce(url: string, token: string, handshakeTimeoutMs?: number, ad
       const line = String(data)
       if (!emitter.push(line.endsWith('\n') ? line : `${line}\n`)) ws.pause()
     })
-    ws.on('close', () => emitter.push(null))
+    ws.on('close', () => emitter.destroy())
     emitter.on('error', fail)
 
     ws.on('unexpected-response', (_req: unknown, res: { statusCode?: number }) => {

@@ -63,7 +63,7 @@ function makeDeps(port: number, tokenResult: string | null): ChannelDeps {
 }
 
 /** Send the authenticated protocol's upgrade and first messages in one TCP write. */
-async function startCoalescedServer(messages: string[]): Promise<number> {
+async function startCoalescedServer(messages: string[], isClosing = false): Promise<number> {
   const http = createServer();
   const sockets = new Set<import('node:stream').Duplex>();
   http.on('upgrade', (request, socket) => {
@@ -89,7 +89,9 @@ async function startCoalescedServer(messages: string[]): Promise<number> {
     socket.write(Buffer.concat([
       Buffer.from('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
         'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n'), ...frames,
+      ...(isClosing ? [Buffer.from([0x88, 0x02, 0x03, 0xe8])] : []),
     ]));
+    if (isClosing) socket.end();
   });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   closers.push(() => { for (const socket of sockets) socket.destroy(); http.close(); });
@@ -97,6 +99,14 @@ async function startCoalescedServer(messages: string[]): Promise<number> {
 }
 
 describe("internalSessionChannel (P2-5)", () => {
+  it('reports peer closure without a data subscriber', { timeout: 3000 }, async () => {
+    const port = await startCoalescedServer([], true);
+    const channel = await openInternalSessionChannel(makeDeps(port, 'tok'), 's1');
+    closers.push(() => channel.destroy());
+    if (!channel.destroyed) await once(channel, 'close');
+    assert.equal(channel.destroyed, true);
+  });
+
   it('preserves a coalesced hello through the real workspace execution reader', { timeout: 3000 }, async () => {
     const binding = { ownerId: 'owner', agentId: 'agent', durableSessionId: 'durable', repositoryPath: '/workspace' };
     const port = await startCoalescedServer([JSON.stringify({ type: 'hello', sessionId: 's1',
