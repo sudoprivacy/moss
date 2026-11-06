@@ -12,6 +12,7 @@ import { readRuntimeRelease } from '@sudo/user-runtime/release'
 import { resolveCohostNexusConfig } from '../../src/server/nexus/nexusEnvConfig.js'
 import { connectSessionRuntime, waitForSessionRuntime } from '../../src/server/nexus/sessionConnection.js'
 import { productConversation } from './productConversation.js'
+import { modelPromptPath } from './modelPromptPath.js'
 import { assertProductConversationUrl } from './productConversationUrl.js'
 import type { EgressPolicyService } from '../../src/server/configuration/egressPolicyService.js'
 import { readOwnerRuntimeOverrides } from '../../src/server/configuration/ownerRuntimeProfiles.js'
@@ -166,7 +167,7 @@ async function main() {
   }
   async function prompts() {
     return new Set((await observer!.client.readdir(input.modelMount, observer!.authToken))
-      .filter(entry => entry.name.endsWith('.prompt')).map(entry => entry.name))
+      .filter(entry => entry.name.endsWith('.prompt')).map(entry => modelPromptPath(input.modelMount, entry.name)))
   }
   async function terminate(sessionId: string) {
     await request(`/api/v1/sessions/${sessionId}/terminate`, 'POST', {})
@@ -250,7 +251,7 @@ async function main() {
       assert.equal(added.length, isDenied ? 0 : 1, 'Native model cache must agree with the allowed or denied call')
       const requestDigests: string[] = []
       for (const filename of added) {
-        const bytes: Buffer = await observer.client.read(`${input.modelMount}/${filename}`, observer.authToken)
+        const bytes: Buffer = await observer.client.read(filename, observer.authToken)
         requestDigests.push(createHash('sha256').update(bytes).digest('hex'))
         const sent: string = JSON.stringify(JSON.parse(bytes.toString('utf8')))
         assert.equal(sent.includes(sensitive), scenario.startsWith('disabled-'))
