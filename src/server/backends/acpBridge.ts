@@ -16,6 +16,7 @@ import { ArtifactTracker, artifactManifestPath } from '../artifacts.js'
 import { readAcpExecutionWorkspace, type ExecutionWorkspace } from './executionWorkspace.js'
 import { readNativeInputReceipt } from './nativeInputReceipt.js'
 import { AcpRequestTracker } from './acpRequestTracker.js'
+import { modelEgressRefusal } from './acpErrorMessage.js'
 
 type AcpBridgeOptions = {
   child?: ChildProcess
@@ -912,18 +913,26 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         }
 
         if (typeof parsed.id === 'string' && pendingPromptIds.delete(parsed.id) && parsed.error) {
-          const message = typeof parsed.error.message === 'string' ? parsed.error.message : 'Model request failed'
+          const refusal = modelEgressRefusal(parsed.error)
+          const message = refusal ?? (typeof parsed.error.message === 'string' ? parsed.error.message : 'Model request failed')
           // A prompt failure may follow streamed provider diagnostics or a partial
           // answer. Retain those chunks before clearing the turn so history and
           // refresh show the same information as the live stream.
           persistThoughtText()
           const retainedText = currentTurnUsedSendUserMessage ? '' : currentAssistantText
-          persistAssistantText(retainedText || message, { is_error: true, partial: Boolean(retainedText) })
+          const retainedError = refusal && retainedText ? `${retainedText}\n\n${refusal}` : retainedText || message
+          persistAssistantText(retainedError, { is_error: true, partial: Boolean(retainedText) })
           if (!retainedText) {
             emitStdout(JSON.stringify({
               type: 'assistant', session_id: sessionId, uuid: lastPersistedUuid,
               timestamp: new Date().toISOString(),
               message: { role: 'assistant', content: [{ type: 'text', text: message }] },
+            }) + '\n')
+          } else if (refusal) {
+            emitStdout(JSON.stringify({
+              type: 'assistant', session_id: sessionId, uuid: lastPersistedUuid,
+              timestamp: new Date().toISOString(), delta: true,
+              message: { role: 'assistant', content: [{ type: 'text', text: `\n\n${refusal}` }] },
             }) + '\n')
           }
           const resultEvent = {

@@ -192,8 +192,17 @@ void test('closing a live turn retains the rendered answer once without a prompt
   } finally { await handle.destroy(); await rm(cwd, { recursive: true, force: true }) }
 })
 
-for (const chunks of [[], ['api returned 403 Forbidden: ', 'enterprise balance is insufficient']]) {
-  void test(`failed prompt diagnostics survive context reload with ${chunks.length} streamed chunks`, async () => {
+for (const [index, scenario] of [
+  { isRefused: false, chunks: [], error: { code: -32603, message: 'Internal error' } },
+  { isRefused: false, chunks: ['api returned 403 Forbidden: ', 'enterprise balance is insufficient'], error: { code: -32603, message: 'Internal error' } },
+  { isRefused: true, chunks: [], error: { code: -32603, message: 'Internal error', data: 'Configuration error: Nexus model write: Permission denied: egress gate rejected private-fixture-secret' } },
+  { isRefused: true, chunks: ['权限不足，无法执行此操作。'], error: { code: -32603, message: 'Internal error', data: 'Configuration error: Nexus model write: PermissionDenied: classifier unavailable private-fixture-secret' } },
+  { isRefused: false, chunks: [], error: { code: -32603, message: 'Internal error', data: 'Permission denied: /private/file' } },
+  { isRefused: false, chunks: [], error: { code: -32603, message: 'Internal error', data: 'Nexus model write: connection refused' } },
+].entries()) {
+  const { chunks, error, isRefused } = scenario
+  const refusal = isRefused ? 'Nexus 拒绝了此次模型外发。请管理员检查出口保护策略与模型挂载权限。' : undefined
+  void test(`failed prompt diagnostics ${index} survive context reload with ${chunks.length} streamed chunks and ${refusal ? 'native refusal' : 'generic failure'}`, async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'moss-failed-turn-history-'))
     const transcriptPath = join(cwd, 'transcript.jsonl')
     const sent: any[] = []
@@ -221,7 +230,7 @@ for (const chunks of [[], ['api returned 403 Forbidden: ', 'enterprise balance i
         update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
       } })
       const first = sent.find(message => message.method === 'session/prompt')
-      receive({ id: first.id, error: { code: -32603, message: 'Internal error' } })
+      receive({ id: first.id, error })
       receive({ id: first.id, error: { code: -32603, message: 'Duplicate error response' } })
       await waitFor(() => output.some(event => event.type === 'result'))
       assert.equal(handle.isBusy?.(), false)
@@ -237,7 +246,14 @@ for (const chunks of [[], ['api returned 403 Forbidden: ', 'enterprise balance i
       const records = (await readFile(transcriptPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
       const assistants = records.filter(record => record.type === 'assistant')
       assert.equal(assistants.length, 2, 'Each turn must retain one stable assistant record')
-      assert.equal(assistants[0].message.content[0].text, chunks.join('') || 'Internal error')
+      const expected = refusal ? [...chunks, refusal].join(chunks.length ? '\n\n' : '') : chunks.join('') || 'Internal error'
+      assert.equal(assistants[0].message.content[0].text, expected)
+      if (refusal) {
+        const failure = output.find(event => event.type === 'result')
+        assert.match(failure.errors[0], /出口保护/)
+        assert(!JSON.stringify(output).includes('private-fixture-secret'))
+        assert(!JSON.stringify(records).includes('private-fixture-secret'))
+      }
       assert.equal(assistants[0].message.is_error, true)
       assert.equal(assistants[1].message.content[0].text, 'Retry succeeded')
       const liveAssistant = output.find(event => event.type === 'assistant')

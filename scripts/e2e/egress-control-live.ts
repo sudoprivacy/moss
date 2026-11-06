@@ -28,6 +28,7 @@ import { ownerField } from '../../src/server/nexus/sessionIdentity.js'
 import { RuntimeService } from '../../src/server/runtimeService.js'
 import { startServer } from '../../src/server/server.js'
 import { connectController } from './cohost-controller-live.js'
+import { modelEgressRefusal } from '../../src/server/backends/acpErrorMessage.js'
 
 const [binaryArgument, directoryArgument, recoveryFlag] = process.argv.slice(2)
 assert(binaryArgument && directoryArgument, 'candidate binary and new private directory are required')
@@ -213,7 +214,13 @@ if (recoveryFlag) {
           const opened = await controller.rpc('session/new', { cwd: '/', mcpServers: [] })
           assert.equal(opened.sessionId, started.durableSessionId)
           const turn = controller.rpc('session/prompt', { sessionId: opened.sessionId, prompt: [{ type: 'text', text: prompt }] })
-          if (isDenied) await assert.rejects(turn, /egress|classif|redact|denied|hook/i)
+          if (isDenied) await assert.rejects(turn, error => {
+            assert(error instanceof Error)
+            assert.match(error.message, /egress|classif|redact|denied|hook/i)
+            const native = JSON.parse(error.message) as { code: number; message: string; data?: unknown }
+            assert.match(modelEgressRefusal(native) ?? '', /出口保护/, 'The actual native refusal must reach the Moss message classifier')
+            return true
+          })
           else {
             assert.equal((await turn).stopReason, 'end_turn')
             assert(JSON.stringify(controller.updates).includes('MOSS_GATE_OK'))
@@ -245,7 +252,7 @@ if (recoveryFlag) {
     await server.stop()
     server = undefined
     await runtime.closeRuntimeServices()
-    store.close()
+    await store.close()
     isStoreClosed = true
     await writeEgressPolicyFile(policyFile, createEgressPolicy())
     writeFileSync(join(root, 'expected-policy.json'), JSON.stringify(savedPolicy), { mode: 0o600 })
@@ -281,7 +288,7 @@ if (recoveryFlag) {
     }
     if (log !== undefined) closeSync(log)
     await new Promise<void>(done => upstream.close(() => done()))
-    if (store && !isStoreClosed) store.close()
+    if (store && !isStoreClosed) await store.close()
     writeFileSync(join(root, 'acceptance.json'), JSON.stringify({ passed: isPassed && cleanupErrors.length === 0,
       scope: 'Moss HTTP policy API -> shared host file -> native receipt -> managed ACP -> synthetic model',
       binarySha256: createHash('sha256').update(readFileSync(binary)).digest('hex'),
@@ -322,7 +329,7 @@ async function recoverController(root: string) {
   } finally {
     try { await server?.stop() } finally {
       await runtime.closeRuntimeServices()
-      store.close()
+      await store.close()
     }
   }
 }
