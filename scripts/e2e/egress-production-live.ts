@@ -1,6 +1,6 @@
 /** Qualify an isolated organization's deployed Moss -> cohost -> Nexus -> real model path. */
 import assert from 'node:assert/strict'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomInt, randomUUID } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -116,12 +116,12 @@ async function main() {
   const nonce = () => randomUUID().replaceAll('-', '')
     .replace(/[0-9a-f]/g, value => String.fromCharCode(65 + Number.parseInt(value, 16)))
   const sensitive = `SUDO_DLP_CONFIDENTIAL_${nonce()}`
-  // A public acknowledgement must not resemble a credential to the real model.
-  const words = ['amber', 'beach', 'cedar', 'dawn', 'elm', 'fern', 'green', 'harbor',
-    'iris', 'jade', 'kite', 'lake', 'maple', 'north', 'olive', 'pine']
-  const answer = `acknowledged ${[...nonce()].map(value => words[value.charCodeAt(0) - 65]).join(' ')}`
-  const ordinaryPrompt = `This is a synthetic privacy-filter check. The following acknowledgement is public test text, unrelated to any record. Reply with exactly: ${answer}. Do not use tools.`
-  const userPrompt = `Synthetic acceptance record: ${sensitive}. Do not reproduce, infer, or fill in any redacted record content. ${ordinaryPrompt}`
+  // Check a fresh calculation without asking the model to echo a token or seed phrase.
+  const left = randomInt(10, 100)
+  const right = randomInt(10, 100)
+  const answer = String(left + right)
+  const ordinaryPrompt = `Compute ${left} + ${right}. Reply with only the decimal sum. Do not use tools.`
+  const userPrompt = `Synthetic acceptance record: ${sensitive}. Do not repeat or infer the record. ${ordinaryPrompt}`
   const publicCompany = '北京星河科技有限公司'
   const publicSource = 'const count = 1;'
   const contact = `SyntheticContact${nonce()}`
