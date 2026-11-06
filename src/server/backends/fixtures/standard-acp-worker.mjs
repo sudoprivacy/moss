@@ -25,3 +25,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   } else if (message.method === 'session/cancel' && params.sessionId === id) finish('cancelled');
   else if (message.id !== undefined) send({ id: message.id, error: { code: -32602, message: 'Invalid controlled fixture operation' } });
 }).on('close', () => { if (pending) clearTimeout(pending.timer); });
+// Test-only readiness stays out of the ACP stream and adds no live IPC handle.
+if (process.send) process.send({ type: 'standard-acp-fixture-ready' }, () => {
+  if (process.connected) process.disconnect();
+});
