@@ -75,10 +75,36 @@ export class OntologyReviewGrantStore implements ISudographReviewGrantStore {
     // An empty patch must still verify current immutable identity and expiry.
     const assignments = fields.length ? fields.map(key => key === 'shareId' ? 'share_id=?' : 'revision=?').join(',') : 'id=id'
     const changed = await this.driver.run(`UPDATE ontology_review_grants SET ${assignments}
-      WHERE id=? AND workspace_id=? AND conversation_id=? AND authorization_ref=? AND prefix=? AND cookie_name=? AND credential_hash=? AND expires_at=? AND expires_at>?`,
+      WHERE id=? AND workspace_id=? AND conversation_id=? AND authorization_ref=? AND prefix=? AND cookie_name=? AND credential_hash=? AND expires_at>?`,
     [...fields.map(key => parsed.data[key] ?? null), id, expected.workspaceId, expected.conversationId, expected.authorizationRef!,
-      expected.prefix, expected.cookieName, expected.credentialHash, expected.expiresAt, this.now()])
+      expected.prefix, expected.cookieName, expected.credentialHash, this.now()])
     return changed === 1
+  }
+
+  /** Keep an active capability usable without replacing its URL or authority. */
+  async renew(id: string, expected: ISudographReviewGrant, expiresAt: number): Promise<boolean> {
+    if (!/^[a-f0-9]{32}$/.test(id) || !grantShape.safeParse(expected).success
+      || !Number.isSafeInteger(expiresAt) || expiresAt <= this.now() || expiresAt > this.now() + 30 * 60_000) return false
+    try {
+      return await this.driver.transaction(async () => {
+        const binding = await this.projects.resolveSession(expected.conversationId)
+        if (!binding || binding.projectId !== expected.workspaceId || reviewAuthorizationRef(binding) !== expected.authorizationRef) return false
+        const changed = await this.driver.run(`UPDATE ontology_review_grants
+          SET expires_at=CASE WHEN expires_at < ? THEN ? ELSE expires_at END
+          WHERE id=? AND org_id=? AND user_id=? AND workspace_id=? AND conversation_id=?
+          AND authorization_ref=? AND prefix=? AND cookie_name=? AND credential_hash=? AND expires_at>?`,
+        [expiresAt, expiresAt, id, binding.orgId, binding.userId, expected.workspaceId, expected.conversationId,
+          expected.authorizationRef!, expected.prefix, expected.cookieName, expected.credentialHash, this.now()])
+        if (changed !== 1) return false
+        const after = await this.projects.resolveSession(expected.conversationId)
+        if (!after || reviewAuthorizationRef(after) !== expected.authorizationRef) throw denied()
+        return true
+      })
+    } catch (error) {
+      // A policy change rolls back the extension; storage failures remain visible.
+      if (error instanceof ResourceAccessError && error.statusCode === 403) return false
+      throw error
+    }
   }
 
   async delete(id: string): Promise<void> {

@@ -62,6 +62,52 @@ async function contract(t: TestContext, stores: DirectConnectStore[], reopen: ()
     assert.equal(await create().get('../../foreign'), undefined)
   })
 
+  await t.test('active leases renew monotonically across controllers without invalidating concurrent metadata', async () => {
+    const key = randomUUID().replaceAll('-', '')
+    const initial = value(alice, key)
+    await create().create(key, initial)
+    now += 10 * 60_000
+    const deadlines = [now + 30 * 60_000, now + 20 * 60_000]
+    assert.deepEqual(await Promise.all(deadlines.map((deadline, index) => create(index).renew(key, initial, deadline))), [true, true])
+    assert.equal(await create(1).update(key, initial, { shareId: 'same-private-share', revision: 'same-model' }), true)
+    await reopen()
+    now += 15 * 60_000
+    assert.ok(now > initial.expiresAt, 'the same lease outlives its initial deadline')
+    const renewed = { ...initial, expiresAt: Math.max(...deadlines), shareId: 'same-private-share', revision: 'same-model' }
+    assert.deepEqual(await create(1).get(key), renewed)
+    for (const deadline of [now - 1, now + 31 * 60_000, Number.NaN, now + 0.5]) {
+      assert.equal(await create().renew(key, initial, deadline), false)
+    }
+    for (const change of [{ credentialHash: 'b'.repeat(64) }, { conversationId: bob.sessionId },
+      { authorizationRef: 'sha256:' + 'b'.repeat(64) }, { cookieName: 'foreign-cookie' }]) {
+      assert.equal(await create().renew(key, { ...initial, ...change }, now + 30 * 60_000), false)
+    }
+    assert.deepEqual(await create().get(key), renewed)
+    now += 31 * 60_000
+    assert.equal(await create().get(key), undefined)
+    assert.equal(await create().renew(key, initial, now + 30 * 60_000), false)
+    assert.equal(await create().update(key, initial, { revision: 'resurrected' }), false)
+    assert.equal(Number((await stores[0].driver.get('SELECT expires_at FROM ontology_review_grants WHERE id=?', [key]))?.expires_at), renewed.expiresAt)
+  })
+
+  await t.test('a policy change during renewal rolls back the extension and storage faults stay visible', async () => {
+    const key = randomUUID().replaceAll('-', '')
+    const initial = value(alice, key)
+    await create().create(key, initial)
+    let reads = 0
+    const changed = new OntologyReviewGrantStore(stores[0].driver, { resolveSession: async sessionId => {
+      const binding = await stores[0].ontologyProjects.resolveSession(sessionId)
+      return ++reads === 1 || !binding ? binding : { ...binding, userId: 'replacement-owner' }
+    } }, () => now)
+    assert.equal(await changed.renew(key, initial, now + 30 * 60_000), false)
+    assert.deepEqual(await create().get(key), { ...initial, shareId: null })
+    const failure = new Error('fixture database outage')
+    const unavailable = new OntologyReviewGrantStore(stores[0].driver, { resolveSession: async () => { throw failure } }, () => now)
+    await assert.rejects(unavailable.renew(key, initial, now + 30 * 60_000), error => error === failure)
+    assert.deepEqual(await create().get(key), { ...initial, shareId: null })
+    await create().delete(key)
+  })
+
   await t.test('the capacity boundary is atomic across controllers and isolated by owner and organization', async () => {
     const template = value(limited, '0'.repeat(32))
     await stores[0].driver.transaction(async () => {
@@ -94,15 +140,22 @@ async function contract(t: TestContext, stores: DirectConnectStore[], reopen: ()
 
   await t.test('ownership generations invalidate old references without depending on model revisions', async () => {
     const oldRef = reviewAuthorizationRef(alice)
+    const disabledKey = randomUUID().replaceAll('-', '')
+    const disabledGrant = value(alice, disabledKey)
+    await create().create(disabledKey, disabledGrant)
     await stores[0].ontologyProjects.setEnabled(alice.orgId, alice.projectId, false)
     await assert.rejects(stores[1].ontologyProjects.resolveSession(alice.sessionId))
+    assert.equal(await create().renew(disabledKey, disabledGrant, now + 30 * 60_000), false)
+    assert.equal((await create().get(disabledKey))?.expiresAt, disabledGrant.expiresAt)
     await stores[0].ontologyProjects.setEnabled(alice.orgId, alice.projectId, true)
     const current = (await stores[1].ontologyProjects.resolveSession(alice.sessionId))!
     assert.notEqual(reviewAuthorizationRef(current), oldRef)
+    assert.equal(await create().renew(disabledKey, disabledGrant, now + 30 * 60_000), false)
     const key = randomUUID().replaceAll('-', '')
     await assert.rejects(create().create(key, value(alice, key)))
     await create().create(key, value(current, key))
     await stores[0].driver.run('UPDATE sessions SET user_id=? WHERE session_id=?', ['different-owner', alice.sessionId])
+    assert.equal(await create().renew(key, value(current, key), now + 30 * 60_000), false)
     const other = randomUUID().replaceAll('-', '')
     await assert.rejects(create().create(other, value(current, other)))
     await stores[0].driver.run('DELETE FROM ontology_session_bindings WHERE session_id=?', [alice.sessionId])
