@@ -19,8 +19,10 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { testShellEnvironment } from './test-shell-environment.mjs'
+import { nodeTestConcurrencyArgs } from './node-test-scheduling.mjs'
 
 const testEnvironment = testShellEnvironment()
+const nodeTestArgs = ['tsx', '--test', ...nodeTestConcurrencyArgs(testEnvironment)]
 
 /**
  * Suites this gates, by directory. Adding a directory here is what makes its
@@ -229,8 +231,8 @@ let isolatedBunOk = true
 for (const name of BUN_ISOLATED) {
   if (!run('bun:test (isolated)', 'bun', ['test'], [name])) isolatedBunOk = false
 }
-const nodeOk = run('node:test', 'npx', ['tsx', '--test'], NODE)
-const extraNodeOk = runPaths('node:test (server api)', 'npx', ['tsx', '--test'], EXTRA_NODE_PATHS)
+const nodeOk = run('node:test', 'npx', nodeTestArgs, NODE)
+const extraNodeOk = runPaths('node:test (server api)', 'npx', nodeTestArgs, EXTRA_NODE_PATHS)
 const nodeSerialOk = run(
   'node:test real-process',
   'npx',

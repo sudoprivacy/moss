@@ -71,7 +71,7 @@ process's comment watcher even when the page already has its ShareOne identity.
 Repeated polls reuse that watcher. Neither account credentials nor model contents
 are cached as a substitute for their authoritative services.
 
-The adopted SDK is the verified official 0.1.5 release, including the original
+The adopted SDK is the verified official 0.1.6 release, including the original
 pinned ShareOne frontend. Packaging checks load its installed bytes through the
 same bundled verifier used for the extracted host archive. Registered acceptance
 also exercises real HTTP, reviewed MCP access, SQL grants/inbox/reservations,
@@ -81,3 +81,9 @@ credential ports remain fixtures in that service acceptance; its minimal fronten
 is explicitly a transport fixture. The client entry is implemented, while live
 Nexus/ShareOne access and comment-to-live-LLM browser acceptance remain deployment
 work before enabling this experience for users.
+
+Authorised activity renews short-lived review leases in the shared SQL store
+without replacing the page URL, current view or comment drafts. Renewal compares
+the current owner, binding and credential atomically and never shortens an
+existing deadline. Idle expired grants and revoked authority cannot renew; every
+read and comment operation still rechecks current server-side policy.

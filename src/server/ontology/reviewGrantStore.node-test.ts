@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, type TestContext } from 'node:test'
-import type { ISudographReviewGrant } from '@sudowork/sudograph-runtime'
+import { SudographReviewHost, type ISudographReviewGrant, type ShareoneReviewAssets } from '@sudowork/sudograph-runtime'
 import { DirectConnectStore, forPostgresDirectConnectStore } from '../db.js'
 import { PgDriver, type DbDriver } from '../db/driver.js'
 import { applyPgSchema } from '../db/pg_schema.js'
@@ -106,6 +107,88 @@ async function contract(t: TestContext, stores: DirectConnectStore[], reopen: ()
     await assert.rejects(unavailable.renew(key, initial, now + 30 * 60_000), error => error === failure)
     assert.deepEqual(await create().get(key), { ...initial, shareId: null })
     await create().delete(key)
+  })
+
+  await t.test('the installed SDK renews durable leases across HTTP host and database replacement', async () => {
+    const hosts: SudographReviewHost[] = []
+    let current: SudographReviewHost | undefined
+    const server = createServer((request, response) => {
+      if (!current) { response.writeHead(503).end(); return }
+      void current.handleRequest(request, response).then(handled => { if (!handled) response.writeHead(404).end() })
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    const origin = `http://127.0.0.1:${address.port}`
+    let preparations = 0
+    const make = (index: number) => {
+      const host = new SudographReviewHost({
+        now: () => now,
+        embedded: { origin, grants: create(index) },
+        authorize: async binding => {
+          const durable = await stores[index].ontologyProjects.resolveSession(binding.conversationId)
+          if (!durable || durable.projectId !== binding.workspaceId || durable.userId !== alice.userId) throw new Error('Review owner changed')
+          return reviewAuthorizationRef(durable)
+        },
+        read: async (_workspace, request) => request.operation === 'document'
+          ? { html: '<html>Canonical model</html>', revision: 'revision-a' }
+          : { revision: 'revision-a' },
+        comments: {
+          assets: {} as ShareoneReviewAssets,
+          prepare: async () => { preparations++; return { shareId: 'private-share' } },
+          proxy: async binding => ({ status: 200, body: { shareId: (binding as ISudographReviewGrant).shareId, revision: binding.revision } }),
+          status: () => ({ delivered: 1 }),
+        },
+      })
+      hosts.push(host)
+      return host
+    }
+    try {
+      current = make(0)
+      const launch = await current.createSession({ workspaceId: alice.projectId, conversationId: alice.sessionId, authorizationRef: reviewAuthorizationRef(alice) })
+      const key = new URL(launch.url).pathname.split('/')[2]
+      const headers = { Cookie: `${launch.cookie.name}=${launch.cookie.value}` }
+      const originalGrant = await create(1).get(key)
+      assert.ok(originalGrant)
+      assert.deepEqual(await (await fetch(launch.url + 'connection', { headers })).json(), { state: 'ready', share_id: 'private-share' })
+      const document = await fetch(launch.url + 'content', { headers })
+      assert.equal(document.status, 200)
+      assert.equal(await document.text(), '<html>Canonical model</html>')
+      now += 20 * 60_000
+      const renewed = await fetch(launch.url + 'delivery', { headers })
+      assert.equal(renewed.status, 200)
+      assert.deepEqual(await renewed.json(), { delivered: 1 })
+      assert.match(renewed.headers.get('set-cookie')!, /Max-Age=1800;/)
+      assert.equal(await create(1).update(key, originalGrant, { revision: 'revision-a' }), true, 'a concurrent metadata writer may retain the initial deadline')
+      await current.close()
+      await reopen()
+      current = make(1)
+      now += 20 * 60_000
+      assert.ok(now > originalGrant.expiresAt, 'the unchanged browser credential outlives the original lease')
+      const restored = await fetch(launch.url + 'api/v1/threads', { headers })
+      assert.equal(restored.status, 200)
+      assert.deepEqual(await restored.json(), { shareId: 'private-share', revision: 'revision-a' })
+      assert.match(restored.headers.get('set-cookie')!, /Max-Age=1800;/)
+      assert.equal(preparations, 1, 'host replacement reuses the original private share')
+      const persisted = await create().get(key)
+      assert.equal(persisted?.expiresAt, now + 30 * 60_000)
+      assert.equal(persisted?.credentialHash, originalGrant.credentialHash)
+      now += 31 * 60_000
+      const expired = await fetch(launch.url + 'delivery', { headers })
+      assert.equal(expired.status, 403)
+      assert.equal(expired.headers.get('set-cookie'), null)
+      await expired.text()
+      const fresh = await current.createSession({ workspaceId: alice.projectId, conversationId: alice.sessionId, authorizationRef: reviewAuthorizationRef(alice) })
+      await create().delete(new URL(fresh.url).pathname.split('/')[2])
+      const revoked = await fetch(fresh.url + 'delivery', { headers: { Cookie: `${fresh.cookie.name}=${fresh.cookie.value}` } })
+      assert.equal(revoked.status, 403)
+      assert.equal(revoked.headers.get('set-cookie'), null)
+      await revoked.text()
+    } finally {
+      await Promise.all(hosts.map(host => host.close()))
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+    }
   })
 
   await t.test('the capacity boundary is atomic across controllers and isolated by owner and organization', async () => {
