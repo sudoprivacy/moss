@@ -3,10 +3,12 @@ import { existsSync, readdirSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { testShellEnvironment } from './test-shell-environment.mjs'
+import { nodeTestConcurrencyArgs } from './node-test-scheduling.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const nodeTestFiles = [
   'scripts/contracts/model-review-assets.test.mjs',
+  'scripts/contracts/node-test-scheduling.test.mjs',
   'scripts/contracts/registry-source.test.mjs',
   'scripts/contracts/nexus-prewrite-source.test.mjs',
   'scripts/e2e/workspace-proof.test.mjs',
@@ -324,14 +326,9 @@ if (selected.length === 0) {
 
 console.log(`Running ${selected.length}/${nodeTestFiles.length} explicitly listed node-test files`)
 const tsxCli = join(repoRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs')
-// Shared developer machines can bound worker pressure without changing cases,
-// assertions or deadlines. CI keeps Node's existing default when unset.
-const concurrency = process.env.MOSS_NODE_TEST_CONCURRENCY
-if (concurrency !== undefined && (!/^[1-9][0-9]*$/.test(concurrency) || !Number.isSafeInteger(Number(concurrency)))) {
-  console.error('MOSS_NODE_TEST_CONCURRENCY must be a positive integer')
-  process.exit(1)
-}
-const result = spawnSync(process.execPath, [tsxCli, '--test', ...(concurrency ? [`--test-concurrency=${concurrency}`] : []), ...selected], {
+// Keep shared PostgreSQL migration fixtures exclusive without changing cases,
+// assertions or deadlines. SQLite-only runs retain Node's default parallelism.
+const result = spawnSync(process.execPath, [tsxCli, '--test', ...nodeTestConcurrencyArgs(), ...selected], {
   cwd: repoRoot,
   stdio: 'inherit',
   env: testShellEnvironment(),
