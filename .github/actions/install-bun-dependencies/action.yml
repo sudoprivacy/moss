@@ -1,0 +1,73 @@
+name: Install Bun dependencies with verified native downloads
+description: Reuse the pinned public SudoWork helpers for sharp's original dependency archives.
+inputs:
+  frozen-lockfile:
+    description: Preserve the caller's existing frozen or ordinary install.
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    - name: Read dependency cache toolchain identity
+      id: toolchain
+      shell: bash
+      run: |
+        echo "bun=$(bun --version)" >> "$GITHUB_OUTPUT"
+        echo "node=$(node --version)" >> "$GITHUB_OUTPUT"
+    - name: Reuse dependency downloads for this platform and toolchain
+      uses: actions/cache@v4
+      with:
+        path: ~/.bun/install/cache
+        key: moss-bun-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.bun }}-${{ steps.toolchain.outputs.node }}-${{ hashFiles('bun.lock') }}
+        restore-keys: moss-bun-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.bun }}-${{ steps.toolchain.outputs.node }}-
+    - name: Read shared verified native dependency helpers
+      uses: actions/checkout@v5
+      with:
+        repository: sudoprivacy/sudowork
+        ref: 48fe8fee517af8f5cfbd94cb91dabccad9687ed7
+        path: .tmp/verified-native-setup
+        persist-credentials: false
+        sparse-checkout-cone-mode: false
+        sparse-checkout: |
+          .github/scripts/cache-sharp-libvips.mjs
+          .github/scripts/verify-sharp-libvips-cache.mjs
+          .github/scripts/verify-sharp-native-cache.mjs
+    - name: Cache verified sharp archives
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ runner.temp }}/npm-cache/_libvips
+          ${{ runner.temp }}/npm-cache/_prebuilds
+        key: sharp-0.32.6-${{ runner.os }}-${{ runner.arch }}-integrity-v3-prebuild-${{ runner.os != 'macOS' && runner.arch == 'X64' }}
+    - name: Verify native downloads before dependency installation
+      shell: bash
+      env:
+        npm_config_cache: ${{ runner.temp }}/npm-cache
+      run: |
+        if [[ "$RUNNER_OS" != macOS && "$RUNNER_ARCH" == X64 ]]; then
+          node .tmp/verified-native-setup/.github/scripts/cache-sharp-libvips.mjs --with-prebuild
+        else
+          node .tmp/verified-native-setup/.github/scripts/cache-sharp-libvips.mjs
+        fi
+        node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "npm_config_cache=" + process.env.npm_config_cache + "\n")'
+    - name: Install dependencies with the original lockfile policy
+      shell: bash
+      env:
+        FROZEN_LOCKFILE: ${{ inputs.frozen-lockfile }}
+      run: |
+        if [[ "$FROZEN_LOCKFILE" == true ]]; then
+          bun install --frozen-lockfile
+        elif [[ "$FROZEN_LOCKFILE" == false ]]; then
+          bun install
+        else
+          echo 'frozen-lockfile must be true or false' >&2
+          exit 1
+        fi
+    - name: Verify the original dependency installer offline
+      shell: bash
+      run: |
+        sharp_package="$(node -e "const {createRequire}=require('node:module'); console.log(createRequire(require.resolve('@xenova/transformers')).resolve('sharp/package.json'))")"
+        if [[ "$RUNNER_OS" != macOS && "$RUNNER_ARCH" == X64 ]]; then
+          node .tmp/verified-native-setup/.github/scripts/verify-sharp-native-cache.mjs "$sharp_package"
+        else
+          node .tmp/verified-native-setup/.github/scripts/verify-sharp-libvips-cache.mjs "$sharp_package"
+        fi

@@ -51,8 +51,9 @@ see [the artifact hashes, results and limits](acceptance-20261109.json).
 Production canary and application/model acceptance remain separate gates.
 Historical receipts below retain their original versions.
 
-The installed-runtime CI also uses the shared SudoWork dependency-cache helpers
-at a fixed source commit. They verify sharp's original libvips archive before
+Root CI dependency installs share one action, which uses the public SudoWork
+dependency-cache helpers at a fixed source commit. It caches Bun downloads by
+platform, toolchain and lockfile. The helpers verify sharp's original libvips archive before
 installation on all three platforms, plus the native prebuild on Linux/Windows.
 The original installer is then checked without download fallback; Linux/Windows
 also exercise native PNG encoding, decoding and exact pixels. The first run's
