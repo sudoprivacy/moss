@@ -1,5 +1,20 @@
 {
-  "architecture": "x86_64",
+  "platforms": {
+    "x86_64": {
+      "architecture": "linux-amd64",
+      "bazel": {
+        "url": "https://releases.bazel.build/8.8.1/release/bazel-8.8.1-linux-x86_64",
+        "sha256": "5b5bab2095065817d3416ca9a0678bd39c10c9ede432dbe8187bfe74de285160"
+      }
+    },
+    "aarch64": {
+      "architecture": "linux-arm64",
+      "bazel": {
+        "url": "https://releases.bazel.build/8.8.1/release/bazel-8.8.1-linux-arm64",
+        "sha256": "41ad5f9e833fcaee7398111343570cb155ca14985abb084b1f0ad2d29eaaec6d"
+      }
+    }
+  },
   "source": {
     "commit": "760b80785dc53311d4c87bd2de167525a99709c1",
     "tag": "release-20261019.0",
@@ -20,9 +35,7 @@
     }
   },
   "bazel": {
-    "version": "8.8.1",
-    "url": "https://releases.bazel.build/8.8.1/release/bazel-8.8.1-linux-x86_64",
-    "sha256": "5b5bab2095065817d3416ca9a0678bd39c10c9ede432dbe8187bfe74de285160"
+    "version": "8.8.1"
   },
   "go": "1.27.2"
 }

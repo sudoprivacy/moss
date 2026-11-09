@@ -31,8 +31,8 @@ def main():
     add_runtime_selection(parser)
     args = parser.parse_args()
     platforms, directfs_modes = runtime_selection(args)
-    if sys.platform != 'linux' or os.geteuid() != 0 or os.uname().machine != 'x86_64':
-        parser.error('Run on an isolated Linux AMD64 host with runtime namespace capabilities.')
+    if sys.platform != 'linux' or os.geteuid() != 0 or os.uname().machine not in ('x86_64', 'aarch64'):
+        parser.error('Run on an isolated Linux AMD64 or ARM64 host with runtime namespace capabilities.')
     assert os.getpriority(os.PRIO_PROCESS, 0) == 0, 'Actual tests require normal priority'
     runtime = args.runtime.resolve(strict=True)
     manifest = args.manifest.resolve(strict=True)
@@ -72,7 +72,7 @@ def main():
         'platforms': platforms, 'directfsModes': directfs_modes,
         'sources': {name: digest(Path(__file__).with_name(name)) for name in
                     ['nexus_storage.py', 'qualify.py', 'nexus-source.lock.json']},
-        'cases': [], 'hardwarePersistenceQualified': False,
+        'cases': [], 'machine': os.uname().machine, 'hardwarePersistenceQualified': False,
     }
 
     def record(label, command, expected, env=None):
@@ -103,6 +103,8 @@ def main():
                     ]
                     # These read-only OS paths belong to the isolated test host/container.
                     for path in ['/usr', '/bin', '/lib', '/lib64']:
+                        if not Path(path).exists():
+                            continue
                         mounts.append({'destination': path, 'type': 'bind', 'source': path,
                                        'options': ['rbind', 'ro']})
                     config = {

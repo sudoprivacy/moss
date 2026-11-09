@@ -93,7 +93,8 @@ def source_gate(run_id, candidate):
     with verified_archive(candidate / release['filename'], release['archiveSha256']) as archive:
         manifest = verify_archive(archive, release['manifestSha256'])
         provenance = json.loads(archive.extractfile('provenance.json').read())
-    if manifest['version'] != release['version'] or provenance['manifestSha256'] != release['manifestSha256']:
+    if (manifest['version'] != release['version'] or provenance['manifestSha256'] != release['manifestSha256'] or
+            provenance['architecture'] != release['architecture']):
         raise ValueError('Release metadata differs from the qualified executable manifest')
     tools = Path(__file__).resolve().parent
     for name, expected in provenance['recipeFiles'].items():
@@ -117,9 +118,11 @@ def public_digest(url):
         raise
 
 
-def publish(run_id, candidate, dry_run):
+def publish(run_id, candidate, dry_run, architecture):
     run, release = source_gate(run_id, candidate)
-    tag = 'gvisor-' + release['version']
+    if release['architecture'] != 'linux-' + architecture:
+        raise ValueError('The selected publication architecture differs from its qualified archive')
+    tag = 'gvisor-' + release['version'] + '-' + release['architecture']
     object_path = COS_PREFIX + '/' + release['version'] + '/' + release['archiveSha256']
     urls = [COS_BASE + '/' + object_path + '/' + release['filename'],
             'https://github.com/' + REPOSITORY + '/releases/download/' + tag + '/' + release['filename']]
@@ -152,7 +155,7 @@ def publish(run_id, candidate, dry_run):
         if current is None:
             gh(['release', 'create', tag, '--repo', REPOSITORY, '--target', run['head_sha'],
                 '--title', tag, '--latest=false', '--notes',
-                'Complete gVisor Linux AMD64 runtime, matching sidecars and source-bound installed-archive qualification.',
+                'Complete gVisor ' + release['architecture'] + ' runtime, matching sidecars and source-bound installed-archive qualification.',
                 *(str(path) for path in sorted(assets.iterdir()))])
         else:
             current = json.loads(current)
@@ -171,9 +174,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run-id', required=True)
     parser.add_argument('--candidate', required=True, type=Path)
+    parser.add_argument('--architecture', required=True, choices=['amd64', 'arm64'])
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
-    print(json.dumps(publish(args.run_id, args.candidate, args.dry_run)))
+    print(json.dumps(publish(args.run_id, args.candidate, args.dry_run, args.architecture)))
 
 
 if __name__ == '__main__':

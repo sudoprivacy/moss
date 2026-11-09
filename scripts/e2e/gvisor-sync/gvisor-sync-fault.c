@@ -10,6 +10,14 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#if defined(__x86_64__)
+#define NATIVE_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define NATIVE_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#else
+#error "The sync fault fixture requires Linux AMD64 or ARM64"
+#endif
+
 int main(int argc, char **argv) {
     if (argc < 3) return 2;
     char *end;
@@ -19,7 +27,7 @@ int main(int argc, char **argv) {
     // other containers and the real production runtime are unchanged.
     struct sock_filter instructions[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NATIVE_AUDIT_ARCH, 1, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_fsync, 2, 0),

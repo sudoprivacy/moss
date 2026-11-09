@@ -11,7 +11,17 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from release import acquire, digest
+from release import acquire, digest, sha256
+
+
+def build_platform(lock, machine):
+    """Select a pinned native toolchain; cross-architecture execution is unqualified."""
+    architecture = {'x86_64': 'linux-amd64', 'aarch64': 'linux-arm64'}.get(machine)
+    selected = lock['platforms'].get(machine)
+    if not architecture or not selected or selected['architecture'] != architecture:
+        raise ValueError('A pinned native Linux AMD64 or ARM64 build platform is required')
+    sha256(selected['bazel']['sha256'])
+    return selected
 
 
 def main():
@@ -23,7 +33,8 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent
     lock = json.loads((root / 'runtime.lock.json').read_text())
-    assert os.uname().machine == lock['architecture'], 'This runtime recipe qualifies Linux AMD64'
+    machine = os.uname().machine
+    selected = build_platform(lock, machine)
     work, output, cache = [path.resolve() for path in [args.workspace, args.output, args.cache]]
     work.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
@@ -32,7 +43,8 @@ def main():
     downloads.mkdir(exist_ok=True)
     state = tempfile.TemporaryDirectory(prefix='moss-gvisor-bazel-')
     receipt = {'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-               'baseline': args.baseline, 'lockSha256': digest(root / 'runtime.lock.json'),
+               'baseline': args.baseline, 'architecture': selected['architecture'],
+               'lockSha256': digest(root / 'runtime.lock.json'),
                'sourceCommit': lock['source']['commit'], 'sourceArchiveSha256': lock['source']['sha256'],
                'recipeFiles': {name: digest(root / name) for name in
                                ['build.py', 'release.py', 'runtime.lock.json', 'sync-errors.patch',
@@ -98,8 +110,8 @@ def main():
             after = {name: digest(source / name) for name in current}
             assert after == lock['patch']['after'], {'observed': after, 'expected': lock['patch']['after']}
         receipt['sourceImages'] = {name: digest(source / name) for name in current}
-        bazel = downloads / ('bazel-' + lock['bazel']['version'])
-        acquire(lock['bazel']['url'], lock['bazel']['sha256'], bazel)
+        bazel = downloads / ('bazel-' + lock['bazel']['version'] + '-' + machine)
+        acquire(selected['bazel']['url'], selected['bazel']['sha256'], bazel)
         bazel.chmod(0o755)
         version = lock['source']['tag'] if args.baseline else lock['version']
         status = output / 'workspace-status.sh'
@@ -109,7 +121,7 @@ def main():
         command = ['nice', '-n', '10', str(bazel), '--batch',
                    '--output_user_root=' + state.name,
                    '--host_jvm_args=-Xmx1024m', '--host_jvm_args=-XX:ActiveProcessorCount=1', 'build',
-                   '--config=x86_64', '--compilation_mode=opt',
+                   '--config=' + machine, '--compilation_mode=opt',
                    '--jobs=1', '--loading_phase_threads=1', '--local_resources=cpu=1',
                    '--local_resources=memory=2048', '--spawn_strategy=processwrapper-sandbox,local',
                    '--repository_cache=' + str(cache / 'repositories'),

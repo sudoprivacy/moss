@@ -113,8 +113,9 @@ def release_metadata(value):
     """Validate the portable distribution identity shared by qualification and publication."""
     if not isinstance(value, dict) or not re.fullmatch('[0-9A-Za-z][0-9A-Za-z._-]*', value.get('version', '')):
         raise ValueError('A portable release version is required')
-    if value.get('architecture') != 'linux-amd64' or value.get('filename') != 'gvisor-' + value['version'] + '-linux-amd64.tar.gz':
-        raise ValueError('A complete Linux AMD64 release is required')
+    architecture = value.get('architecture')
+    if architecture not in ('linux-amd64', 'linux-arm64') or value.get('filename') != 'gvisor-' + value['version'] + '-' + architecture + '.tar.gz':
+        raise ValueError('A complete, architecture-matched Linux AMD64 or ARM64 release is required')
     sha256(value.get('archiveSha256'))
     sha256(value.get('manifestSha256'))
     return value
