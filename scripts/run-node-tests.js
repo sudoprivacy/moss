@@ -14,6 +14,7 @@ const nodeTestFiles = [
   'scripts/e2e/workspace-proof.test.mjs',
   'scripts/e2e/inspect-existing-product.node-test.ts',
   'scripts/e2e/modelPromptPath.node-test.ts',
+  'scripts/e2e/hostEgressRuntime.node-test.ts',
   'scripts/e2e/productConversation.node-test.ts',
   'scripts/e2e/http-agent-artifact.test.mjs',
   'scripts/e2e/fetch-nexus-runtime.test.mjs',

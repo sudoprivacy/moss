@@ -119,6 +119,25 @@ NER quality remains covered separately by the shared analyzer benchmarks.
 These are deployment acceptance cases; compiling the script does not establish
 that production has passed them.
 
+For an existing local cohost, supply `hostRuntime` instead of `userPod`:
+
+```json
+{
+  "pinFile": "/private/deployment/container-plan.json",
+  "pinSha256": "EXACT_PLAN_SHA256",
+  "placementLibrary": "/private/installed-stack/tools/deploy/cohost.py",
+  "placementLibrarySha256": "EXACT_LIBRARY_SHA256"
+}
+```
+
+This mode requires the deployed local policy organization and cohost default.
+It reuses Stack's installed placement verifier, checks the actual model daemon's
+endpoint and read-only policy mount, and compares container identity, executable,
+start time and restart count through the same production journey. Use a dedicated
+`egress-canary-*` organization administrator in that configured local organization;
+its existing inheritance or override is restored exactly. Owner-Pod qualification
+continues to require its separate synthetic organization and verified release.
+
 `egressPolicyService.node-test.ts` covers desired-versus-applied state and
 propagation that preserves organization overrides. The real Node server
 journey in `lbLifecycleE2e.test.ts` exercises authentication, role boundaries,
