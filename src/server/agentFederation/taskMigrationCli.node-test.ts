@@ -19,6 +19,10 @@ void test('maintenance CLI refuses unconfirmed/live writers, backs up before mig
   await seedExternalTaskMigration(db)
   const args = ['--import', 'tsx', resolve('scripts/migrate-external-tasks.ts'), '--sqlite', source, '--backup', destination]
   await assert.rejects(run(process.execPath, args), /Usage:/)
+  await assert.rejects(run(process.execPath, [...args, '--confirm-old-writers-stopped'], {
+    env: { ...process.env, PATH: directory },
+  }), /SQLite offline verification requires lsof/)
+  await assert.rejects(stat(destination), { code: 'ENOENT' })
   // A separate CLI process must detect this still-open old writer, even while idle.
   await assert.rejects(run(process.execPath, [...args, '--confirm-old-writers-stopped']), /SQLite is open/)
   assert.equal((await db.get('SELECT COUNT(*) AS total FROM external_pilot_tasks'))?.total, 1)

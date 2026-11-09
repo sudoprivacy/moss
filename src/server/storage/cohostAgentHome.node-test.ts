@@ -77,8 +77,17 @@ void test(`PostgreSQL Agent homes serialize controller claims with ${isolation} 
     const admin = new Pool(config)
     await admin.query(`CREATE SCHEMA ${schema}`)
     const pool = async () => {
-      const connection = new Pool({ ...config, options: `-c search_path=${schema}`, max: 1 })
-      await connection.query(`SET default_transaction_isolation = '${isolation}'`)
+      const connection = new Pool({
+        ...config,
+        options: `-c search_path=${schema} -c default_transaction_isolation=${isolation.replaceAll(' ', '\\ ')}`,
+        max: 1,
+      })
+      // Startup options also apply after idle expiry or a broken connection.
+      // Retire the first socket so this fixture verifies a replacement socket.
+      const initial = await connection.connect()
+      try {
+        assert.equal((await initial.query('SHOW default_transaction_isolation')).rows[0].default_transaction_isolation, isolation)
+      } finally { initial.release(true) }
       return connection as unknown as PgPoolLike
     }
     const firstDriver = new PgDriver(await pool())

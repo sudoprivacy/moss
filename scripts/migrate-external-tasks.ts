@@ -23,6 +23,7 @@ async function assertSqliteOffline(path: string): Promise<void> {
   } catch (error) {
     const failure = error as { code?: unknown; stdout?: string; stderr?: string }
     if (failure.code === 1 && !failure.stdout?.trim() && !failure.stderr?.trim()) return
+    if (failure.code === 'ENOENT') throw new Error('SQLite offline verification requires lsof; install lsof before migration')
     throw error
   }
 }
