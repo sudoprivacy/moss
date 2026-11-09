@@ -51,6 +51,13 @@ see [the artifact hashes, results and limits](acceptance-20261109.json).
 Production canary and application/model acceptance remain separate gates.
 Historical receipts below retain their original versions.
 
+The installed-runtime CI also uses the shared SudoWork dependency-cache helpers
+at a fixed source commit. They verify sharp's original libvips archive before
+installation on all three platforms, plus the native prebuild on Linux/Windows.
+The original installer is then checked without download fallback; Linux/Windows
+also exercise native PNG encoding, decoding and exact pixels. The first run's
+download timeouts and a separate cold-cache HTTP 504 remain recorded failures.
+
 ## Earlier release evidence
 
 The public [v0.58.17 release](https://github.com/sudoprivacy/ai-dev-browser/releases/tag/v0.58.17)

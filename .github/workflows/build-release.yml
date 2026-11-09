@@ -160,7 +160,46 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.1'
+      - name: Read shared verified native dependency helpers
+        uses: actions/checkout@v5
+        with:
+          repository: sudoprivacy/sudowork
+          ref: 48fe8fee517af8f5cfbd94cb91dabccad9687ed7
+          path: .tmp/verified-native-setup
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/scripts/cache-sharp-libvips.mjs
+            .github/scripts/verify-sharp-libvips-cache.mjs
+            .github/scripts/verify-sharp-native-cache.mjs
+      - name: Cache verified sharp archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/npm-cache/_libvips
+            ${{ runner.temp }}/npm-cache/_prebuilds
+          key: sharp-0.32.6-${{ runner.os }}-${{ runner.arch }}-integrity-v3-prebuild-${{ runner.os != 'macOS' }}
+      - name: Verify native downloads before dependency installation
+        shell: bash
+        env:
+          npm_config_cache: ${{ runner.temp }}/npm-cache
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            node .tmp/verified-native-setup/.github/scripts/cache-sharp-libvips.mjs
+          else
+            node .tmp/verified-native-setup/.github/scripts/cache-sharp-libvips.mjs --with-prebuild
+          fi
+          node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "npm_config_cache=" + process.env.npm_config_cache + "\n")'
       - run: bun install --frozen-lockfile
+      - name: Verify the original dependency installer offline
+        shell: bash
+        run: |
+          sharp_package="$(node -e "const {createRequire}=require('node:module'); console.log(createRequire(require.resolve('@xenova/transformers')).resolve('sharp/package.json'))")"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            node .tmp/verified-native-setup/.github/scripts/verify-sharp-libvips-cache.mjs "$sharp_package"
+          else
+            node .tmp/verified-native-setup/.github/scripts/verify-sharp-native-cache.mjs "$sharp_package"
+          fi
       - name: Verify pinned contract bytes on every runtime platform
         run: node --test scripts/contracts/nexus-prewrite-source.test.mjs scripts/contracts/registry-source.test.mjs
       - name: Install checksum-verified runtime
