@@ -6,13 +6,13 @@ binds them to authenticated Moss owners and conversations. The extension
 signing key stays in BuildKit secret storage; profiles and credentials stay
 outside the image.
 
-SDK v0.58.17 owns the HTTP worker, persistent control journal, profile lease and
+SDK v0.58.20 owns the HTTP worker, persistent control journal, profile lease and
 browser tools. `worker.py` only sets Moss's isolated X11 display, signed
 extension directory and container Chrome arguments. The checked-in
 `mcp-tools.json` is a pinned SDK manifest for allocation-free server discovery;
 the consumer test verifies it against the installed public package.
 
-The managed-browser workflow builds the SDK v0.58.17 base, applies
+The managed-browser workflow builds the SDK v0.58.20 base, applies
 `chrome-version.Dockerfile`, then builds this worker. The Chrome layer downloads
 the versioned official package, verifies its SHA-256 before installation and
 checks the installed package version. The current runtime uses Chrome
@@ -30,6 +30,28 @@ crash recovery.
 Land this update only after the public SDK release is available and its
 exact artifact has passed qualification. A candidate image test does not publish
 the package or upgrade the running Moss service.
+
+## Public SDK 0.58.20 candidate, 9 November
+
+The public wheel's SHA-256 is
+`d83bbe9fbcc12c9b094ce89fa740e7f250492026ddfab76f574c2c0e94c58f48`.
+An isolated candidate retained the qualified Chrome 156.0.8078.73 package and
+existing extension identity. All 205 installed package files and signed source
+assets matched that wheel. A real Chrome 0.58.17-to-0.58.20 profile upgrade
+installed extension 0.4.10, retained ordinary and HttpOnly cookies, and preserved
+human input exclusion through forced recovery. The first iframe command passed
+after each recovery. Its fresh fixture resources were removed; the production
+worker and user profile were unchanged.
+
+The complete pinned-Chrome candidate passed six original Moss lifecycle/file
+cases, 24 SDK page/window/input cases and the five-tool catalog check. The
+lifecycle cases also passed at CI's original 256-PID, 1.5-CPU, 1536-MiB limits.
+The maintained CI workflow uses this same public release and source commit;
+see [the artifact hashes, results and limits](acceptance-20261109.json).
+Production canary and application/model acceptance remain separate gates.
+Historical receipts below retain their original versions.
+
+## Earlier release evidence
 
 The public [v0.58.17 release](https://github.com/sudoprivacy/ai-dev-browser/releases/tag/v0.58.17)
 flushes the last held pointer movement before release, including when the user

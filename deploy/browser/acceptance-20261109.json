@@ -1,0 +1,95 @@
+{
+  "recordedAt": "2026-11-09T05:08:28.156222+00:00",
+  "scope": "Isolated complete managed Chrome image, exact installed public SDK, signed extension upgrade and maintained live tests",
+  "sourceBase": "57b4e0710df925c8bd0f3383204c9f75cb78d072",
+  "sdk": {
+    "version": "0.58.20",
+    "sourceCommit": "d04d366c645b4ee244aa4b8bdfbb614d3d906227",
+    "wheelSha256": "d83bbe9fbcc12c9b094ce89fa740e7f250492026ddfab76f574c2c0e94c58f48",
+    "installedWithoutSourceOverlay": true,
+    "installedFilesMatched": 205
+  },
+  "candidateImage": "sha256:55b131207c465a7ce3d2345b9f4d7398ea454ab9aded7a57caf5290aa5bf1795",
+  "qualifiedBaseImage": "sha256:a3952c903217bd706050b9d3a3cd0a5bdaca95bfc011d8e48d7ce0a6bc03d17e",
+  "chromeVersion": "156.0.8078.73-1",
+  "extension": {
+    "id": "ihcleenfhafccfabdlmoofkpfmledbid",
+    "version": "0.4.10"
+  },
+  "testInputs": {
+    "deploy/browser/worker.py": "0b749e981242472c6700deb9d8efd2ef6cd84a015374ac004bad334c342d4e5a",
+    "deploy/browser/mcp-tools.json": "8f073f8f685638b207c737f9c5363aa3005bd752e13d46b4ba46b81f6ca5c2e3",
+    "deploy/browser/verify_tool_catalog.py": "cd308f6445ec89452d298e5ab1dd1d21d099a7ed1a2b4442a8baefc5cbaa1c5b",
+    "deploy/browser/test_public_worker.py": "ac95e83137c5981eee5480e9a0e98e965cd517da242c0790a6ce7e0210489023",
+    "deploy/browser/test_lifecycle_live.py": "6fda74491832ee5998e912da5840655f62ada6c2bcf550fdeed45e9d84c6d0fc",
+    "deploy/browser/test_files_live.py": "c530384441ae4cacb87636edb0627803f29e88647e76186140d1e2577d396b6b",
+    "deploy/browser/fixtures/lifecycle-test.Dockerfile": "68fa3921a030898cb31b718edfb4643a21fcb27bc273ec63564db8c212489105",
+    "deploy/browser/fixtures/run_sdk_acceptance.py": "380b3d32b5fa7a54a2e4b3189927b3bdfc042fee71377c058f5316fad8afb724"
+  },
+  "results": {
+    "lifecycleCasesPassed": 6,
+    "sdkCasesPassed": 24,
+    "failed": 0,
+    "publicCatalogMatches": true,
+    "firstIframeCommandAfterRecoveryPassed": true,
+    "profileUpgrade": {
+      "fromSdk": "0.58.17",
+      "toSdk": "0.58.20",
+      "extensionVersions": [
+        "0.4.9",
+        "0.4.10",
+        "0.4.10"
+      ],
+      "cookiesPreserved": true,
+      "httpOnlyCookiesPreserved": true,
+      "humanLeasePreserved": true,
+      "exclusiveProfileOwnership": true
+    },
+    "ciResourceLimits": [
+      {
+        "name": "catalog",
+        "exit": 0,
+        "pidsLimit": 64,
+        "cpuLimit": 0.5,
+        "memoryMiB": 256,
+        "oomKilled": false,
+        "seconds": 1.08
+      },
+      {
+        "name": "lifecycle",
+        "exit": 0,
+        "pidsLimit": 256,
+        "cpuLimit": 1.5,
+        "memoryMiB": 1536,
+        "oomKilled": false,
+        "seconds": 27.26
+      }
+    ],
+    "sdkResourceLimits": {
+      "cpuLimit": 1,
+      "memoryMiB": 1536,
+      "pidsLimit": 384,
+      "network": "none"
+    },
+    "ownedFixtureResourcesRemoved": true,
+    "productionChanged": false,
+    "productionContainerUnchanged": true,
+    "privateSigningKeyHostFileCreated": false
+  },
+  "testLogsSha256": {
+    "complete-image-catalog.log": "f2c4a75d4508cb97374ea2b3678eb9be951335a2532070d25225f53eef8918be",
+    "complete-image-lifecycle.log": "525c839accb69864333238bb338cc753c5dfb21406282ca2596a320548e2a4c6",
+    "complete-image-sdk.log": "1e9f53675954d5dfb885813f9c72fbbfb21b5a4f07d8e3c2ec71707aa6a74662",
+    "ci-limits-catalog.log": "f2c4a75d4508cb97374ea2b3678eb9be951335a2532070d25225f53eef8918be",
+    "ci-limits-lifecycle.log": "de8ca1167b13132b11e40d30dac001f0af0d8040b8bd83276d53827bf84af266",
+    "signed-upgrade.json": "cc1cc21d7bd5a36228c403b0f45c21121373b92b988c8b9a753c3aa47e4fdc52"
+  },
+  "coverageLimits": [
+    "The isolated image reuses the existing qualified Chrome package; it does not qualify a newer Chrome release.",
+    "The catalog and lifecycle cases were repeated at their exact CI limits; these repetitions do not increase the distinct case count.",
+    "No production profile, real model provider or user conversation was used by these component tests.",
+    "Public owner canary, final application artifacts, real model/view/comment binding and physical phone remain separate acceptance gates.",
+    "Production still runs the prior SDK0.58.17 image; building this candidate does not promote it."
+  ],
+  "reproduction": ".github/workflows/managed-browser.yml"
+}
