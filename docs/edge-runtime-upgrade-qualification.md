@@ -23,6 +23,16 @@ changes existing values requires its own reviewed mapping; this check does
 not silently accept it. More than 100,000 rows in one table requires a
 separately reviewed larger-data qualification.
 
+For a retained audit table exceeding that default bound, the explicit
+`--streaming /absolute/moss.db` mode reads one typed row at a time and sorts
+fixed-size row digests in a private, disk-backed SQLite index. It preserves
+duplicates and produces exactly the default mode's multiset hash; no rows are
+sampled or discarded. This mode allows at most 1,000,000 rows per table and
+retains every integrity, existing-column/value and idempotent-reopen check.
+Its receipt records `inventoryMode: "streaming"`. The default mode still
+refuses tables exceeding 100,000 rows. Qualify the larger-data mode's producer
+source, dependencies and bundle digest before applying it to a real backup.
+
 This program starts no server, controller, managed execution or model request.
 Its private copy is removed afterward. The in-repository process tests cover
 source-file preservation, committed WAL data with the source still open, and

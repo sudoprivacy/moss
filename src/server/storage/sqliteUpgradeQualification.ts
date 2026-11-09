@@ -10,7 +10,9 @@ import { serverFileConfigSchema } from '../types.js'
 
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"'
 const MAX_ROWS_PER_TABLE = 100_000
+const MAX_STREAMING_ROWS_PER_TABLE = 1_000_000
 type Inventory = Record<string, { columns: string[]; rows: number; sha256: string }>
+type InventoryMode = 'bounded' | 'streaming'
 
 /** Read the running controller's operational identity before a stop, never mint one.
  * The deployment caller must independently bind expectedPid to the owned service.
@@ -68,7 +70,7 @@ function valueHash(value: unknown): unknown {
 }
 
 /** Only hashes/counts leave the process; database values and prompts never do. */
-function inventory(db: DatabaseSync, original?: Inventory): Inventory {
+function inventory(db: DatabaseSync, original?: Inventory, scratch?: DatabaseSync): Inventory {
   const tables = original ? Object.keys(original) : db.prepare(
     "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
   ).all().map(row => String(row.name))
@@ -77,13 +79,35 @@ function inventory(db: DatabaseSync, original?: Inventory): Inventory {
     const columns = original?.[table]?.columns ?? available
     assert(columns.length && columns.every(column => available.includes(column)), `Existing columns removed: ${table}`)
     const count = Number(db.prepare(`SELECT count(*) AS count FROM ${quote(table)}`).get()!.count)
-    assert(count <= MAX_ROWS_PER_TABLE, `Qualification row bound exceeded: ${table}; use a reviewed larger-data journey`)
+    const limit = scratch ? MAX_STREAMING_ROWS_PER_TABLE : MAX_ROWS_PER_TABLE
+    assert(count <= limit, `Qualification row bound exceeded: ${table}; use a reviewed larger-data journey`)
     const query = db.prepare(`SELECT ${columns.map(quote).join(',')} FROM ${quote(table)}`)
     query.setReadBigInts(true)
-    const rows = query.all().map(row => createHash('sha256').update(JSON.stringify(
+    const rowHash = (row: Record<string, unknown>) => createHash('sha256').update(JSON.stringify(
       columns.map(column => valueHash(row[column])),
-    )).digest('hex')).sort()
-    const sha256 = createHash('sha256').update(JSON.stringify(rows)).digest('hex')
+    )).digest('hex')
+    let sha256: string
+    if (scratch) {
+      // Keep values out of the sorting database. Its index sorts fixed-size
+      // digests on disk, preserving duplicate rows and the bounded mode's hash.
+      scratch.exec('DROP TABLE IF EXISTS row_hashes; CREATE TABLE row_hashes (sha256 TEXT NOT NULL); CREATE INDEX sorted_hashes ON row_hashes(sha256); BEGIN')
+      const insert = scratch.prepare('INSERT INTO row_hashes VALUES (?)')
+      let read = 0
+      for (const row of query.iterate()) { insert.run(rowHash(row)); read++ }
+      assert.equal(read, count, `Inventory row count changed: ${table}`)
+      scratch.exec('COMMIT')
+      const hash = createHash('sha256').update('[')
+      let first = true
+      for (const row of scratch.prepare('SELECT sha256 FROM row_hashes ORDER BY sha256 COLLATE BINARY').iterate()) {
+        if (!first) hash.update(',')
+        hash.update(JSON.stringify(row.sha256))
+        first = false
+      }
+      sha256 = hash.update(']').digest('hex')
+    } else {
+      const rows = query.all().map(rowHash).sort()
+      sha256 = createHash('sha256').update(JSON.stringify(rows)).digest('hex')
+    }
     return [table, { columns, rows: count, sha256 }]
   }))
 }
@@ -93,14 +117,22 @@ function integrity(db: DatabaseSync): void {
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), [], 'Foreign-key violations require review')
 }
 
-export async function qualifySqliteUpgrade(source: string) {
+export async function qualifySqliteUpgrade(source: string, inventoryMode: InventoryMode = 'bounded') {
   assert(isAbsolute(source), 'Use an absolute source database path')
+  assert(inventoryMode === 'bounded' || inventoryMode === 'streaming', 'Unknown inventory mode')
   const directory = mkdtempSync(join(tmpdir(), 'moss-db-upgrade-'))
   chmodSync(directory, 0o700)
   const copy = join(directory, 'moss.db')
   let sourceDb: DatabaseSync | undefined
   let store: DirectConnectStore | undefined
+  let scratch: DatabaseSync | undefined
   try {
+    if (inventoryMode === 'streaming') {
+      const path = join(directory, 'inventory-hashes.db')
+      scratch = new DatabaseSync(path)
+      chmodSync(path, 0o600)
+      scratch.exec('PRAGMA cache_size=-1024; PRAGMA temp_store=FILE')
+    }
     // Read-only source plus the SQLite backup API includes WAL commits. A raw
     // filesystem copy of a running database is not an upgrade qualification.
     sourceDb = new DatabaseSync(source, { readOnly: true })
@@ -109,7 +141,7 @@ export async function qualifySqliteUpgrade(source: string) {
     chmodSync(copy, 0o600)
     const snapshot = new DatabaseSync(copy, { readOnly: true })
     let before: Inventory
-    try { integrity(snapshot); before = inventory(snapshot) }
+    try { integrity(snapshot); before = inventory(snapshot, undefined, scratch) }
     finally { snapshot.close() }
 
     const errors: unknown[][] = []
@@ -119,14 +151,14 @@ export async function qualifySqliteUpgrade(source: string) {
     finally { console.error = originalError }
     assert.equal(errors.length, 0, 'Migration emitted errors; retain the original diagnostic')
     integrity(store.db!)
-    assert.deepEqual(inventory(store.db!, before), before, 'Migration changed existing rows or columns')
-    const migrated = inventory(store.db!)
+    assert.deepEqual(inventory(store.db!, before, scratch), before, 'Migration changed existing rows or columns')
+    const migrated = inventory(store.db!, undefined, scratch)
     await store.close(); store = undefined
     // An ordinary restart must not perform another logical data mutation.
     store = new DirectConnectStore(copy)
     integrity(store.db!)
-    assert.deepEqual(inventory(store.db!), migrated, 'Migration is not idempotent on reopen')
-    return { schemaVersion: 1, sourceOpenedReadOnly: true, sourceBackupApi: 'node:sqlite.backup',
+    assert.deepEqual(inventory(store.db!, undefined, scratch), migrated, 'Migration is not idempotent on reopen')
+    return { schemaVersion: 1, inventoryMode, sourceOpenedReadOnly: true, sourceBackupApi: 'node:sqlite.backup',
       sourceTables: Object.fromEntries(Object.entries(before).map(([name, value]) =>
         [name, { rows: value.rows, sha256: value.sha256 }])),
       addedTables: Object.keys(migrated).filter(table => !(table in before)),
@@ -135,6 +167,7 @@ export async function qualifySqliteUpgrade(source: string) {
   } finally {
     sourceDb?.close()
     await store?.close()
+    scratch?.close()
     // Remove only the exact private directory created above, on either outcome.
     assert.equal(dirname(directory), resolve(tmpdir()))
     assert(directory.startsWith(resolve(tmpdir()) + sep + 'moss-db-upgrade-'))
