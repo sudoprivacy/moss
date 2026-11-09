@@ -20,6 +20,13 @@ void test('a native cloud default refuses new legacy placements while retaining 
   assert.doesNotThrow(() => assertRuntimePlacement('cohost', true, true, true))
   assert.doesNotThrow(() => assertRuntimePlacement('k8s', true, true, false))
 })
+for (const type of ['host', 'docker', 'k8s']) {
+  void test(`a local native default refuses new ${type} sessions without allocating an owner Pod`, () => {
+    assert.throws(() => assertRuntimePlacement(type, false, false, true), error => error instanceof ResourceAccessError && error.statusCode === 403)
+    assert.doesNotThrow(() => assertRuntimePlacement(type, false, false, false))
+    assert.doesNotThrow(() => assertRuntimePlacement('cohost', false, false, true))
+  })
+}
 void test('metered native sessions cannot spend a deployment credential through the legacy daemon', () => {
   assert.throws(() => assertRuntimePlacement('cohost', false, true), error => error instanceof ResourceAccessError && error.statusCode === 503)
   assert.doesNotThrow(() => assertRuntimePlacement('cohost', false, false))

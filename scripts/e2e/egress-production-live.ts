@@ -17,15 +17,18 @@ import { assertProductConversationUrl } from './productConversationUrl.js'
 import type { EgressPolicyService } from '../../src/server/configuration/egressPolicyService.js'
 import { readOwnerRuntimeOverrides } from '../../src/server/configuration/ownerRuntimeProfiles.js'
 import { analyzerRelaySchema, ownerRuntimeOverridesSchema } from '../../src/server/configuration/ownerRuntimeProfileSchema.js'
+import { resolveCohostConnection } from '../../src/server/nexus/cohostConnection.js'
+import { assertLocalEgressDeployment, hostRuntimeSchema, readHostEgressSnapshot } from './hostEgressRuntime.js'
 
 type PolicyView = Awaited<ReturnType<EgressPolicyService['view']>>
-const fixtureSchema = z.object({
+const fixtureBaseSchema = z.object({
   fixture: z.literal('sudo-egress-production'),
   baseUrl: z.string().url(), accessToken: z.string().min(1),
   ownerId: z.string().uuid(), organizationId: z.string().uuid(),
   modelId: z.string().min(1), modelMount: z.string().regex(/^\/[a-zA-Z0-9/_-]+$/),
   outputDirectory: z.string().refine(isAbsolute),
-  userPod: z.object({
+}).strict()
+const userPodSchema = z.object({
     allocationId: z.string().optional(), image: z.string().min(1),
     nodeHost: z.string().min(1), namespace: z.string().min(1),
     kubeconfig: z.string().optional(), storageClass: z.string().min(1),
@@ -34,13 +37,18 @@ const fixtureSchema = z.object({
     imagePullPolicy: z.enum(['Always', 'IfNotPresent', 'Never']).optional(),
     imagePullSecrets: z.array(z.string()).optional(),
     egressAnalyzerRelay: z.object({ image: z.string().min(1), secretName: z.string().min(1) }).strict(),
-  }).strict(),
 }).strict()
+const fixtureSchema = z.union([
+  fixtureBaseSchema.extend({ userPod: userPodSchema }).strict(),
+  fixtureBaseSchema.extend({ hostRuntime: hostRuntimeSchema }).strict(),
+])
 
 async function main() {
   assert(process.argv.includes('--execute'), 'Pass --execute for this isolated live qualification')
   assert.equal(process.env.MOSS_COHOST_LIVE, '1', 'Explicit live-provider opt-in is required')
   const input = fixtureSchema.parse(JSON.parse(readFileSync(0, 'utf8')))
+  const userPod = 'userPod' in input ? input.userPod : undefined
+  const hostRuntime = 'hostRuntime' in input ? input.hostRuntime : undefined
   const origin = new URL(input.baseUrl)
   assert(!origin.username && !origin.password && !origin.search && !origin.hash)
   assert(origin.pathname === '/' || origin.pathname === '')
@@ -51,23 +59,36 @@ async function main() {
   assert(configPath && isAbsolute(configPath), 'Use the deployed absolute Moss configuration path')
   const deploymentBytes = readFileSync(configPath)
   const deployment = z.object({
+    runtimeDefaults: z.object({ type: z.string().optional() }).optional(),
     k8s: z.object({ ownerRuntimeOverrides: ownerRuntimeOverridesSchema.optional() }).optional(),
-    egressGate: z.object({ analyzerRelay: analyzerRelaySchema.optional() }).optional(),
+    egressGate: z.object({ analyzerRelay: analyzerRelaySchema.optional(), localPolicyFile: z.string().optional(),
+      localOrganizationId: z.string().optional() }).optional(),
   }).parse(JSON.parse(deploymentBytes.toString('utf8')))
   const selected = readOwnerRuntimeOverrides(deployment.k8s?.ownerRuntimeOverrides)?.[input.ownerId]
   const manifestPath = process.env.MOSS_RUNTIME_MANIFEST_PATH
-  assert(manifestPath && isAbsolute(manifestPath), 'Use the deployed absolute default runtime manifest path')
-  const release = selected?.release ?? readRuntimeRelease(manifestPath)
-  assert.deepEqual(input.userPod.egressAnalyzerRelay,
-    selected ? selected.egressAnalyzerRelay : deployment.egressGate?.analyzerRelay,
-    'Observe the analyzer placement actually selected by Moss for this owner')
-  assert.equal(input.userPod.image, release.image.reference)
+  if (!hostRuntime) assert(manifestPath && isAbsolute(manifestPath), 'Use the deployed absolute default runtime manifest path')
+  const release = hostRuntime ? undefined : selected?.release ?? readRuntimeRelease(manifestPath!)
+  const hostContext = { policyFile: deployment.egressGate?.localPolicyFile ?? '', endpoint: hostRuntime ? resolveCohostConnection().endpoint : '' }
+  let verifiedHost: ReturnType<typeof readHostEgressSnapshot> | undefined
+  if (hostRuntime) {
+    assertLocalEgressDeployment({ ...deployment, runtimeDefaults: {
+      type: process.env.MOSS_DEFAULT_RUNTIME || deployment.runtimeDefaults?.type,
+    } }, input.organizationId)
+    verifiedHost = readHostEgressSnapshot(hostRuntime, hostContext)
+  } else {
+    assert.deepEqual(userPod!.egressAnalyzerRelay,
+      selected ? selected.egressAnalyzerRelay : deployment.egressGate?.analyzerRelay,
+      'Observe the analyzer placement actually selected by Moss for this owner')
+    assert.equal(userPod!.image, release!.image.reference)
+  }
   // Refuse reused evidence before creating sessions or changing a saved policy.
   mkdirSync(input.outputDirectory, { mode: 0o700 })
   const proof = { passed: false, realModel: false, scope: 'organization',
-    ownerId: input.ownerId, organizationId: input.organizationId, releaseId: release.releaseId,
-    engineCommit: release.engine.commit, cohostVersion: release.cohost.version,
-    nexusVersion: release.cohost.nexusVersion, imageDigest: release.image.digest,
+    ownerId: input.ownerId, organizationId: input.organizationId, releaseId: release?.releaseId,
+    engineCommit: release?.engine.commit, cohostVersion: release?.cohost.version,
+    nexusVersion: release?.cohost.nexusVersion, imageDigest: release?.image.digest ?? verifiedHost?.imageSha256,
+    cohostSha256: verifiedHost?.binarySha256,
+    runtimePlacement: hostRuntime ? 'local-cohost' : 'owner-pod', sameRuntime: false,
     deploymentConfigSha256: createHash('sha256').update(deploymentBytes).digest('hex'),
     ownerScopedRuntime: Boolean(selected), runtimeProvenanceVerified: false,
     platformPolicyMutations: 0, policyRestored: false, sameOwnerPod: false,
@@ -90,7 +111,7 @@ async function main() {
     assert.equal(result.scopeType, 'organization')
     assert.equal(result.organizationId, input.organizationId)
     result.policy = parseEgressPolicy(result.policy)
-    assert(result.runtimes.every(row => !row.isPresent || row.ownerId === input.ownerId),
+    assert(hostRuntime || result.runtimes.every(row => !row.isPresent || row.ownerId === input.ownerId),
       'The acceptance organization must not contain another running owner')
     return result
   }
@@ -98,16 +119,16 @@ async function main() {
   const profile = await request<{ data: { login_name: string } }>('/api/v1/user/profile')
   assert.equal(me.user.id, input.ownerId)
   assert.equal(me.organization.id, input.organizationId)
-  assert(profile.data.login_name.startsWith('egress-canary-') && me.organization.name.startsWith('DLP acceptance '),
+  assert(profile.data.login_name.startsWith('egress-canary-') && (hostRuntime || me.organization.name.startsWith('DLP acceptance ')),
     'Use a dedicated synthetic account and organization, never a human workspace')
   const platform = await fetch(`${origin.origin}/api/v1/settings/egress?scope=platform`, { headers, redirect: 'error', signal: AbortSignal.timeout(15_000) })
   assert.equal(platform.status, 403, 'Use an organization administrator without platform policy authority')
   const original = await view()
-  assert(original.isInherited && !original.policy.enabled && original.policy.mode === 'redact')
+  assert((hostRuntime || original.isInherited) && !original.policy.enabled && original.policy.mode === 'redact')
   assert(original.policy.modelMounts.includes(input.modelMount), 'Install the Cloud outbound profile before qualifying it')
   assert(original.policy.analyzer, 'The real shared analyzer must be configured')
-  const owners = new UserPodService({ ...input.userPod, release,
-    issuer: { endpoint: issuer.endpoint, tls: issuer.tls } }, undefined, waitForSessionRuntime)
+  const owners = userPod ? new UserPodService({ ...userPod, release: release!,
+    issuer: { endpoint: issuer.endpoint, tls: issuer.tls } }, undefined, waitForSessionRuntime) : undefined
   let observer: Awaited<ReturnType<typeof connectSessionRuntime>> | undefined
   let current = original
   const ownPolicies = new Set<string>()
@@ -145,14 +166,15 @@ async function main() {
       protectedMarker: '内部技术文档：', preserved: [], removed: [internalDesign, internalSource] },
   }
   const scenarioNames = ['disabled-before', 'allow', 'redact', 'deny', 'outage', 'disabled-after', ...Object.keys(businessScenarios)]
-  const base = buildKubectlBaseArgs(input.userPod.namespace, input.userPod.kubeconfig)
-  const name = userPodName(input.ownerId, input.userPod.allocationId)
+  const base = userPod ? buildKubectlBaseArgs(userPod.namespace, userPod.kubeconfig) : undefined
+  const name = userPod ? userPodName(input.ownerId, userPod.allocationId) : undefined
   const podSchema = z.object({ metadata: z.object({ uid: z.string().min(1) }), status: z.object({
     containerStatuses: z.array(z.object({ name: z.string(), restartCount: z.number().int().nonnegative(),
       state: z.object({ running: z.object({ startedAt: z.string().min(1) }).optional() }) })),
   }) })
   async function snapshot() {
-    const pod = podSchema.parse(await readK8sResource(base, 'pod', name))
+    if (hostRuntime) return readHostEgressSnapshot(hostRuntime, hostContext)
+    const pod = podSchema.parse(await readK8sResource(base!, 'pod', name!))
     const runtime = pod.status.containerStatuses.find(item => item.name === 'runtime')
     assert(runtime?.state.running, 'The isolated native runtime must be running')
     return { uid: pod.metadata.uid, restarts: runtime.restartCount, startedAt: runtime.state.running.startedAt }
@@ -226,14 +248,15 @@ async function main() {
     }
     assert.equal(legacy.status, 403, 'New legacy sessions must not bypass the managed Cloud model gate')
     proof.legacySessionCreationRejected = true
-    const connection = await owners.find(input.ownerId)
-    assert(connection, 'The product did not create the isolated owner runtime')
-    const verified = await owners.resolve(input.ownerId)
+    const connection = hostRuntime ? resolveCohostConnection() : await owners!.find(input.ownerId)
+    assert(connection, 'The product did not create the configured runtime')
+    const verified = hostRuntime ? connection : await owners!.resolve(input.ownerId)
     proof.runtimeProvenanceVerified = true
     observer = await connectSessionRuntime(verified, input.ownerId)
     await applied(original.policy)
     const initialPod = await snapshot()
-    proof.rows.push({ scenario: 'bootstrap', realModelAnswered: true, podUid: initialPod.uid })
+    proof.rows.push({ scenario: 'bootstrap', realModelAnswered: true,
+      ...(hostRuntime ? { containerId: initialPod.uid } : { podUid: initialPod.uid }) })
     for (const scenario of scenarioNames) {
       const isDenied = scenario === 'deny' || scenario === 'outage'
       const business = businessScenarios[scenario]
@@ -271,12 +294,13 @@ async function main() {
       proof.rows.push({ scenario, revision: current.policy.revision, nativeApplied: true,
         modelRequests: added.length, requestDigests, realModelAnswered: !isDenied && !response.clarificationRequested, callerGateFailure: isDenied,
         clarificationRequested: response.clarificationRequested,
-        originalRetained: true, sameOwnerPod: true, freshReplyMarkerRequired: !isDenied && !isWholeRecord,
+        originalRetained: true, sameOwnerPod: !hostRuntime, sameRuntime: true, freshReplyMarkerRequired: !isDenied && !isWholeRecord,
         ...(business ? { businessFamily: business.family, wholeRecordRedacted: isWholeRecord,
           publicContentPreserved: business.preserved.length > 0 } : {}) })
       save()
     }
-    proof.sameOwnerPod = true
+    proof.sameOwnerPod = !hostRuntime
+    proof.sameRuntime = true
   } catch (error) {
     proof.error = error instanceof Error ? error.message.replaceAll(input.accessToken, '[hidden]') : 'Live qualification failed'
   } finally {
@@ -287,14 +311,16 @@ async function main() {
       const observed = await view()
       if (!observed.isInherited) {
         assert(ownPolicies.has(fingerprint(observed.policy)), 'Preserve a policy changed by another administrator')
-        current = await request<PolicyView>('/api/v1/settings/egress/inherit?scope=organization', 'POST', { expectedRevision: observed.policy.revision })
+        current = hostRuntime && !original.isInherited
+          ? await request<PolicyView>(policyPath, 'PUT', { policy: original.policy, expectedRevision: observed.policy.revision })
+          : await request<PolicyView>('/api/v1/settings/egress/inherit?scope=organization', 'POST', { expectedRevision: observed.policy.revision })
       } else current = observed
-      assert(current.isInherited && !current.policy.enabled, 'Restore the inherited disabled policy')
+      assert(current.isInherited === original.isInherited && fingerprint(current.policy) === fingerprint(original.policy), 'Restore the original disabled policy and inheritance')
       if (observer) await applied(current.policy)
       proof.policyRestored = true
     } catch { proof.cleanupErrors.push('policy-restore') }
     observer?.client.close()
-    await owners.close()
+    await owners?.close()
     proof.passed = !proof.error && proof.policyRestored && proof.nativeDefaultVerified && proof.legacySessionCreationRejected && proof.runtimeProvenanceVerified
       && proof.cleanupErrors.length === 0 && proof.rows.length === 1 + scenarioNames.length
     save()
