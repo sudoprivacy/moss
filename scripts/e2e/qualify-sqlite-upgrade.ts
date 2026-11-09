@@ -8,6 +8,9 @@ if (process.argv[2] === '--prepare-controller-config') {
 } else if (process.argv[2] === '--inspect-controller') {
   assert.equal(process.argv.length, 6, 'Usage: --inspect-controller <absolute-db> <verified-service-pid> <heartbeat-timeout-ms>')
   console.log(JSON.stringify(inspectSqliteController(process.argv[3]!, Number(process.argv[4]), Number(process.argv[5])), null, 2))
+} else if (process.argv[2] === '--streaming') {
+  assert.equal(process.argv.length, 4, 'Usage: --streaming <absolute-existing-database-path>')
+  console.log(JSON.stringify(await qualifySqliteUpgrade(process.argv[3]!, 'streaming'), null, 2))
 } else {
   assert.equal(process.argv.length, 3, 'Usage: qualify-sqlite-upgrade <absolute-existing-database-path>')
   console.log(JSON.stringify(await qualifySqliteUpgrade(process.argv[2]!), null, 2))

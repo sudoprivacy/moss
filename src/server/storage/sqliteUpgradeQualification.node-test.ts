@@ -8,6 +8,83 @@ import { test } from 'node:test'
 import { DirectConnectStore } from '../db.js'
 import { inspectSqliteController, prepareControllerConfiguration, qualifySqliteUpgrade } from './sqliteUpgradeQualification.js'
 
+void test('streaming inventory matches typed multiset hashes and detects changes without exposing values', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'moss-upgrade-stream-'))
+  const path = join(root, 'moss.db')
+  try {
+    const initial = new DirectConnectStore(path)
+    await initial.close()
+    const db = new DatabaseSync(path)
+    db.exec('CREATE TABLE private_fixture (value, text TEXT)')
+    const insert = db.prepare('INSERT INTO private_fixture VALUES (?, ?)')
+    for (const value of [null, 9007199254740993n, 1.25, new Uint8Array([0, 255]), 'private-value']) {
+      insert.run(value, 'private-text')
+      insert.run(value, 'private-text')
+    }
+    db.close()
+    const before = readFileSync(path)
+    const bounded = await qualifySqliteUpgrade(path)
+    const streaming = await qualifySqliteUpgrade(path, 'streaming')
+    assert.deepEqual(streaming.sourceTables, bounded.sourceTables)
+    assert.equal(streaming.inventoryMode, 'streaming')
+    assert(!JSON.stringify(streaming).includes('private-value'))
+    assert(!JSON.stringify(streaming).includes('private-text'))
+    assert.deepEqual(readFileSync(path), before)
+    const changed = new DatabaseSync(path)
+    // Reordering the same typed multiset must not change its hash.
+    changed.exec('CREATE TABLE reordered AS SELECT * FROM private_fixture ORDER BY rowid DESC; DELETE FROM private_fixture; INSERT INTO private_fixture SELECT * FROM reordered; DROP TABLE reordered')
+    changed.close()
+    const reordered = await qualifySqliteUpgrade(path, 'streaming')
+    assert.deepEqual(reordered.sourceTables.private_fixture, streaming.sourceTables.private_fixture)
+    const mutation = new DatabaseSync(path)
+    mutation.exec("UPDATE private_fixture SET text='changed' WHERE rowid=1")
+    mutation.close()
+    const mutated = await qualifySqliteUpgrade(path, 'streaming')
+    assert.equal(mutated.sourceTables.private_fixture.rows, streaming.sourceTables.private_fixture.rows)
+    assert.notEqual(mutated.sourceTables.private_fixture.sha256, streaming.sourceTables.private_fixture.sha256)
+    const duplicate = new DatabaseSync(path)
+    duplicate.exec('DELETE FROM private_fixture WHERE rowid=2; INSERT INTO private_fixture SELECT * FROM private_fixture WHERE rowid=3')
+    duplicate.close()
+    const duplicated = await qualifySqliteUpgrade(path, 'streaming')
+    assert.equal(duplicated.sourceTables.private_fixture.rows, mutated.sourceTables.private_fixture.rows)
+    assert.notEqual(duplicated.sourceTables.private_fixture.sha256, mutated.sourceTables.private_fixture.sha256)
+  } finally {
+    assert.equal(dirname(root), resolve(tmpdir()))
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+void test('large inventory preserves every WAL row while the default bound still refuses', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'moss-upgrade-large-'))
+  const path = join(root, 'moss.db')
+  const initial = new DirectConnectStore(path)
+  await initial.close()
+  const db = new DatabaseSync(path)
+  try {
+    db.exec(`PRAGMA journal_mode=WAL; CREATE TABLE audit_fixture (id INTEGER PRIMARY KEY, value TEXT);
+      WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<103073)
+      INSERT INTO audit_fixture SELECT id, 'retained-' || id FROM ids`)
+    const before = db.prepare('SELECT count(*) AS n, sum(id) AS total FROM audit_fixture').get()
+    await assert.rejects(qualifySqliteUpgrade(path), /Qualification row bound exceeded: audit_fixture/)
+    const result = await qualifySqliteUpgrade(path, 'streaming')
+    assert.equal(result.sourceTables.audit_fixture.rows, 103073)
+    assert.equal(result.existingRowsPreserved, true)
+    assert.equal(result.idempotentReopen, true)
+    assert.equal(result.runtimeStarted, false)
+    assert.deepEqual(db.prepare('SELECT count(*) AS n, sum(id) AS total FROM audit_fixture').get(), before)
+    const limited = new DatabaseSync(path)
+    limited.exec('DELETE FROM audit_fixture WHERE id=103073')
+    limited.close()
+    const changed = await qualifySqliteUpgrade(path, 'streaming')
+    assert.equal(changed.sourceTables.audit_fixture.rows, 103072)
+    assert.notEqual(changed.sourceTables.audit_fixture.sha256, result.sourceTables.audit_fixture.sha256)
+  } finally {
+    db.close()
+    assert.equal(dirname(root), resolve(tmpdir()))
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 void test('native configuration preparation preserves original settings and refuses stale pins or output reuse', async () => {
   const root = mkdtempSync(join(tmpdir(), 'moss-upgrade-config-'))
   const path = join(root, 'moss.db'), config = join(root, 'server.json'), output = join(root, 'prepared.json')
