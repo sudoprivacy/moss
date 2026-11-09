@@ -23,7 +23,7 @@ runs:
       uses: actions/checkout@v5
       with:
         repository: sudoprivacy/sudowork
-        ref: 48fe8fee517af8f5cfbd94cb91dabccad9687ed7
+        ref: 73a317e77c3ad19c9dfe4a0c09fdd2308c647250
         path: .tmp/verified-native-setup
         persist-credentials: false
         sparse-checkout-cone-mode: false
@@ -31,6 +31,10 @@ runs:
           .github/scripts/cache-sharp-libvips.mjs
           .github/scripts/verify-sharp-libvips-cache.mjs
           .github/scripts/verify-sharp-native-cache.mjs
+          .github/scripts/verify-sharp-download-recovery.mjs
+    - name: Verify shared native download recovery with real curl
+      shell: bash
+      run: node .tmp/verified-native-setup/.github/scripts/verify-sharp-download-recovery.mjs
     - name: Cache verified sharp archives
       uses: actions/cache@v4
       with:
