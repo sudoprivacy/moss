@@ -29,3 +29,8 @@ void test('a separate execution issuer does not inherit the embedded secret stor
   assert.equal(execution.tls?.cert, '/runtime-controller')
   assert.equal(environment.MOSS_NEXUS_ZONE_ID, 'existing-secrets-zone')
 })
+void test('an explicitly plaintext local connection retains a required null TLS binding', () => {
+  const config: SessionConnectionConfig = { endpoint: 'http://127.0.0.1:22141', tls: null, authToken: '' }
+  assert.deepEqual(resolveCohostConnection({ MOSS_COHOST_CONNECTION: encodeCohostConnection(config) }), config)
+  assert.throws(() => resolveCohostConnection({ MOSS_COHOST_CONNECTION: JSON.stringify({ endpoint: config.endpoint, authToken: '' }) }))
+})

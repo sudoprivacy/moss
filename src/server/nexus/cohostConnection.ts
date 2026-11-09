@@ -18,7 +18,11 @@ export function encodeCohostConnection(config: SessionConnectionConfig): string 
 
 /** Resolve exactly the coordinator's connection, or the external deployment endpoint. */
 export function resolveCohostConnection(env: NodeJS.ProcessEnv = process.env): SessionConnectionConfig {
-  if (env.MOSS_COHOST_CONNECTION) return connectionSchema.parse(JSON.parse(env.MOSS_COHOST_CONNECTION))
+  if (env.MOSS_COHOST_CONNECTION) {
+    const connection = connectionSchema.parse(JSON.parse(env.MOSS_COHOST_CONNECTION))
+    return { endpoint: connection.endpoint, tls: connection.tls ?? null, authToken: connection.authToken,
+      ...(connection.runtimeEndpoint ? { runtimeEndpoint: connection.runtimeEndpoint } : {}) }
+  }
   const { mode: _mode, ...config } = resolveCohostNexusConfig(env)
   return config
 }

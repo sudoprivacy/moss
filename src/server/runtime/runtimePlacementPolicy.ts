@@ -1,9 +1,9 @@
 import { ResourceAccessError } from '../catalog/resourceError.js'
 
-/** Keep shared cloud execution isolated and bind metered native inference to its owner box. */
+/** Enforce the configured native entrypoint and isolate shared cloud execution. */
 export function assertRuntimePlacement(runtimeType: string, isOwnerPodConfigured: boolean, isMetered = false, isNativeOnly = false): void {
-  if (isOwnerPodConfigured && isNativeOnly && runtimeType !== 'cohost') {
-    throw new ResourceAccessError(403, 'New cloud sessions must use the shared native runtime')
+  if (isNativeOnly && runtimeType !== 'cohost') {
+    throw new ResourceAccessError(403, 'New sessions must use the configured native runtime')
   }
   if (isOwnerPodConfigured && (runtimeType === 'host' || runtimeType === 'docker')) {
     throw new ResourceAccessError(403, 'Cloud sessions must use the isolated compute runtime')
