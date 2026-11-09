@@ -24,7 +24,7 @@ runs:
       with:
         repository: sudoprivacy/sudowork
         ref: 73a317e77c3ad19c9dfe4a0c09fdd2308c647250
-        path: .tmp/verified-native-setup
+        path: tmp/verified-native-setup
         persist-credentials: false
         sparse-checkout-cone-mode: false
         sparse-checkout: |
@@ -34,7 +34,7 @@ runs:
           .github/scripts/verify-sharp-download-recovery.mjs
     - name: Verify shared native download recovery with real curl
       shell: bash
-      run: node .tmp/verified-native-setup/.github/scripts/verify-sharp-download-recovery.mjs
+      run: node tmp/verified-native-setup/.github/scripts/verify-sharp-download-recovery.mjs
     - name: Cache verified sharp archives
       uses: actions/cache@v4
       with:
@@ -48,9 +48,9 @@ runs:
         npm_config_cache: ${{ runner.temp }}/npm-cache
       run: |
         if [[ "$RUNNER_OS" != macOS && "$RUNNER_ARCH" == X64 ]]; then
-          node .tmp/verified-native-setup/.github/scripts/cache-sharp-libvips.mjs --with-prebuild
+          node tmp/verified-native-setup/.github/scripts/cache-sharp-libvips.mjs --with-prebuild
         else
-          node .tmp/verified-native-setup/.github/scripts/cache-sharp-libvips.mjs
+          node tmp/verified-native-setup/.github/scripts/cache-sharp-libvips.mjs
         fi
         node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "npm_config_cache=" + process.env.npm_config_cache + "\n")'
     - name: Install dependencies with the original lockfile policy
@@ -71,7 +71,7 @@ runs:
       run: |
         sharp_package="$(node -e "const {createRequire}=require('node:module'); console.log(createRequire(require.resolve('@xenova/transformers')).resolve('sharp/package.json'))")"
         if [[ "$RUNNER_OS" != macOS && "$RUNNER_ARCH" == X64 ]]; then
-          node .tmp/verified-native-setup/.github/scripts/verify-sharp-native-cache.mjs "$sharp_package"
+          node tmp/verified-native-setup/.github/scripts/verify-sharp-native-cache.mjs "$sharp_package"
         else
-          node .tmp/verified-native-setup/.github/scripts/verify-sharp-libvips-cache.mjs "$sharp_package"
+          node tmp/verified-native-setup/.github/scripts/verify-sharp-libvips-cache.mjs "$sharp_package"
         fi
