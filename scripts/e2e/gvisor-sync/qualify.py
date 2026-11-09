@@ -64,8 +64,8 @@ def main():
     args = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         parser.error('Run on an isolated Linux host or container with runtime namespace capabilities.')
-    if os.uname().machine != 'x86_64':
-        parser.error('The host fault fixture qualifies the Linux AMD64 syscall ABI.')
+    if os.uname().machine not in ('x86_64', 'aarch64'):
+        parser.error('The host fault fixture requires the Linux AMD64 or ARM64 syscall ABI.')
     runtime = args.runtime.resolve(strict=True)
     manifest = args.manifest.resolve(strict=True)
     files = verify_release(runtime, manifest, args.sha256)
@@ -89,7 +89,7 @@ def main():
         'sources': {name: digest(source / name) for name in
                     ['qualify.py', 'gvisor-sync-probe.c', 'gvisor-sync-fault.c']},
         'method': 'An inherited host seccomp filter returns errno for fsync/fdatasync.',
-        'cases': [], 'kernel': os.uname().release,
+        'cases': [], 'kernel': os.uname().release, 'machine': os.uname().machine,
     }
 
     def run(label, command):

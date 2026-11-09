@@ -87,7 +87,7 @@ def qualify(args):
              'runtimeSha256': files['runsc'], 'namespace': namespace,
              'testNice': os.getpriority(os.PRIO_PROCESS, 0), 'configVersion': args.config_version,
              'sources': {path.name: digest(path) for path in [Path(__file__), Path(__file__).with_name('shim-guest.c')]},
-             'success': False}
+             'machine': os.uname().machine, 'success': False}
     try:
         config = work / 'containerd.toml'
         disabled = ['io.containerd.grpc.v1.cri', 'io.containerd.cri.v1.runtime',

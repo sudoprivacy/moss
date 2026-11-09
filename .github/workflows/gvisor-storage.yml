@@ -22,8 +22,16 @@ jobs:
   sync-errors:
     # Skipped on draft PRs: heavy CI starts once the PR is marked ready.
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    name: Host sync error propagation
-    runs-on: ubuntu-24.04
+    name: Host sync error propagation (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
       GVISOR_QUALIFICATION_ROOT: /tmp/moss-gvisor-${{ github.run_id }}-${{ github.run_attempt }}
@@ -31,7 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify archive and host installation contracts
-        run: python3 -m unittest discover -s deploy/runtime/gvisor -p 'test_*.py' -v
+        run: |
+          umask 0002
+          python3 -m unittest discover -s deploy/runtime/gvisor -p 'test_*.py' -v
       - name: Prepare isolated qualification directories
         shell: bash
         run: |
@@ -68,8 +78,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ${{ runner.temp }}/nexus-storage-target
-          key: gvisor-nexus-${{ runner.os }}-${{ hashFiles('scripts/e2e/gvisor-sync/nexus-source.lock.json') }}
-          restore-keys: gvisor-nexus-${{ runner.os }}-
+          key: gvisor-nexus-${{ runner.os }}-${{ matrix.architecture }}-${{ hashFiles('scripts/e2e/gvisor-sync/nexus-source.lock.json') }}
+          restore-keys: gvisor-nexus-${{ runner.os }}-${{ matrix.architecture }}-
       - name: Build the real Nexus database and CAS suites
         shell: bash
         run: |
@@ -80,8 +90,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/gvisor-cache
-          key: gvisor-content-v1-${{ runner.os }}-${{ hashFiles('deploy/runtime/gvisor/runtime.lock.json') }}
-          restore-keys: gvisor-content-v1-${{ runner.os }}-
+          key: gvisor-content-v1-${{ runner.os }}-${{ matrix.architecture }}-${{ hashFiles('deploy/runtime/gvisor/runtime.lock.json') }}
+          restore-keys: gvisor-content-v1-${{ runner.os }}-${{ matrix.architecture }}-
       - name: Build the pinned toolchain image
         run: docker build -t moss-gvisor-builder deploy/runtime/gvisor
       - name: Build and qualify upstream and the candidate
@@ -165,12 +175,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gvisor-storage-qualification
+          name: gvisor-storage-qualification-${{ matrix.architecture }}
           path: ${{ env.GVISOR_QUALIFICATION_ROOT }}/output
           retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
-          name: gvisor-release-candidate
+          name: gvisor-release-candidate-${{ matrix.architecture }}
           path: ${{ env.GVISOR_QUALIFICATION_ROOT }}/output/distribution
           retention-days: 14
           if-no-files-found: error

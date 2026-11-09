@@ -17,6 +17,9 @@ def package(build, source, output):
     if not re.fullmatch('[0-9A-Za-z][0-9A-Za-z._-]*', lock['version']):
         raise ValueError('A portable release version is required')
     receipt = json.loads((build / 'build.json').read_text())
+    architecture = receipt.get('architecture')
+    if architecture not in {item['architecture'] for item in lock['platforms'].values()}:
+        raise ValueError('Build receipt must identify its pinned native architecture')
     if (not receipt.get('success') or receipt['baseline'] or
             receipt['sourceCommit'] != lock['source']['commit'] or
             receipt['sourceArchiveSha256'] != lock['source']['sha256'] or
@@ -35,7 +38,7 @@ def package(build, source, output):
     if json.loads((release / 'manifest.json').read_text())['version'] != lock['version']:
         raise ValueError('Build version differs from the release pin')
     provenance = {
-        'version': lock['version'], 'architecture': 'linux-amd64',
+        'version': lock['version'], 'architecture': architecture,
         'upstream': lock['source'], 'lockSha256': receipt['lockSha256'],
         'manifestSha256': receipt['manifestSha256'], 'sourceImages': receipt['sourceImages'],
         'recipeFiles': receipt['recipeFiles'], 'packagerSha256': digest(Path(__file__)),
@@ -44,7 +47,7 @@ def package(build, source, output):
                 'provenance.json': json.dumps(provenance, indent=2).encode(),
                 'bin/manifest.json': (release / 'manifest.json').read_bytes()}
     output.mkdir(parents=True, exist_ok=False)
-    filename = 'gvisor-' + lock['version'] + '-linux-amd64.tar.gz'
+    filename = 'gvisor-' + lock['version'] + '-' + architecture + '.tar.gz'
     archive = output / filename
     with archive.open('xb') as file, gzip.GzipFile(filename='', mode='wb', compresslevel=1, fileobj=file, mtime=0) as compressed, \
             tarfile.open(fileobj=compressed, mode='w') as tar:
@@ -61,7 +64,7 @@ def package(build, source, output):
                 member.mode, member.size = 0o555, path.stat().st_size
                 with path.open('rb') as stream:
                     tar.addfile(member, stream)
-    result = {'version': lock['version'], 'architecture': 'linux-amd64', 'filename': filename,
+    result = {'version': lock['version'], 'architecture': architecture, 'filename': filename,
               'archiveSha256': digest(archive), 'manifestSha256': receipt['manifestSha256'],
               'archiveBytes': archive.stat().st_size}
     (output / 'release.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
@@ -73,6 +76,9 @@ def qualify(distribution, installation, syscalls, storage, shim, revision):
     """Bind a packaged archive to its actual installed full-matrix qualification."""
     result = release_metadata(json.loads((distribution / 'release.json').read_text()))
     installed, calls, nexus, runtime = [json.loads(path.read_text()) for path in [installation, syscalls, storage, shim]]
+    machine = {'linux-amd64': 'x86_64', 'linux-arm64': 'aarch64'}[result['architecture']]
+    if any(receipt.get('machine') != machine for receipt in (calls, nexus, runtime)):
+        raise ValueError('Every runtime qualification must execute on the packaged architecture')
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('An exact source revision is required')
     if (installed['archiveSha256'] != result['archiveSha256'] or

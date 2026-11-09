@@ -84,6 +84,13 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(json.loads(self.labels.read_text())['node-label+'], [label + '=installed'])
         self.assertEqual(self.running, {'preceding-workload'})
 
+    def test_arm64_handler_retains_workload_and_selects_only_arm64_nodes(self):
+        self.release['architecture'] = 'linux-arm64'
+        result = self.activate()
+        self.assertEqual(result['runtimeClass']['scheduling']['nodeSelector']['kubernetes.io/arch'], 'arm64')
+        self.assertEqual(result['retainedContainerCount'], 1)
+        self.assertEqual(self.running, {'preceding-workload'})
+
     def test_idempotent_install_verifies_loaded_handler_without_another_restart(self):
         first = self.activate()
         second = self.activate()
@@ -95,9 +102,11 @@ class NodeTests(unittest.TestCase):
         template = self.containerd / 'config.toml.tmpl'
         original = '{{ template "base" . }}\n# customer handler\n'
         template.write_text(original)
-        self.labels.parent.mkdir()
+        template.chmod(0o644)
+        self.labels.parent.mkdir(mode=0o755)
         old = 'moss.sudo.dev/gvisor-' + 'a' * 52 + '=installed'
         self.labels.write_text(json.dumps({'node-label+': [old]}))
+        self.labels.chmod(0o644)
         self.activate()
         self.assertTrue(template.read_text().startswith(original))
         self.assertIn(old, json.loads(self.labels.read_text())['node-label+'])
@@ -107,6 +116,7 @@ class NodeTests(unittest.TestCase):
         template = self.containerd / 'config-v3.toml.tmpl'
         original = b'{{ template "base" . }}\r\n# customer configuration\r\n'
         template.write_bytes(original)
+        template.chmod(0o644)
         self.activate()
         self.assertTrue(template.read_bytes().startswith(original))
         installed = template.read_bytes()
@@ -131,7 +141,7 @@ class NodeTests(unittest.TestCase):
         self.assertFalse(self.fixture.prefix.exists())
 
     def test_a_writable_or_symlinked_configuration_is_refused(self):
-        self.labels.parent.mkdir()
+        self.labels.parent.mkdir(mode=0o755)
         self.labels.write_text('{}')
         self.labels.chmod(0o666)
         with self.assertRaisesRegex(ValueError, 'protected regular file'):
@@ -149,6 +159,7 @@ class NodeTests(unittest.TestCase):
         template = self.containerd / 'config-v3.toml.tmpl'
         original = '{{ template "base" . }}\n# retained template\n'
         template.write_text(original)
+        template.chmod(0o644)
         self.fail_restart = True
         with self.assertRaisesRegex(subprocess.CalledProcessError, 'non-zero'):
             self.activate()

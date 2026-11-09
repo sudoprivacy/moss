@@ -71,6 +71,19 @@ class FetchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'metadata checksum'):
             fetch.fetch(Path(selected['release']), selected['releaseSha256'], self.cache)
 
+    def test_authenticated_arm64_distribution_uses_the_same_online_and_offline_verifier(self):
+        archive = self.archive.with_name('gvisor-fixture-linux-arm64.tar.gz')
+        self.archive.rename(archive)
+        self.release.update(architecture='linux-arm64', filename=archive.name, urls=[archive.as_uri()])
+        self.metadata.write_text(json.dumps(self.release))
+        selected = fetch.distribution('arm64', 'qualified', self.metadata)
+        self.assertEqual(selected['provider'], 'qualified')
+        first = self.acquire()
+        self.assertEqual(first['architecture'], 'linux-arm64')
+        self.assertEqual(self.acquire(offline=True), first)
+        with self.assertRaisesRegex(ValueError, 'does not support amd64'):
+            fetch.distribution('amd64', 'qualified', self.metadata)
+
     def test_upstream_architecture_and_explicit_channel_remain_available(self):
         self.assertEqual(fetch.distribution('arm64', metadata=self.metadata), {'provider': 'upstream', 'version': 'latest'})
         self.assertEqual(fetch.distribution('amd64', '20261012.0', self.metadata), {'provider': 'upstream', 'version': '20261012.0'})

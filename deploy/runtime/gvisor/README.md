@@ -24,9 +24,14 @@ The [CI workflow](../../../.github/workflows/gvisor-storage.yml) builds the
 baseline and candidate using the same source tree and toolchain. The upstream
 `//:release` target assembles runsc, the containerd shim and all matching sidecars.
 The release manifest identifies every executable, including the Sentry kernel.
+The same source and backport have pinned native AMD64 and ARM64 toolchains.
+CI qualifies both architectures independently, including host syscall fault
+injection, Nexus recovery and the installed containerd shim. Qualification must
+identify the packaged architecture; an AMD64 receipt cannot qualify ARM64 bytes.
 The vendor release label follows gVisor's release-version format, enabling its
-default sidecar version enforcement. Builds use the upstream AMD64 optimized
-release configuration.
+default sidecar version enforcement. Builds use the matching upstream optimized
+release configuration. The native architecture also selects the checksummed
+Bazel executable and a separate build/cache namespace.
 Compiler work uses Bazel file isolation, one job, reduced CPU priority and a
 bounded container. The Go SDK source manifest determines the compiler and
 analyzer inputs; upstream actions marked `no-sandbox` retain their explicit
@@ -73,7 +78,11 @@ The [publication workflow](../../../.github/workflows/publish-gvisor.yml)
 consumes a successful `dev` push qualification run. All latest source workflows
 and their jobs must succeed before publication. GitHub and Tencent COS receive
 the same archive and metadata; public readback verifies complete contents.
-The gVisor release has its own tag and content-addressed COS path.
+The gVisor release has its own architecture-qualified tag and content-addressed
+COS path. Publication selects one architecture from a successful full source
+run. Existing published releases and deployed distribution locks retain their
+identities; a newly built ARM64 candidate needs publication and device acceptance
+before it can become the appliance default.
 
 ```mermaid
 flowchart LR

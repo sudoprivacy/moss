@@ -16,7 +16,8 @@ from unittest.mock import patch
 import install
 import package as packaging
 import publish as publication
-from release import acquire, digest, relative_file, verify_release
+from release import acquire, digest, relative_file, release_metadata, verify_release
+from build import build_platform
 
 
 def install_worker(archive, archive_sha, manifest_sha, prefix, template):
@@ -25,6 +26,26 @@ def install_worker(archive, archive_sha, manifest_sha, prefix, template):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_release_architecture_and_filename_must_agree(self):
+        for architecture in ['linux-amd64', 'linux-arm64']:
+            value = {'version': 'fixture', 'architecture': architecture,
+                     'filename': 'gvisor-fixture-' + architecture + '.tar.gz',
+                     'archiveSha256': 'a' * 64, 'manifestSha256': 'b' * 64}
+            self.assertEqual(release_metadata(value), value)
+            for changed in ['linux-riscv64', 'linux-arm64' if architecture == 'linux-amd64' else 'linux-amd64']:
+                with self.subTest(architecture=architecture, changed=changed), self.assertRaisesRegex(ValueError, 'architecture-matched'):
+                    release_metadata({**value, 'architecture': changed})
+
+    def test_native_build_selection_refuses_unknown_or_mislabeled_toolchains(self):
+        lock = json.loads(Path(__file__).with_name('runtime.lock.json').read_text())
+        for machine, architecture in [('x86_64', 'linux-amd64'), ('aarch64', 'linux-arm64')]:
+            self.assertEqual(build_platform(lock, machine)['architecture'], architecture)
+        with self.assertRaisesRegex(ValueError, 'pinned native'):
+            build_platform(lock, 'riscv64')
+        lock['platforms']['aarch64']['architecture'] = 'linux-amd64'
+        with self.assertRaisesRegex(ValueError, 'pinned native'):
+            build_platform(lock, 'aarch64')
+
     def test_names_reject_aliases_and_parent_paths(self):
         for name in ['.', '../escape', '/absolute', 'a//b', './runsc', 'a/../b', 'C:escape', 'a\\b', 'a\0b']:
             with self.subTest(name=name), self.assertRaises(ValueError):
@@ -82,6 +103,18 @@ class DownloadTests(unittest.TestCase):
 
 
 class PublicationGateTests(unittest.TestCase):
+    def test_publication_architecture_must_match_and_tags_do_not_collide(self):
+        for architecture in ['amd64', 'arm64']:
+            release = {'version': 'fixture', 'architecture': 'linux-' + architecture,
+                       'filename': 'gvisor-fixture-linux-' + architecture + '.tar.gz',
+                       'archiveSha256': 'a' * 64}
+            with patch.object(publication, 'source_gate', return_value=({'head_sha': 'b' * 40}, release)):
+                report = publication.publish('1', Path('unused-fixture'), True, architecture)
+                self.assertEqual(report['releaseTag'], 'gvisor-fixture-linux-' + architecture)
+                self.assertFalse(report['published'])
+                with self.assertRaisesRegex(ValueError, 'publication architecture'):
+                    publication.publish('1', Path('unused-fixture'), True, 'arm64' if architecture == 'amd64' else 'amd64')
+
     def utf8_cli(self, output, exit_code=0):
         """Decode actual child output using the caller's encoding or a Windows GBK default."""
         run = subprocess.run
@@ -142,7 +175,7 @@ class QualificationGateTests(unittest.TestCase):
                        'archiveBytes': archive.stat().st_size}
             (root / 'release.json').write_text(json.dumps(release))
             installed = {'runsc': '/qualified/bin/runsc', **{key: release[key] for key in ['archiveSha256', 'manifestSha256']}}
-            common = {'success': True, 'manifestSha256': release['manifestSha256'],
+            common = {'success': True, 'machine': 'x86_64', 'manifestSha256': release['manifestSha256'],
                       'runtimeSha256': 'b' * 64, 'releaseLibrarySha256': digest(Path(__file__).with_name('release.py')),
                       'platforms': ['ptrace', 'systrap'], 'directfsModes': [True, False]}
             calls = {**common, 'runtime': installed['runsc'], 'expect': 'propagated',
@@ -159,6 +192,11 @@ class QualificationGateTests(unittest.TestCase):
                     packaging.qualify(root, *inputs, 'f' * 40)
                 self.assertFalse((root / 'qualification.json').exists())
             inputs[-1].write_text(json.dumps(shim))
+            inputs[1].write_text(json.dumps({**calls, 'machine': 'aarch64'}))
+            with self.assertRaisesRegex(ValueError, 'packaged architecture'):
+                packaging.qualify(root, *inputs, 'f' * 40)
+            self.assertFalse((root / 'qualification.json').exists())
+            inputs[1].write_text(json.dumps(calls))
             packaging.qualify(root, *inputs, 'f' * 40)
             self.assertTrue(json.loads((root / 'qualification.json').read_text())['success'])
 
@@ -172,7 +210,7 @@ class InstallationTests(unittest.TestCase):
         self.root.chmod(0o755)
         self.prefix = self.root / 'versions'
         self.template = self.root / 'containerd/config.toml.tmpl'
-        self.template.parent.mkdir()
+        self.template.parent.mkdir(mode=0o755)
         self.payload = {
             'runsc': b'runsc', 'containerd-shim-runsc-v1': b'shim',
             'gvisor-bin/gvisor_sentry': b'sentry',
