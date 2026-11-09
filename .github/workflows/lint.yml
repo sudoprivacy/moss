@@ -21,13 +21,15 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install root dependencies
-        run: bun install
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Install root dependencies
+        uses: ./.github/actions/install-bun-dependencies
+        with:
+          frozen-lockfile: 'false'
 
       - name: Lint src/server
         run: npx eslint src/server

@@ -46,7 +46,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.1'
-      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/install-bun-dependencies
       - name: Run authorization, actual HTTP and native process cases
         run: >-
           node scripts/run-node-tests.js src/server/agentControl

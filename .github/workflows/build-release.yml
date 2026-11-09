@@ -52,7 +52,9 @@ jobs:
           node-version: '22.22.1'
 
       - name: Install dependencies
-        run: bun install
+        uses: ./.github/actions/install-bun-dependencies
+        with:
+          frozen-lockfile: 'false'
 
       - name: Lint server and node tests
         run: bun run lint
@@ -160,7 +162,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.1'
-      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/install-bun-dependencies
       - name: Verify pinned contract bytes on every runtime platform
         run: node --test scripts/contracts/nexus-prewrite-source.test.mjs scripts/contracts/registry-source.test.mjs
       - name: Install checksum-verified runtime
@@ -247,7 +249,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.1'
-      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/install-bun-dependencies
       - name: Verify owner isolation, active daemon crash and exact durable recovery
         run: bash scripts/e2e/run-cohost-recovery.sh
         env:
@@ -283,7 +285,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.1'
-      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/install-bun-dependencies
       - uses: ./.github/actions/shared-images
       - uses: actions/cache@v4
         with:
@@ -392,7 +394,7 @@ jobs:
           bun-version: latest
 
       - name: Install release manifest dependencies
-        run: bun install --frozen-lockfile
+        uses: ./.github/actions/install-bun-dependencies
 
       - name: Validate deployment scripts
         run: |
