@@ -264,7 +264,7 @@ async function main() {
   await resetControlLog()
   await resetStatusLog()
   await resetBroadcastLog()
-  await setSeatState({ seatNo: 'A', tray: { tray_state: 'opened', tray_flipped: 'true' } })
+  await setSeatState({ seatNo: 'A', tray: { open: 'true', flipped: 'true' } })
   const trayClose = await sendMessage(token, '关闭小桌板')
   const trayControlLog = await getControlLog()
   const trayStatusLog = await getStatusLog()
@@ -278,7 +278,7 @@ async function main() {
   check('tray guard tells passenger to fold first', /折叠|展开|不能关闭/.test(trayClose.reply), `reply=${trayClose.reply}`)
 
   await resetControlLog()
-  await setSeatState({ seatNo: 'A', tray: { tray_state: 'opened', tray_flipped: 'false' } })
+  await setSeatState({ seatNo: 'A', tray: { open: 'true', flipped: 'false' } })
   const trayCloseAllowed = await sendMessage(token, '关闭小桌板')
   const trayAllowedLog = await getControlLog()
   log(`  乘客: 关闭小桌板 (已折叠)`)

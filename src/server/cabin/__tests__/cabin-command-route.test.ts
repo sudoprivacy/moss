@@ -122,7 +122,7 @@ describe('executeHardwareControl', () => {
             data: {
               target: 'A',
               key: 'tray',
-              data: { tray_state: 'opened', tray_flipped: 'true' },
+              data: { open: 'true', flipped: 'true' },
             },
           }), { status: 200 })
         }
@@ -140,7 +140,7 @@ describe('executeHardwareControl', () => {
     expect(calls.some(call => call.url.includes('/admin-api/cabin/broadcast/error-seat'))).toBe(true)
   })
 
-  it('allows tray close when the tray is already folded', async () => {
+  it('does not dispatch tray close when the tray is already closed', async () => {
     const calls: Array<{ url: string; method?: string }> = []
     const services = new CabinServices({
       config: { controlBaseUrl: 'http://control.local', controlTimeoutMs: 50 } as unknown as CabinConfig,
@@ -153,7 +153,7 @@ describe('executeHardwareControl', () => {
             data: {
               target: 'A',
               key: 'tray',
-              data: { tray_state: 'opened', tray_flipped: 'false' },
+              data: { open: 'false', flipped: 'false' },
             },
           }), { status: 200 })
         }
@@ -164,7 +164,47 @@ describe('executeHardwareControl', () => {
     const route = buildRouteFromCommand(context, 'seat.tray.close')!
     const result = await services.executeHardwareControl({ route })
 
+    expect(result.slots.execution_status).toBe('succeeded')
+    expect(result.slots.already_reached).toBe(true)
+    expect(calls.some(call => call.url.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toBe(false)
+  })
+
+  it('allows tray close when the tray is folded but still open', async () => {
+    const calls: Array<{ url: string; method?: string }> = []
+    const services = new CabinServices({
+      config: { controlBaseUrl: 'http://control.local', controlTimeoutMs: 50 } as unknown as CabinConfig,
+      store: {} as never,
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), method: init?.method })
+        if (String(url).includes('/admin-api/tcp/hardware/status')) {
+          return Response.json({ code: 0, data: { target: 'A', key: 'tray', data: { open: 'true', flipped: 'false' } } })
+        }
+        return Response.json({ code: 0 })
+      },
+    })
+
+    const result = await services.executeHardwareControl({ route: buildRouteFromCommand(context, 'seat.tray.close')! })
+
     expect(result.slots.execution_status).toBe('dispatched')
     expect(calls.some(call => call.url.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toBe(true)
+  })
+
+  it('blocks tray close when the status response omits required fields', async () => {
+    const calls: Array<{ url: string; method?: string }> = []
+    const services = new CabinServices({
+      config: { controlBaseUrl: 'http://control.local', controlTimeoutMs: 50 } as unknown as CabinConfig,
+      store: {} as never,
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), method: init?.method })
+        return Response.json({ code: 0, data: { target: 'A', key: 'tray', data: {} } })
+      },
+    })
+
+    const route = buildRouteFromCommand(context, 'seat.tray.close')!
+    const result = await services.executeHardwareControl({ route })
+
+    expect(result.slots.execution_status).toBe('blocked')
+    expect(result.slots.blocked_reason).toBe('tray_status_unavailable')
+    expect(calls.some(call => call.url.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toBe(false)
   })
 })

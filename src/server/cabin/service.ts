@@ -1459,6 +1459,32 @@ export class CabinServices {
       }
     }
     const data = extractHardwareStatusData(status.payload)
+    if (!Object.prototype.hasOwnProperty.call(data, 'flipped') || !Object.prototype.hasOwnProperty.call(data, 'open')) {
+      return {
+        intent: input.route.intent,
+        slots: {
+          ...input.route.slots,
+          execution_status: 'blocked',
+          blocked_reason: 'tray_status_unavailable',
+          status_data: data,
+        },
+        toolCall: input.route.toolCall,
+        reply: '当前暂时无法确认小桌板状态，不能关闭，请稍后再试或联系乘务员。',
+      }
+    }
+    if (!isTrayUnfolded(data) && !isTruthyStatusFlag(data.open)) {
+      return {
+        intent: input.route.intent,
+        slots: {
+          ...input.route.slots,
+          execution_status: 'succeeded',
+          already_reached: true,
+          status_data: data,
+        },
+        toolCall: input.route.toolCall,
+        reply: '小桌板已处于关闭状态，无需重复操作。',
+      }
+    }
     if (!isTrayUnfolded(data)) return null
 
     const message = `${seatNo} 小桌板未折叠，无法关闭`
@@ -1487,7 +1513,7 @@ export class CabinServices {
           severity: 'warning',
           message,
           details: {
-            reason: 'tray_flipped_true',
+            reason: 'flipped_true',
             tray: data,
           },
         })
@@ -2462,7 +2488,7 @@ function isTruthyStatusFlag(value: unknown): boolean {
 }
 
 function isTrayUnfolded(data: Record<string, unknown>): boolean {
-  return isTruthyStatusFlag(data.tray_flipped)
+  return isTruthyStatusFlag(data.flipped)
 }
 
 function formatHardwareStatusReply(key: CabinHardwareStatusKey, data: Record<string, unknown>): string {
@@ -2471,7 +2497,7 @@ function formatHardwareStatusReply(key: CabinHardwareStatusKey, data: Record<str
   }
   if (key === 'tray') {
     const flipped = isTrayUnfolded(data) ? '展开' : '折叠'
-    const state = data.tray_state === 'closed' ? '关闭' : data.tray_state === 'opened' ? '打开' : '未知'
+    const state = data.open === undefined ? '未知' : isTruthyStatusFlag(data.open) ? '打开' : '关闭'
     return `当前小桌板处于${state}状态，桌板为${flipped}状态。`
   }
   if (key === 'reading_light' && data.on !== undefined) {

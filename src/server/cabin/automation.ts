@@ -626,10 +626,14 @@ export class CabinFlightAutomation {
       if (!safety) {
         statusFailures += 1
       } else {
-        if (!toBool(safety.data.presence)) {
+        if (!hasStatusField(safety.data, 'presence')) {
+          statusFailures += 1
+        } else if (!toBool(safety.data.presence)) {
           problems.push({ type: 'PASSENGER_NOT_PRESENT', severity: 'warning', message: `${seat.seatNo} 座位乘客未在席`, details: safety.data })
         }
-        if (!toBool(safety.data.seatbelt)) {
+        if (!hasStatusField(safety.data, 'seatbelt')) {
+          statusFailures += 1
+        } else if (!toBool(safety.data.seatbelt)) {
           problems.push({ type: 'SEATBELT_NOT_FASTENED', severity: 'critical', message: `${seat.seatNo} 座位安全带未扣合`, details: safety.data })
         }
       }
@@ -666,6 +670,8 @@ export class CabinFlightAutomation {
       const posture = await this.getHardwareStatus(seat, 'posture', requestId, phaseCode, phaseName)
       if (!posture) {
         statusFailures += 1
+      } else if (!hasStatusField(posture.data, 'position') || toNumber(posture.data.position) === null) {
+        statusFailures += 1
       } else if (toNumber(posture.data.position) !== 0) {
         problems.push({ type: 'SEAT_NOT_UPRIGHT', severity: 'critical', message: `${seat.seatNo} 座椅未归位`, details: posture.data })
         controls.push({ command: 'seat.cushion', params: { position: '0' } })
@@ -673,16 +679,16 @@ export class CabinFlightAutomation {
       const tray = await this.getHardwareStatus(seat, 'tray', requestId, phaseCode, phaseName)
       if (!tray) {
         statusFailures += 1
-      } else if (!hasStatusField(tray.data, 'tray_flipped') || !hasStatusField(tray.data, 'tray_state')) {
+      } else if (!hasStatusField(tray.data, 'flipped') || !hasStatusField(tray.data, 'open')) {
         statusFailures += 1
-      } else if (toBool(tray.data.tray_flipped)) {
+      } else if (toBool(tray.data.flipped)) {
         problems.push({
           type: 'TRAY_NOT_FOLDED',
           severity: 'critical',
           message: `${seat.seatNo} 小桌板仍处于展开状态`,
           details: tray.data,
         })
-      } else if (!isTrayClosed(tray.data.tray_state)) {
+      } else if (toBool(tray.data.open)) {
         problems.push({ type: 'TRAY_NOT_CLOSED', severity: 'critical', message: `${seat.seatNo} 小桌板未收起`, details: tray.data })
         controls.push({ command: 'seat.tray.close', params: {} })
       }
@@ -1013,7 +1019,7 @@ export class CabinFlightAutomation {
     const reached = key === 'posture'
       ? status !== null && hasStatusField(status.data, 'position') && toNumber(status.data.position) === 0
       : key === 'tray'
-        ? status !== null && hasStatusField(status.data, 'tray_state') && hasStatusField(status.data, 'tray_flipped') && isTrayClosed(status.data.tray_state) && !toBool(status.data.tray_flipped)
+        ? status !== null && hasStatusField(status.data, 'open') && hasStatusField(status.data, 'flipped') && !toBool(status.data.open) && !toBool(status.data.flipped)
         : status !== null && hasStatusField(status.data, 'on') && !toBool(status.data.on)
     if (reached) return true
     this.recordSeatAlert(
@@ -1487,11 +1493,6 @@ function toNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null
   }
   return null
-}
-
-function isTrayClosed(value: unknown): boolean {
-  if (typeof value !== 'string') return false
-  return ['closed', 'close', '0', '收起', '关闭'].includes(value.trim().toLowerCase())
 }
 
 function describeSeatProblem(problem: SeatProblem): string {

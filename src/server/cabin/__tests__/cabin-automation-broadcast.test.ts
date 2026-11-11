@@ -180,7 +180,7 @@ describe('CabinFlightAutomation external broadcasts', () => {
             : key === 'posture'
               ? { position: '0' }
               : key === 'tray'
-                ? { tray_state: 'closed', tray_flipped: 'false' }
+                ? { open: 'false', flipped: 'false' }
                 : key === 'reading_light' || key === 'ceiling_state'
                   ? { on: 'false' }
                   : { higherBag: 'false', lowerBag: 'false', bagLock: 'true' }
@@ -189,7 +189,7 @@ describe('CabinFlightAutomation external broadcasts', () => {
           : key === 'posture'
             ? { position: '20' }
             : key === 'tray'
-              ? { tray_state: 'opened', tray_flipped: 'false' }
+              ? { open: 'true', flipped: 'false' }
               : key === 'reading_light' || key === 'ceiling_state'
                 ? { on: 'true' }
                 : { higherBag: 'false', lowerBag: 'false', bagLock: 'true' }
@@ -346,7 +346,7 @@ describe('CabinFlightAutomation external broadcasts', () => {
               ? { presence: 'true', seatbelt: 'true' }
               : key === 'posture'
                 ? { position: '0' }
-                : { tray_state: 'closed' },
+                : { open: 'false' },
           },
         })
       }

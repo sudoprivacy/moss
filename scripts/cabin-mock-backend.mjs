@@ -32,14 +32,14 @@ const wsClients = new Set()
 const seatState = new Map([
   ['A', {
     posture: { position: '20' },
-    tray: { tray_state: 'opened', tray_flipped: 'false' },
+    tray: { open: 'true', flipped: 'false' },
     safety: { presence: 'true', seatbelt: 'false', wireless_charging: 'false', safe_to_move: 'true' },
     comfort: { ventilation_level: '0', heating_level: '0', massage_level: '0' },
     reading_light: { on: 'false', pwm: '0' },
   }],
   ['B', {
     posture: { position: '0' },
-    tray: { tray_state: 'closed', tray_flipped: 'false' },
+    tray: { open: 'false', flipped: 'false' },
     safety: { presence: 'true', seatbelt: 'true', wireless_charging: 'false', safe_to_move: 'true' },
     comfort: { ventilation_level: '0', heating_level: '0', massage_level: '0' },
     reading_light: { on: 'false', pwm: '0' },
@@ -74,7 +74,7 @@ function ensureSeat(seatNo) {
   if (!seatState.has(seatNo)) {
     seatState.set(seatNo, {
       posture: { position: '0' },
-      tray: { tray_state: 'closed', tray_flipped: 'false' },
+      tray: { open: 'false', flipped: 'false' },
       safety: { presence: 'true', seatbelt: 'true', wireless_charging: 'false', safe_to_move: 'true' },
       comfort: { ventilation_level: '0', heating_level: '0', massage_level: '0' },
       reading_light: { on: 'false', pwm: '0' },
@@ -87,7 +87,7 @@ function flightDataMessage(phase) {
   return JSON.stringify({
     type: 'flight_data',
     content: JSON.stringify({
-      mavpacktype: 'CE25_AUTO_GUIDE_DATA',
+      mavpackettype: 'CE25_AUTO_GUIDE_DATA',
       afcs_status_data: [1, 1, 0, 0, 0, 0, 1, phase, 1],
       control_mode: 1,
       current_leg_index: 5,
@@ -202,12 +202,12 @@ const server = http.createServer(async (req, res) => {
       state.posture.position = url.searchParams.get('position') || '0'
     }
     if (url.pathname === '/admin-api/tcp-client/cmd/seat/tray/open') {
-      state.tray.tray_state = 'opened'
-      state.tray.tray_flipped = 'false'
+      state.tray.open = 'true'
+      state.tray.flipped = 'false'
     }
     if (url.pathname === '/admin-api/tcp-client/cmd/seat/tray/close') {
-      state.tray.tray_state = 'closed'
-      state.tray.tray_flipped = 'false'
+      state.tray.open = 'false'
+      state.tray.flipped = 'false'
     }
     const entry = {
       at: new Date().toISOString(),

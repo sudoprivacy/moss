@@ -65,11 +65,15 @@ type HardwareState = {
   higherBag?: boolean | string
   lowerBag?: boolean | string
   posture?: number | string
-  trayState?: string
+  trayOpen?: boolean | string
   trayFlipped?: boolean | string
+  presence?: boolean | string
+  seatbelt?: boolean | string
   readingLight?: boolean | string
   ceilingLight?: boolean | string
   omitBagFields?: boolean
+  omitSafetyFields?: boolean
+  omitPostureField?: boolean
   applyControls?: boolean
 }
 
@@ -97,14 +101,16 @@ async function runPhase(phaseCode: number, state: HardwareState): Promise<{ stor
           ? {}
           : { bagLock: state.bagLock ?? 'true', higherBag: state.higherBag ?? 'false', lowerBag: state.lowerBag ?? 'false' }
         : key === 'posture'
-          ? { position: state.posture ?? '0' }
+          ? state.omitPostureField ? {} : { position: state.posture ?? '0' }
           : key === 'tray'
-            ? { tray_state: state.trayState ?? 'closed', tray_flipped: state.trayFlipped ?? 'false' }
+            ? { open: state.trayOpen ?? 'false', flipped: state.trayFlipped ?? 'false' }
             : key === 'reading_light'
               ? { on: state.readingLight ?? 'false' }
               : key === 'ceiling_state'
                 ? { on: state.ceilingLight ?? 'false' }
-                : { presence: 'true', seatbelt: 'true' }
+                : state.omitSafetyFields
+                  ? {}
+                  : { presence: state.presence ?? 'true', seatbelt: state.seatbelt ?? 'true', safeToMove: 'false' }
       return Response.json({ code: 0, data: { target: key === 'ceiling_state' ? 'cabin' : 'A', key, data, aircraftNo: 'B-WITHFLIGHT-01' } })
     }
     if (url.pathname.startsWith('/admin-api/tcp-client/cmd/')) {
@@ -112,7 +118,7 @@ async function runPhase(phaseCode: number, state: HardwareState): Promise<{ stor
         if (url.pathname.endsWith('/seat/light')) state.readingLight = 'false'
         if (url.pathname.endsWith('/cabin/ceiling/light')) state.ceilingLight = 'false'
         if (url.pathname.endsWith('/seat/cushion')) state.posture = '0'
-        if (url.pathname.endsWith('/seat/tray/close')) state.trayState = 'closed'
+        if (url.pathname.endsWith('/seat/tray/close')) state.trayOpen = 'false'
       }
       return Response.json({ code: 0, data: 'ok' })
     }
@@ -150,10 +156,44 @@ describe('CabinFlightAutomation baggage and hardware controls', () => {
     expect(store.listAlerts().alerts.some(alert => alert.alertType.startsWith('BAG_'))).toBe(false)
   })
 
-  it('blocks tray close when tray_flipped is true', async () => {
-    const { store, calls } = await runPhase(16, { trayState: 'opened', trayFlipped: 'true' })
+  it('does not create false safety or posture alerts when status fields are missing', async () => {
+    const { store, calls } = await runPhase(16, { omitSafetyFields: true, omitPostureField: true })
+    const alerts = store.listAlerts().alerts
+    expect(alerts.some(alert => alert.alertType === 'PASSENGER_NOT_PRESENT')).toBe(false)
+    expect(alerts.some(alert => alert.alertType === 'SEATBELT_NOT_FASTENED')).toBe(false)
+    expect(alerts.some(alert => alert.alertType === 'SEAT_NOT_UPRIGHT')).toBe(false)
+    expect(calls.some(call => call.includes('/admin-api/tcp-client/cmd/seat/cushion'))).toBe(false)
+  })
+
+  it('interprets the hardware status shape returned at the site', async () => {
+    const { store, calls } = await runPhase(16, {
+      presence: 'false',
+      seatbelt: 'true',
+      posture: '0',
+      trayOpen: 'false',
+      trayFlipped: 'false',
+      readingLight: 'false',
+      ceilingLight: 'false',
+    })
+    const alerts = store.listAlerts().alerts
+    expect(alerts.some(alert => alert.alertType === 'PASSENGER_NOT_PRESENT')).toBe(true)
+    expect(alerts.some(alert => alert.alertType === 'SEATBELT_NOT_FASTENED')).toBe(false)
+    expect(alerts.some(alert => alert.alertType === 'SEAT_NOT_UPRIGHT')).toBe(false)
+    expect(alerts.some(alert => alert.alertType.startsWith('TRAY_'))).toBe(false)
+    expect(calls.some(call => call.includes('/admin-api/tcp-client/cmd/'))).toBe(false)
+  })
+
+  it('blocks tray close when flipped is true', async () => {
+    const { store, calls } = await runPhase(16, { trayOpen: 'true', trayFlipped: 'true' })
     expect(store.listAlerts().alerts.some(alert => alert.alertType === 'TRAY_NOT_FOLDED')).toBe(true)
     expect(calls.some(call => call.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toBe(false)
+  })
+
+  it('closes the tray when it is folded but still open', async () => {
+    const { store, calls } = await runPhase(16, { trayOpen: 'true', trayFlipped: 'false' })
+    expect(store.listAlerts().alerts.some(alert => alert.alertType === 'TRAY_NOT_CLOSED')).toBe(true)
+    expect(store.listAlerts().alerts.some(alert => alert.alertType === 'HARDWARE_STATE_NOT_REACHED')).toBe(false)
+    expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toHaveLength(1)
   })
 
   it('turns off reading and ceiling lights and verifies their final state', async () => {
