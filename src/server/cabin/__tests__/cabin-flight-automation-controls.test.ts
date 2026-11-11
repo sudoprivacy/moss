@@ -53,7 +53,7 @@ function flightMessage(phaseCode: number): string {
   return JSON.stringify({
     type: 'flight_data',
     content: JSON.stringify({
-      mavpacktype: 'CE25_AUTO_GUIDE_DATA',
+      mavpackettype: 'CE25_AUTO_GUIDE_DATA',
       afcs_status_data: [1, 1, 0, 0, 0, 0, 1, phaseCode, 1],
       id: 1021,
     }),

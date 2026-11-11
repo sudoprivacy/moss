@@ -11,7 +11,7 @@ import { CabinBroadcastClient } from './broadcastClient.js'
 import { fetchWithTimeout } from './http.js'
 
 type FlightDataMessage = {
-  mavpacktype?: string
+  mavpackettype?: string
   afcs_status_data?: unknown[]
   control_mode?: number
   current_leg_index?: number
@@ -352,12 +352,12 @@ export class CabinFlightAutomation {
   }
 
   private async handleFlightData(content: FlightDataMessage, requestId: string): Promise<void> {
-    if (content.id !== 1021 || content.mavpacktype !== 'CE25_AUTO_GUIDE_DATA') {
+    if (content.id !== 1021 || content.mavpackettype !== 'CE25_AUTO_GUIDE_DATA') {
       this.log({
         event: 'flight_data.ignored',
         requestId,
         ok: true,
-        details: { id: content.id, mavpacktype: content.mavpacktype },
+        details: { id: content.id, mavpackettype: content.mavpackettype },
       })
       return
     }
