@@ -71,6 +71,10 @@ type AutomationControl = {
   params: Record<string, string>
 }
 
+type DelayedSeatControl = AutomationControl & {
+  command: 'seat.cushion' | 'seat.tray.close'
+}
+
 type BroadcastAsset = {
   file: string
   url: string
@@ -124,6 +128,7 @@ const BROADCAST_SPECS: Partial<Record<PhaseName, { title: string; zh: string; en
 }
 
 const MAX_AUTOMATION_LOG_BYTES = 50 * 1024 * 1024
+const SEAT_CONTROL_VERIFY_DELAY_MS = 20_000
 
 export class CabinFlightAutomation {
   private ws: WebSocket | null = null
@@ -134,9 +139,11 @@ export class CabinFlightAutomation {
   private reconnectAttempts = 0
   private lastActivityAt = 0
   private lastPhaseCode: number | null = null
+  private phaseGeneration = 0
   private readonly logFile: string
   private readonly broadcastClient: CabinBroadcastClient
   private readonly ttsInflight = new Map<string, Promise<BroadcastAsset>>()
+  private readonly pendingSeatControlVerifications = new Map<string, NodeJS.Timeout>()
   private phaseTaskQueue: Promise<void> = Promise.resolve()
   private readonly emittedAlertKeys = new Set<string>()
 
@@ -144,6 +151,7 @@ export class CabinFlightAutomation {
     private readonly config: ServerConfig,
     private readonly store: CabinStore,
     private readonly healthReports?: CabinHealthReportService,
+    private readonly seatControlVerifyDelayMs = SEAT_CONTROL_VERIFY_DELAY_MS,
   ) {
     this.logFile = config.cabin.automationLogFile || join(config.rootDir, 'logs', 'cabin-automation.jsonl')
     this.broadcastClient = new CabinBroadcastClient(config.cabin)
@@ -163,6 +171,8 @@ export class CabinFlightAutomation {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
     this.clearWsTimers()
+    for (const timer of this.pendingSeatControlVerifications.values()) clearTimeout(timer)
+    this.pendingSeatControlVerifications.clear()
     this.ws?.close()
     this.ws = null
   }
@@ -373,6 +383,7 @@ export class CabinFlightAutomation {
     }
     const previousPhaseCode = this.lastPhaseCode
     this.lastPhaseCode = phaseCode
+    const phaseGeneration = ++this.phaseGeneration
     this.log({
       event: 'flight.phase.changed',
       requestId,
@@ -381,13 +392,14 @@ export class CabinFlightAutomation {
       ok: true,
       details: { previous_phase_code: previousPhaseCode, label: PHASE_LABELS[phaseCode] || '未知' },
     })
-    await this.enqueuePhaseTask({ requestId, phaseCode, phaseName, content })
+    await this.enqueuePhaseTask({ requestId, phaseCode, phaseName, phaseGeneration, content })
   }
 
   private enqueuePhaseTask(input: {
     requestId: string
     phaseCode: number
     phaseName: PhaseName
+    phaseGeneration: number
     content: FlightDataMessage
   }): Promise<void> {
     const run = this.phaseTaskQueue
@@ -410,9 +422,10 @@ export class CabinFlightAutomation {
     requestId: string
     phaseCode: number
     phaseName: PhaseName
+    phaseGeneration: number
     content: FlightDataMessage
   }): Promise<void> {
-    const { requestId, phaseCode, phaseName } = input
+    const { requestId, phaseCode, phaseName, phaseGeneration } = input
     if (!shouldRunTask(phaseName)) {
       this.log({ event: 'phase.task.skipped', requestId, phaseCode, phaseName, ok: true })
       return
@@ -538,7 +551,7 @@ export class CabinFlightAutomation {
         if (!pushed) summary.alertPushFailures += 1
       }
       for (const control of checks.controls) {
-        const result = await this.sendControl(seat, control, requestId, phaseCode, phaseName)
+        const result = await this.sendControl(seat, control, requestId, phaseCode, phaseName, phaseGeneration)
         summary.controls += 1
         if (!result) summary.controlFailures += 1
       }
@@ -799,6 +812,31 @@ export class CabinFlightAutomation {
     requestId: string,
     phaseCode: number,
     phaseName: PhaseName,
+    phaseGeneration: number,
+  ): Promise<boolean> {
+    const ok = await this.dispatchSeatControl(seat, control, requestId, phaseCode, phaseName, 'initial')
+    if (!ok) return false
+    if (isDelayedSeatControl(control)) {
+      this.scheduleDelayedSeatControlVerification({
+        seat,
+        control,
+        requestId,
+        phaseCode,
+        phaseName,
+        phaseGeneration,
+      })
+      return true
+    }
+    return this.verifySeatControl(seat, control, requestId, phaseCode, phaseName)
+  }
+
+  private async dispatchSeatControl(
+    seat: CabinManagedSeat,
+    control: AutomationControl,
+    requestId: string,
+    phaseCode: number,
+    phaseName: PhaseName,
+    attempt: 'initial' | 'retry',
   ): Promise<boolean> {
     const baseUrl = this.config.cabin.controlBaseUrl?.replace(/\/+$/, '')
     if (!baseUrl) return false
@@ -825,7 +863,7 @@ export class CabinFlightAutomation {
       method: 'POST',
       url: url.toString(),
       ok: true,
-      details: { command: control.command },
+      details: { command: control.command, attempt },
     })
     try {
       const response = await fetchWithTimeout(fetch, url, {
@@ -848,13 +886,13 @@ export class CabinFlightAutomation {
         status: response.status,
         ok,
         elapsedMs: Date.now() - start,
-        details: { command: control.command, payload },
+        details: { command: control.command, attempt, payload },
       })
       if (!ok) {
         this.recordSeatAlert(seat, phaseCode, phaseName, 'HARDWARE_CONTROL_FAILED', `${seat.seatNo} ${control.command} 指令下发失败`, requestId, { payload })
         return false
       }
-      return this.verifySeatControl(seat, control, requestId, phaseCode, phaseName)
+      return true
     } catch (error) {
       this.recordSeatAlert(seat, phaseCode, phaseName, 'HARDWARE_CONTROL_FAILED', `${seat.seatNo} ${control.command} 指令下发异常`, requestId, { error: stringifyError(error), command: control.command })
       this.log({
@@ -871,10 +909,174 @@ export class CabinFlightAutomation {
         ok: false,
         elapsedMs: Date.now() - start,
         error: stringifyError(error),
-        details: { command: control.command },
+        details: { command: control.command, attempt },
       })
       return false
     }
+  }
+
+  private scheduleDelayedSeatControlVerification(input: {
+    seat: CabinManagedSeat
+    control: DelayedSeatControl
+    requestId: string
+    phaseCode: number
+    phaseName: PhaseName
+    phaseGeneration: number
+  }): void {
+    const { seat, control, requestId, phaseCode, phaseName, phaseGeneration } = input
+    const key = delayedControlKey(seat, control)
+    const existing = this.pendingSeatControlVerifications.get(key)
+    if (existing) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      if (this.pendingSeatControlVerifications.get(key) !== timer) return
+      this.pendingSeatControlVerifications.delete(key)
+      void this.verifyAndRetrySeatControl(input).catch(error => {
+        this.log({
+          event: 'hardware.control.delayed_verify_error',
+          requestId,
+          aircraftNo: seat.aircraftNo,
+          flightId: seat.flightId,
+          flightDate: seat.flightDate,
+          phaseCode,
+          phaseName,
+          seatNo: seat.seatNo,
+          ok: false,
+          error: stringifyError(error),
+          details: { command: control.command },
+        })
+      })
+    }, Math.max(0, this.seatControlVerifyDelayMs))
+    timer.unref?.()
+    this.pendingSeatControlVerifications.set(key, timer)
+    this.log({
+      event: 'hardware.control.delayed_verify_scheduled',
+      requestId,
+      aircraftNo: seat.aircraftNo,
+      flightId: seat.flightId,
+      flightDate: seat.flightDate,
+      phaseCode,
+      phaseName,
+      seatNo: seat.seatNo,
+      ok: true,
+      details: { command: control.command, delay_ms: this.seatControlVerifyDelayMs, phase_generation: phaseGeneration },
+    })
+  }
+
+  private async verifyAndRetrySeatControl(input: {
+    seat: CabinManagedSeat
+    control: DelayedSeatControl
+    requestId: string
+    phaseCode: number
+    phaseName: PhaseName
+    phaseGeneration: number
+  }): Promise<void> {
+    const { seat, control, requestId, phaseCode, phaseName, phaseGeneration } = input
+    if (this.stopped) return
+    if (!this.isDelayedControlPhaseCurrent(input)) return
+    if (!requiresDelayedSeatControl(phaseName, control.command)) {
+      this.log({
+        event: 'hardware.control.delayed_verify_cancelled',
+        requestId,
+        aircraftNo: seat.aircraftNo,
+        flightId: seat.flightId,
+        flightDate: seat.flightDate,
+        phaseCode,
+        phaseName,
+        seatNo: seat.seatNo,
+        ok: true,
+        details: { command: control.command, reason: 'control_not_required_for_current_phase' },
+      })
+      return
+    }
+
+    const key: HardwareStatusKey = control.command === 'seat.cushion' ? 'posture' : 'tray'
+    const status = await this.getHardwareStatus(seat, key, requestId, phaseCode, phaseName)
+    if (!this.isDelayedControlPhaseCurrent(input)) return
+    const evaluation = evaluateDelayedSeatControl(control, status)
+    if (evaluation === 'reached') {
+      this.log({
+        event: 'hardware.control.delayed_verify_success',
+        requestId,
+        aircraftNo: seat.aircraftNo,
+        flightId: seat.flightId,
+        flightDate: seat.flightDate,
+        phaseCode,
+        phaseName,
+        seatNo: seat.seatNo,
+        ok: true,
+        details: { command: control.command, key, status: status?.data ?? null },
+      })
+      return
+    }
+    if (evaluation !== 'retry') {
+      this.log({
+        event: 'hardware.control.delayed_verify_skipped',
+        requestId,
+        aircraftNo: seat.aircraftNo,
+        flightId: seat.flightId,
+        flightDate: seat.flightDate,
+        phaseCode,
+        phaseName,
+        seatNo: seat.seatNo,
+        ok: false,
+        details: { command: control.command, key, reason: evaluation, status: status?.data ?? null },
+      })
+      return
+    }
+
+    this.recordSeatAlert(
+      seat,
+      phaseCode,
+      phaseName,
+      'HARDWARE_STATE_NOT_REACHED',
+      `${seat.seatNo} ${control.command} 执行 20 秒后状态未达到目标，已重试一次`,
+      requestId,
+      { command: control.command, status: status?.data ?? null, retry: 1 },
+    )
+    this.log({
+      event: 'hardware.control.delayed_retry',
+      requestId,
+      aircraftNo: seat.aircraftNo,
+      flightId: seat.flightId,
+      flightDate: seat.flightDate,
+      phaseCode,
+      phaseName,
+      seatNo: seat.seatNo,
+      ok: true,
+      details: { command: control.command, key, status: status?.data ?? null, retry: 1 },
+    })
+    await this.dispatchSeatControl(seat, control, requestId, phaseCode, phaseName, 'retry')
+  }
+
+  private isDelayedControlPhaseCurrent(input: {
+    seat: CabinManagedSeat
+    control: DelayedSeatControl
+    requestId: string
+    phaseCode: number
+    phaseName: PhaseName
+    phaseGeneration: number
+  }): boolean {
+    const { seat, control, requestId, phaseCode, phaseName, phaseGeneration } = input
+    if (phaseGeneration === this.phaseGeneration && phaseCode === this.lastPhaseCode) return true
+    this.log({
+      event: 'hardware.control.delayed_verify_cancelled',
+      requestId,
+      aircraftNo: seat.aircraftNo,
+      flightId: seat.flightId,
+      flightDate: seat.flightDate,
+      phaseCode,
+      phaseName,
+      seatNo: seat.seatNo,
+      ok: true,
+      details: {
+        command: control.command,
+        reason: 'flight_phase_changed',
+        current_phase_code: this.lastPhaseCode,
+        scheduled_phase_generation: phaseGeneration,
+        current_phase_generation: this.phaseGeneration,
+      },
+    })
+    return false
   }
 
   private async sendCabinControl(
@@ -1404,6 +1606,33 @@ export function mapPhaseName(code: number): PhaseName {
 
 function shouldRunTask(phaseName: PhaseName): boolean {
   return ['taxi_in', 'taxiing', 'takeoff_prepare', 'takeoff', 'climb', 'descent', 'landing_approach'].includes(phaseName)
+}
+
+function isDelayedSeatControl(control: AutomationControl): control is DelayedSeatControl {
+  return control.command === 'seat.cushion' || control.command === 'seat.tray.close'
+}
+
+function requiresDelayedSeatControl(phaseName: PhaseName, command: DelayedSeatControl['command']): boolean {
+  if (command !== 'seat.cushion' && command !== 'seat.tray.close') return false
+  return ['taxi_in', 'taxiing', 'takeoff_prepare', 'takeoff', 'descent', 'landing_approach'].includes(phaseName)
+}
+
+function delayedControlKey(seat: CabinManagedSeat, control: DelayedSeatControl): string {
+  return [seat.aircraftNo || '', seat.flightId, seat.flightDate, seat.seatNo, control.command].join('|')
+}
+
+function evaluateDelayedSeatControl(
+  control: DelayedSeatControl,
+  status: HardwareStatus | null,
+): 'reached' | 'retry' | 'status_unavailable' | 'tray_not_folded' {
+  if (!status) return 'status_unavailable'
+  if (control.command === 'seat.cushion') {
+    if (!hasStatusField(status.data, 'position') || toNumber(status.data.position) === null) return 'status_unavailable'
+    return toNumber(status.data.position) === 0 ? 'reached' : 'retry'
+  }
+  if (!hasStatusField(status.data, 'open') || !hasStatusField(status.data, 'flipped')) return 'status_unavailable'
+  if (toBool(status.data.flipped)) return 'tray_not_folded'
+  return toBool(status.data.open) ? 'retry' : 'reached'
 }
 
 function readPhaseCode(content: FlightDataMessage): number | null {

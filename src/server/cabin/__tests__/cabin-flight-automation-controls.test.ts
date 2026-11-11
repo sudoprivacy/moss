@@ -77,7 +77,14 @@ type HardwareState = {
   applyControls?: boolean
 }
 
-async function runPhase(phaseCode: number, state: HardwareState): Promise<{ store: CabinStore; calls: string[] }> {
+async function runPhase(
+  phaseCode: number,
+  state: HardwareState,
+  options: {
+    verifyDelayMs?: number
+    afterInitial?: (automation: CabinFlightAutomation) => Promise<void> | void
+  } = {},
+): Promise<{ store: CabinStore; calls: string[] }> {
   const rootDir = await makeTempDir()
   const config = createConfig(rootDir)
   const db = new Database(':memory:') as unknown as DatabaseSync
@@ -124,10 +131,16 @@ async function runPhase(phaseCode: number, state: HardwareState): Promise<{ stor
     }
     return Response.json({ code: 0, data: 'ok' })
   }) as typeof fetch
+  let automation: CabinFlightAutomation | null = null
   try {
-    const automation = new CabinFlightAutomation(config, store)
+    automation = new CabinFlightAutomation(config, store, undefined, options.verifyDelayMs)
     await (automation as unknown as { handleRawMessage(raw: string): Promise<void> }).handleRawMessage(flightMessage(phaseCode))
+    await options.afterInitial?.(automation)
+    if (options.verifyDelayMs !== undefined) {
+      await new Promise(resolve => setTimeout(resolve, options.verifyDelayMs + 40))
+    }
   } finally {
+    automation?.stop()
     globalThis.fetch = previousFetch
   }
   return { store, calls }
@@ -194,6 +207,83 @@ describe('CabinFlightAutomation baggage and hardware controls', () => {
     expect(store.listAlerts().alerts.some(alert => alert.alertType === 'TRAY_NOT_CLOSED')).toBe(true)
     expect(store.listAlerts().alerts.some(alert => alert.alertType === 'HARDWARE_STATE_NOT_REACHED')).toBe(false)
     expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toHaveLength(1)
+  })
+
+  it('checks a tray after the delay and does not retry when the first command reached the target', async () => {
+    const { store, calls } = await runPhase(16, {
+      trayOpen: 'true',
+      trayFlipped: 'false',
+    }, { verifyDelayMs: 10 })
+    expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toHaveLength(1)
+    expect(calls.filter(call => call.includes('/admin-api/tcp/hardware/status?target=A&key=tray'))).toHaveLength(2)
+    expect(store.listAlerts().alerts.some(alert => alert.alertType === 'HARDWARE_STATE_NOT_REACHED')).toBe(false)
+  })
+
+  it('retries a tray close once after the delayed check and does not verify the retry', async () => {
+    const { store, calls } = await runPhase(16, {
+      trayOpen: 'true',
+      trayFlipped: 'false',
+      applyControls: false,
+    }, { verifyDelayMs: 10 })
+    expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toHaveLength(2)
+    expect(calls.filter(call => call.includes('/admin-api/tcp/hardware/status?target=A&key=tray'))).toHaveLength(2)
+    expect(store.listAlerts().alerts.filter(alert => alert.alertType === 'HARDWARE_STATE_NOT_REACHED')).toHaveLength(1)
+  })
+
+  it('retries a seat position command once after the delayed check', async () => {
+    const { store, calls } = await runPhase(16, {
+      posture: '35',
+      applyControls: false,
+    }, { verifyDelayMs: 10 })
+    expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/seat/cushion?seatNo=A&position=0'))).toHaveLength(2)
+    expect(calls.filter(call => call.includes('/admin-api/tcp/hardware/status?target=A&key=posture'))).toHaveLength(2)
+    expect(store.listAlerts().alerts.filter(alert => alert.alertType === 'HARDWARE_STATE_NOT_REACHED')).toHaveLength(1)
+  })
+
+  it('does not retry tray close when the delayed state says the tray is no longer folded', async () => {
+    const state: HardwareState = {
+      trayOpen: 'true',
+      trayFlipped: 'false',
+      applyControls: false,
+    }
+    const { store, calls } = await runPhase(16, state, {
+      verifyDelayMs: 10,
+      afterInitial: () => {
+        state.trayFlipped = 'true'
+      },
+    })
+    expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toHaveLength(1)
+    expect(calls.filter(call => call.includes('/admin-api/tcp/hardware/status?target=A&key=tray'))).toHaveLength(2)
+    expect(store.listAlerts().alerts.some(alert => alert.alertType === 'HARDWARE_STATE_NOT_REACHED')).toBe(false)
+  })
+
+  it('cancels the old delayed check when the flight changes to a phase that does not control the tray', async () => {
+    const { calls } = await runPhase(16, {
+      trayOpen: 'true',
+      trayFlipped: 'false',
+      applyControls: false,
+    }, {
+      verifyDelayMs: 10,
+      afterInitial: automation => (automation as unknown as { handleRawMessage(raw: string): Promise<void> })
+        .handleRawMessage(flightMessage(5)),
+    })
+    expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toHaveLength(1)
+    expect(calls.filter(call => call.includes('/admin-api/tcp/hardware/status?target=A&key=tray'))).toHaveLength(1)
+  })
+
+  it('lets the new phase replace the old delayed check when tray control is still required', async () => {
+    const { store, calls } = await runPhase(16, {
+      trayOpen: 'true',
+      trayFlipped: 'false',
+      applyControls: false,
+    }, {
+      verifyDelayMs: 10,
+      afterInitial: automation => (automation as unknown as { handleRawMessage(raw: string): Promise<void> })
+        .handleRawMessage(flightMessage(2)),
+    })
+    expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/seat/tray/close'))).toHaveLength(3)
+    expect(calls.filter(call => call.includes('/admin-api/tcp/hardware/status?target=A&key=tray'))).toHaveLength(3)
+    expect(store.listAlerts().alerts.filter(alert => alert.alertType === 'HARDWARE_STATE_NOT_REACHED')).toHaveLength(1)
   })
 
   it('turns off reading and ceiling lights and verifies their final state', async () => {
