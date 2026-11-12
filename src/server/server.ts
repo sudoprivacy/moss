@@ -172,6 +172,7 @@ import { loadIndex, vectorSearch, rrfFuse, createQuerySemaphore, runWikiGrep } f
 import { ensureEmbedder } from './wikiIndex/embedder.js'
 import { AgentifyService } from './agentify/service.js'
 import { createAgentifyRoutes } from './agentify/routes.js'
+import { approvalLinkFor, type ConfirmNotifier } from './agentify/confirmNotify.js'
 import { RuntimeSessionDriver } from './agentify/sessionDriver.js'
 import type { NexusVfsLike } from './agentify/agentHome.js'
 import { readUpgradeReport } from './nexus/nexusUpgrade.js'
@@ -186,6 +187,7 @@ import './sources/wecomDrive.js'
 // Corp-app connectors register themselves on import.
 import './corpapps/wecomApp.js'
 import './corpapps/wecomMsgAudit.js'
+import { createCorpApp, getCorpAppCapabilities } from './corpapps/types.js'
 import { WeComMsgAuditConnector } from './corpapps/wecomMsgAudit.js'
 import { MsgAuditWorker } from './corpapps/msgaudit/worker.js'
 import { MediaPurgeWorker, type RetentionTarget } from './corpapps/msgaudit/purgeWorker.js'
@@ -2233,6 +2235,50 @@ export function startServer(
   })
   const eventTriggerIngest = createEventTriggerIngest(eventTriggerService)
 
+  // Agentify task confirmations: notices to confirmers through a corp app that
+  // can send messages (capability `send`, e.g. a WeCom 自建应用). The link
+  // points at the task's approval page in moss admin.
+  const agentifyNoticeApp = (orgId: string, corpAppId: string): { row: Record<string, unknown> | null; problem: string | null } => {
+    const row = runtime.store.getCorpAppById(corpAppId) as Record<string, unknown> | null
+    if (!row || String(row.org_id ?? '') !== orgId) return { row: null, problem: `corp app ${corpAppId} not found` }
+    if (!getCorpAppCapabilities(String(row.type)).includes('send')) return { row: null, problem: `corp app ${String(row.name)} cannot send messages` }
+    if (!Number(row.enabled)) return { row: null, problem: `corp app ${String(row.name)} is disabled` }
+    return { row, problem: null }
+  }
+  const agentifyConfirmNotifier: ConfirmNotifier = {
+    checkCorpApp: (orgId, corpAppId) => agentifyNoticeApp(orgId, corpAppId).problem,
+    approvalLink: callId => approvalLinkFor(config.publicBaseUrl, callId),
+    send: async ({ orgId, corpAppId, to, text }) => {
+      const { row, problem } = agentifyNoticeApp(orgId, corpAppId)
+      if (!row) return { ok: false, invalid: [], error: problem ?? 'corp app unavailable' }
+      const { readSecret } = await import('./sources/secrets.js')
+      const connector = createCorpApp(String(row.type))
+      await connector.init(
+        JSON.parse(String(row.config_json ?? '{}')) as Record<string, unknown>,
+        typeof row.credentials_secret_key === 'string' && row.credentials_secret_key ? await readSecret(row.credentials_secret_key) : {},
+      )
+      if (!connector.sendMessage) return { ok: false, invalid: [], error: 'this corp app cannot send messages' }
+      // One message per account: works for every corp-app type, and a bad
+      // account only costs its own message.
+      const invalid: string[] = []
+      let error: string | undefined
+      for (const account of to) {
+        try {
+          const r = await connector.sendMessage(account, text, 'text')
+          if (!r.ok || (r.invalidUsers ?? []).includes(account)) {
+            invalid.push(account)
+            error ??= r.error
+          }
+        } catch (err) {
+          invalid.push(account)
+          error ??= err instanceof Error ? err.message : String(err)
+        }
+      }
+      const ok = invalid.length < to.length
+      return { ok, invalid, ...(error && !ok ? { error } : {}) }
+    },
+  }
+
   // Agentify: durable agents with an agent home (Nexus VFS when available),
   // searchable history and agent-to-agent collaboration.
   const agentify = new AgentifyService({
@@ -2283,6 +2329,7 @@ export function startServer(
         return false
       }
     },
+    confirmNotifier: agentifyConfirmNotifier,
   })
   runtime.agentifyHooks = {
     onSessionCreated: (sessionId, assistantName, source) => agentify.onSessionCreated(sessionId, assistantName, source),

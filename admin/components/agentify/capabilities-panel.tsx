@@ -8,6 +8,22 @@ import { AccessPickers, EMPTY, ListPicker, type PickOption } from './sharing-pan
 
 const CAPABILITY_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
+const ACCOUNT_ID = /^\S{1,128}$/
+const NO_NOTICE = '__none__'
+
+/** Notice settings the server would reject. */
+export function confirmNotifyProblems(a2a: AgentifyConfig['a2a'] | undefined): string[] {
+  const notify = a2a?.confirmNotify
+  if (!notify) return []
+  const out: string[] = []
+  if (!notify.corpAppId) out.push('确认通知：请选择企业应用')
+  for (const [userId, id] of Object.entries(notify.accountIds ?? {})) {
+    if (!(a2a?.confirmers ?? []).includes(userId)) continue
+    if (id.trim() && !ACCOUNT_ID.test(id.trim())) out.push(`确认通知：接收账号「${id}」不能含空格，且不超过 128 个字符`)
+  }
+  return out
+}
+
 /** Problems the server would reject, shown next to the field. */
 export function capabilityProblems(caps: AgentifyCapability[]): string[] {
   const out: string[] = []
@@ -43,6 +59,11 @@ export function CapabilitiesPanel(props: {
   onChange: (update: (config: AgentifyConfig) => AgentifyConfig) => void
   users: PickOption[]
   agents: PickOption[]
+  /** Enabled corp apps that can send messages (capability `send`). */
+  corpApps: PickOption[]
+  /** Send a test notice with the saved settings. */
+  onTestNotice?: () => void
+  testingNotice?: boolean
 }) {
   const cfg = props.config
   if (!cfg) return <p className="text-xs text-destructive">配置 JSON 无效，请在「JSON」页修正后再使用此页。</p>
@@ -69,7 +90,24 @@ export function CapabilitiesPanel(props: {
       while (c.a2a.capabilities.some(x => x.id === `capability-${n}`)) n += 1
       return { ...c, a2a: { ...c.a2a, capabilities: [...c.a2a.capabilities, { id: `capability-${n}`, kind: 'ask', description: '' }] } }
     })
-  const problems = capabilityProblems(caps)
+  const confirmers = cfg.a2a.confirmers ?? []
+  const notify = cfg.a2a.confirmNotify
+  const setNotify = (next: AgentifyConfig['a2a']['confirmNotify'] | undefined) =>
+    props.onChange(c => {
+      const a2a = { ...c.a2a }
+      if (next) a2a.confirmNotify = next
+      else delete a2a.confirmNotify
+      return { ...c, a2a }
+    })
+  const setWecomId = (userId: string, value: string) => {
+    if (!notify) return
+    const ids = { ...notify.accountIds }
+    if (value) ids[userId] = value
+    else delete ids[userId]
+    setNotify({ ...notify, accountIds: ids })
+  }
+  const userLabel = (id: string) => props.users.find(u => u.value === id)?.label ?? id
+  const problems = [...capabilityProblems(caps), ...confirmNotifyProblems(cfg.a2a)]
   const hasOutbound = caps.some(c => c.allowOutbound)
 
   return (
@@ -108,6 +146,68 @@ export function CapabilitiesPanel(props: {
             />
           </label>
         </div>
+      </div>
+
+      <div className="rounded-lg border p-3 space-y-3" data-testid="confirm-notify">
+        <div>
+          <div className="text-xs font-medium">确认通知</div>
+          <p className="text-xs text-muted-foreground">
+            任务等待确认时，以及任一确认人确认或拒绝后，通过所选企业应用（如企业微信自建应用）给下列确认人发消息。消息只含双方智能体、任务编号和确认链接，不含任务内容。
+          </p>
+        </div>
+        <label className="block space-y-1 max-w-sm">
+          <span className="text-xs text-muted-foreground">发送通知的企业应用</span>
+          <Select
+            value={notify?.corpAppId || NO_NOTICE}
+            onValueChange={v => setNotify(v === NO_NOTICE ? undefined : { corpAppId: v, accountIds: notify?.accountIds ?? {} })}
+          >
+            <SelectTrigger className="h-8" aria-label="发送通知的企业应用">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NO_NOTICE}>不发送通知</SelectItem>
+              {props.corpApps.map(a => (
+                <SelectItem key={a.value} value={a.value}>{a.label}</SelectItem>
+              ))}
+              {notify?.corpAppId && !props.corpApps.some(a => a.value === notify.corpAppId) ? (
+                <SelectItem value={notify.corpAppId}>{notify.corpAppId}（不可用）</SelectItem>
+              ) : null}
+            </SelectContent>
+          </Select>
+          {props.corpApps.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">没有可发送消息的企业应用，请先在「企业应用管理」中添加并启用（如企业微信自建应用）。</span>
+          ) : null}
+        </label>
+        {notify ? (
+          confirmers.length === 0 ? (
+            <p className="text-xs text-amber-600">请先在上方选择任务确认人。</p>
+          ) : (
+            <div className="space-y-2">
+              <div className="grid grid-cols-[minmax(0,180px)_minmax(0,240px)] gap-2 text-xs text-muted-foreground">
+                <span>确认人</span>
+                <span>接收账号（如企业微信 userid）</span>
+              </div>
+              {confirmers.map(userId => (
+                <div key={userId} className="grid grid-cols-[minmax(0,180px)_minmax(0,240px)] gap-2 items-center" data-testid="confirm-notify-row">
+                  <span className="truncate text-sm">{userLabel(userId)}</span>
+                  <Input
+                    className="h-8 font-mono"
+                    aria-label={`${userLabel(userId)} 的接收账号`}
+                    placeholder="不填则不通知此人"
+                    value={notify.accountIds?.[userId] ?? ''}
+                    onChange={e => setWecomId(userId, e.target.value.trim())}
+                  />
+                </div>
+              ))}
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <Button size="sm" variant="outline" disabled={!props.onTestNotice || props.testingNotice} onClick={() => props.onTestNotice?.()}>
+                  发送测试通知
+                </Button>
+                <span className="text-xs text-muted-foreground">按已保存的设置发送，修改后请先保存。确认人需能收到该应用的消息（企业微信：在应用可见范围内）。</span>
+              </div>
+            </div>
+          )
+        ) : null}
       </div>
 
       <div className="flex items-center justify-between">

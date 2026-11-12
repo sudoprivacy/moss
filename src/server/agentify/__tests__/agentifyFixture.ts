@@ -15,6 +15,7 @@ import type { Embedder } from '../../wikiIndex/embedder.js'
 import { AgentifyService } from '../service.js'
 import type { CreateAgentSessionInput, SessionDriver } from '../sessionDriver.js'
 import type { Summarizer } from '../summarizer.js'
+import type { ConfirmNotifier } from '../confirmNotify.js'
 
 export const ORG = 'org-1'
 
@@ -81,7 +82,10 @@ function transcriptLine(role: 'user' | 'assistant', text: string, sessionId: str
   return `${JSON.stringify({ type: role, sessionId, uuid: randomUUID(), parentUuid: null, isSidechain: false, timestamp: new Date(at).toISOString(), message })}\n`
 }
 
-export function createFixture(agentMetas: Array<AssistantStoreMeta & { id: string; name: string; display_name: string }>): Fixture {
+export function createFixture(
+  agentMetas: Array<AssistantStoreMeta & { id: string; name: string; display_name: string }>,
+  opts: { confirmNotifier?: ConfirmNotifier } = {},
+): Fixture {
   const dir = mkdtempSync(path.join(tmpdir(), 'agentify-test-'))
   const store = new DirectConnectStore(path.join(dir, 'moss.db'))
   const agentsDir = path.join(dir, 'assistants')
@@ -184,6 +188,7 @@ export function createFixture(agentMetas: Array<AssistantStoreMeta & { id: strin
     isAdmin: id => admins.has(id),
     isAgentUsableBy: (ref, userId) => usable.has(`${ref.id}:${userId}`),
     summarizer: echoSummarizer,
+    confirmNotifier: opts.confirmNotifier,
   })
 
   const addSession: Fixture['addSession'] = input => {

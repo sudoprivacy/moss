@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { A2AError, type CallerContext } from '../a2aService.js'
 import { createFixture, configurePair, ORG, PAIR_AGENTS, type Fixture } from './agentifyFixture.js'
 import type { A2ACall } from '../store.js'
+import { approvalLinkFor, pendingNoticeText, type ConfirmNotifier } from '../confirmNotify.js'
 
 let fx: Fixture
 afterEach(() => fx?.cleanup())
@@ -383,5 +384,95 @@ describe('agent-to-agent collaboration', () => {
     assert.match(block!, /跟进 PO-778 交期/, 'recent work is listed')
     const hits = await fx.svc.index.search({ orgId: ORG, agentId: 'agent-gendan-uuid', query: 'PO-778 发货', viewer: { kind: 'user', userId: 'u-li' } })
     assert.ok(hits.some(h => h.snippet.includes('SF1234')))
+  })
+
+  it('sends corp-app notices to confirmers when a task waits and when someone decides it', async () => {
+    const sent: Array<{ corpAppId: string; to: string[]; text: string }> = []
+    let failNext = false
+    const notifier: ConfirmNotifier = {
+      checkCorpApp: (_org, id) => (id === 'app-1' ? null : `corp app ${id} not found`),
+      approvalLink: callId => `https://moss.example.com/admin/agentify/confirmations/${callId}`,
+      async send({ corpAppId, to, text }) {
+        if (failNext) {
+          failNext = false
+          throw new Error('network down')
+        }
+        sent.push({ corpAppId, to, text })
+        return { ok: true, invalid: to.filter(id => id === 'left01') }
+      },
+    }
+    fx = createFixture(PAIR_AGENTS, { confirmNotifier: notifier })
+    await configurePair(fx)
+    const shouhou = fx.svc.store.getAgent(ORG, 'agent-shouhou-uuid')!.config
+    const withNotify = (confirmNotify: unknown, confirmers = ['u-boss', 'u-lead', 'u-noim']) => ({
+      ...shouhou,
+      a2a: { ...shouhou.a2a, confirmers, confirmNotify },
+    })
+
+    // The corp app must exist; WeCom userids must look like userids; ids of
+    // people who are no longer confirmers are dropped.
+    await assert.rejects(fx.svc.configure(ORG, 'shouhou', withNotify({ corpAppId: 'nope', accountIds: {} })), /corp app nope not found/)
+    await assert.rejects(fx.svc.configure(ORG, 'shouhou', withNotify({ corpAppId: 'app-1', accountIds: { 'u-boss': 'boss 01' } })), /not a valid account/)
+    const saved = await fx.svc.configure(ORG, 'shouhou', withNotify({ corpAppId: 'app-1', accountIds: { 'u-boss': ' boss01 ', 'u-lead': 'lead01', 'u-gone': 'gone01' } }))
+    assert.deepEqual(saved.config.a2a.confirmNotify, { corpAppId: 'app-1', accountIds: { 'u-boss': 'boss01', 'u-lead': 'lead01' } })
+
+    fx.scripts.set('售后返厂助手', () => ({ reply: '已通知' }))
+    const gendan = await callerFor('跟单助手', 'u-gendan')
+    const flush = () => new Promise(r => setTimeout(r, 20))
+
+    // A task that needs no confirmation sends nothing.
+    await fx.svc.a2a.delegate(gendan, { agent: '售后返厂助手', capability: 'return-report', input: '报表' })
+    await flush()
+    assert.equal(sent.length, 0)
+
+    // Waiting: one message to every confirmer with a WeCom userid, with the task number and link.
+    const call = await fx.svc.a2a.delegate(gendan, { agent: '售后返厂助手', capability: 'notify-supplier', input: '通知供应商', idempotencyKey: 'n1' })
+    await flush()
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0]!.corpAppId, 'app-1')
+    assert.deepEqual(sent[0]!.to, ['boss01', 'lead01'])
+    assert.match(sent[0]!.text, /跟单助手 → 售后返厂助手/)
+    assert.ok(sent[0]!.text.includes(`任务编号：${call.id.slice(0, 8)}`))
+    assert.ok(sent[0]!.text.includes(`https://moss.example.com/admin/agentify/confirmations/${call.id}`))
+    assert.ok(!sent[0]!.text.includes('通知供应商'), 'the notice carries no task content')
+
+    // The same request again (idempotent) is not announced twice.
+    await fx.svc.a2a.delegate(gendan, { agent: '售后返厂助手', capability: 'notify-supplier', input: '通知供应商', idempotencyKey: 'n1' })
+    await flush()
+    assert.equal(sent.length, 1)
+
+    // Any confirmer decides; all confirmers hear who did.
+    await fx.svc.a2a.confirm({ orgId: ORG, userId: 'u-lead', callId: call.id, approve: true })
+    await flush()
+    assert.equal(sent.length, 2)
+    assert.deepEqual(sent[1]!.to, ['boss01', 'lead01'])
+    assert.ok(sent[1]!.text.includes(`任务编号 ${call.id.slice(0, 8)}（跟单助手 → 售后返厂助手）已由 用户u-lead 确认`))
+
+    // An administrator who is not a confirmer may reject; confirmers are told.
+    fx.admins.add('u-admin')
+    const rej = await fx.svc.a2a.delegate(gendan, { agent: '售后返厂助手', capability: 'notify-supplier', input: 'x' })
+    await fx.svc.a2a.confirm({ orgId: ORG, userId: 'u-admin', callId: rej.id, approve: false })
+    await flush()
+    assert.equal(sent.length, 4)
+    assert.match(sent[3]!.text, /已拒绝[\s\S]*已由 用户u-admin 拒绝/)
+
+    // A notice that fails to send does not affect the task.
+    failNext = true
+    const quiet = await fx.svc.a2a.delegate(gendan, { agent: '售后返厂助手', capability: 'notify-supplier', input: 'y' })
+    await flush()
+    assert.equal(fx.svc.store.getCall(quiet.id)!.status, 'pending_confirmation')
+
+    // Admins can send a test notice; WeCom's undeliverable ids are reported.
+    await fx.svc.configure(ORG, 'shouhou', withNotify({ corpAppId: 'app-1', accountIds: { 'u-boss': 'boss01', 'u-lead': 'left01' } }))
+    const test = await fx.svc.testConfirmNotice(ORG, 'agent-shouhou-uuid')
+    assert.deepEqual(test, { sentTo: ['boss01'], invalid: ['left01'] })
+    assert.match(sent.at(-1)!.text, /测试通知/)
+  })
+
+  it('builds the approval link from the public address, and says where to go without one', () => {
+    assert.equal(approvalLinkFor('https://moss.example.com/', 'abc-1'), 'https://moss.example.com/admin/agentify/confirmations/abc-1')
+    assert.equal(approvalLinkFor('', 'abc-1'), null)
+    assert.equal(approvalLinkFor('moss.example.com', 'abc-1'), null)
+    assert.match(pendingNoticeText({ callerName: 'B', targetName: 'A', callId: 'abcdef123456', link: null }), /任务编号：abcdef12\n请登录 moss 管理端/)
   })
 })

@@ -148,13 +148,22 @@ export class WeComAppConnector implements CorpAppConnector {
     to: string,
     text: string,
     format: 'text' | 'markdown' = 'text',
-  ): Promise<{ ok: boolean; msgId?: string }> {
+  ): Promise<{ ok: boolean; msgId?: string; invalidUsers?: string[]; error?: string }> {
     const body =
       format === 'markdown'
         ? { touser: to, msgtype: 'markdown', agentid: Number(this.agentId), markdown: { content: text } }
         : { touser: to, msgtype: 'text', agentid: Number(this.agentId), text: { content: text } }
     const json = await this.requireClient().post('/cgi-bin/message/send', body)
-    return { ok: Number(json.errcode ?? 0) === 0, msgId: json.msgid ? String(json.msgid) : undefined }
+    const errcode = Number(json.errcode ?? 0)
+    // `to` may list several userids joined by '|'; WeCom names the ones it
+    // could not deliver to (not in the app's visible range, or unknown).
+    const invalidUsers = typeof json.invaliduser === 'string' && json.invaliduser ? json.invaliduser.split('|') : []
+    return {
+      ok: errcode === 0,
+      msgId: json.msgid ? String(json.msgid) : undefined,
+      ...(invalidUsers.length ? { invalidUsers } : {}),
+      ...(errcode !== 0 ? { error: `errcode ${errcode}${json.errmsg ? `: ${String(json.errmsg)}` : ''}` } : {}),
+    }
   }
 
   async sendFile(

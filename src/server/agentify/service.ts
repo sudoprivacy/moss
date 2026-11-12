@@ -21,6 +21,7 @@ import { cronRunNote } from './runLabel.js'
 import type { SessionDriver } from './sessionDriver.js'
 import { AgentifyStore, type AgentRow } from './store.js'
 import { ModelSummarizer, type ModelGateway, type Summarizer } from './summarizer.js'
+import { noticeRecipients, testNoticeText, type ConfirmNotifier } from './confirmNotify.js'
 
 export interface AgentifyServiceOptions {
   db: DatabaseSync
@@ -36,6 +37,8 @@ export interface AgentifyServiceOptions {
   getUserAuth: (userId: string, orgId: string) => { role: string; scopes: string[] } | null
   isAdmin: (userId: string, orgId: string) => boolean
   isAgentUsableBy: (ref: AgentRef, userId: string, orgId: string) => boolean
+  /** Notices to confirmers through a corp app; absent = no notices. */
+  confirmNotifier?: ConfirmNotifier
   /** Tests inject a summarizer; production uses the model gateway. */
   summarizer?: Summarizer
 }
@@ -86,6 +89,7 @@ export class AgentifyService {
       digestSession: id => this.digest.digestSessionById(id),
       isAdmin: opts.isAdmin,
       getUserAuth: opts.getUserAuth,
+      notifier: opts.confirmNotifier,
     })
   }
 
@@ -273,11 +277,30 @@ export class AgentifyService {
         throw new AgentifyConfigError(`capability ${cap.id}: run-as user ${cap.runAsUserId} is not an active user of this organization`)
       }
     }
+    const notify = config.a2a.confirmNotify
+    if (notify) {
+      const problem = this.opts.confirmNotifier
+        ? this.opts.confirmNotifier.checkCorpApp(orgId, notify.corpAppId)
+        : 'confirmation notices are not available on this server'
+      if (problem) throw new AgentifyConfigError(`a2a.confirmNotify: ${problem}`)
+    }
     const row = this.store.upsertAgent({ orgId, agentId: ref.id, agentName: ref.name, displayName: ref.displayName, config })
     this.registry.invalidate()
     // Existing sessions of this agent become searchable on the next sweep.
     void this.digest.backfillAgentIds().catch(() => undefined)
     return row
+  }
+
+  /** Send a test notice to the saved confirmers of an agent; reports who did not get it. */
+  async testConfirmNotice(orgId: string, agentId: string): Promise<{ sentTo: string[]; invalid: string[] }> {
+    const row = this.store.getAgent(orgId, agentId)
+    const notify = row?.config.a2a.confirmNotify
+    const to = noticeRecipients(row?.config.a2a.confirmers ?? [], notify)
+    if (!row || !notify || to.length === 0) throw new AgentifyConfigError('no confirmer with an account for notices is saved for this agent')
+    if (!this.opts.confirmNotifier) throw new AgentifyConfigError('confirmation notices are not available on this server')
+    const r = await this.opts.confirmNotifier.send({ orgId, corpAppId: notify.corpAppId, to, text: testNoticeText({ targetName: row.displayName }) })
+    if (!r.ok) throw new AgentifyConfigError(`notice not sent: ${r.error ?? 'unknown error'}`)
+    return { sentTo: to.filter(id => !r.invalid.includes(id)), invalid: r.invalid }
   }
 
   removeAgent(orgId: string, agentId: string): boolean {

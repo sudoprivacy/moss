@@ -1,12 +1,13 @@
 'use client'
 
-import { Navigate, Outlet } from 'react-router-dom'
+import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { AppSidebar } from '@/components/app-sidebar'
 import { Loader2 } from 'lucide-react'
 
 export function DashboardShell() {
   const { isAuthenticated, isLoading } = useAuth()
+  const location = useLocation()
 
   if (isLoading) {
     return (
@@ -17,7 +18,7 @@ export function DashboardShell() {
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace />
+    return <Navigate to={loginPath(location.pathname + location.search)} replace />
   }
 
   return (
@@ -28,4 +29,9 @@ export function DashboardShell() {
       </div>
     </div>
   )
+}
+
+/** The login page, returning to `path` afterwards (home needs no parameter). */
+export function loginPath(path: string): string {
+  return path && path !== '/' ? `/login?next=${encodeURIComponent(path)}` : '/login'
 }

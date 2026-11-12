@@ -42,6 +42,10 @@ services:
       # wiki 资源令牌的签名密钥（config.ts / wikiResourceToken.ts）。
       # 值放在 .env 中，不要写进本文件。
       - MOSS_RESOURCE_TOKEN_SECRET=${MOSS_RESOURCE_TOKEN_SECRET}
+      # 协作任务确认通知（企业微信）里的链接地址：员工在企业微信里（含手机）能打开的
+      # moss 地址。也可写在 server.json 的 server.publicBaseUrl；两处都没有时通知不带链接。
+      # 注意：这里一旦写上（即使为空）就会覆盖 server.json 的值。
+      # - MOSS_PUBLIC_BASE_URL=https://moss.example.com
       # Auth proxy must bind all interfaces so session containers can reach it by
       # container name over moss-network (it injects per-user credentials into
       # outbound calls; still gated by the per-session bearer token). The URL

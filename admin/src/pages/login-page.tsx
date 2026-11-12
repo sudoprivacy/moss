@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -15,13 +15,18 @@ export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const { login, isAuthenticated, isLoading: isCheckingAuth } = useAuth()
+  // Where to go after login (e.g. a task's approval page opened from a WeCom
+  // notice). Only paths inside this app; anything else goes home.
+  const nextParam = searchParams.get('next') ?? ''
+  const next = nextParam.startsWith('/') && !nextParam.startsWith('//') && !nextParam.startsWith('/login') ? nextParam : '/'
 
   useEffect(() => {
     if (!isCheckingAuth && isAuthenticated) {
-      navigate('/', { replace: true })
+      navigate(next, { replace: true })
     }
-  }, [isAuthenticated, isCheckingAuth, navigate])
+  }, [isAuthenticated, isCheckingAuth, navigate, next])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -30,7 +35,7 @@ export default function LoginPage() {
 
     try {
       await login(username, password)
-      navigate('/', { replace: true })
+      navigate(next, { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败')
     } finally {
