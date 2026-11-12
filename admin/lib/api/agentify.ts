@@ -59,8 +59,17 @@ export interface AgentifyConfig {
     capabilities: AgentifyCapability[]
     callers: AccessList
     confirmers: string[]
+    /** Notices to confirmers through a corp app; absent = none. */
+    confirmNotify?: ConfirmNotifyConfig
     dailyCallLimit: number
   }
+}
+
+export interface ConfirmNotifyConfig {
+  /** Corp app the notices go through (any type that can send messages). */
+  corpAppId: string
+  /** Confirmer's moss user id → their account on that corp app (e.g. WeCom userid). */
+  accountIds: Record<string, string>
 }
 
 export interface HistoryPolicy {
@@ -119,6 +128,7 @@ export interface A2ACallView {
   runAs: { id: string; name: string | null } | null
   requiresConfirmation: boolean
   confirmedBy: string | null
+  confirmedByName?: string | null
   targetSessionId: string | null
   callerSessionId: string | null
   createdAt: number
@@ -200,6 +210,11 @@ export const listA2ACalls = (opts: { agentId?: string; status?: string } = {}) =
 }
 
 export const listConfirmations = () => dcClient.get<{ calls: A2ACallView[] }>('/api/v1/agentify/confirmations')
+
+export const getConfirmation = (callId: string) => dcClient.get<{ call: A2ACallView }>(`/api/v1/agentify/confirmations/${enc(callId)}`)
+
+export const testConfirmNotice = (agentId: string) =>
+  dcClient.post<{ sentTo: string[]; invalid: string[] }>(`${BASE}/agents/${enc(agentId)}/testnotice`, {})
 
 export const confirmCall = (callId: string, approve: boolean, note?: string) =>
   dcClient.post<{ call: A2ACallView }>(`/api/v1/agentify/confirmations/${enc(callId)}`, { approve, note })

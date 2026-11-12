@@ -102,6 +102,13 @@ export interface CapabilityConfig {
   requireCallerVisibility?: boolean
 }
 
+export interface ConfirmNotifyConfig {
+  /** Corp app the notices are sent through (any type that can send messages). */
+  corpAppId: string
+  /** Confirmer's moss user id → their account on that corp app (e.g. WeCom userid). */
+  accountIds: Record<string, string>
+}
+
 export interface AgentifyConfig {
   enabled: boolean
   /** Who sees which kind of data. */
@@ -134,6 +141,12 @@ export interface AgentifyConfig {
     callers: AccessList
     /** User ids who may confirm tasks that require confirmation. */
     confirmers: string[]
+    /**
+     * Optional notices to the confirmers, sent through a corp app (e.g. a
+     * WeCom 自建应用): one when a task starts waiting, one when any confirmer
+     * decides it. Confirmers without an account here are not notified.
+     */
+    confirmNotify?: ConfirmNotifyConfig
     /** Per-day ceiling on calls this agent accepts. */
     dailyCallLimit: number
   }
@@ -226,6 +239,34 @@ function stringList(value: unknown, field: string): string[] {
     if (trimmed && !out.includes(trimmed)) out.push(trimmed)
   }
   return out
+}
+
+/** A corp-app account id (e.g. a WeCom userid): no spaces, at most 128 characters. */
+const ACCOUNT_ID = /^\S{1,128}$/
+
+function parseConfirmNotify(value: unknown, confirmers: string[]): ConfirmNotifyConfig | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'object' || Array.isArray(value)) throw new AgentifyConfigError('a2a.confirmNotify must be an object')
+  const r = value as Record<string, unknown>
+  const corpAppId = typeof r.corpAppId === 'string' ? r.corpAppId.trim() : ''
+  if (!corpAppId) throw new AgentifyConfigError('a2a.confirmNotify.corpAppId is required')
+  const raw = r.accountIds ?? {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new AgentifyConfigError('a2a.confirmNotify.accountIds must map confirmer user ids to corp-app accounts')
+  }
+  const accountIds: Record<string, string> = {}
+  for (const [userId, value] of Object.entries(raw as Record<string, unknown>)) {
+    // A confirmer removed from the list takes their account with them.
+    if (!confirmers.includes(userId)) continue
+    if (typeof value !== 'string') throw new AgentifyConfigError(`a2a.confirmNotify.accountIds.${userId} must be a string`)
+    const id = value.trim()
+    if (!id) continue
+    if (!ACCOUNT_ID.test(id)) {
+      throw new AgentifyConfigError(`a2a.confirmNotify: "${id}" is not a valid account (no spaces, at most 128 characters)`)
+    }
+    accountIds[userId] = id
+  }
+  return { corpAppId, accountIds }
 }
 
 /** `["a","b"]` (allow only) or `{ allow: [...], deny: [...] }`. */
@@ -389,6 +430,9 @@ export function parseAgentifyConfig(raw: unknown): AgentifyConfig {
   const callers = accessList(a2aRaw.callers, 'a2a.callers') ?? { allow: stringList(a2aRaw.allowCallers, 'a2a.allowCallers'), deny: [] }
   const sharing = parseSharing(r.sharing, { share: memoryRaw.share, historyReaders: stringList(a2aRaw.historyReaders, 'a2a.historyReaders') })
 
+  const confirmers = stringList(a2aRaw.confirmers, 'a2a.confirmers')
+  const confirmNotify = parseConfirmNotify(a2aRaw.confirmNotify, confirmers)
+
   return {
     enabled: r.enabled === undefined ? true : r.enabled === true,
     sharing,
@@ -396,7 +440,8 @@ export function parseAgentifyConfig(raw: unknown): AgentifyConfig {
     a2a: {
       capabilities,
       callers,
-      confirmers: stringList(a2aRaw.confirmers, 'a2a.confirmers'),
+      confirmers,
+      ...(confirmNotify ? { confirmNotify } : {}),
       dailyCallLimit: positiveInt(a2aRaw.dailyCallLimit, DEFAULT_AGENTIFY_CONFIG.a2a.dailyCallLimit, 'a2a.dailyCallLimit', 100000),
     },
   }

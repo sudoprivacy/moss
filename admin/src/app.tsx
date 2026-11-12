@@ -31,6 +31,7 @@ const CronJobsPage = lazy(() => import('./pages/cron-jobs-page'))
 const EventTriggersPage = lazy(() => import('./pages/event-triggers-page'))
 const AgentifyPage = lazy(() => import('./pages/agentify-page'))
 const AgentifyConfirmationsPage = lazy(() => import('./pages/agentify-confirmations-page'))
+const AgentifyConfirmationPage = lazy(() => import('./pages/agentify-confirmation-page'))
 const McpServersPage = lazy(() => import('./pages/mcp/mcp-servers-page'))
 const McpEnterpriseServersPage = lazy(() => import('./pages/mcp/mcp-enterprise-servers-page'))
 const McpDepartmentServersPage = lazy(() => import('./pages/mcp/mcp-department-servers-page'))
@@ -74,6 +75,16 @@ export default function App() {
         element={
           <SuspendedRoute>
             <LoginPage />
+          </SuspendedRoute>
+        }
+      />
+      {/* One task's approval page, opened from a WeCom notice (often on a
+          phone): full width, no sidebar; login returns here. */}
+      <Route
+        path="/agentify/confirmations/:id"
+        element={
+          <SuspendedRoute>
+            <AgentifyConfirmationPage />
           </SuspendedRoute>
         }
       />

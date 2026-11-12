@@ -28,6 +28,7 @@ import type { A2ACall, A2ACallStatus, AgentifyStore, AgentRow } from './store.js
 import { A2A_TERMINAL } from './store.js'
 import type { SessionDriver } from './sessionDriver.js'
 import { truncateMiddle } from './transcriptDigest.js'
+import { decidedNoticeText, noticeRecipients, pendingNoticeText, taskNumber, type ConfirmNotifier } from './confirmNotify.js'
 
 export const MAX_A2A_DEPTH = Number(process.env.MOSS_AGENTIFY_MAX_DEPTH) || 2
 const ASK_TIMEOUT_MS = Number(process.env.MOSS_AGENTIFY_ASK_TIMEOUT_MS) || 10 * 60 * 1000
@@ -77,6 +78,8 @@ export interface A2ADeps {
   isAdmin: (userId: string, orgId: string) => boolean
   /** Current role and scopes of an employee (null when they no longer exist). */
   getUserAuth: (userId: string, orgId: string) => { role: string; scopes: string[] } | null
+  /** Sends notices to confirmers through a corp app; absent = no notices. */
+  notifier?: ConfirmNotifier
 }
 
 export interface CallableAgent {
@@ -286,6 +289,7 @@ export class A2AService {
       requiresConfirmation: cap.requiresConfirmation === true,
       idempotencyKey: input.idempotencyKey ?? null,
     })
+    if (call?.status === 'pending_confirmation') void this.notifyConfirmers(call, null)
     return call ?? this.deps.store.findCallByIdempotency(caller.orgId, caller.agent.agentId, input.idempotencyKey!)!
   }
 
@@ -304,8 +308,41 @@ export class A2AService {
         })
     if (!ok) throw new A2AError(409, 'not_pending', `call is ${call.status}, not waiting for confirmation`)
     const updated = this.deps.store.getCall(call.id)!
+    void this.notifyConfirmers(updated, { approved: input.approve, byUserId: input.userId })
     if (!input.approve) await this.logExchange(updated)
     return updated
+  }
+
+  /**
+   * Notice to the target agent's confirmers: the task is waiting
+   * (decision = null), or someone approved/rejected it. Never throws: a
+   * notice that cannot be sent leaves the task on the approval page.
+   */
+  private async notifyConfirmers(call: A2ACall, decision: { approved: boolean; byUserId: string } | null): Promise<void> {
+    const notifier = this.deps.notifier
+    if (!notifier) return
+    try {
+      const target = this.deps.store.getAgent(call.orgId, call.targetAgentId)
+      const notify = target?.config.a2a.confirmNotify
+      const to = noticeRecipients(target?.config.a2a.confirmers ?? [], notify)
+      if (!target || !notify || to.length === 0) return
+      const callerName = this.deps.store.getAgent(call.orgId, call.callerAgentId)?.displayName ?? call.callerAgentId
+      const text = decision
+        ? decidedNoticeText({
+            callerName,
+            targetName: target.displayName,
+            callId: call.id,
+            approved: decision.approved,
+            byName: this.deps.getUserName(decision.byUserId) ?? decision.byUserId,
+          })
+        : pendingNoticeText({ callerName, targetName: target.displayName, callId: call.id, link: notifier.approvalLink(call.id) })
+      const r = await notifier.send({ orgId: call.orgId, corpAppId: notify.corpAppId, to, text })
+      const what = decision ? (decision.approved ? 'approved' : 'rejected') : 'pending'
+      if (!r.ok) console.warn(`[agentify] ${what} notice for task ${taskNumber(call.id)} not sent: ${r.error ?? 'unknown error'}`)
+      else if (r.invalid.length > 0) console.warn(`[agentify] ${what} notice for task ${taskNumber(call.id)} not delivered to: ${r.invalid.join(', ')}`)
+    } catch (err) {
+      console.warn(`[agentify] notice for task ${taskNumber(call.id)} failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   /** The calling agent may cancel its own task before it starts. */

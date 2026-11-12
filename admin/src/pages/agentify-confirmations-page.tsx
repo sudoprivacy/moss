@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { CheckCircle2, RefreshCw, XCircle } from 'lucide-react'
 import { DashboardLayout } from '@/components/dashboard-layout'
@@ -72,6 +73,9 @@ export default function AgentifyConfirmationsPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-medium">{call.caller.name} → {call.target.name}</span>
                 <Badge variant="outline">{call.capability}</Badge>
+                <Link to={`/agentify/confirmations/${encodeURIComponent(call.id)}`} className="text-xs font-mono text-primary hover:underline">
+                  任务编号 {call.id.slice(0, 8)}
+                </Link>
                 <span className="text-xs text-muted-foreground">发起员工：{call.actor?.name ?? '—'} · {fmt(call.createdAt)}</span>
               </div>
               {call.runAs ? (

@@ -13,7 +13,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { SharingPanel, type PickOption } from '@/components/agentify/sharing-panel'
-import { CapabilitiesPanel, capabilityProblems } from '@/components/agentify/capabilities-panel'
+import { CapabilitiesPanel, capabilityProblems, confirmNotifyProblems } from '@/components/agentify/capabilities-panel'
+import { listCorpApps } from '@/lib/api/corp-apps'
 import { getUsers } from '@/lib/api/auth'
 import {
   DEFAULT_CONFIG,
@@ -30,6 +31,7 @@ import {
   listConfirmations,
   saveAgentMemory,
   saveAgentifyConfig,
+  testConfirmNotice,
   type A2ACallView,
   type AgentifyAgent,
   type AgentifyConfig,
@@ -118,6 +120,7 @@ a2a.capabilities: 本智能体对外提供的能力（kind=ask 只读问答；ki
 a2a.callers: 可调用本智能体的其他智能体 { allow, deny }（名称 / ID，"*" 表示全部已开启协作的智能体；排除优先）
 sharing: 每类数据的共享范围与名单，见下方「共享权限」。其他智能体不能直接读取本智能体的数据，只能提问，由本智能体交给它
 a2a.confirmers: 可以确认委派任务的员工 ID（管理员始终可以）
+a2a.confirmNotify: 确认通知 { corpAppId: 可发送消息的企业应用 ID, accountIds: { 员工 ID: 该应用中的接收账号（如企业微信 userid） } }
 memory.digestLookbackHours / decayHalfLifeHours / deleteAfterHours: 见上方，留空 = 服务器默认`
 
 export default function AgentifyPage() {
@@ -132,6 +135,8 @@ export default function AgentifyPage() {
   const [configText, setConfigText] = useState('')
   const [saving, setSaving] = useState(false)
   const [userOptions, setUserOptions] = useState<PickOption[] | null>(null)
+  const [corpAppOptions, setCorpAppOptions] = useState<PickOption[] | null>(null)
+  const [testingNotice, setTestingNotice] = useState(false)
   const [configTab, setConfigTab] = useState('general')
 
   const [memoryAgent, setMemoryAgent] = useState<AgentifyAgent | null>(null)
@@ -188,6 +193,25 @@ export default function AgentifyPage() {
         .then(r => setUserOptions(r.users.filter(u => u.status === 'active').map(u => ({ value: u.id, label: u.displayName || u.name }))))
         .catch(() => setUserOptions([]))
     }
+    if (corpAppOptions === null) {
+      listCorpApps()
+        .then(apps => setCorpAppOptions(apps.filter(a => a.enabled && (a.capabilities ?? []).includes('send')).map(a => ({ value: a.id, label: a.name }))))
+        .catch(() => setCorpAppOptions([]))
+    }
+  }
+
+  const sendTestNotice = async () => {
+    if (!configAgent) return
+    setTestingNotice(true)
+    try {
+      const r = await testConfirmNotice(configAgent.id)
+      if (r.invalid.length > 0) toast.warning(`已发送给 ${r.sentTo.join('、') || '无'}；未送达：${r.invalid.join('、')}（账号不存在或收不到该应用的消息）`)
+      else toast.success(`测试通知已发送给 ${r.sentTo.join('、')}`)
+    } catch (err) {
+      toast.error(errorText(err, '发送失败'))
+    } finally {
+      setTestingNotice(false)
+    }
   }
 
   const parsedConfig = useMemo((): AgentifyConfig | null => {
@@ -231,7 +255,7 @@ export default function AgentifyPage() {
       setConfigTab('json')
       return
     }
-    const problems = capabilityProblems(parsed?.a2a?.capabilities ?? [])
+    const problems = [...capabilityProblems(parsed?.a2a?.capabilities ?? []), ...confirmNotifyProblems(parsed?.a2a)]
     if (problems.length > 0) {
       toast.error(problems[0]!)
       setConfigTab('capabilities')
@@ -540,7 +564,15 @@ export default function AgentifyPage() {
               </label>
             </TabsContent>
             <TabsContent value="capabilities" className="pt-2">
-              <CapabilitiesPanel config={parsedConfig} onChange={updateConfig} users={userOptions ?? []} agents={agentOptions} />
+              <CapabilitiesPanel
+                config={parsedConfig}
+                onChange={updateConfig}
+                users={userOptions ?? []}
+                agents={agentOptions}
+                corpApps={corpAppOptions ?? []}
+                onTestNotice={configAgent?.config?.a2a.confirmNotify ? () => void sendTestNotice() : undefined}
+                testingNotice={testingNotice}
+              />
             </TabsContent>
             <TabsContent value="sharing" className="pt-2">
               <SharingPanel config={parsedConfig} onChange={updateConfig} users={userOptions ?? []} agents={agentOptions} />

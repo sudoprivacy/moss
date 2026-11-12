@@ -80,6 +80,7 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
       })(),
       requiresConfirmation: call.requiresConfirmation,
       confirmedBy: call.confirmedBy,
+      confirmedByName: call.confirmedBy ? deps.getUserName(call.confirmedBy) ?? null : null,
       targetSessionId: call.targetSessionId,
       callerSessionId: call.callerSessionId,
       createdAt: call.createdAt,
@@ -253,15 +254,31 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
   // ------------------------------------------------------- employee routes
 
   async function handleUser(req: http.IncomingMessage, res: http.ServerResponse, pathname: string, auth: AgentAuth): Promise<void> {
+    const mayConfirm = (targetAgentId: string) =>
+      isAgentifyAdmin(auth) || (svc.store.getAgent(auth.orgId, targetAgentId)?.config.a2a.confirmers.includes(auth.userId) ?? false)
     if (req.method === 'GET' && pathname === '/api/v1/agentify/confirmations') {
-      const admin = isAgentifyAdmin(auth)
       const pending = svc.store
         .listCalls({ orgId: auth.orgId, status: 'pending_confirmation', limit: 200 })
-        .filter(c => admin || svc.store.getAgent(auth.orgId, c.targetAgentId)?.config.a2a.confirmers.includes(auth.userId))
+        .filter(c => mayConfirm(c.targetAgentId))
       writeJson(res, 200, { calls: pending.map(view) })
       return
     }
     const m = pathname.match(/^\/api\/v1\/agentify\/confirmations\/([^/]+)$/)
+    // One task's approval page (the link in the confirmation notice), whatever its
+    // state now: waiting, decided, expired or finished.
+    if (req.method === 'GET' && m) {
+      const call = svc.store.getCall(decodeURIComponent(m[1]!))
+      if (!call || call.orgId !== auth.orgId || !call.requiresConfirmation) {
+        writeJson(res, 404, { error: { code: 'call_not_found', message: 'no such task' } })
+        return
+      }
+      if (!mayConfirm(call.targetAgentId)) {
+        writeJson(res, 403, { error: { code: 'not_confirmer', message: 'you are not a confirmer for this agent' } })
+        return
+      }
+      writeJson(res, 200, { call: view(call) })
+      return
+    }
     if (req.method === 'POST' && m) {
       const body = await deps.readJsonBody(req, 16 * 1024)
       const call = await svc.a2a.confirm({
@@ -328,6 +345,10 @@ export function createAgentifyRoutes(svc: AgentifyService, deps: AgentifyRouteDe
         const body = await deps.readJsonBody(req, 256 * 1024)
         const saved = await svc.configure(auth.orgId, ref.id, body.config ?? body)
         writeJson(res, 200, { agent: { id: saved.agentId, displayName: saved.displayName, config: saved.config } })
+        return
+      }
+      if (tail === '/testnotice' && req.method === 'POST') {
+        writeJson(res, 200, await svc.testConfirmNotice(auth.orgId, ref.id))
         return
       }
       if (tail === '' && req.method === 'DELETE') {

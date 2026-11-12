@@ -252,7 +252,7 @@ export interface CorpAppConnector {
     to: string,
     text: string,
     format?: 'text' | 'markdown',
-  ): Promise<{ ok: boolean; msgId?: string }>
+  ): Promise<{ ok: boolean; msgId?: string; invalidUsers?: string[]; error?: string }>
 
   /** Optional: upload + send a file to a platform user. */
   sendFile?(to: string, fileName: string, bytes: Buffer): Promise<{ ok: boolean; msgId?: string }>
