@@ -57,7 +57,7 @@ flowchart TD
 | 能力 | 对方已知接口/消息 | Moss 当前实现 |
 | --- | --- | --- |
 | 飞行状态 WS 订阅 | `ws://.../infra/ws`，消息 `type=flight_data` | 已实现。配置 `cabin.flightStateWsUrl` 后自动连接；解析 `content` 字符串 JSON；校验 `id=1021`、`mavpacktype=CE25_AUTO_GUIDE_DATA`；读取 `afcs_status_data[7]` 作为阶段。 |
-| 飞行阶段枚举映射 | `1-17` 阶段枚举 | 已实现。`1=taxi_in`、`16=taxiing`、`2=takeoff_prepare`、`3/4=takeoff`、`5/6=climb`、`7=cruise`、`8=descent`、`9-15=landing_approach`、`17=go_around`。 |
+| 飞行阶段枚举映射 | `1-17` 阶段枚举 | 已实现。`1=taxi_in`、`16=taxiing`、`2=takeoff_prepare`、`3/4=takeoff`、`5/6=climb`、`7=cruise`、`8=descent`、`9-14=landing_approach`、`15=landing_complete`、`17=go_around`。 |
 | 托管座位 | 座位端获取 auth token 时传入 `seatNo` | 已实现。`/v1/auth/token` 收到 `seatNo` 后立即写入 `cabin_managed_seats`，写入成功后才签发 token。若未带 `flightId/flightDate`，先用 `AUTO + 北京日期` 记录，后续 passengerInfo 再补真实航班。 |
 | 硬件状态查询 | `GET /admin-api/tcp/hardware/status?target=&key=` | 已实现。按托管座位查询 `safety`、`posture`、`tray`。所有请求、响应、失败都会写自动化日志。 |
 | 安全带/在席检查 | `key=safety` | 已实现。发现乘客未在席生成 `PASSENGER_NOT_PRESENT` 告警；发现安全带未扣生成 `SEATBELT_NOT_FASTENED` 告警。 |
@@ -145,7 +145,8 @@ flowchart TD
 | `5/6` 爬升 | TTS 生成/复用爬升中英文广播音频；调用 `audio-all` 全机广播；检查 `safety`；内部告警；调用 `error-seat` 推送座位异常。 | 解除座椅/桌板限制接口。 |
 | `7` 巡航 | 当前跳过自动化任务。 | 客舱服务策略；卫生间解除限制；安全带限制解除；乘客偏好。 |
 | `8` 下降 | TTS 生成/复用下降中英文广播音频；调用 `audio-all` 全机广播；检查 `safety`；内部告警；调用 `error-seat` 推送座位异常。 | 卫生间限制接口；安全带信号/限制接口。 |
-| `9-15` 进近/降落 | TTS 生成/复用降落进近中英文广播音频；调用 `audio-all` 全机广播；检查 `safety/posture/tray`；内部告警；调用 `error-seat` 推送座位异常；必要时调直座椅、收桌板。 | 舷窗检查/控制；座椅/桌板禁用接口。 |
+| `9-14` 进近/降落 | TTS 生成/复用降落进近中英文广播音频；调用 `audio-all` 全机广播；检查 `safety/posture/tray`；内部告警；调用 `error-seat` 推送座位异常；必要时调直座椅、收桌板。 | 舷窗检查/控制；座椅/桌板禁用接口。 |
+| `15` 着陆滑跑结束 | 检查 `bag`；发现行李时记录内部告警并调用 `error-seat` 推送指定座位提醒。 | 不再执行降落前安全带、在席、座椅、桌板和顶灯检查。 |
 | `17` 复飞 | 已映射阶段，但当前不执行任务。 | 复飞专用播报和安全策略待确认。 |
 
 ## 6. Moss 查询接口

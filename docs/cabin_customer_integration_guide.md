@@ -374,7 +374,8 @@ Moss 是 WS 客户端，不向客户提供 Cabin WS 服务端路径。默认连�
 | 5、6 | climb | 是 | 在席、安全带；5→6分别触发 |
 | 7 | cruise | 否 | 不执行 |
 | 8 | descent | 是 | 在席、安全带 |
-| 9～15 | landing_approach | 是 | 在席、安全带、座椅、桌板；不同码分别触发 |
+| 9～14 | landing_approach | 是 | 在席、安全带、座椅、桌板；不同码分别触发 |
+| 15 | landing_complete | 是 | 仅检查行李遗留；不执行降落前安全带、在席、座椅、桌板检查 |
 | 16 | taxiing | 是 | 在席、安全带、座椅、桌板 |
 | 17 / 其他 | go_around / unknown | 否 | 不执行 |
 

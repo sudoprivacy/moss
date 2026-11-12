@@ -28,6 +28,7 @@ type PhaseName =
   | 'cruise'
   | 'descent'
   | 'landing_approach'
+  | 'landing_complete'
   | 'go_around'
   | 'unknown'
 
@@ -1599,13 +1600,14 @@ export function mapPhaseName(code: number): PhaseName {
   if (code === 5 || code === 6) return 'climb'
   if (code === 7) return 'cruise'
   if (code === 8) return 'descent'
-  if (code >= 9 && code <= 15) return 'landing_approach'
+  if (code >= 9 && code <= 14) return 'landing_approach'
+  if (code === 15) return 'landing_complete'
   if (code === 17) return 'go_around'
   return 'unknown'
 }
 
 function shouldRunTask(phaseName: PhaseName): boolean {
-  return ['taxi_in', 'taxiing', 'takeoff_prepare', 'takeoff', 'climb', 'descent', 'landing_approach'].includes(phaseName)
+  return ['taxi_in', 'taxiing', 'takeoff_prepare', 'takeoff', 'climb', 'descent', 'landing_approach', 'landing_complete'].includes(phaseName)
 }
 
 function isDelayedSeatControl(control: AutomationControl): control is DelayedSeatControl {

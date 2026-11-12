@@ -164,6 +164,28 @@ describe('CabinFlightAutomation baggage and hardware controls', () => {
     expect(store.listAlerts().alerts.some(alert => alert.alertType === 'BAG_LEFT_BEHIND_POSSIBLE')).toBe(true)
   })
 
+  it('only checks baggage after landing is complete', async () => {
+    const { store, calls } = await runPhase(15, {
+      higherBag: 'true',
+      lowerBag: 'false',
+      presence: 'false',
+      seatbelt: 'false',
+      posture: '35',
+      trayOpen: 'true',
+      trayFlipped: 'false',
+      readingLight: 'true',
+      ceilingLight: 'true',
+    })
+    const alerts = store.listAlerts().alerts
+    expect(alerts.map(alert => alert.alertType)).toEqual(['BAG_LEFT_BEHIND_POSSIBLE'])
+    expect(calls.some(call => call.includes('key=safety'))).toBe(false)
+    expect(calls.some(call => call.includes('key=posture'))).toBe(false)
+    expect(calls.some(call => call.includes('key=tray'))).toBe(false)
+    expect(calls.some(call => call.includes('key=reading_light'))).toBe(false)
+    expect(calls.some(call => call.includes('key=ceiling_state'))).toBe(false)
+    expect(calls.some(call => call.includes('/admin-api/tcp-client/cmd/'))).toBe(false)
+  })
+
   it('does not infer a baggage alert when the baggage fields are missing', async () => {
     const { store } = await runPhase(15, { omitBagFields: true })
     expect(store.listAlerts().alerts.some(alert => alert.alertType.startsWith('BAG_'))).toBe(false)

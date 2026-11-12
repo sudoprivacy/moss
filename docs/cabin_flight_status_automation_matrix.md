@@ -55,7 +55,7 @@ Moss 作为 WebSocket 客户端连接配置项 `cabin.flightStateWsUrl`。只有
 | 12 | 跑道对准 | `landing_approach` | 原始阶段码变化时再次执行 | 降落进近阶段中英文全机广播 | 同上 | 同上 | 同上 |
 | 13 | 低机头 | `landing_approach` | 原始阶段码变化时再次执行 | 降落进近阶段中英文全机广播 | 同上 | 同上 | 同上 |
 | 14 | 着陆滑跑 | `landing_approach` | 原始阶段码变化时再次执行 | 降落进近阶段中英文全机广播 | 同上 | 同上 | 同上 |
-| 15 | 着陆滑跑结束 | `landing_approach` | 原始阶段码变化时再次执行 | 降落进近阶段中英文全机广播 | 在上面基础上增加 `bag` | 同上 | 在席、安全带、行李遗留、座椅、桌板 |
+| 15 | 着陆滑跑结束 | `landing_complete` | 原始阶段码变化时再次执行 | 无 | 仅检查 `bag` | 无 | 行李遗留 |
 | 17 | 复飞 | `go_around` | 否，记录 `phase.task.skipped` | 无 | 无 | 无 | 无 |
 | 其他 | 未知 | `unknown` | 否，记录 `phase.task.skipped` | 无 | 无 | 无 | 无 |
 
