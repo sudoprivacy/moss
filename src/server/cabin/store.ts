@@ -18,6 +18,9 @@ import type {
   CabinToolCall,
 } from './types.js'
 import { buildConversationKey } from './auth.js'
+import { digest, languageCode, textLanguage, type Language } from './language.js'
+import { exactCommand } from './commandLanguage.js'
+import { comfortActions, type ComfortAction } from './comfortLanguage.js'
 
 type Row = Record<string, unknown>
 
@@ -175,6 +178,17 @@ function mapMessage(row: Row): CabinMessage {
 
 export function ensureCabinTables(db: DatabaseSync): void {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS cabin_language_hints (
+      scope TEXT NOT NULL, text_key TEXT NOT NULL, language TEXT NOT NULL, prompted INTEGER NOT NULL, expires INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS cabin_hint_lookup ON cabin_language_hints(scope, text_key, expires);
+    CREATE INDEX IF NOT EXISTS cabin_hint_expiry ON cabin_language_hints(expires);
+    CREATE TABLE IF NOT EXISTS cabin_recent_language (scope TEXT PRIMARY KEY, language TEXT NOT NULL, expires INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS cabin_recent_expiry ON cabin_recent_language(expires);
+    CREATE TABLE IF NOT EXISTS cabin_comfort_offers (scope TEXT PRIMARY KEY, action TEXT NOT NULL, expires INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS cabin_offer_expiry ON cabin_comfort_offers(expires);
+    CREATE TABLE IF NOT EXISTS cabin_order_language_prompts (scope TEXT PRIMARY KEY, signature TEXT NOT NULL, expires INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS cabin_order_prompt_expiry ON cabin_order_language_prompts(expires);
     CREATE TABLE IF NOT EXISTS cabin_conversations (
       id TEXT PRIMARY KEY,
       conversation_key TEXT NOT NULL UNIQUE,
@@ -309,6 +323,8 @@ export function ensureCabinTables(db: DatabaseSync): void {
       ON cabin_health_reports(created_at);
   `)
   const messageColumns = db.prepare('PRAGMA table_info(cabin_messages)').all() as Row[]
+  const conversationColumns = db.prepare('PRAGMA table_info(cabin_conversations)').all() as Row[]
+  if (!conversationColumns.some(column => column.name === 'language_epoch')) db.exec('ALTER TABLE cabin_conversations ADD COLUMN language_epoch INTEGER NOT NULL DEFAULT 0')
   if (!messageColumns.some(column => column.name === 'tool_calls_json')) {
     db.exec('ALTER TABLE cabin_messages ADD COLUMN tool_calls_json TEXT')
   }
@@ -317,6 +333,50 @@ export function ensureCabinTables(db: DatabaseSync): void {
 export class CabinStore {
   constructor(private readonly db: DatabaseSync) {
     ensureCabinTables(db)
+  }
+
+  recordLanguage(scope: string, text: string, language: string, prompted: boolean, time = Date.now()): void {
+    this.db.prepare('DELETE FROM cabin_language_hints WHERE expires <= ?').run(time)
+    this.db.prepare('INSERT INTO cabin_language_hints VALUES (?, ?, ?, ?, ?)').run(scope, digest(text), language, Number(prompted), time + 120_000)
+  }
+
+  languageEpoch(conversation: string): number {
+    const row = this.db.prepare('SELECT language_epoch FROM cabin_conversations WHERE id = ?').get(conversation) as Row
+    return Number(row.language_epoch)
+  }
+
+  recordComfortOffer(scope: string, action: ComfortAction, time = Date.now()): void {
+    this.db.prepare('DELETE FROM cabin_comfort_offers WHERE expires <= ?').run(time)
+    this.db.prepare('INSERT OR REPLACE INTO cabin_comfort_offers VALUES (?, ?, ?)').run(scope, action, time + 120_000)
+  }
+
+  takeComfortOffer(scope: string, time = Date.now()): ComfortAction | undefined {
+    const row = this.db.prepare('DELETE FROM cabin_comfort_offers WHERE scope = ? RETURNING action, expires').get(scope) as Row | undefined
+    return row && Number(row.expires) > time && Object.hasOwn(comfortActions, String(row.action)) ? row.action as ComfortAction : undefined
+  }
+
+  rememberOrderChoices(scope: string, candidates: CabinOrderCancellationCandidate[], time = Date.now()): void {
+    this.db.prepare('DELETE FROM cabin_order_language_prompts WHERE expires <= ?').run(time)
+    this.db.prepare('INSERT OR REPLACE INTO cabin_order_language_prompts VALUES (?, ?, ?)').run(scope, digest(JSON.stringify(candidates.map(item => item.orderId))), time + 120_000)
+  }
+
+  takeOrderChoices(scope: string, candidates: CabinOrderCancellationCandidate[], time = Date.now()): boolean {
+    const row = this.db.prepare('DELETE FROM cabin_order_language_prompts WHERE scope = ? RETURNING signature, expires').get(scope) as Row | undefined
+    return !!row && Number(row.expires) > time && row.signature === digest(JSON.stringify(candidates.map(item => item.orderId)))
+  }
+
+  resolveLanguage(scope: string, text: string, hint?: string, profile?: string, time = Date.now()): Language {
+    const rows = this.db.prepare('DELETE FROM cabin_language_hints WHERE scope = ? AND text_key = ? AND expires > ? RETURNING language, prompted').all(scope, digest(text), time) as Row[]
+    const matched = rows.length === 1 ? rows[0] : undefined
+    const detected = languageCode(matched?.language)
+    const explicit = (matched && !matched.prompted ? detected : undefined) ?? exactCommand(text)?.language ?? textLanguage(text)
+    this.db.prepare('DELETE FROM cabin_recent_language WHERE expires <= ?').run(time)
+    if (explicit) {
+      this.db.prepare('INSERT OR REPLACE INTO cabin_recent_language VALUES (?, ?, ?)').run(scope, explicit, time + 600_000)
+      return explicit
+    }
+    const recent = this.db.prepare('SELECT language FROM cabin_recent_language WHERE scope = ?').get(scope) as Row | undefined
+    return languageCode(hint) ?? detected ?? languageCode(recent?.language) ?? languageCode(profile) ?? 'zh'
   }
 
   getConversationByKey(conversationKey: string, options: { includeReset?: boolean } = {}): CabinConversation | null {
@@ -899,7 +959,7 @@ export class CabinStore {
 
   resetConversation(conversationId: string): void {
     const timestamp = now()
-    this.db.prepare('UPDATE cabin_conversations SET status = ?, updated_at = ? WHERE id = ?')
+    this.db.prepare('UPDATE cabin_conversations SET status = ?, updated_at = ?, language_epoch = language_epoch + 1 WHERE id = ?')
       .run('reset', timestamp, conversationId)
     this.db.prepare(`
       INSERT INTO cabin_messages (id, conversation_id, role, source, content, created_at)

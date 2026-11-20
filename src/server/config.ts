@@ -211,6 +211,8 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       ttsModel: process.env.CABIN_TTS_MODEL || raw.cabin.ttsModel,
       ttsVoice: process.env.CABIN_TTS_VOICE || raw.cabin.ttsVoice,
       ttsLanguage: process.env.CABIN_TTS_LANGUAGE || raw.cabin.ttsLanguage,
+      conversationLanguageMode: raw.cabin.conversationLanguageMode,
+      conversationTtsProfiles: raw.cabin.conversationTtsProfiles,
       ttsApiKey: process.env.CABIN_TTS_API_KEY || raw.cabin.ttsApiKey,
       llmBaseUrl: process.env.CABIN_LLM_BASE_URL || raw.cabin.llmBaseUrl,
       llmModel: process.env.CABIN_LLM_MODEL || raw.cabin.llmModel,

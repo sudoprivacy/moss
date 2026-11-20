@@ -20,6 +20,10 @@ import { CabinStore } from './store.js'
 import { CabinLogger, type CabinLogContext, summarizeContext } from './logger.js'
 import type { CabinPassengerContext, CabinToolCall, CabinTokenPayload } from './types.js'
 import { isOrderSelection } from './orders.js'
+import { orderChoice, orderReply } from './orderLanguage.js'
+import { comfortAction, comfortActions, comfortOffer as localizedComfortOffer, confirmsOffer } from './comfortLanguage.js'
+import { clarifyText, languageCode, languageScope, wrongReplyLanguage, type Language } from './language.js'
+import { deniedCommand, hypotheticalCommand, hardwareReply, invalidSetting, isSpoken, message, readingLightQuestion, lightStatusReply } from './commandLanguage.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -296,8 +300,13 @@ function optionalCabinTokenFields(body: JsonBody): Omit<CabinTokenPayload, 'tabl
   }
 }
 
-function validateLanguage(value: string | undefined): string {
+function validateLanguage(value: string | undefined, multilingual = false): string {
   const language = value || 'auto'
+  if (multilingual && language !== 'auto') {
+    const code = languageCode(language)
+    if (code) return code
+    throw new CabinHttpError(400, 'INVALID_LANGUAGE', 'Unsupported language')
+  }
   if (!['auto', 'zh', 'en', 'fr', 'ja', 'ko'].includes(language)) {
     throw new CabinHttpError(400, 'INVALID_LANGUAGE', 'language must be one of auto/zh/en/fr/ja/ko')
   }
@@ -686,6 +695,7 @@ export function createCabinApi(options: {
   handle: (req: http.IncomingMessage, res: http.ServerResponse, pathname: string) => Promise<boolean>
 } {
   const cabinConfig = options.config.cabin
+  const languageMode = cabinConfig.conversationLanguageMode ?? 'legacy'
   const store = new CabinStore(options.runtime.store.db)
   const cabinLogger = new CabinLogger(options.config)
   const healthReports = options.healthReports ?? new CabinHealthReportService({
@@ -869,9 +879,10 @@ export function createCabinApi(options: {
     const identity = requireCabinRequestIdentity(req)
     const form = await readMultipartForm(req)
     const file = form.file
-    const language = validateLanguage(form.fields.language)
+    const language = validateLanguage(form.fields.language, languageMode !== 'legacy')
     const context = await resolveCabinContext(identity, requestId)
     const conversation = await services.ensureConversation(context)
+    const scope = languageMode !== 'legacy' ? languageScope(`${conversation.id}:${store.languageEpoch(conversation.id)}`, context) : undefined
     const logContext = {
       requestId,
       tabletId: context.tabletId,
@@ -886,6 +897,7 @@ export function createCabinApi(options: {
         filename: file.filename,
         contentType: file.contentType,
         language: language === 'auto' ? undefined : language,
+        detectLanguage: !!scope,
         logContext,
       })
     } catch (error) {
@@ -905,10 +917,11 @@ export function createCabinApi(options: {
       status: 'ok',
       elapsedMs: result.elapsedMs,
     })
+    if (scope) store.recordLanguage(scope, result.text, result.language, language !== 'auto')
     writeJson(res, 200, {
       status: 'ok',
       seat_id: context.seatId || '',
-      language: normalizeLanguage(language === 'auto' ? context.language : language),
+      language: languageMode === 'enabled' ? result.language : normalizeLanguage(language === 'auto' ? context.language : language),
       text: result.text,
     })
   }
@@ -922,6 +935,12 @@ export function createCabinApi(options: {
     requestId: string
   }): Promise<void> {
     const { res, context, conversation, text, source, requestId } = input
+    const language = context.replyLanguage
+    const spoken = language && isSpoken(language) ? language : undefined
+    const scope = language ? languageScope(`${conversation.id}:${store.languageEpoch(conversation.id)}`, context) : undefined
+    const pendingComfort = scope ? store.takeComfortOffer(scope) : undefined
+    const pendingOrderCancellation = store.getPendingOrderCancellation(conversation.id)
+    const allowPendingSelection = !scope || store.takeOrderChoices(scope, pendingOrderCancellation?.candidates ?? [])
     const logContext = {
       requestId,
       tabletId: context.tabletId,
@@ -953,6 +972,7 @@ export function createCabinApi(options: {
         slots: input.slots,
         toolCalls: input.toolCalls,
       })
+      if (language && input.emitDelta !== false) writeSse(res, 'delta', { content: input.reply })
       const audioPlayback: CabinSeatAudioPlayback = await services.speakToSeat({
         context,
         text: input.reply,
@@ -982,11 +1002,12 @@ export function createCabinApi(options: {
           reply_chars: input.reply.length,
           intent: assistantMessage.intent || '',
           routed: input.routed,
+          reply_language: language,
           execution_status: input.slots?.execution_status,
           audio_playback: audioPlayback,
         },
       })
-      if (input.emitDelta !== false) {
+      if (!language && input.emitDelta !== false) {
         writeSse(res, 'delta', { content: input.reply })
       }
       writeSse(res, 'done', {
@@ -997,17 +1018,36 @@ export function createCabinApi(options: {
       })
       res.end()
     }
-    const orderIntent = await services.resolveOrderIntent({ context, text, logContext })
-    const pendingOrderCancellation = store.getPendingOrderCancellation(conversation.id)
-    if (orderIntent || (pendingOrderCancellation && isOrderSelection(text))) {
+    const textOnly = Boolean(language && !spoken)
+    if (spoken && invalidSetting(text)) {
+      await completeReply({ reply: message(spoken, 'clarify'), routed: 'invalid-device-setting' })
+      return
+    }
+    if (spoken && (deniedCommand(text) || hypotheticalCommand(text))) {
+      await completeReply({ reply: message(spoken, 'noAction'), routed: 'hardware-no-action' })
+      return
+    }
+    if (spoken && readingLightQuestion(text)) {
+      const result = await services.executeHardwareStatusQuery({ context, spec: { targetType: 'seat', statusKey: 'reading_light' }, logContext })
+      writeSse(res, 'tool_call', result.toolCall)
+      await completeReply({ ...result, reply: lightStatusReply(spoken, result.slots), toolCalls: [result.toolCall], routed: 'hardware-status' })
+      return
+    }
+    const selection = scope && pendingOrderCancellation && allowPendingSelection ? orderChoice(text,pendingOrderCancellation.candidates) : undefined
+    const orderIntent = textOnly || selection ? null : await services.resolveOrderIntent({ context, text, logContext })
+    if (!textOnly && (orderIntent || (allowPendingSelection && pendingOrderCancellation && isOrderSelection(selection ?? text)))) {
       const orderResult = await services.executeOrderIntent({
         context,
         conversationId: conversation.id,
-        text,
+        text: selection ?? text,
         intent: orderIntent,
+        allowPendingSelection,
         logContext,
       })
-      const reply = normalizeCabinPassengerReply({ userText: text, reply: orderResult.reply, context })
+      const reply = spoken && spoken !== 'zh' ? orderReply(spoken, orderResult) : normalizeCabinPassengerReply({ userText: text, reply: orderResult.reply, context })
+      if (scope && orderResult.slots.execution_status === 'confirmation_required') {
+        store.rememberOrderChoices(scope, orderResult.slots.candidates as NonNullable<typeof pendingOrderCancellation>['candidates'])
+      }
       if (orderResult.toolCall) writeSse(res, 'tool_call', orderResult.toolCall)
       await completeReply({
         reply,
@@ -1019,20 +1059,22 @@ export function createCabinApi(options: {
       })
       return
     }
-    const hardwareRoute = services.routeHardwareControl({ context, text })
+    const confirmed = spoken && pendingComfort && confirmsOffer(text) ? comfortActions[pendingComfort] : undefined
+    const hardwareRoute = textOnly ? null : services.routeHardwareControl({ context, text: confirmed ?? text })
     if (hardwareRoute) {
       writeSse(res, 'tool_call', hardwareRoute.toolCall)
       const result = await services.executeHardwareControl({
         route: hardwareRoute,
+        reportTransportFailure: !!language,
         logContext,
       })
-      const reply = normalizeCabinPassengerReply({ userText: text, reply: result.reply, context })
+      const reply = spoken ? (spoken === 'zh' ? result.reply : hardwareReply(spoken, result.slots)) : normalizeCabinPassengerReply({ userText: text, reply: result.reply, context })
       await completeReply({
         reply,
         intent: result.intent,
         slots: result.slots,
         toolCalls: [result.toolCall],
-        routed: 'hardware-control',
+        routed: confirmed ? 'hardware-confirm' : 'hardware-control',
       })
       return
     }
@@ -1042,7 +1084,7 @@ export function createCabinApi(options: {
     // offer through the deterministic Path A router and execute the resolved action. This sits
     // between Path A and Path B and only fires for a bare affirmation following an offer, so no
     // existing input path changes behavior.
-    if (isAffirmationReply(text)) {
+    if (!language && isAffirmationReply(text)) {
       const lastAssistant = [...store.listMessages(conversation.id, 6)]
         .reverse()
         .find(message => message.role === 'assistant')
@@ -1064,13 +1106,26 @@ export function createCabinApi(options: {
       }
     }
 
-    const comfortOffer = buildCabinComfortOffer({ context, text })
+    if (scope && spoken) {
+      const action = comfortAction(text)
+      if (action) {
+        store.recordComfortOffer(scope, action)
+        await completeReply({ reply: localizedComfortOffer(spoken, action), routed:'comfort-offer' })
+        return
+      }
+      if (confirmsOffer(text)) {
+        await completeReply({ reply: message(spoken,'clarify'), routed:'no-pending-action' })
+        return
+      }
+    }
+    const comfortOffer = !language && buildCabinComfortOffer({ context, text })
     if (comfortOffer) {
       await completeReply({ reply: comfortOffer, routed: 'comfort-offer' })
       return
     }
 
-    const inferredTool = cabinConfig.createMossSession
+    const useMoss = cabinConfig.createMossSession && !textOnly
+    const inferredTool = useMoss || language
       ? null
       : services.inferToolCall({ context, text })
 
@@ -1083,17 +1138,13 @@ export function createCabinApi(options: {
     let mossToolCall: CabinToolCall | undefined
     let mossIntent: string | undefined
     let mossSlots: Record<string, unknown> | undefined
-    const shouldBufferReply = shouldBufferCabinReply(text)
-    const bufferedDeltas: string[] = []
+    const shouldBufferReply = Boolean(language) || shouldBufferCabinReply(text)
     const writeDelta = (delta: string): void => {
-      if (shouldBufferReply) {
-        bufferedDeltas.push(delta)
-        return
-      }
+      if (shouldBufferReply) return
       writeSse(res, 'delta', { content: delta })
     }
     try {
-      if (cabinConfig.createMossSession) {
+      if (useMoss) {
         const mossResult = await services.generateReplyWithMossSession({
           mossSessionId: conversation.mossSessionId,
           conversationId: conversation.id,
@@ -1128,10 +1179,11 @@ export function createCabinApi(options: {
       res.end()
       return
     }
-    reply = normalizeCabinPassengerReply({ userText: text, reply, context })
+    if (!language || (language === 'zh' && !mossToolCall)) reply = normalizeCabinPassengerReply({ userText: text, reply, context })
+    if (language && wrongReplyLanguage(reply, language) && (!mossToolCall || mossIntent === 'hardware_status_query')) reply = clarifyText[language]
     // Deltas are streamed live only for free-chat moss turns. Control turns (mossToolCall)
     // and buffered turns emit the full reply once, after the tool_call.
-    const streamedIncrementally = cabinConfig.createMossSession && !shouldBufferReply && !mossToolCall
+    const streamedIncrementally = useMoss && !shouldBufferReply && !mossToolCall
     await completeReply({
       reply,
       intent: inferredTool?.intent ?? mossIntent,
@@ -1148,10 +1200,18 @@ export function createCabinApi(options: {
     const text = stringField(body, 'content') || stringField(body, 'text')
     if (!text) throw new CabinHttpError(400, 'MISSING_CONTENT', 'content is required')
     const source = parseMessageSource(stringField(body, 'source'))
-    validateLanguage(stringField(body, 'language'))
+    const clientLanguage = stringField(body, 'language')
+    const hint = validateLanguage(languageMode !== 'legacy' && clientLanguage === 'unknown' ? 'auto' : clientLanguage, languageMode !== 'legacy')
 
     const context = await resolveCabinContext(identity, requestId)
     const conversation = await services.ensureConversation(context)
+    let replyLanguage: Language | undefined
+    if (languageMode !== 'legacy') {
+      const scope = languageScope(`${conversation.id}:${store.languageEpoch(conversation.id)}`, context)
+      const selected = store.resolveLanguage(scope, text, hint, context.language)
+      if (languageMode === 'enabled') replyLanguage = selected
+      else cabinLogger.log({ type: 'outbound', requestId, upstream: 'conversation-language-shadow', method: 'RESOLVE', ok: true, elapsedMs: 0, details: { selected } })
+    }
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache',
@@ -1160,7 +1220,7 @@ export function createCabinApi(options: {
     writeSse(res, 'start', { status: 'ok' })
     await streamChatReply({
       res,
-      context,
+      context: replyLanguage ? { ...context, replyLanguage } : context,
       conversation,
       text,
       source,

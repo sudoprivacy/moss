@@ -190,6 +190,8 @@ export const serverFileConfigSchema = lazySchema(() =>
       ttsModel: z.string().default('qwen3-tts'),
       ttsVoice: z.string().default('vivian'),
       ttsLanguage: z.string().default('chinese'),
+      conversationLanguageMode: z.enum(['legacy', 'shadow', 'enabled']).optional(),
+      conversationTtsProfiles: z.record(z.string(), z.object({ voice: z.string().min(1), language: z.string().min(1), field: z.enum(['language', 'lang_code']).optional() })).optional(),
       ttsApiKey: z.string().optional(),
       llmBaseUrl: z.string().default('http://127.0.0.1:8000/v1'),
       llmModel: z.string().default('Qwen3.6-35B-A3B-NVFP4'),
@@ -367,6 +369,8 @@ export type ServerConfig = {
     ttsModel: string
     ttsVoice: string
     ttsLanguage: string
+    conversationLanguageMode?: 'legacy' | 'shadow' | 'enabled'
+    conversationTtsProfiles?: Record<string, { voice: string; language: string; field?: 'language' | 'lang_code' }>
     ttsApiKey?: string
     llmBaseUrl: string
     llmModel: string

@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
+import { languageNames } from '../language.js'
+import { spokenLanguages, type SpokenLanguage } from '../commandLanguage.js'
 import http from 'http'
 import { Database } from 'bun:sqlite'
 import type { DatabaseSync } from 'node:sqlite'
@@ -75,7 +77,7 @@ function createConfig(baseUrl: string): ServerConfig {
   } as unknown as ServerConfig
 }
 
-async function startCabinServer(baseUrl: string): Promise<{
+async function startCabinServer(baseUrl: string, overrides: Partial<ServerConfig['cabin']> = {}): Promise<{
   cabinBaseUrl: string
   db: DatabaseSync
 }> {
@@ -84,7 +86,9 @@ async function startCabinServer(baseUrl: string): Promise<{
     store: { db },
     authService: { listAllOrganizations: () => ({ organizations: [{ id: 'org-1' }] }) },
   } as unknown as RuntimeService
-  const api = createCabinApi({ config: createConfig(baseUrl), runtime })
+  const config = createConfig(baseUrl)
+  Object.assign(config.cabin, overrides)
+  const api = createCabinApi({ config, runtime })
   const server = http.createServer(async (req, res) => {
     const pathname = new URL(req.url || '/', 'http://localhost').pathname
     const handled = await api.handle(req, res, pathname)
@@ -102,6 +106,126 @@ const seatHeaders = {
 }
 
 describe('cabin seat context mode', () => {
+  it('can shadow real labels without changing the legacy voice response', async () => {
+    const upstream = http.createServer((req,res) => {
+      res.setHeader('content-type','application/json')
+      if (req.url === '/asr') return res.end(JSON.stringify({text:'Guten Tag',language:['German']}))
+      res.end(JSON.stringify({code:0,data:{flightId:'1',flightDate:'2026-11-20',tabletId:'pad',passenger:{passengerRef:'p',language:'zh-CN'}}}))
+    })
+    const base = await listen(upstream)
+    for (const mode of ['shadow','legacy'] as const) {
+      const {cabinBaseUrl,db} = await startCabinServer(base,{conversationLanguageMode:mode})
+      const form = new FormData(); form.set('audio',new Blob(['test']),'test.wav')
+      const result = await fetch(`${cabinBaseUrl}/v1/voice/query`,{method:'POST',headers:seatHeaders,body:form})
+      expect(await result.json()).toMatchObject({language:'zh',text:'Guten Tag'})
+      const rows = db.prepare('SELECT language FROM cabin_language_hints').all()
+      expect(rows).toEqual(mode === 'shadow' ? [{language:'de'}] : [])
+    }
+  })
+  it('switches languages on the unchanged two-request contract without calling a model for direct commands', async () => {
+    const turns: Array<[SpokenLanguage, string]> = [
+      ['zh','请打开阅读灯'], ['de','Schalten Sie die Leselampe ein.'], ['ja','読書灯をつけてください。'], ['zh','关闭阅读灯'],
+      ['en','Turn on the reading light.'], ['fr','Allumez la liseuse.'], ['it','Accendi la luce di lettura.'],
+      ['es','Enciende la luz de lectura.'], ['pt','Acenda a luz de leitura.'], ['ko','독서등을 켜 주세요.'], ['ru','Включите лампу для чтения.'],
+    ]
+    let recording: Record<string, unknown> = {}
+    let businessCode = 0
+    let ttsFails = false
+    let ttsGate: Promise<void> | undefined
+    let statusData: Record<string, unknown> = { on:false }
+    let llmText = 'Bonjour !'
+    const controls: string[] = [], audio: Record<string,unknown>[] = [], pushes: string[] = [], prompts: string[] = [], formats: string[] = [], statusReads: string[] = []
+    const upstream = http.createServer(async (req, res) => {
+      const url = new URL(req.url!, 'http://localhost')
+      res.setHeader('content-type','application/json')
+      if (url.pathname.endsWith('get-seat-context')) return res.end(JSON.stringify({ code:0, data:{ flightId:'1', flightDate:'2026-11-20', seatNo:'01A', tabletId:'pad', passenger:{ passengerRef:'p',language:'zh-CN' } } }))
+      if (url.pathname === '/asr') {
+        const parts: Buffer[] = []; for await (const part of req) parts.push(part)
+        const form = await new Response(Buffer.concat(parts), { headers:{ 'content-type':req.headers['content-type']! } }).formData()
+        formats.push(`${form.get('response_format')}:${form.get('language')}`)
+        return res.end(JSON.stringify(recording))
+      }
+      if (url.pathname.includes('/cmd/')) { controls.push(url.pathname); return res.end(JSON.stringify({code:businessCode})) }
+      if (url.pathname === '/admin-api/tcp/hardware/status') { statusReads.push(url.pathname); return res.end(JSON.stringify({code:0,data:{data:statusData}})) }
+      if (url.pathname === '/tts') {
+        await ttsGate
+        audio.push(await readJsonRequest(req)); res.writeHead(ttsFails ? 503 : 200,{'content-type':'audio/wav'}); return res.end('RIFF-test')
+      }
+      if (url.pathname.endsWith('/audio-seat')) { pushes.push(url.pathname); return res.end(JSON.stringify({code:0,data:{sentCount:1,matchedCount:1}})) }
+      if (url.pathname.endsWith('/chat/completions')) {
+        const body = await readJsonRequest(req); prompts.push((body.messages as Array<{content:string}>)[0]!.content)
+        return res.end(JSON.stringify({choices:[{message:{content:llmText}}]}))
+      }
+      res.writeHead(404); res.end()
+    })
+    const base = await listen(upstream)
+    const { cabinBaseUrl, db } = await startCabinServer(base, { conversationLanguageMode:'enabled', conversationSeatAudioEnabled:true,
+      broadcastApiBaseUrl:base, broadcastEnabled:true, broadcastApiKey:'test',
+      conversationTtsProfiles:Object.fromEntries(spokenLanguages.map(code => [code, { voice:`voice-${code}`, language:languageNames[code], field:'lang_code' }])) })
+    const asr = async () => {
+      const form = new FormData(); form.set('audio', new Blob(['test']), 'test.wav')
+      const result = await fetch(`${cabinBaseUrl}/v1/voice/query`, {method:'POST',headers:seatHeaders,body:form})
+      return result.json()
+    }
+    const chat = async (content: string, language?: string) => {
+      const result = await fetch(`${cabinBaseUrl}/v1/ai-chat/send`, {method:'POST',headers:{...seatHeaders,'content-type':'application/json'},body:JSON.stringify({content,language})})
+      const events = (await result.text()).split('\n\n').filter(block => block.startsWith('event:')).map(block => {
+        const [event,data] = block.split('\n'); return {event:event!.slice(7),data:JSON.parse(data!.slice(6))}
+      })
+      const done = events.find(item => item.event === 'done')?.data
+      expect(done).toBeDefined()
+      expect(events.filter(item => item.event === 'delta').map(item => item.data.content).join('')).toBe(done.reply_text)
+      const stored = db.prepare("SELECT content FROM cabin_messages WHERE role='assistant' ORDER BY rowid DESC LIMIT 1").get() as {content:string}
+      expect(stored.content).toBe(done.reply_text)
+      return done
+    }
+    for (const [code,text] of turns) {
+      recording = {text,language:[languageNames[code]],segments:[{language:languageNames[code]}]}
+      const transcription = await asr(); expect(transcription.language).toBe(code)
+      const done = await chat(transcription.text)
+      expect(done.slots.execution_status).toBe('dispatched'); expect(done.audio_playback.status).toBe('sent')
+      expect(audio.at(-1)).toMatchObject({input:done.reply_text,lang_code:languageNames[code],voice:`voice-${code}`})
+      if (code !== 'zh' && code !== 'ja') expect(done.reply_text).not.toMatch(/\p{Script=Han}/u)
+    }
+    expect(controls).toHaveLength(turns.length); expect(audio).toHaveLength(turns.length); expect(pushes).toHaveLength(turns.length)
+    expect(formats).toEqual(turns.map(()=>'verbose_json:null')); expect(prompts).toHaveLength(0)
+    businessCode = 123; ttsFails = true
+    const failed = await chat('Schalte die Leselampe ein.', 'de')
+    expect(failed.slots.execution_status).toBe('failed'); expect(failed.reply_text).toContain('fehlgeschlagen'); expect(failed.audio_playback.status).toBe('failed')
+    ttsFails = false
+    expect((await chat('Schalte die Leselampe nicht ein.', 'de')).reply_text).toContain('kein Gerätebefehl')
+    expect((await chat('Is the reading light on?', 'en')).reply_text).toBe('The reading light is off.')
+    statusData = {}; const blocked = await chat('テーブルを閉じてください。','ja'); expect(blocked.slots.execution_status).toBe('blocked'); expect(blocked.reply_text).toContain('確認できない')
+    expect(statusReads).toHaveLength(2); expect(controls).toHaveLength(turns.length+1); expect(prompts).toHaveLength(0)
+    recording = {text:'42',language:['French']}; await asr()
+    expect((await chat('42','zh')).reply_text).toBe('Bonjour !'); expect(prompts.at(-1)).toContain('French (fr)')
+    recording = {text:'Hello'}; expect((await asr()).language).toBe('unknown')
+    llmText = '收到，我会为您处理。'; expect((await chat('Hello','zh')).reply_text).toBe('Please clarify your request.')
+    const before = audio.length; recording = {text:'สวัสดี',language:['Thai']}; await asr(); llmText = 'สวัสดีครับ'
+    const thai = await chat('สวัสดี'); expect(thai.reply_text).toBe(llmText); expect(thai.audio_playback.status).toBe('skipped'); expect(audio).toHaveLength(before)
+    businessCode = 0
+    const beforeOffer = controls.length
+    await chat('Set seat heating to level 8.','en'); expect(controls).toHaveLength(beforeOffer)
+    expect((await chat('我有点冷')).reply_text).toContain('座椅加热吗')
+    recording = {text:'Ja',language:['German']}; await asr()
+    const confirmed = await chat('Ja'); expect(confirmed.slots.command).toBe('seat.heating'); expect(confirmed.reply_text).toContain('Sitzheizung')
+    await chat('Ja','de'); expect(controls.length).toBe(beforeOffer+1)
+    await chat('Wenn es dunkel wird, schalte das Leselicht ein.','de'); expect(controls.length).toBe(beforeOffer+1)
+    let release!: () => void
+    ttsGate = new Promise<void>(resolve => { release = resolve })
+    try {
+      const response = await fetch(`${cabinBaseUrl}/v1/ai-chat/send`, {method:'POST',headers:{...seatHeaders,'content-type':'application/json'},body:JSON.stringify({content:'Turn off the reading light.'}),signal:AbortSignal.timeout(2000)})
+      const reader = response.body!.getReader(); const decoder = new TextDecoder(); let sse = ''
+      while (!sse.includes('event: delta')) {
+        const part = await reader.read(); if (part.done) break; sse += decoder.decode(part.value,{stream:true})
+      }
+      expect(sse).toContain('turn off your reading light'); expect(sse).not.toContain('event: done')
+      release()
+      for (;;) { const part = await reader.read(); if (part.done) break; sse += decoder.decode(part.value,{stream:true}) }
+      expect(sse.match(/event: delta/g)).toHaveLength(1); expect(sse.match(/event: done/g)).toHaveLength(1)
+    } finally { release(); ttsGate = undefined }
+    recording = {text:' '}; expect((await asr()).code).toBe('ASR_NO_SPEECH')
+  })
   it('uses UE aircraft and seat headers across the complete local workflow', async () => {
     const contextRequests: Array<{
       method: string

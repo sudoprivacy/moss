@@ -25,6 +25,7 @@ export type CabinPassengerContext = {
   bindingId?: string
   contextStatus?: string
   language?: string
+  replyLanguage?: import('./language.js').Language
 }
 
 export type CabinMessageRole = 'user' | 'assistant' | 'system'

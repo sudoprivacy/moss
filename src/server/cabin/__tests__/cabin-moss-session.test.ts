@@ -84,6 +84,17 @@ afterEach(() => {
 })
 
 describe('generateReplyWithMossSession · intent-first', () => {
+  it('renders the real outcome in German and refuses a write for a status question even if the model emits a command', async () => {
+    const controls: string[] = []
+    const services = makeServices({ lines:[emitToolResult({ok:true,mode:'emit',command:'seat.light',params:{on:true}})], fetchImpl:Object.assign(async (url: Parameters<typeof fetch>[0]) => {
+      controls.push(String(url)); return Response.json({code:0})
+    }, {preconnect:fetch.preconnect}) })
+    const turnContext = { ...context, replyLanguage:'de' as const }
+    const result = await services.generateReplyWithMossSession({mossSessionId:'t1',context:turnContext,text:'Mach das Leselicht an.'})
+    expect(result.reply).toContain('Leselampe'); expect(result.slots?.execution_status).toBe('dispatched'); expect(controls).toHaveLength(1)
+    const status = await services.generateReplyWithMossSession({mossSessionId:'t1',context:turnContext,text:'Ist die Leselampe an?'})
+    expect(status.toolCall).toBeUndefined(); expect(controls).toHaveLength(1)
+  })
   it('executes the emitted command server-side and grounds the reply in the real dispatch', async () => {
     const dispatched: string[] = []
     const services = makeServices({
