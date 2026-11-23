@@ -1,6 +1,5 @@
-import type { Language } from './language.js'
+import { spokenLanguages, type Language } from './language.js'
 
-export const spokenLanguages = ['zh', 'en', 'de', 'ja', 'ko', 'fr', 'es', 'pt', 'it', 'ru'] as const
 export type SpokenLanguage = typeof spokenLanguages[number]
 export function isSpoken(language: Language): language is SpokenLanguage {
   return spokenLanguages.some(code => code === language)

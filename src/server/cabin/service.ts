@@ -29,7 +29,7 @@ import {
 } from './orders.js'
 import { fetchWithTimeout } from './http.js'
 import { CabinBroadcastClient } from './broadcastClient.js'
-import { asrLanguage, clarifyText, languageNames, replyInstruction, textLanguage, type Language } from './language.js'
+import { asrLanguage, clarifyText, defaultConversationTtsProfiles, languageNames, replyInstruction, textLanguage, type Language } from './language.js'
 import { deniedCommand, describesDevice, exactCommand, hardwareReply, hypotheticalCommand, isSpoken, message } from './commandLanguage.js'
 
 type FetchLike = typeof fetch
@@ -109,9 +109,11 @@ export class CabinServices {
   private readonly fetchImpl: FetchLike
   private readonly orderClient: CabinOrderClient
   private readonly broadcastClient: CabinBroadcastClient
+  private readonly conversationTtsProfiles: NonNullable<CabinConfig['conversationTtsProfiles']>
 
   constructor(private readonly options: CabinServicesOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch
+    this.conversationTtsProfiles = options.config.conversationTtsProfiles ?? defaultConversationTtsProfiles()
     this.orderClient = new CabinOrderClient(options.config, this.fetchImpl, options.logger)
     this.broadcastClient = new CabinBroadcastClient(options.config, this.fetchImpl)
   }
@@ -905,7 +907,7 @@ export class CabinServices {
 
     try {
       const language = input.context.replyLanguage
-      const profile = language && this.options.config.conversationTtsProfiles?.[language]
+      const profile = language && this.conversationTtsProfiles[language]
       if (language && (!isSpoken(language) || !profile)) {
         return { status: 'skipped', elapsedMs: 0, error: 'no enabled conversation voice for this language' }
       }

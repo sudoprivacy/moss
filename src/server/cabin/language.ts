@@ -9,6 +9,15 @@ export const languageNames = {
   el: 'Greek', hu: 'Hungarian', mk: 'Macedonian', ro: 'Romanian',
 } as const
 export type Language = keyof typeof languageNames
+export const spokenLanguages = ['zh', 'en', 'de', 'ja', 'ko', 'fr', 'es', 'pt', 'it', 'ru'] as const
+export const defaultConversationLanguageMode = 'enabled'
+
+export function defaultConversationTtsProfiles() {
+  return Object.fromEntries(spokenLanguages.map(code => [code, {
+    voice: 'Vivian', field: 'lang_code' as const, language: languageNames[code],
+  }]))
+}
+
 const aliases = new Map<string, Language>([['mandarin', 'zh'], ['zh-yue', 'yue'], ['tagalog', 'fil'], ['tl', 'fil']])
 for (const [code, name] of Object.entries(languageNames)) {
   aliases.set(code, code as Language)

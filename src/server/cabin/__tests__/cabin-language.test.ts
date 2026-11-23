@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import type { DatabaseSync } from 'node:sqlite'
-import { asrLanguage, languageNames, languageScope, textLanguage, type Language } from '../language.js'
-import { deniedCommand, exactCommand, hardwareReply, lightStatusReply, spokenLanguages } from '../commandLanguage.js'
+import { asrLanguage, languageNames, languageScope, spokenLanguages, textLanguage, type Language } from '../language.js'
+import { deniedCommand, exactCommand, hardwareReply, lightStatusReply } from '../commandLanguage.js'
 import { CabinStore } from '../store.js'
 import { orderChoice, orderReply } from '../orderLanguage.js'
 import { serverFileConfigSchema } from '../../types.js'
@@ -98,9 +98,28 @@ describe('turn language', () => {
     expect(store.takeOrderChoices('one',[...choices].reverse())).toBe(false)
     store.rememberOrderChoices('one',choices); expect(store.takeOrderChoices('one',choices)).toBe(true); expect(store.takeOrderChoices('one',choices)).toBe(false)
   })
-  it('loads the opt-in mode and profiles from the real configuration schema', () => {
-    const raw = getDefaultServerConfig()
-    const parsed = serverFileConfigSchema().parse({...raw,cabin:{...raw.cabin,conversationLanguageMode:'enabled',conversationTtsProfiles:{de:{voice:'test-de',language:'German',field:'lang_code'}}}})
-    expect(parsed.cabin.conversationLanguageMode).toBe('enabled'); expect(parsed.cabin.conversationTtsProfiles?.de?.field).toBe('lang_code')
+  it('defaults new and existing configurations to enabled and ten Vivian profiles without enabling seat audio', () => {
+    const expected = Object.fromEntries(Object.entries({
+      zh: 'Chinese', en: 'English', de: 'German', ja: 'Japanese', ko: 'Korean',
+      fr: 'French', es: 'Spanish', pt: 'Portuguese', it: 'Italian', ru: 'Russian',
+    }).map(([code, language]) => [code, { voice: 'Vivian', field: 'lang_code', language }]))
+    for (const cabin of [getDefaultServerConfig().cabin, serverFileConfigSchema().parse({}).cabin,
+      serverFileConfigSchema().parse({ cabin: { enabled: true } }).cabin]) {
+      expect(cabin.conversationLanguageMode).toBe('enabled')
+      expect(cabin.conversationTtsProfiles).toEqual(expected)
+      expect(cabin.conversationSeatAudioEnabled).toBe(false)
+    }
+  })
+  it('honors explicit modes and whole profile maps independently, including an empty map', () => {
+    const parse = (cabin: Record<string, unknown>) => serverFileConfigSchema().parse({ cabin }).cabin
+    const profiles = { de: { voice: 'custom', language: 'de', field: 'language' } }
+    expect(parse({ conversationTtsProfiles: profiles })).toMatchObject({ conversationLanguageMode: 'enabled' })
+    expect(parse({ conversationTtsProfiles: profiles }).conversationTtsProfiles).toEqual(profiles)
+    expect(parse({ conversationTtsProfiles: {} }).conversationTtsProfiles).toEqual({})
+    for (const mode of ['legacy', 'shadow']) {
+      const cabin = parse({ conversationLanguageMode: mode })
+      expect(cabin.conversationLanguageMode).toBe(mode)
+      expect(cabin.conversationTtsProfiles.de).toEqual({ voice: 'Vivian', language: 'German', field: 'lang_code' })
+    }
   })
 })

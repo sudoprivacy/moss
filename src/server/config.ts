@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { serverFileConfigSchema, type ServerConfig, type ServerFileConfig } from './types.js'
 import { normalizeHubApiBaseUrl } from './hubConfig.js'
+import { defaultConversationLanguageMode, defaultConversationTtsProfiles } from './cabin/language.js'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import { expandPath } from '../utils/path.js'
 
@@ -85,6 +86,8 @@ export function getDefaultServerConfig(): ServerFileConfig {
       ttsModel: 'qwen3-tts',
       ttsVoice: 'vivian',
       ttsLanguage: 'chinese',
+      conversationLanguageMode: defaultConversationLanguageMode,
+      conversationTtsProfiles: defaultConversationTtsProfiles(),
       llmBaseUrl: 'http://127.0.0.1:8000/v1',
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,

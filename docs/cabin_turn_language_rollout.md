@@ -1,17 +1,16 @@
 # Cabin 逐轮语言：启用与验收
 
-适用 `codex/cabin-status-mode-tools` 上的 `/v1/voice/query` → `/v1/ai-chat/send`。UE 不用升级，无需新增参数、请求头或轮次 ID。只配 `conversationLanguageMode: enabled` **不会自动开放任何座位音色**。
+适用 `codex/cabin-status-mode-tools` 上的 `/v1/voice/query` → `/v1/ai-chat/send`。升级并重启 Cabin 后，即使现有 `server.json` 没有这两项，也默认按本轮语种回复。UE 不用升级，无需新增参数、请求头或轮次 ID。
 
 ## 如何启用
 
-1. 在隔离联调实例的 `server.json` 中，将下面的键合并到原有 `cabin` 对象内，不要覆盖其余配置。初次使用 `shadow`：ASR 取详细结果，服务端记录影子判定，但对外回复和播放仍按旧逻辑。
-2. 确认现场 `8004` 的 `/openapi.json` 中 `/v1/audio/speech` 实际接收的字段，再用同一句话实测。`field` 可配 `lang_code` 或 `language`；`voice`、`language` 是原样发给 TTS 的供应方值。下面是**配置形状示例，不是现场已验收参数**。仅给已经试听通过的语种添加条目。
-3. 在隔离实例将模式改为 `enabled`，重启 Cabin。保留原有 `conversationSeatAudioEnabled`、推送地址和鉴权。没有该语种的 profile → 仅返文字、`audio_playback.status=skipped`；合成失败 → 保留文字与真实动作结果、不会重发硬件。如果是单实例服务，切换开关影响该实例的全部座位，并不是单座开关。
-4. 回滚：改为 `legacy` 或移除此模式键并重启。不需要改 UE、删表或回退历史记录。独立 TTS、广播、健康报告、未使用的一步式 `/v1/voice-chat/send` 不启用本轮策略。
+1. 两项均可省略。`conversationLanguageMode` 默认 `enabled`；`conversationTtsProfiles` 默认包含 `zh/en/de/ja/ko/fr/es/pt/it/ru`，统一使用 `Vivian`，向座位 TTS 发送 `lang_code` 和英文语种全名（如 `German`）。这不会自动打开座位播音：仍需原有 `conversationSeatAudioEnabled: true`、正确的推送地址和鉴权。
+2. 如需限制语种或更换音色，可在 `cabin` 内显式设置 `conversationTtsProfiles`。它会**整表替换**默认十语：例如下面仅播英、德语；`{}` 表示逐轮模式仅返回文字。合成失败时保留文字和真实动作结果，不重发硬件。请在现场试听，不把生成 WAV 视为通过。
+3. 若需先观察或回滚，显式设 `conversationLanguageMode` 为 `shadow`（仅记录逐轮判定，仍按旧逻辑回复和播放）或 `legacy`（回退旧逻辑），改后重启。删除模式键是恢复 `enabled`，不是回滚。切换影响该实例全部座位，不影响独立 TTS、广播、健康报告或 `/v1/voice-chat/send`。
 
 ```json
 {
-  "conversationLanguageMode": "shadow",
+  "conversationLanguageMode": "enabled",
   "conversationTtsProfiles": {
     "en": { "voice": "Vivian", "field": "lang_code", "language": "English" },
     "de": { "voice": "Vivian", "field": "lang_code", "language": "German" }

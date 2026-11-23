@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { languageNames } from '../language.js'
-import { spokenLanguages, type SpokenLanguage } from '../commandLanguage.js'
+import type { SpokenLanguage } from '../commandLanguage.js'
 import http from 'http'
 import { Database } from 'bun:sqlite'
 import type { DatabaseSync } from 'node:sqlite'
@@ -122,7 +122,7 @@ describe('cabin seat context mode', () => {
       expect(rows).toEqual(mode === 'shadow' ? [{language:'de'}] : [])
     }
   })
-  it('switches languages on the unchanged two-request contract without calling a model for direct commands', async () => {
+  it('switches languages with default settings on the unchanged two-request contract without calling a model for direct commands', async () => {
     const turns: Array<[SpokenLanguage, string]> = [
       ['zh','请打开阅读灯'], ['de','Schalten Sie die Leselampe ein.'], ['ja','読書灯をつけてください。'], ['zh','关闭阅读灯'],
       ['en','Turn on the reading light.'], ['fr','Allumez la liseuse.'], ['it','Accendi la luce di lettura.'],
@@ -159,9 +159,8 @@ describe('cabin seat context mode', () => {
       res.writeHead(404); res.end()
     })
     const base = await listen(upstream)
-    const { cabinBaseUrl, db } = await startCabinServer(base, { conversationLanguageMode:'enabled', conversationSeatAudioEnabled:true,
-      broadcastApiBaseUrl:base, broadcastEnabled:true, broadcastApiKey:'test',
-      conversationTtsProfiles:Object.fromEntries(spokenLanguages.map(code => [code, { voice:`voice-${code}`, language:languageNames[code], field:'lang_code' }])) })
+    const { cabinBaseUrl, db } = await startCabinServer(base, { conversationSeatAudioEnabled:true,
+      broadcastApiBaseUrl:base, broadcastEnabled:true, broadcastApiKey:'test' })
     const asr = async () => {
       const form = new FormData(); form.set('audio', new Blob(['test']), 'test.wav')
       const result = await fetch(`${cabinBaseUrl}/v1/voice/query`, {method:'POST',headers:seatHeaders,body:form})
@@ -184,7 +183,7 @@ describe('cabin seat context mode', () => {
       const transcription = await asr(); expect(transcription.language).toBe(code)
       const done = await chat(transcription.text)
       expect(done.slots.execution_status).toBe('dispatched'); expect(done.audio_playback.status).toBe('sent')
-      expect(audio.at(-1)).toMatchObject({input:done.reply_text,lang_code:languageNames[code],voice:`voice-${code}`})
+      expect(audio.at(-1)).toMatchObject({input:done.reply_text,lang_code:languageNames[code],voice:'Vivian'})
       if (code !== 'zh' && code !== 'ja') expect(done.reply_text).not.toMatch(/\p{Script=Han}/u)
     }
     expect(controls).toHaveLength(turns.length); expect(audio).toHaveLength(turns.length); expect(pushes).toHaveLength(turns.length)
@@ -322,7 +321,7 @@ describe('cabin seat context mode', () => {
     expect(await voiceResponse.json()).toMatchObject({
       status: 'ok',
       seat_id: '01A',
-      language: 'zh',
+      language: 'unknown',
       text: '请帮我打开阅读灯',
     })
 

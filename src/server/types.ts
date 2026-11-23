@@ -1,4 +1,5 @@
 import { z } from 'zod/v4'
+import { defaultConversationLanguageMode, defaultConversationTtsProfiles } from './cabin/language.js'
 import { lazySchema } from '../utils/lazySchema.js'
 import type { SessionRuntimeInfo, SessionRuntimeOptions, SessionRuntimeType } from './sessionManager.js'
 
@@ -190,8 +191,8 @@ export const serverFileConfigSchema = lazySchema(() =>
       ttsModel: z.string().default('qwen3-tts'),
       ttsVoice: z.string().default('vivian'),
       ttsLanguage: z.string().default('chinese'),
-      conversationLanguageMode: z.enum(['legacy', 'shadow', 'enabled']).optional(),
-      conversationTtsProfiles: z.record(z.string(), z.object({ voice: z.string().min(1), language: z.string().min(1), field: z.enum(['language', 'lang_code']).optional() })).optional(),
+      conversationLanguageMode: z.enum(['legacy', 'shadow', 'enabled']).default(defaultConversationLanguageMode),
+      conversationTtsProfiles: z.record(z.string(), z.object({ voice: z.string().min(1), language: z.string().min(1), field: z.enum(['language', 'lang_code']).optional() })).default(defaultConversationTtsProfiles),
       ttsApiKey: z.string().optional(),
       llmBaseUrl: z.string().default('http://127.0.0.1:8000/v1'),
       llmModel: z.string().default('Qwen3.6-35B-A3B-NVFP4'),
@@ -242,6 +243,8 @@ export const serverFileConfigSchema = lazySchema(() =>
       ttsModel: 'qwen3-tts',
       ttsVoice: 'vivian',
       ttsLanguage: 'chinese',
+      conversationLanguageMode: defaultConversationLanguageMode,
+      conversationTtsProfiles: defaultConversationTtsProfiles(),
       llmBaseUrl: 'http://127.0.0.1:8000/v1',
       llmModel: 'Qwen3.6-35B-A3B-NVFP4',
       controlTimeoutMs: 10_000,

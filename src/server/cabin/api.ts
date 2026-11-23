@@ -22,7 +22,7 @@ import type { CabinPassengerContext, CabinToolCall, CabinTokenPayload } from './
 import { isOrderSelection } from './orders.js'
 import { orderChoice, orderReply } from './orderLanguage.js'
 import { comfortAction, comfortActions, comfortOffer as localizedComfortOffer, confirmsOffer } from './comfortLanguage.js'
-import { clarifyText, languageCode, languageScope, wrongReplyLanguage, type Language } from './language.js'
+import { clarifyText, defaultConversationLanguageMode, languageCode, languageScope, wrongReplyLanguage, type Language } from './language.js'
 import { deniedCommand, hypotheticalCommand, hardwareReply, invalidSetting, isSpoken, message, readingLightQuestion, lightStatusReply } from './commandLanguage.js'
 
 type JsonBody = Record<string, unknown>
@@ -695,7 +695,7 @@ export function createCabinApi(options: {
   handle: (req: http.IncomingMessage, res: http.ServerResponse, pathname: string) => Promise<boolean>
 } {
   const cabinConfig = options.config.cabin
-  const languageMode = cabinConfig.conversationLanguageMode ?? 'legacy'
+  const languageMode = cabinConfig.conversationLanguageMode ?? defaultConversationLanguageMode
   const store = new CabinStore(options.runtime.store.db)
   const cabinLogger = new CabinLogger(options.config)
   const healthReports = options.healthReports ?? new CabinHealthReportService({
@@ -1068,7 +1068,12 @@ export function createCabinApi(options: {
         reportTransportFailure: !!language,
         logContext,
       })
-      const reply = spoken ? (spoken === 'zh' ? result.reply : hardwareReply(spoken, result.slots)) : normalizeCabinPassengerReply({ userText: text, reply: result.reply, context })
+      let reply = result.reply
+      if (spoken && spoken !== 'zh') {
+        reply = hardwareReply(spoken, result.slots)
+      } else if (!spoken || result.slots.execution_status === 'dispatched') {
+        reply = normalizeCabinPassengerReply({ userText: text, reply, context })
+      }
       await completeReply({
         reply,
         intent: result.intent,

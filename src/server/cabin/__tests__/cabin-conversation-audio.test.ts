@@ -55,6 +55,27 @@ function servicesWith(fetchImpl: typeof fetch, overrides: Partial<CabinConfig> =
 }
 
 describe('conversation seat audio', () => {
+  it('uses explicit voice profiles without filling missing or disabled languages from defaults', async () => {
+    const requests: unknown[] = []
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/audio/speech')) {
+        requests.push(JSON.parse(String(init?.body)))
+        return new Response('RIFF-test', { headers: { 'content-type': 'audio/wav' } })
+      }
+      return response({ code: 0, data: { matchedCount: 1, sentCount: 1 } })
+    }
+    const germanOnly = servicesWith(fetchImpl as typeof fetch, { conversationTtsProfiles: {
+      de: { voice: 'custom', field: 'language', language: 'de' },
+    } })
+    expect((await germanOnly.speakToSeat({ context: { ...context, replyLanguage: 'de' }, text: 'Hallo' })).status).toBe('sent')
+    expect((await germanOnly.speakToSeat({ context: { ...context, replyLanguage: 'ja' }, text: 'こんにちは' })).status).toBe('skipped')
+    const none = servicesWith(fetchImpl as typeof fetch, { conversationTtsProfiles: {} })
+    expect((await none.speakToSeat({ context: { ...context, replyLanguage: 'de' }, text: 'Hallo' })).status).toBe('skipped')
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ input: 'Hallo', voice: 'custom', language: 'de' })
+    expect(requests[0]).not.toHaveProperty('lang_code')
+  })
+
   it('generates TTS and uploads the audio to the requested seat', async () => {
     let ttsCalls = 0
     let broadcastCalls = 0
