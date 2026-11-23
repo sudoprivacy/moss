@@ -15,9 +15,22 @@ const words: Record<Exclude<SpokenLanguage,'zh'>, OrderWords> = {
   ru:{ created:'Ваш заказ оформлен.', cancelled:'Ваш заказ отменён.', empty:'Подходящих заказов нет.', list:'Ваши заказы:', choose:'Какой заказ вы хотите отменить?', drink:'Какой напиток вы хотите?', items:['Плед','Кола','Апельсиновый сок','Латте с жасмином'] },
 }
 
+const creationDisabled: Record<Exclude<SpokenLanguage, 'zh'>, string> = {
+  en: 'Automatic ordering is paused. No order was placed. Please ask a flight attendant.',
+  de: 'Automatische Bestellungen sind pausiert. Es wurde nichts bestellt. Bitte wenden Sie sich an das Kabinenpersonal.',
+  ja: '自動注文は休止中です。注文はされていません。客室乗務員にお声がけください。',
+  ko: '자동 주문이 일시 중지되었습니다. 주문이 접수되지 않았습니다. 승무원에게 문의해 주세요.',
+  fr: 'Les commandes automatiques sont suspendues. Aucune commande passée. Veuillez vous adresser au personnel de cabine.',
+  es: 'Los pedidos automáticos están en pausa. No se ha realizado ningún pedido. Consulte a la tripulación.',
+  pt: 'Os pedidos automáticos estão suspensos. Não foi feito nenhum pedido. Fale com a tripulação.',
+  it: 'Gli ordini automatici sono sospesi. Nessun ordine è stato effettuato. Si rivolga al personale di cabina.',
+  ru: 'Автоматический заказ приостановлен. Заказ не оформлен. Обратитесь к бортпроводнику.',
+}
+
 export function orderReply(language: Exclude<SpokenLanguage,'zh'>, result: CabinOrderResult): string {
   const labels = words[language]
   const slots = result.slots
+  if (slots.reason === 'creation_disabled') return creationDisabled[language]
   if (slots.execution_status === 'failed') return message(language,'failed')
   if (slots.execution_status === 'not_found') return labels.empty
   if (slots.execution_status === 'clarification_required') return `${labels.drink} ${labels.items.slice(1).join(', ')}`

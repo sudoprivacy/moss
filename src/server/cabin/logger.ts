@@ -16,7 +16,7 @@ export type CabinLogContext = {
 
 type CabinLogEvent = CabinLogContext & {
   level?: CabinLogLevel
-  type: 'inbound' | 'outbound'
+  type: 'inbound_start' | 'inbound' | 'outbound' | 'stage'
   method?: string
   path?: string
   endpoint?: string

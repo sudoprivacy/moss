@@ -133,6 +133,7 @@ export class SessionRunnerDaemon {
       this.#store.updateAttemptRunner(this.manifest.attempt.attemptId, process.pid)
 
       const handle = await this.#backend.spawn({
+        cabinManaged: this.manifest.session.cabinManaged,
         sessionId: this.manifest.session.sessionId,
         resumeSessionId: this.manifest.session.resumeFromTranscript
           ? this.manifest.session.transcriptSessionId
@@ -394,6 +395,7 @@ export class SessionRunnerDaemon {
     )
     this.#send(socket, {
       type: 'hello',
+      ...(this.manifest.session.cabinManaged && this.manifest.session.runtime.engine === 'scode' ? { cabinControlMode: 'emit' as const } : {}),
       attemptId: this.manifest.attempt.attemptId,
       sessionId: this.manifest.session.sessionId,
       runtimeType: this.manifest.session.runtime.type,

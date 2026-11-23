@@ -19,7 +19,7 @@ import {
   buildAvailableSkillSnapshot,
 } from './backendUtils.js'
 import { createAcpBridgeHandle } from './acpBridge.js'
-import { buildAllModelsConfig, ensureOpenAIModelConfig } from '../modelListCache.js'
+import { prepareScodeModel } from '../modelListCache.js'
 import { reapInUserContainer } from '../runtime/reaper.js'
 import { toHostPath } from '../runtime/dockerPathMap.js'
 import { logRuntimeEvent, logRuntimeMetric } from '../runtime/runtimeMetrics.js'
@@ -153,11 +153,14 @@ export class DockerBackend implements SessionBackend {
       'CABIN_CONTROL_BASE_URL',
       'CABIN_CONTROL_AUTH',
       'CABIN_CONTROL_TIMEOUT_MS',
+      ...(options.cabinManaged ? ['CABIN_CONTROL_MODE', 'MOSS_CABIN_MANAGED'] : []),
     ]
 
     const env = buildSessionEnv(options, {
       ...(options.sessionToken ? { SESSION_TOKEN: options.sessionToken } : {}),
     })
+    const dockerEnvArgs = passthroughEnvKeys.flatMap(key => env[key] ? ['-e', `${key}=${env[key]}`] : [])
+    if (options.cabinManaged) dockerEnvArgs.push('-e', 'CABIN_CONTROL_AUTH=', '-e', 'CABIN_CONTROL_BASE_URL=')
 
     // A1: per-session SUDO_CODE_CONFIG_HOME (always — even in session mode the
     // shared user-mode configDir caused write collisions on concurrent runs).
@@ -175,20 +178,11 @@ export class DockerBackend implements SessionBackend {
 
     const dummySudocodePath = join(scodeHomeDir, 'sudocode.json')
 
+    const selectedModel = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
+    const baseUrl = env.ANTHROPIC_BASE_URL || (options.cabinManaged ? '' : 'https://hk.sudorouter.ai/v1')
+    const { models, alias: model } = await prepareScodeModel(baseUrl, selectedModel, options.cabinManaged)
     try {
-      const baseUrl = env.ANTHROPIC_BASE_URL || 'https://hk.sudorouter.ai/v1'
       const apiKey = env.ANTHROPIC_API_KEY || ''
-      // Use model from env (which includes user preference), or fallback
-      // env.MOSS_DEFAULT_MODEL has priority: user preference > system settings > default
-      const model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
-      let scodeModelName = model
-      if (!scodeModelName.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(scodeModelName)) {
-        scodeModelName = `proxy/${scodeModelName}`
-      }
-
-      // Preload all available models from sudorouter API
-      // This allows dynamic model switching without modifying sudocode.json
-      const allModels = ensureOpenAIModelConfig(await buildAllModelsConfig(baseUrl), model)
 
       const scodeConfig = {
         auth_modes: {
@@ -199,11 +193,12 @@ export class DockerBackend implements SessionBackend {
             }
           }
         },
-        models: allModels  // Preload all available models
+        models,
       }
       writeFileSync(dummySudocodePath, JSON.stringify(scodeConfig, null, 2), 'utf8')
-      process.stderr.write(`[DockerBackend] Preloaded ${Object.keys(allModels).length} models into sudocode.json\n`)
+      process.stderr.write(`[DockerBackend] Preloaded ${Object.keys(models).length} models into sudocode.json\n`)
     } catch (e) {
+      if (options.cabinManaged) throw e
       process.stderr.write(`[DockerBackend] Failed to create dynamic sudocode.json: ${e}\n`)
     }
 
@@ -229,10 +224,6 @@ export class DockerBackend implements SessionBackend {
     ]).filter(p => p !== '/')
 
     // Use model from env (which includes user preference), or fallback
-    let model = env.MOSS_DEFAULT_MODEL || runtime?.model || 'gemini-3-flash-preview'
-    if (model && !model.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(model)) {
-      model = `proxy/${model}`
-    }
     console.log(`[DockerBackend] Model for session ${options.sessionId}: ${model} (from env.MOSS_DEFAULT_MODEL: ${env.MOSS_DEFAULT_MODEL})`)
 
     let args: string[]
@@ -240,11 +231,7 @@ export class DockerBackend implements SessionBackend {
       // docker exec into long-lived user container. moss-session-launch writes
       // pid + start_ticks for the reaper.
       args = ['exec', '-i', '-w', safeCwd]
-      for (const key of passthroughEnvKeys) {
-        if (env[key]) {
-          args.push('-e', `${key}=${env[key]}`)
-        }
-      }
+      args.push(...dockerEnvArgs)
       args.push('-e', `HOME=${configDir}`)
       args.push('-e', `MOSS_HOME=${MOSS_HOME}`)
       args.push('-e', `SUDO_CODE_CONFIG_HOME=${scodeHomeDir}`)
@@ -297,11 +284,7 @@ export class DockerBackend implements SessionBackend {
         args.push('-v', `${hostPath}:${mount}`)
       }
       args.push('-w', safeCwd)
-      for (const key of passthroughEnvKeys) {
-        if (env[key]) {
-          args.push('-e', `${key}=${env[key]}`)
-        }
-      }
+      args.push(...dockerEnvArgs)
       args.push('-e', `HOME=${configDir}`)
       args.push('-e', `MOSS_HOME=${MOSS_HOME}`)
       args.push('-e', `SUDO_CODE_CONFIG_HOME=${scodeHomeDir}`)
@@ -356,6 +339,7 @@ export class DockerBackend implements SessionBackend {
       : undefined
 
     const handle = createAcpBridgeHandle({
+      cabinManaged: options.cabinManaged,
       child,
       sessionId: options.sessionId,
       cwd: safeCwd,

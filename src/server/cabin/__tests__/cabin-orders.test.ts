@@ -95,6 +95,18 @@ describe('cabin order intent parsing', () => {
 })
 
 describe('CabinOrderClient', () => {
+  it('blocks all four independent creates when paused but still sends order queries', async () => {
+    const urls: string[] = []
+    const services = new CabinServices({ config: { ...config(), serviceOrderCreateEnabled: false }, store: new CabinStore(new Database(':memory:') as unknown as DatabaseSync),
+      fetchImpl: Object.assign(async (url: Parameters<typeof fetch>[0]) => { urls.push(String(url)); return response({ code: 0, data: [] }) }, { preconnect: fetch.preconnect }) })
+    const input = { context, conversationId: 'c1', text: '我要一杯可乐' }
+    const results = await Promise.all(Array.from({ length: 4 }, () => services.executeOrderIntent(input)))
+    expect(results.every(result => result.slots.reason === 'creation_disabled' && result.reply.includes('没有下单'))).toBe(true)
+    expect(urls).toHaveLength(0)
+    await services.executeOrderIntent({ ...input, text: '查一下我的订单' })
+    expect(urls).toHaveLength(1)
+    expect(urls[0]).toContain('/list-by-seat')
+  })
   it('sends tablet-token, Authorization, quantity and the documented endpoint', async () => {
     let request: { url: string; init: RequestInit } | null = null
     const client = new CabinOrderClient(config(), async (url, init) => {

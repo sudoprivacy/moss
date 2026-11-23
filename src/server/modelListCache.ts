@@ -135,6 +135,19 @@ export async function buildAllModelsConfig(baseUrl: string): Promise<Record<stri
   return modelsConfig
 }
 
+export async function prepareScodeModel(baseUrl: string, model: string, cabinManaged = false) {
+  const started = performance.now()
+  if (cabinManaged && (!baseUrl.trim() || !model.trim() || model === 'proxy/')) {
+    throw new Error('Fixed cabin model requires a base URL and model ID')
+  }
+  const models = ensureOpenAIModelConfig(cabinManaged ? {} : await buildAllModelsConfig(baseUrl), model)
+  const needsPrefix = cabinManaged ? !model.startsWith('proxy/') :
+    !model.includes('/') && !['opus', 'sonnet', 'haiku', 'claude-opus', 'claude-sonnet', 'claude-haiku'].includes(model)
+  const alias = needsPrefix ? `proxy/${model}` : model
+  if (cabinManaged) process.stderr.write(`${JSON.stringify({ event: 'cabin.model_config', policy: 'fixed', catalog_requests: 0, elapsed_ms: Math.round(performance.now() - started) })}\n`)
+  return { models, alias }
+}
+
 export function ensureOpenAIModelConfig(
   modelsConfig: Record<string, unknown>,
   modelId: string,

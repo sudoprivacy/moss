@@ -1285,6 +1285,7 @@ export class RuntimeService {
     const manifest: RunnerManifest = {
       config: this.options.config,
       session: {
+        cabinManaged: session.source === 'cabin',
         sessionId: session.sessionId,
         transcriptSessionId:
           options.resumeTranscriptSessionId ?? session.transcriptSessionId,
@@ -1380,12 +1381,8 @@ export class RuntimeService {
       runnerEnv.ANTHROPIC_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
       runnerEnv.PROXY_AUTH_TOKEN = runnerEnv.ANTHROPIC_API_KEY
       runnerEnv.ANTHROPIC_MODEL = runnerEnv.MOSS_DEFAULT_MODEL
-      if (this.options.config.cabin.controlBaseUrl) {
-        runnerEnv.CABIN_CONTROL_BASE_URL = this.options.config.cabin.controlBaseUrl
-      }
-      if (this.options.config.cabin.controlAuth) {
-        runnerEnv.CABIN_CONTROL_AUTH = this.options.config.cabin.controlAuth
-      }
+      delete runnerEnv.CABIN_CONTROL_BASE_URL
+      delete runnerEnv.CABIN_CONTROL_AUTH
       runnerEnv.CABIN_CONTROL_TIMEOUT_MS = String(this.options.config.cabin.controlTimeoutMs)
       // Intent-first: the skill only emits the structured command; the server performs the
       // hardware dispatch and authors the confirmation. The LLM never triggers hardware.

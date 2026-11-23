@@ -1,5 +1,5 @@
 import http from 'http'
-import { randomUUID } from 'crypto'
+import { createHmac, randomBytes, randomUUID } from 'crypto'
 import { readFile, stat } from 'fs/promises'
 import path from 'path'
 import type { RuntimeService } from '../runtimeService.js'
@@ -8,6 +8,7 @@ import { buildConversationKey, issueCabinToken, verifyCabinTokenDetailed } from 
 import { CabinDemoState } from './demo.js'
 import {
   CabinServices,
+  MossSubmittedTurnError,
   normalizeCabinPassengerReply,
   shouldBufferCabinReply,
   isAffirmationReply,
@@ -85,9 +86,24 @@ function writeJson(res: http.ServerResponse, status: number, body: unknown): voi
   res.end(payload)
 }
 
+type TraceStage = (phase: string, details?: Record<string, unknown>) => void
+const requestTrace = new WeakMap<http.ServerResponse, TraceStage>()
+const upstreamRequestIdPattern = /^(?:req_[a-f\d]{16}|[a-f\d]{16,32}|[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12})$/i
+const traceKey = randomBytes(32)
+function textReference(conversationId: string, text: string): string {
+  return createHmac('sha256', traceKey).update(JSON.stringify([conversationId, text.trim()])).digest('hex').slice(0, 24)
+}
+
 function writeSse(res: http.ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\n`)
   res.write(`data: ${JSON.stringify(data)}\n\n`)
+  if (event === 'delta') {
+    const content = (data as { content?: unknown })?.content
+    if (typeof content === 'string' && content.trim()) requestTrace.get(res)?.('sse.first_text')
+  } else if (['start', 'done', 'error'].includes(event)) {
+    const code = (data as { code?: string })?.code
+    requestTrace.get(res)?.(`sse.${event}`, code ? { code } : undefined)
+  }
 }
 
 function serializeAudioPlayback(playback: CabinSeatAudioPlayback): Record<string, unknown> {
@@ -875,13 +891,22 @@ export function createCabinApi(options: {
     })
   }
 
+  async function prepareDialogue(identity: CabinRequestIdentity, res: http.ServerResponse, requestId: string) {
+    const trace = requestTrace.get(res)
+    trace?.('input.ready')
+    const context = await resolveCabinContext(identity, requestId)
+    trace?.('context.ready')
+    const conversation = await services.ensureConversation(context)
+    trace?.('conversation.ready')
+    return { context, conversation }
+  }
+
   async function handleVoiceQuery(req: http.IncomingMessage, res: http.ServerResponse, requestId: string): Promise<void> {
     const identity = requireCabinRequestIdentity(req)
     const form = await readMultipartForm(req)
     const file = form.file
     const language = validateLanguage(form.fields.language, languageMode !== 'legacy')
-    const context = await resolveCabinContext(identity, requestId)
-    const conversation = await services.ensureConversation(context)
+    const { context, conversation } = await prepareDialogue(identity, res, requestId)
     const scope = languageMode !== 'legacy' ? languageScope(`${conversation.id}:${store.languageEpoch(conversation.id)}`, context) : undefined
     const logContext = {
       requestId,
@@ -918,6 +943,7 @@ export function createCabinApi(options: {
       elapsedMs: result.elapsedMs,
     })
     if (scope) store.recordLanguage(scope, result.text, result.language, language !== 'auto')
+    requestTrace.get(res)?.('asr.ready', { text_ref: textReference(conversation.id, result.text) })
     writeJson(res, 200, {
       status: 'ok',
       seat_id: context.seatId || '',
@@ -935,6 +961,7 @@ export function createCabinApi(options: {
     requestId: string
   }): Promise<void> {
     const { res, context, conversation, text, source, requestId } = input
+    requestTrace.get(res)?.('chat.ready', { text_ref: textReference(conversation.id, text) })
     const language = context.replyLanguage
     const spoken = language && isSpoken(language) ? language : undefined
     const scope = language ? languageScope(`${conversation.id}:${store.languageEpoch(conversation.id)}`, context) : undefined
@@ -1044,7 +1071,9 @@ export function createCabinApi(options: {
         allowPendingSelection,
         logContext,
       })
-      const reply = spoken && spoken !== 'zh' ? orderReply(spoken, orderResult) : normalizeCabinPassengerReply({ userText: text, reply: orderResult.reply, context })
+      const reply = spoken && spoken !== 'zh' ? orderReply(spoken, orderResult)
+        : orderResult.slots.reason === 'creation_disabled' ? orderResult.reply
+        : normalizeCabinPassengerReply({ userText: text, reply: orderResult.reply, context })
       if (scope && orderResult.slots.execution_status === 'confirmation_required') {
         store.rememberOrderChoices(scope, orderResult.slots.candidates as NonNullable<typeof pendingOrderCancellation>['candidates'])
       }
@@ -1179,7 +1208,7 @@ export function createCabinApi(options: {
       writeSse(res, 'error', {
         code: mapped.code,
         message: mapped.message,
-        retriable: mapped.statusCode >= 500,
+        retriable: !(error instanceof MossSubmittedTurnError) && mapped.statusCode >= 500,
       })
       res.end()
       return
@@ -1208,8 +1237,7 @@ export function createCabinApi(options: {
     const clientLanguage = stringField(body, 'language')
     const hint = validateLanguage(languageMode !== 'legacy' && clientLanguage === 'unknown' ? 'auto' : clientLanguage, languageMode !== 'legacy')
 
-    const context = await resolveCabinContext(identity, requestId)
-    const conversation = await services.ensureConversation(context)
+    const { context, conversation } = await prepareDialogue(identity, res, requestId)
     let replyLanguage: Language | undefined
     if (languageMode !== 'legacy') {
       const scope = languageScope(`${conversation.id}:${store.languageEpoch(conversation.id)}`, context)
@@ -1241,8 +1269,7 @@ export function createCabinApi(options: {
     const source = form.fields.source
       ? parseMessageSource(form.fields.source)
       : 'voice'
-    const context = await resolveCabinContext(identity, requestId)
-    const conversation = await services.ensureConversation(context)
+    const { context, conversation } = await prepareDialogue(identity, res, requestId)
     const logContext = {
       requestId,
       tabletId: context.tabletId,
@@ -1485,6 +1512,21 @@ export function createCabinApi(options: {
         method: req.method || '',
         path: pathname,
       }
+      let streamFailed = false
+      if (req.method === 'POST' && ['/v1/voice/query', '/v1/voice-chat/send', '/v1/ai-chat/send'].includes(pathname)) {
+        const start = performance.now()
+        const seen = new Set<string>()
+        const trace: TraceStage = (phase, details) => {
+          if (seen.has(phase)) return
+          seen.add(phase)
+          if (phase === 'sse.error') streamFailed = true
+          cabinLogger.log({ ...inboundBase, type: 'stage', ok: !streamFailed, elapsedMs: Math.round(performance.now() - start), details: { phase, ...details } })
+        }
+        requestTrace.set(res, trace)
+        res.once('close', () => {
+          if (!res.writableFinished) trace('connection.closed')
+        })
+      }
       const logInbound = (event: {
         status: number
         ok: boolean
@@ -1496,82 +1538,72 @@ export function createCabinApi(options: {
           type: 'inbound',
           ...inboundBase,
           status: event.status,
-          ok: event.ok,
+          ok: event.ok && !streamFailed,
           elapsedMs: Date.now() - startedAt,
           errorCode: event.errorCode,
           errorMessage: event.errorMessage,
           details: event.details,
         })
       }
+      const handleInbound = async (handler: () => void | Promise<void>, route = pathname): Promise<true> => {
+        inboundBase.path = route
+        const upstreamId = req.headers['x-request-id']
+        const length = req.headers['content-length']
+        cabinLogger.log({
+          ...inboundBase, type: 'inbound_start', elapsedMs: 0,
+          details: {
+            phase: 'request.accepted',
+            upstream_request_id: typeof upstreamId === 'string' && upstreamRequestIdPattern.test(upstreamId) ? upstreamId : undefined,
+            content_length: length !== undefined && /^\d{1,15}$/.test(length) ? Number(length) : undefined,
+          },
+        })
+        await handler()
+        logInbound({ status: res.statusCode, ok: res.statusCode < 400 })
+        return true
+      }
       try {
         const url = new URL(req.url || '/', 'http://localhost')
         const isHead = req.method === 'HEAD'
         if (req.method === 'POST' && pathname === '/v1/auth/token') {
-          await handleAuthToken(req, res, requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleAuthToken(req, res, requestId))
         }
         if (req.method === 'POST' && pathname === '/v1/voice/query') {
-          await handleVoiceQuery(req, res, requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleVoiceQuery(req, res, requestId))
         }
         if (req.method === 'POST' && pathname === '/v1/voice-chat/send') {
-          await handleVoiceChatSend(req, res, requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleVoiceChatSend(req, res, requestId))
         }
         if (req.method === 'POST' && pathname === '/v1/ai-chat/send') {
-          await handleChatSend(req, res, requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleChatSend(req, res, requestId))
         }
         if (req.method === 'GET' && pathname === '/v1/ai-chat/history') {
-          await handleHistory(req, res, url, requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleHistory(req, res, url, requestId))
         }
         if (req.method === 'POST' && pathname === '/v1/ai-chat/reset') {
-          await handleReset(req, res, requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleReset(req, res, requestId))
         }
         if (req.method === 'POST' && pathname === '/v1/tts/speech') {
-          await handleSpeech(req, res, requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleSpeech(req, res, requestId))
         }
         if (req.method === 'POST' && pathname === '/v1/health-reports/start') {
-          await handleHealthReportStart(req, res, requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleHealthReportStart(req, res, requestId))
         }
         const healthReportMatch = pathname.match(/^\/v1\/health-reports\/([^/]+)$/)
         if (req.method === 'GET' && healthReportMatch) {
-          await handleHealthReportGet(req, res, decodeURIComponent(healthReportMatch[1] || ''), requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleHealthReportGet(req, res, decodeURIComponent(healthReportMatch[1] || ''), requestId), '/v1/health-reports/:id')
         }
         if (req.method === 'POST' && pathname === '/v1/cabin-demo/flight-state') {
-          await handleDemoFlightState(req, res, requestId)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleDemoFlightState(req, res, requestId))
         }
         if (req.method === 'GET' && pathname === '/v1/cabin-demo/alerts') {
-          handleDemoAlerts(res)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleDemoAlerts(res))
         }
         if (req.method === 'GET' && pathname === '/v1/cabin-demo/broadcasts') {
-          handleDemoBroadcasts(res)
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleDemoBroadcasts(res))
         }
         const broadcastMatch = pathname.match(/^\/v1\/cabin\/broadcasts\/([^/]+)$/)
         if ((req.method === 'GET' || isHead) && broadcastMatch) {
-          await handleBroadcastAsset(res, decodeURIComponent(broadcastMatch[1] || ''))
-          logInbound({ status: 200, ok: true })
-          return true
+          return await handleInbound(() => handleBroadcastAsset(res, decodeURIComponent(broadcastMatch[1] || '')), '/v1/cabin/broadcasts/:filename')
         }
         return false
       } catch (error) {

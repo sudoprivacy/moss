@@ -17,6 +17,7 @@ export type RunnerServerMessage =
       attemptId: string
       sessionId: string
       runtimeType: 'host' | 'docker'
+      cabinControlMode?: 'emit'
       state: string
     }
   | {

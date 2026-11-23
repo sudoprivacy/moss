@@ -12,6 +12,7 @@ import {
 import { cleanupIntermediateFiles, ensureDraftsDirectory } from '../draftsCleanup.js'
 
 type AcpBridgeOptions = {
+  cabinManaged?: boolean
   child: ChildProcess
   sessionId: string
   cwd: string
@@ -88,6 +89,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
   const exitListeners = new Set<(code: number | null, signal: NodeJS.Signals | null) => void>()
 
   let rpcId = 1
+  const promptRpcIds = new Set<string>()
   let acpSessionId: string | null = null
   const pendingStdin: string[] = []
   const pendingStdout: string[] = []
@@ -191,8 +193,9 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const id = customId || `m-${rpcId++}`
     const msg = { jsonrpc: '2.0', id, method, params }
     const raw = JSON.stringify(msg) + '\n'
-    process.stderr.write(`[AcpBridge] Sending RPC: ${raw}`)
+    process.stderr.write(`[AcpBridge] Sending RPC: ${method} ${id}\n`)
     if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
+      if (method === 'session/prompt') promptRpcIds.add(id)
       child.stdin.write(raw)
     }
   }
@@ -219,7 +222,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     const id = customId || `m-${rpcId++}`
     const msg = { jsonrpc: '2.0', id, method, params }
     const raw = JSON.stringify(msg) + '\n'
-    process.stderr.write(`[AcpBridge] Sending RPC (wait): ${raw}`)
+    process.stderr.write(`[AcpBridge] Sending RPC (wait): ${method} ${id}\n`)
     if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
       child.stdin.write(raw)
     }
@@ -303,7 +306,7 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       // because the engine will run another turn from this answer; the next
       // stopReason will flip it back to false.
 
-      process.stderr.write(`[AcpBridge] Processing AskUserQuestion response for toolCallId=${pendingQuestionKey}, answer=${trimmedText}\n`)
+      process.stderr.write(`[AcpBridge] Processing AskUserQuestion response for toolCallId=${pendingQuestionKey}\n`)
 
       // Build the answer payload for scode
       // The answer format expected by scode: { answers: [{ id, value, label }] }
@@ -322,7 +325,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
         result: answerPayload,
       }
       const raw = JSON.stringify(responseMsg) + '\n'
-      process.stderr.write(`[AcpBridge] Sending AskUserQuestion RPC response: ${raw}\n`)
       if (!child.stdin?.destroyed && !child.stdin?.writableEnded) {
       child.stdin.write(raw)
     }
@@ -481,7 +483,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       while (pendingStdin.length > 0) {
         const data = pendingStdin.shift()!
         try {
-          process.stderr.write(`[AcpBridge] Flushing message: ${data.slice(0, 50)}...\n`)
           processUserMessage(data)
         } catch (e: any) {
           process.stderr.write(`[AcpBridge] Error flushing message: ${e.message}\n`)
@@ -566,9 +567,19 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
           continue
         }
 
-        // ... (rest of the stdout processing logic)
+        const incomplete = options.cabinManaged && parsed.result?.stopReason && parsed.result.stopReason !== 'end_turn'
+        if ((parsed.error || incomplete) && promptRpcIds.delete(parsed.id)) {
+          currentTurnToolCalls.clear()
+          currentTurnAssistantUuid = null
+          currentAssistantText = ''
+          currentTurnUsedSendUserMessage = false
+          reevaluateBusy()
+          emitStdout(JSON.stringify({ type: 'result', session_id: sessionId, status: 'error', code: incomplete ? 'PROMPT_INCOMPLETE' : 'PROMPT_RPC_FAILED' }) + '\n')
+          continue
+        }
 
         if (parsed.result?.stopReason) {
+          promptRpcIds.delete(parsed.id)
           process.stderr.write(`[AcpBridge] Turn Ended. Unblocking UI...\n`)
           currentTurnAssistantUuid = null // Reset UUID for the next turn
 
@@ -694,7 +705,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
             }
 
             if (text && !currentTurnUsedSendUserMessage) {
-              process.stderr.write(`[AcpBridge] Received chunk: ${text.slice(0, 20)}...\n`)
               currentAssistantText += text
 
               if (!currentTurnAssistantUuid) {
@@ -748,7 +758,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
                   model,
                 },
               }
-              process.stderr.write(`[AcpBridge] EMITTING SendUserMessage AS ASSISTANT EVENT: ${JSON.stringify(assistantEvent)}\n`)
               emitStdout(JSON.stringify(assistantEvent) + '\n')
               void writeTranscript(assistantEvent)
               lastPersistedUuid = assistantUuid
@@ -777,7 +786,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               userType: 'external',
               version: 'unknown',
             }
-            process.stderr.write(`[AcpBridge] EMITTING TOOL_USE EVENT: ${JSON.stringify(toolEvent)}\n`)
             emitStdout(JSON.stringify(toolEvent) + '\n')
             void writeTranscript(toolEvent)
             lastPersistedUuid = toolUuid
@@ -872,7 +880,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
               // Add requestId so frontend can send response back
               _request_id: requestId,
             }
-            process.stderr.write(`[AcpBridge] EMITTING AskUserQuestion EVENT (no prior session/update): ${JSON.stringify(toolEvent)}\n`)
             emitStdout(JSON.stringify(toolEvent) + '\n')
             void writeTranscript(toolEvent)
             lastPersistedUuid = toolCallId || requestId
@@ -924,7 +931,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
     workDir: cwd,
     runtime,
     writeStdin(data: string) {
-      process.stderr.write(`[AcpBridge] writeStdin called: ${data?.slice(0, 100)}...\n`)
       if (child.stdin?.destroyed) {
         process.stderr.write(`[AcpBridge] writeStdin: stdin destroyed, ignoring\n`)
         return
@@ -935,7 +941,6 @@ export function createAcpBridgeHandle(options: AcpBridgeOptions): BackendHandle 
       // Handle control_request for model switching (async)
       try {
         const parsed = JSON.parse(data)
-        process.stderr.write(`[AcpBridge] Received control_request: ${JSON.stringify(parsed)}\n`)
         if (parsed.type === 'control_request' && parsed.request?.subtype === 'set_model') {
           const modelId = parsed.request.model_id
           if (!modelId) {

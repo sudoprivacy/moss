@@ -94,6 +94,11 @@ export function getDefaultServerConfig(): ServerFileConfig {
       automationEnabled: false,
       broadcastEnabled: true,
       conversationSeatAudioEnabled: false,
+      serviceOrderCreateEnabled: true,
+      replyTimeoutMs: 45_000,
+      sessionRecoveryEnabled: true,
+      sessionRecoveryMaxAttempts: 1,
+      contextReplayTurns: 20,
       broadcastTtsVersion: 'flight-phase-v1',
       healthReportEnabled: false,
       healthReportCollectSeconds: 30,
@@ -243,6 +248,11 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       conversationSeatAudioEnabled: process.env.CABIN_CONVERSATION_SEAT_AUDIO_ENABLED
         ? process.env.CABIN_CONVERSATION_SEAT_AUDIO_ENABLED === '1' || process.env.CABIN_CONVERSATION_SEAT_AUDIO_ENABLED === 'true'
         : raw.cabin.conversationSeatAudioEnabled,
+      serviceOrderCreateEnabled: raw.cabin.serviceOrderCreateEnabled,
+      replyTimeoutMs: raw.cabin.replyTimeoutMs,
+      sessionRecoveryEnabled: raw.cabin.sessionRecoveryEnabled,
+      sessionRecoveryMaxAttempts: raw.cabin.sessionRecoveryMaxAttempts,
+      contextReplayTurns: raw.cabin.contextReplayTurns,
       broadcastTtsCacheDir: (process.env.CABIN_BROADCAST_TTS_CACHE_DIR || raw.cabin.broadcastTtsCacheDir)
         ? normalizePath((process.env.CABIN_BROADCAST_TTS_CACHE_DIR || raw.cabin.broadcastTtsCacheDir)!)
         : undefined,

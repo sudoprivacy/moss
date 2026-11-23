@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { languageNames } from '../language.js'
 import type { SpokenLanguage } from '../commandLanguage.js'
 import http from 'http'
+import { connect, type Socket } from 'node:net'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import type { DatabaseSync } from 'node:sqlite'
 
@@ -106,6 +110,116 @@ const seatHeaders = {
 }
 
 describe('cabin seat context mode', () => {
+  it('records four independent HTTP arrivals before the bodies finish and joins each to its error response', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'moss-cabin-ingress-'))
+    const logFile = join(directory, 'cabin.jsonl')
+    const sockets: Socket[] = []
+    type Entry = { type: string; path: string; request_id: string; status?: number; details?: { phase?: string; upstream_request_id?: string; content_length?: number } }
+    const waitForRows = async (type: string, count: number) => {
+      for (let attempt = 0; attempt < 150; attempt++) {
+        const log = await readFile(logFile, 'utf8').catch(() => '')
+        const rows: Entry[] = log.split('\n').slice(0, -1).map(line => JSON.parse(line))
+        if (rows.filter(row => row.type === type).length >= count) return rows
+        await Bun.sleep(10)
+      }
+      throw new Error(`Missing ${count} ${type} records`)
+    }
+    try {
+      const { cabinBaseUrl } = await startCabinServer('http://127.0.0.1:1', { logEnabled: true, logFile })
+      const upstream = 'c96c4564-a24a-4c6d-8c7f-fbf90f437f35'
+      const body = '{"ignored":"private-body"}'
+      const replies = Array.from({ length: 4 }, () => {
+        const socket = connect(Number(new URL(cabinBaseUrl).port), '127.0.0.1')
+        sockets.push(socket)
+        socket.setEncoding('utf8')
+        const response = new Promise<string>((resolve, reject) => {
+          let reply = ''
+          socket.on('data', chunk => { reply += chunk })
+          socket.on('end', () => resolve(reply))
+          socket.on('error', reject)
+        })
+        socket.write(['POST /v1/ai-chat/send?private-query HTTP/1.1', 'Host: localhost', 'Connection: close',
+          `X-Request-Id: ${upstream}`, 'Authorization: Bearer private-token', 'X-Cabin-Aircraft-No: test', 'X-Cabin-Seat-No: A',
+          'Content-Type: application/json', `Content-Length: ${Buffer.byteLength(body)}`, '', body.slice(0, 1)].join('\r\n'))
+        return response
+      })
+      const early = await waitForRows('inbound_start', 4)
+      expect(early).toHaveLength(4)
+      const ids = early.map(row => row.request_id).sort()
+      expect(new Set(ids).size).toBe(4)
+      for (const row of early) {
+        expect(row.request_id).not.toBe(upstream)
+        expect(row).toMatchObject({ type: 'inbound_start', method: 'POST', path: '/v1/ai-chat/send', details: { phase: 'request.accepted', upstream_request_id: upstream, content_length: body.length } })
+        expect(row.status).toBeUndefined()
+      }
+      for (const socket of sockets) socket.write(body.slice(1))
+      const responseIds = (await Promise.all(replies)).map(reply => {
+        expect(reply).toContain('MISSING_CONTENT')
+        return /^x-request-id:\s*([^\r\n]+)/im.exec(reply)?.[1]
+      })
+      expect(responseIds.sort()).toEqual(ids)
+      const dynamic = await fetch(`${cabinBaseUrl}/v1/health-reports/private-path`, { headers: { 'x-request-id': 'private-invalid-id' } })
+      await dynamic.text()
+      const other = await fetch(`${cabinBaseUrl}/v1/not-a-cabin-route`)
+      expect(other.status).toBe(404)
+      const final = await waitForRows('inbound', 5)
+      const chats = final.filter(row => row.path === '/v1/ai-chat/send')
+      expect(chats.filter(row => row.type === 'inbound_start')).toHaveLength(4)
+      expect(chats.filter(row => row.type === 'inbound' && row.status === 400).map(row => row.request_id).sort()).toEqual(ids)
+      const otherStarts = final.filter(row => row.type === 'inbound_start' && row.path !== '/v1/ai-chat/send')
+      expect(otherStarts.map(row => row.path)).toEqual(['/v1/health-reports/:id'])
+      expect(JSON.stringify(final.filter(row => row.type === 'inbound_start'))).not.toContain('private-')
+    } finally {
+      for (const socket of sockets) socket.destroy()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('correlates ASR, an order receipt and SSE writes without logging turn text in stages', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'moss-cabin-trace-'))
+    const logFile = join(directory, 'cabin.jsonl')
+    const content = '请给我一杯可乐'
+    let orders = 0
+    const upstream = http.createServer((req, res) => {
+      res.setHeader('content-type', 'application/json')
+      if (req.url === '/asr') return res.end(JSON.stringify({ text: content }))
+      if (req.url?.endsWith('/service-order/create')) { orders++; return res.end(JSON.stringify({ code: 0, data: 321 })) }
+      res.end(JSON.stringify({ code: 0, data: { tabletId: 'pad', flightId: '1', flightDate: '2026-11-20', tabletAccessToken: 'private-fixture-token', passenger: { passengerRef: 'p' } } }))
+    })
+    try {
+      const base = await listen(upstream)
+      const { cabinBaseUrl } = await startCabinServer(base, { logFile, logEnabled: true, conversationLanguageMode: 'legacy' })
+      const body = new FormData(); body.set('audio', new Blob(['audio-fixture']), 'test.wav')
+      const voice = await fetch(`${cabinBaseUrl}/v1/voice/query`, { method: 'POST', headers: seatHeaders, body })
+      expect((await voice.json()).text).toBe(content)
+      const chat = await fetch(`${cabinBaseUrl}/v1/ai-chat/send`, { method: 'POST', headers: { ...seatHeaders, 'content-type': 'application/json' }, body: JSON.stringify({ content }) })
+      expect(await chat.text()).toContain('event: done')
+      expect(orders).toBe(1)
+      type Row = { type: string; request_id: string; upstream?: string; details: { phase: string; text_ref?: string; order_id?: string } }
+      let rows: Row[] = []
+      for (let tries = 0; tries < 100; tries++) {
+        const text = await readFile(logFile, 'utf8').catch(() => '')
+        rows = text.split('\n').slice(0, -1).map(line => JSON.parse(line) as Row)
+        if (rows.filter(row => row.type === 'inbound').length === 2 && rows.some(row => row.details?.phase === 'sse.done') && rows.some(row => row.details?.phase === 'order.receipt')) break
+        await Bun.sleep(10)
+      }
+      for (const [response, upstream] of [[voice, 'asr'], [chat, 'service-order']] as const) {
+        const chain = rows.filter(row => row.request_id === response.headers.get('x-request-id'))
+        expect(chain.filter(row => row.type === 'inbound_start')).toHaveLength(1)
+        expect(chain.filter(row => row.type === 'outbound' && row.upstream === upstream)).toHaveLength(1)
+        expect(chain.filter(row => row.type === 'inbound')).toHaveLength(1)
+      }
+      const stages = rows.filter(row => row.type === 'stage')
+      const forChat = stages.filter(row => row.request_id === chat.headers.get('x-request-id'))
+      expect(forChat.filter(row => row.details.phase === 'sse.first_text')).toHaveLength(1)
+      expect(forChat.find(row => row.details.phase === 'order.receipt')?.details.order_id).toBe('321')
+      const ref = stages.find(row => row.request_id === voice.headers.get('x-request-id') && row.details.phase === 'asr.ready')?.details.text_ref
+      expect(ref).toMatch(/^[a-f0-9]{24}$/)
+      expect(forChat.find(row => row.details.phase === 'chat.ready')?.details.text_ref).toBe(ref)
+      expect(JSON.stringify(stages)).not.toContain(content)
+      expect(JSON.stringify(stages)).not.toContain('private-fixture-token')
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
   it('can shadow real labels without changing the legacy voice response', async () => {
     const upstream = http.createServer((req,res) => {
       res.setHeader('content-type','application/json')

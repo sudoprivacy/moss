@@ -9,6 +9,8 @@ emoji: "🛫"
 
 # Cabin Hardware Control
 
+In Moss-managed cabin sessions the script runs in `emit` mode, validates the arguments and returns a command without making an HTTP request. No control URL or credential is needed. Only the server dispatches the command; do not retry it or claim that emitting it confirms execution.
+
 Use this skill for passenger requests that require real cabin hardware control.
 Do not use this skill for hardware status questions such as 当前座椅角度是多少 or 小桌板收好了吗; use `cabin-hardware-status-query`.
 Do not use this skill for business mode switching such as 办公模式、放松模式、睡眠模式、个人模式; use `cabin-mode-switch`.

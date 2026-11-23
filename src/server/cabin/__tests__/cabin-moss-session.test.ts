@@ -63,6 +63,7 @@ function makeServices(opts: {
   const config = { controlBaseUrl: 'http://control.local', controlTimeoutMs: 200, llmModel: 'test' } as unknown as CabinConfig
   let connectionIndex = 0
   const runtime = {
+    getSessionSnapshot: () => snap('active'),
     ensureSessionReady: async () => ({ attempt: {} }),
     connectToAttempt: async () => {
       const allLines = Array.isArray(opts.lines[0]) ? opts.lines as string[][] : [opts.lines as string[]]
@@ -84,6 +85,18 @@ afterEach(() => {
 })
 
 describe('generateReplyWithMossSession · intent-first', () => {
+  it('never redispatches based on an old tool invocation or an execution receipt', async () => {
+    const invocation = shellToolUse('node cabin-control.mjs --command seat.tray.open --seat-no 01A')
+    let fetches = 0
+    const make = (lines: string[]) => makeServices({ lines, fetchImpl: Object.assign(async () => { fetches++; return new Response('{}') }, { preconnect: fetch.preconnect }) })
+    const turn = { mossSessionId: 's', context, text: '打开小桌板' }
+    await expect(make([invocation]).generateReplyWithMossSession(turn)).rejects.toThrow(/not replayed/)
+    for (const ok of [true, false]) {
+      const result = await make([invocation, emitToolResult({ ok, command: 'seat.tray.open', execution_status: ok ? 'dispatched' : 'failed' }), stdout({ type: 'result', status: 'error' })]).generateReplyWithMossSession(turn)
+      expect(result.reply).toContain(ok ? '已为您下发' : '没有下发成功')
+    }
+    expect(fetches).toBe(0)
+  })
   it('renders the real outcome in German and refuses a write for a status question even if the model emits a command', async () => {
     const controls: string[] = []
     const services = makeServices({ lines:[emitToolResult({ok:true,mode:'emit',command:'seat.light',params:{on:true}})], fetchImpl:Object.assign(async (url: Parameters<typeof fetch>[0]) => {
@@ -282,6 +295,7 @@ function snap(status: SessionSnapshot['status'], extra: Partial<SessionSnapshot>
 }
 
 type RecoveryCalls = {
+  retired: string[]
   createMossSession: number
   rebind: Array<[string, string]>
   connect: number
@@ -295,7 +309,7 @@ function makeRecoveryServices(opts: {
   messages?: CabinMessage[]
   replyTimeoutMs?: number
 }): { services: CabinServices; calls: RecoveryCalls } {
-  const calls: RecoveryCalls = { createMossSession: 0, rebind: [], connect: 0 }
+  const calls: RecoveryCalls = { createMossSession: 0, rebind: [], connect: 0, retired: [] }
   let socketIdx = 0
   const config = {
     controlBaseUrl: 'http://control.local',
@@ -308,6 +322,7 @@ function makeRecoveryServices(opts: {
   } as unknown as CabinConfig
   const runtime = {
     getSessionSnapshot: (id: string) => opts.snapshots[id] ?? null,
+    terminateSession: async (id: string) => { calls.retired.push(id) },
     ensureSessionReady: async (id: string) => {
       if (opts.ensureThrowsFor?.has(id)) throw new Error('ensure failed')
       return { attempt: {} }
@@ -415,10 +430,10 @@ describe('generateReplyWithMossSession · session recovery', () => {
     expect(calls.rebind).toEqual([['c1', 's2']])
   })
 
-  it('recovers from a fake-dead (stalled) session via reply timeout, then answers', async () => {
+  it('recovers from a refused attach before submitting the prompt', async () => {
     const { calls, services } = makeRecoveryServices({
       snapshots: { s1: snap('active', { attempt: { runtimeState: 'running', runnerPid: 1, attachPath: '/x', lastHeartbeatAt: 1, stopReason: null, errorText: null } }) },
-      sockets: [() => fakeStallSocket(), goodSocket('已经帮您处理好了。')],
+      sockets: [async () => { throw Object.assign(new Error('attach failed'), { code: 'ECONNREFUSED' }) }, goodSocket('已经帮您处理好了。')],
       replyTimeoutMs: 120,
     })
     const result = await services.generateReplyWithMossSession({ ...base, mossSessionId: 's1' })
@@ -427,7 +442,7 @@ describe('generateReplyWithMossSession · session recovery', () => {
     expect(result.reply).toContain('处理好了')
   })
 
-  it('recovers at most once — a second stall surfaces the error instead of churning', async () => {
+  it('retires the stalled runner without replaying a submitted turn', async () => {
     const { calls, services } = makeRecoveryServices({
       snapshots: { s1: snap('active', { attempt: { runtimeState: 'running', runnerPid: 1, attachPath: '/x', lastHeartbeatAt: 1, stopReason: null, errorText: null } }) },
       sockets: [() => fakeStallSocket(), () => fakeStallSocket()],
@@ -436,8 +451,26 @@ describe('generateReplyWithMossSession · session recovery', () => {
     await expect(
       services.generateReplyWithMossSession({ ...base, mossSessionId: 's1' }),
     ).rejects.toThrow(/timed out/)
-    expect(calls.createMossSession).toBe(1)
-    expect(calls.connect).toBe(2)
+    expect(calls.createMossSession).toBe(0)
+    expect(calls.retired).toEqual(['s1'])
+    expect(calls.connect).toBe(1)
+  })
+
+  it('reports an exit or terminal failure immediately without submitting again', async () => {
+    for (const terminal of [stdout({ type: 'result', status: 'error' }), JSON.stringify({ type: 'exit', code: 1 })]) {
+      const { calls, services } = makeRecoveryServices({ snapshots: { s1: snap('active') }, sockets: [() => fakeRunnerSocket([terminal])] })
+      await expect(services.generateReplyWithMossSession({ ...base, mossSessionId: 's1' })).rejects.toThrow(/not replayed/)
+      expect(calls.connect).toBe(1)
+      expect(calls.createMossSession).toBe(0)
+    }
+  })
+
+  it('does not attach a second passenger turn to the same broadcast socket', async () => {
+    const { services, calls } = makeRecoveryServices({ snapshots: { s1: snap('active') }, sockets: [fakeStallSocket], replyTimeoutMs: 50 })
+    const turn = services.generateReplyWithMossSession({ ...base, mossSessionId: 's1' })
+    await expect(services.generateReplyWithMossSession({ ...base, mossSessionId: 's1' })).rejects.toThrow(/active turn/)
+    await expect(turn).rejects.toThrow(/timed out/)
+    expect(calls.connect).toBe(1)
   })
 
   it('builds a context-replay block that excludes the current turn and hardware templates', () => {

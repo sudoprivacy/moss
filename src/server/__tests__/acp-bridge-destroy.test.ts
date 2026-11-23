@@ -191,6 +191,16 @@ describe('AcpBridge.destroy (C2 dispatch)', () => {
       await waitUntil(() => stdinWrites.some(line => line.includes('"method":"session/prompt"')))
       const promptLine = stdinWrites.find(line => line.includes('"method":"session/prompt"'))!
       expect(promptLine).toContain('"sessionId":"acp-existing"')
+      const events: string[] = []
+      handle.onStdoutLine(line => events.push(line))
+      const error = { code: -32603, message: 'private-model-payload' }
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: 'other-rpc', error })
+      expect(events).toHaveLength(0)
+      writeJsonLine(stdout, { jsonrpc: '2.0', id: JSON.parse(promptLine).id, error })
+      await waitUntil(() => events.length === 1)
+      expect(JSON.parse(events[0]!)).toMatchObject({ type: 'result', status: 'error', code: 'PROMPT_RPC_FAILED' })
+      expect(events[0]).not.toContain('private-model-payload')
+      expect(handle.isBusy!()).toBe(false)
     } finally {
       await rm(cwd, { recursive: true, force: true })
     }

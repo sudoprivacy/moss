@@ -78,6 +78,7 @@ export type SessionCreateOptions = {
 }
 
 export type BackendSpawnOptions = {
+  cabinManaged?: boolean
   sessionId: string
   resumeSessionId?: string
   cwd: string

@@ -105,7 +105,23 @@ export type CabinServicesOptions = {
   logger?: CabinLogger
 }
 
+type MossReplyInput = {
+  mossSessionId: string
+  conversationId?: string
+  currentUserMessageId?: string
+  context: CabinPassengerContext
+  text: string
+  timeoutMs?: number
+  onDelta?: (text: string) => void
+  logContext?: CabinLogContext
+}
+
+export class MossSubmittedTurnError extends Error {}
+class MossRunnerTerminalError extends Error {}
+
 export class CabinServices {
+  private readonly inFlightTurns = new Set<string>()
+  private readonly failedRetirements = new Set<string>()
   private readonly fetchImpl: FetchLike
   private readonly orderClient: CabinOrderClient
   private readonly broadcastClient: CabinBroadcastClient
@@ -264,6 +280,11 @@ export class CabinServices {
     }
 
     if (intent.kind === 'create') {
+      if (this.options.config.serviceOrderCreateEnabled === false) {
+        this.options.logger?.log({ ...input.logContext, type: 'stage', upstream: 'service-order', details: { phase: 'order.create_blocked', reason: 'disabled' } })
+        return { intent: 'service_order_create', slots: { execution_status: 'blocked', reason: 'creation_disabled' },
+          reply: '自动下单已暂停，本次没有下单。如需饮品或毛毯，请联系乘务员。', ok: false }
+      }
       this.options.store.clearPendingOrderCancellation(input.conversationId)
       const response = await this.orderClient.create({
         context: input.context,
@@ -274,6 +295,11 @@ export class CabinServices {
       })
       const orderId = extractOrderId(response.payload)
       const ok = response.ok && Boolean(orderId)
+      this.options.logger?.log({
+        ...input.logContext, type: 'stage', upstream: 'service-order', ok,
+        details: { phase: 'order.receipt', service_type_id: intent.serviceTypeId, sub_item_ids: intent.subItemIds,
+          quantities: intent.quantities, has_order_id: !!orderId, order_id: orderId && /^\d{1,24}$/.test(orderId) ? orderId : undefined },
+      })
       return {
         intent: 'service_order_create',
         slots: {
@@ -1081,16 +1107,18 @@ export class CabinServices {
       : input.context.replyLanguage ? clarifyText[input.context.replyLanguage] : '收到，我会为您处理。'
   }
 
-  async generateReplyWithMossSession(input: {
-    mossSessionId: string
-    conversationId?: string
-    currentUserMessageId?: string
-    context: CabinPassengerContext
-    text: string
-    timeoutMs?: number
-    onDelta?: (text: string) => void
-    logContext?: CabinLogContext
-  }): Promise<{ reply: string; toolCall?: CabinToolCall; intent?: string; slots?: Record<string, unknown> }> {
+  async generateReplyWithMossSession(input: MossReplyInput) {
+    const key = input.conversationId || input.mossSessionId
+    if (this.inFlightTurns.has(key)) throw new Error('Moss session already has an active turn')
+    this.inFlightTurns.add(key)
+    try {
+      return await this.runMossTurn(input)
+    } finally {
+      this.inFlightTurns.delete(key)
+    }
+  }
+
+  private async runMossTurn(input: MossReplyInput): Promise<{ reply: string; toolCall?: CabinToolCall; intent?: string; slots?: Record<string, unknown> }> {
     const runtime = this.options.runtime
     if (!runtime) {
       throw new Error('RuntimeService is required for moss session replies')
@@ -1106,21 +1134,36 @@ export class CabinServices {
       !!input.conversationId
 
     let currentSessionId = input.mossSessionId
-    let recovered = false
+    let replacements = 0
     let seededHistory = false
+    let submitted = false
+    const started = performance.now()
+    const stage = (phase: string, details?: Record<string, unknown>) => this.options.logger?.log({
+      ...input.logContext, type: 'stage', upstream: 'moss-session', endpoint: currentSessionId,
+      elapsedMs: Math.round(performance.now() - started), details: { phase, ...details },
+    })
+    const retire = async (sessionId: string) => {
+      try { await runtime.terminateSession(sessionId) } catch {
+        this.failedRetirements.add(sessionId)
+        stage('retire.failed')
+      }
+    }
 
     // Mint a fresh session, rebind the SAME conversation row to it, and arm history seeding.
     // Never inserts a reset marker or new conversation row — history stays intact.
     const replaceSession = async (fromSessionId: string, classification: string, reason: string): Promise<void> => {
+      const recoveryStart = performance.now()
+      stage('recovery.start', { classification, reason })
       const newId = await this.options.createMossSession!(input.context)
       this.options.store.rebindMossSession(input.conversationId!, newId)
+      this.failedRetirements.delete(fromSessionId)
       this.logOutbound({
         ...input.logContext,
         upstream: 'moss-session-recovery',
         method: 'RECOVER',
         endpoint: newId,
         ok: true,
-        elapsedMs: 0,
+        elapsedMs: Math.round(performance.now() - recoveryStart),
         details: {
           old_moss_session_id: fromSessionId,
           new_moss_session_id: newId,
@@ -1129,15 +1172,18 @@ export class CabinServices {
         },
       })
       currentSessionId = newId
-      recovered = true
+      replacements++
       seededHistory = (config.contextReplayTurns ?? 0) > 0
     }
 
     const attemptOnce = async (
       sessionId: string,
     ): Promise<{ reply: string; toolCall?: CabinToolCall; intent?: string; slots?: Record<string, unknown> }> => {
+      stage('ensure.start')
       const ready = await runtime.ensureSessionReady(sessionId)
+      stage('ensure.ready', { attempt_id: ready.attempt.attemptId })
       const socket = await runtime.connectToAttempt(ready.attempt)
+      stage('socket.connected')
       const start = Date.now()
       // On a recovered session the scode transcript is empty, so prepend a read-only
       // history summary (excluding this turn's just-written user message) — background
@@ -1149,13 +1195,17 @@ export class CabinServices {
       try {
         // The Path B LLM is a pure NLU: it emits a structured command and never authors
         // hardware confirmations, so its pre-tool text is always suppressed.
-        const { reply, hardwareResult, commandSpec, statusQuerySpec, modeSwitchSpec } = await sendPromptToRunnerSocket(
+        submitted = true
+        stage('prompt.submit')
+        const { reply, hardwareResult, commandSpec, statusQuerySpec, modeSwitchSpec, retireRunner } = await sendPromptToRunnerSocket(
           socket,
           prompt,
           replyTimeoutMs,
           input.onDelta,
           true,
+          stage,
         )
+        if (retireRunner) await retire(sessionId)
         this.logOutbound({
           ...input.logContext,
           upstream: 'moss-session',
@@ -1170,7 +1220,7 @@ export class CabinServices {
             command: commandSpec?.command,
             status_key: statusQuerySpec?.statusKey,
             mode: modeSwitchSpec?.cabinMode,
-            recovered,
+            recovered: replacements > 0,
           },
         })
 
@@ -1256,11 +1306,17 @@ export class CabinServices {
           })
         }
         const language = input.context.replyLanguage
-        if (hardwareResult && language && language !== 'zh' && isSpoken(language)) {
-          return { reply: hardwareReply(language, { command: hardwareResult.command, execution_status: hardwareResult.executionStatus ?? (hardwareResult.ok ? 'dispatched' : 'failed') }) }
+        if (hardwareResult) {
+          const confirmation = language && language !== 'zh' && isSpoken(language)
+            ? hardwareReply(language, { command: hardwareResult.command, execution_status: hardwareResult.ok ? 'dispatched' : 'failed' })
+            : hardwareResult.ok ? hardwareResult.passengerReplyHint || buildDispatchedHardwareReply(input.text) || '已为您下发指令，请稍候。' : '抱歉，刚才的操作没有下发成功，请您稍后再试或联系乘务员。'
+          input.onDelta?.(confirmation)
+          return { reply: confirmation }
         }
         return { reply: reply || (language && isSpoken(language) ? message(language, 'clarify') : '收到，我会为您处理。') }
       } catch (error) {
+        const reason = error instanceof MossReplyTimeoutError ? 'timeout' : error instanceof MossRunnerTerminalError ? error.message : 'outcome_unknown'
+        stage('turn.failed', { reason, replay: false })
         this.logOutbound({
           ...input.logContext,
           upstream: 'moss-session',
@@ -1268,10 +1324,11 @@ export class CabinServices {
           endpoint: sessionId,
           ok: false,
           elapsedMs: Date.now() - start,
-          errorMessage: error instanceof Error ? error.message : String(error),
+          errorMessage: reason,
           model: config.llmModel,
         })
-        throw error
+        if (!(error instanceof MossRunnerTerminalError)) await retire(sessionId)
+        throw new MossSubmittedTurnError(error instanceof MossReplyTimeoutError ? error.message : `Moss session ${reason}; request not replayed`)
       }
     }
 
@@ -1279,7 +1336,13 @@ export class CabinServices {
     // already know are dead/retired (or unknown), so we never burn a timeout attaching
     // to them. reuse/recover both proceed to attemptOnce (ensureSessionReady respawns
     // a lost attach); a pre-flight recover that can't be readied falls through to replace.
-    if (recoveryEnabled) {
+    if (!recoveryEnabled && runtime.getSessionSnapshot(currentSessionId)?.desiredState === 'terminated') {
+      throw new Error('Moss session retired; recovery is disabled')
+    }
+    if (this.failedRetirements.has(currentSessionId)) {
+      if (!recoveryEnabled) throw new Error('Moss session unavailable after incomplete turn')
+      await replaceSession(currentSessionId, 'replace', 'incomplete-turn')
+    } else if (recoveryEnabled) {
       const snapshot = runtime.getSessionSnapshot(currentSessionId)
       const classification = classifyMossSession(snapshot)
       const reason = snapshot ? snapshot.status : 'session-not-found'
@@ -1294,17 +1357,14 @@ export class CabinServices {
       }
     }
 
-    try {
-      return await attemptOnce(currentSessionId)
-    } catch (error) {
-      // Fake-death / transient transport failure on an otherwise-live session: replace
-      // exactly once. If the fresh session throws the same class of error, propagate —
-      // never swallow a second time.
-      if (recoveryEnabled && !recovered && isRecoverableSessionError(error)) {
-        await replaceSession(currentSessionId, 'replace', recoveryReason(error))
+    for (;;) {
+      try {
         return await attemptOnce(currentSessionId)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code
+        if (submitted || !recoveryEnabled || replacements >= (config.sessionRecoveryMaxAttempts ?? 1) || !code || !RECOVERABLE_SOCKET_CODES.has(code)) throw error
+        await replaceSession(currentSessionId, 'replace', `socket-${code}`)
       }
-      throw error
     }
   }
 
@@ -2551,35 +2611,6 @@ export class MossReplyTimeoutError extends Error {
 
 const RECOVERABLE_SOCKET_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'EPIPE', 'ECONNRESET'])
 
-// Only three narrow classes trigger a recovery retry: reply timeout, a small allowlist of
-// socket errno codes, and the exact runner-transport failures. Deliberately NOT broadened
-// to arbitrary runner text — an unrecognized error propagates to SSE error rather than
-// being swallowed into an endless session churn.
-function isRecoverableSessionError(error: unknown): boolean {
-  if (error instanceof MossReplyTimeoutError) return true
-  if (error && typeof error === 'object') {
-    const code = (error as { code?: unknown }).code
-    if (typeof code === 'string' && RECOVERABLE_SOCKET_CODES.has(code)) return true
-    const message = (error as { message?: unknown }).message
-    if (typeof message === 'string') {
-      if (message === 'Moss session runner socket closed before result') return true
-      if (message === 'Moss session runner error') return true
-    }
-  }
-  return false
-}
-
-function recoveryReason(error: unknown): string {
-  if (error instanceof MossReplyTimeoutError) return 'reply-timeout'
-  if (error && typeof error === 'object') {
-    const code = (error as { code?: unknown }).code
-    if (typeof code === 'string') return `socket-${code}`
-    const message = (error as { message?: unknown }).message
-    if (typeof message === 'string') return message
-  }
-  return 'recoverable-error'
-}
-
 function isTerminalAttemptRuntime(state: string): boolean {
   return state === 'stopped' || state === 'failed' || state === 'lost'
 }
@@ -2754,6 +2785,7 @@ type HardwareCommandSpec = {
 }
 
 type RunnerSocketResult = {
+  retireRunner?: boolean
   reply: string
   hardwareResult: HardwareToolResult | null
   commandSpec: HardwareCommandSpec | null
@@ -3381,9 +3413,14 @@ function sendPromptToRunnerSocket(
   timeoutMs: number,
   onDelta?: (text: string) => void,
   suppressPreToolText = false,
+  stage?: (phase: string) => void,
 ): Promise<RunnerSocketResult> {
   return new Promise((resolve, reject) => {
     let settled = false
+    let firstText = false
+    let firstTool = false
+    let verifiedEmit = false
+    let unverifiedWrite = false
     let assistantText = ''
     let pendingText = ''
     let hardwareResult: HardwareToolResult | null = null
@@ -3404,9 +3441,15 @@ function sendPromptToRunnerSocket(
       cleanup()
       fn()
     }
-    const timer = setTimeout(() => {
-      finish(() => reject(new MossReplyTimeoutError(timeoutMs)))
-    }, timeoutMs)
+    const resolveReceipt = (retireRunner: boolean) => {
+      stage?.(retireRunner ? 'hardware.receipt_without_terminal' : 'hardware.receipt')
+      finish(() => resolve({ reply: '', hardwareResult, commandSpec: null, statusQuerySpec: null, modeSwitchSpec: null, retireRunner }))
+    }
+    const failTurn = (error: Error) => {
+      if (hardwareResult && suppressPreToolText) resolveReceipt(true)
+      else finish(() => reject(error))
+    }
+    const timer = setTimeout(() => failTurn(new MossReplyTimeoutError(timeoutMs)), timeoutMs)
 
     rl.on('line', line => {
       let envelope: unknown
@@ -3416,16 +3459,25 @@ function sendPromptToRunnerSocket(
         return
       }
       if (!envelope || typeof envelope !== 'object') return
-      const message = envelope as { type?: string; line?: string; message?: string }
+      if (settled) return
+      const message = envelope as { type?: string; line?: string; cabinControlMode?: string }
+      if (message.type === 'hello') {
+        verifiedEmit = message.cabinControlMode === 'emit'
+        return
+      }
       if (message.type === 'stderr') return
-      if (message.type === 'error') {
-        finish(() => reject(new Error(message.message || 'Moss session runner error')))
+      if (message.type === 'error' || message.type === 'exit') {
+        failTurn(new Error(`Moss session runner ${message.type}`))
         return
       }
       if (message.type !== 'stdout' || typeof message.line !== 'string') return
 
       const textDelta = extractAssistantText(message.line)
       if (textDelta) {
+        if (!firstText && textDelta.trim()) {
+          firstText = true
+          stage?.('runner.first_text')
+        }
         if (suppressPreToolText) {
           pendingText += textDelta
         } else if (releasedDeltas) {
@@ -3442,7 +3494,8 @@ function sendPromptToRunnerSocket(
       // dispatch fires the moment the model emits it — independent of whether the model
       // waits for tool execution. The tool_result-based spec is a secondary fallback.
       const emittedSpec = extractHardwareCommandFromToolUse(message.line)
-      if (emittedSpec) commandSpec = emittedSpec
+      if (emittedSpec && verifiedEmit) commandSpec = emittedSpec
+      else if (emittedSpec) unverifiedWrite = true
       const spec = extractHardwareCommandSpec(message.line)
       if (spec) commandSpec = spec
       const emittedStatusSpec = extractHardwareStatusQueryFromToolUse(message.line)
@@ -3455,8 +3508,9 @@ function sendPromptToRunnerSocket(
       if (modeSpec) modeSwitchSpec = modeSpec
 
       try {
-        const inner = JSON.parse(message.line) as { type?: string; status?: string; input?: unknown }
+        const inner = JSON.parse(message.line) as { type?: string; status?: string; code?: string; input?: unknown }
         if (inner.type === 'tool_use') {
+          if (!firstTool) { firstTool = true; stage?.('runner.first_tool') }
           // Drop buffered pre-tool narration only once a real cabin-control command has
           // been emitted this turn (a hardware turn — its reply is server-authored anyway).
           // A chat turn where the model merely pokes the Skill without emitting a command
@@ -3467,21 +3521,21 @@ function sendPromptToRunnerSocket(
           }
         }
         if (inner.type === 'result') {
+          stage?.(inner.status === 'success' ? 'runner.completed' : 'runner.failed')
+          if (hardwareResult && suppressPreToolText) {
+            resolveReceipt(false)
+            return
+          }
+          if (unverifiedWrite && !hardwareResult && !commandSpec) {
+            finish(() => reject(new MossRunnerTerminalError('legacy_execution_unknown')))
+            return
+          }
           if (inner.status === 'success') {
             if (suppressPreToolText) {
               if (commandSpec || statusQuerySpec || modeSwitchSpec) {
                 // A structured tool was emitted. The server performs the business call
                 // and owns the passenger-facing reply.
                 assistantText = ''
-              } else if (hardwareResult) {
-                // Execute-mode subprocess performed the HTTP call itself; ground the reply
-                // in the real hardware outcome, never the model's narration.
-                assistantText = hardwareResult.ok
-                  ? hardwareResult.passengerReplyHint
-                    || buildDispatchedHardwareReply(text)
-                    || '已为您下发指令，请稍候。'
-                  : '抱歉，刚才的操作没有下发成功，请您稍后再试或联系乘务员。'
-                onDelta?.(assistantText)
               } else {
                 // Free chat turn: no hardware command was emitted, so pass the model text
                 // through. Nothing here can fabricate a hardware action.
@@ -3500,7 +3554,8 @@ function sendPromptToRunnerSocket(
               modeSwitchSpec,
             }))
           } else {
-            finish(() => reject(new Error(`Moss session result status: ${inner.status || 'unknown'}`)))
+            const reason = inner.code === 'PROMPT_RPC_FAILED' || inner.code === 'PROMPT_INCOMPLETE' ? inner.code : 'runner_terminal'
+            finish(() => reject(new MossRunnerTerminalError(reason)))
           }
         }
       } catch {
@@ -3509,11 +3564,11 @@ function sendPromptToRunnerSocket(
     })
 
     socket.once('error', error => {
-      finish(() => reject(error))
+      failTurn(error)
     })
     socket.once('close', () => {
       if (!settled) {
-        finish(() => reject(new Error('Moss session runner socket closed before result')))
+        failTurn(new Error('Moss session runner socket closed before result'))
       }
     })
 

@@ -214,6 +214,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       broadcastAuth: z.string().optional(),
       broadcastEnabled: z.boolean().default(true),
       conversationSeatAudioEnabled: z.boolean().default(false),
+      serviceOrderCreateEnabled: z.boolean().default(true),
       broadcastTtsCacheDir: z.string().optional(),
       broadcastTtsVersion: z.string().default('flight-phase-v1'),
       automationLogFile: z.string().optional(),
@@ -251,6 +252,7 @@ export const serverFileConfigSchema = lazySchema(() =>
       automationEnabled: false,
       broadcastEnabled: true,
       conversationSeatAudioEnabled: false,
+      serviceOrderCreateEnabled: true,
       broadcastTtsVersion: 'flight-phase-v1',
       healthReportEnabled: false,
       healthReportCollectSeconds: 30,
@@ -395,6 +397,7 @@ export type ServerConfig = {
     broadcastAuth?: string
     broadcastEnabled?: boolean
     conversationSeatAudioEnabled?: boolean
+    serviceOrderCreateEnabled?: boolean
     broadcastTtsCacheDir?: string
     broadcastTtsVersion?: string
     automationLogFile?: string
@@ -562,6 +565,7 @@ export type EnterpriseRecord = {
 export type RunnerManifest = {
   config: ServerConfig
   session: {
+    cabinManaged?: boolean
     sessionId: string
     transcriptSessionId: string
     resumeFromTranscript: boolean

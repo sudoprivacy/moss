@@ -143,6 +143,18 @@ export function buildSessionEnv(
     ),
   }
 
+  if (options.cabinManaged) {
+    const baseUrl = process.env.ANTHROPIC_BASE_URL?.trim()
+    const model = process.env.MOSS_DEFAULT_MODEL?.trim()
+    if (!baseUrl || !model) throw new Error('Fixed cabin model requires a base URL and model ID')
+    env.ANTHROPIC_BASE_URL = baseUrl
+    env.MOSS_DEFAULT_MODEL = model
+    env.CABIN_CONTROL_MODE = 'emit'
+    env.MOSS_CABIN_MANAGED = '1'
+    delete env.CABIN_CONTROL_BASE_URL
+    delete env.CABIN_CONTROL_AUTH
+  }
+
   // Document Center v2: prepend bin/ to PATH so scode can find the wiki
   // CLI without manual installation. Falls back silently if bin/wiki
   // wasn't built (Go missing on build host).

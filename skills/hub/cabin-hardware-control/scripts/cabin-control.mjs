@@ -461,9 +461,9 @@ async function main() {
     return
   }
 
-  const baseUrl = normalizeBaseUrl(process.env.CABIN_CONTROL_BASE_URL)
-  if (!baseUrl) {
-    fail('CONFIG_MISSING', 'CABIN_CONTROL_BASE_URL is not configured')
+  const controlMode = String(process.env.CABIN_CONTROL_MODE || 'execute').trim().toLowerCase()
+  if (!['emit', 'execute'].includes(controlMode) || (process.env.MOSS_CABIN_MANAGED === '1' && controlMode !== 'emit')) {
+    fail('INVALID_MODE', 'Managed cabin control requires emit mode')
     return
   }
 
@@ -479,13 +479,13 @@ async function main() {
   const parsedArgs = {}
   const emitParams = {}
   let seatNo
-  const url = new URL(`${baseUrl}${command.path}`)
+  const query = new URLSearchParams()
   try {
     for (const spec of command.params) {
       const value = parseParam(spec, args)
       if (value === undefined) continue
       parsedArgs[spec.arg.replace(/-/g, '_')] = value
-      url.searchParams.set(spec.name, String(value))
+      query.set(spec.name, String(value))
       if (spec.name === 'seatNo') {
         seatNo = value
       } else {
@@ -502,7 +502,6 @@ async function main() {
   // Emit mode: the server owns the hardware dispatch. Resolve the command + params here
   // (parsing/validation still runs above) but skip the HTTP call and print the structured
   // command for the server to execute. The LLM never triggers hardware or authors a reply.
-  const controlMode = String(process.env.CABIN_CONTROL_MODE || 'execute').trim().toLowerCase()
   if (controlMode === 'emit') {
     console.log(JSON.stringify({
       ok: true,
@@ -514,6 +513,13 @@ async function main() {
     return
   }
 
+  const baseUrl = normalizeBaseUrl(process.env.CABIN_CONTROL_BASE_URL)
+  if (!baseUrl) {
+    fail('CONFIG_MISSING', 'CABIN_CONTROL_BASE_URL is not configured')
+    return
+  }
+  const url = new URL(`${baseUrl}${command.path}`)
+  url.search = query.toString()
   const timeoutMs = Number.parseInt(process.env.CABIN_CONTROL_TIMEOUT_MS || '10000', 10)
   const controller = new AbortController()
   const timeout = delay(Number.isFinite(timeoutMs) ? timeoutMs : 10000, null, {
