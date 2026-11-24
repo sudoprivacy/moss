@@ -110,6 +110,62 @@ const seatHeaders = {
 }
 
 describe('cabin seat context mode', () => {
+  it('never turns compact free text into a receipt or inferred tool event, including a real negative-command failure', async () => {
+    let modelReply = ''
+    let modelCalls = 0
+    let hardwareCalls = 0
+    const upstream = http.createServer(async (req, res) => {
+      const url = new URL(req.url!, 'http://localhost')
+      res.setHeader('content-type', 'application/json')
+      if (url.pathname.endsWith('get-seat-context')) {
+        return res.end(JSON.stringify({ code: 0, data: { flightId: '1', flightDate: '2026-11-24', seatNo: '01A', tabletId: 'pad', passengerRef: 'p' } }))
+      }
+      if (url.pathname.endsWith('/chat/completions')) {
+        modelCalls++
+        return res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: modelReply } }] }))
+      }
+      hardwareCalls++
+      res.writeHead(500)
+      res.end()
+    })
+    const base = await listen(upstream)
+    for (const conversationLanguageMode of ['legacy', 'enabled'] as const) {
+      const { cabinBaseUrl, db } = await startCabinServer(base, {
+        conversationLanguageMode, createMossSession: true, controlBaseUrl: undefined,
+        conversationSeatAudioEnabled: false,
+      })
+      // No runtime.createSession is provided: compact must not create a runner.
+      for (const [text, reply, expected] of [
+        ['不要打开阅读灯', '好的，已为您关闭阅读灯。', '没有执行设备操作。'],
+        ['请调整一下灯光', '已将阅读灯打开。', '没有执行设备操作。'],
+        ['请调整一下灯光', '此工具无法执行操作。', '此工具无法执行操作。'],
+        ['请调整一下灯光', '您想调亮还是调暗阅读灯？', '您想调亮还是调暗阅读灯？'],
+      ]) {
+        modelReply = reply!
+        const result = await fetch(`${cabinBaseUrl}/v1/ai-chat/send`, {
+          method: 'POST', headers: { ...seatHeaders, 'content-type': 'application/json' },
+          body: JSON.stringify({ content: text, source: 'text' }),
+        })
+        expect(result.status).toBe(200)
+        const events = (await result.text()).trim().split(/\n\n+/).map(chunk => ({
+          event: chunk.match(/^event:\s*(.+)$/m)?.[1],
+          data: JSON.parse(chunk.match(/^data:\s*(.+)$/m)?.[1] || '{}'),
+        }))
+        expect(events.map(event => event.event)).toEqual(['start', 'delta', 'done'])
+        expect(events.find(event => event.event === 'delta')?.data.content).toBe(expected)
+        expect(events.at(-1)?.data.reply_text).toBe(expected)
+        expect(events.at(-1)?.data.slots).toEqual({})
+        const stored = db.prepare("SELECT content, tool_calls_json FROM cabin_messages WHERE role='assistant' ORDER BY rowid DESC LIMIT 1").get() as { content: string; tool_calls_json: string | null }
+        expect(stored.content).toBe(expected)
+        expect(stored.tool_calls_json).toBeNull()
+      }
+    }
+    // Enabled language routing rejects the negative request before the model;
+    // legacy mode exercises the exact free-text failure observed in the smoke.
+    expect(modelCalls).toBe(7)
+    expect(hardwareCalls).toBe(0)
+  })
+
   it('records four independent HTTP arrivals before the bodies finish and joins each to its error response', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'moss-cabin-ingress-'))
     const logFile = join(directory, 'cabin.jsonl')
@@ -249,6 +305,7 @@ describe('cabin seat context mode', () => {
     let statusData: Record<string, unknown> = { on:false }
     let llmText = 'Bonjour !'
     const controls: string[] = [], audio: Record<string,unknown>[] = [], pushes: string[] = [], prompts: string[] = [], formats: string[] = [], statusReads: string[] = []
+    const modelContexts: unknown[] = []
     const upstream = http.createServer(async (req, res) => {
       const url = new URL(req.url!, 'http://localhost')
       res.setHeader('content-type','application/json')
@@ -268,7 +325,8 @@ describe('cabin seat context mode', () => {
       if (url.pathname.endsWith('/audio-seat')) { pushes.push(url.pathname); return res.end(JSON.stringify({code:0,data:{sentCount:1,matchedCount:1}})) }
       if (url.pathname.endsWith('/chat/completions')) {
         const body = await readJsonRequest(req); prompts.push((body.messages as Array<{content:string}>)[0]!.content)
-        return res.end(JSON.stringify({choices:[{message:{content:llmText}}]}))
+        modelContexts.push(JSON.parse((body.messages as Array<{content:string}>)[1]!.content))
+        return res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:llmText}}]}))
       }
       res.writeHead(404); res.end()
     })
@@ -311,9 +369,10 @@ describe('cabin seat context mode', () => {
     statusData = {}; const blocked = await chat('テーブルを閉じてください。','ja'); expect(blocked.slots.execution_status).toBe('blocked'); expect(blocked.reply_text).toContain('確認できない')
     expect(statusReads).toHaveLength(2); expect(controls).toHaveLength(turns.length+1); expect(prompts).toHaveLength(0)
     recording = {text:'42',language:['French']}; await asr()
-    expect((await chat('42','zh')).reply_text).toBe('Bonjour !'); expect(prompts.at(-1)).toContain('French (fr)')
-    recording = {text:'Hello'}; expect((await asr()).language).toBe('unknown')
-    llmText = '收到，我会为您处理。'; expect((await chat('Hello','zh')).reply_text).toBe('Please clarify your request.')
+    expect((await chat('42','zh')).reply_text).toBe('Bonjour !')
+    expect(modelContexts.at(-1)).toMatchObject({ cabin_context: { reply_language: 'fr' } })
+    recording = {text:'What can you do?'}; expect((await asr()).language).toBe('unknown')
+    llmText = '收到，我会为您处理。'; expect((await chat('What can you do?','zh')).reply_text).toBe('Please clarify your request.')
     const before = audio.length; recording = {text:'สวัสดี',language:['Thai']}; await asr(); llmText = 'สวัสดีครับ'
     const thai = await chat('สวัสดี'); expect(thai.reply_text).toBe(llmText); expect(thai.audio_playback.status).toBe('skipped'); expect(audio).toHaveLength(before)
     businessCode = 0

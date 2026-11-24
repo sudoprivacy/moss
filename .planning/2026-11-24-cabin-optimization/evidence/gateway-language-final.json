@@ -1,0 +1,499 @@
+[
+  {
+    "test": "zh_short",
+    "input": "已为您下发打开阅读灯的指令，请稍候。",
+    "language": "Chinese",
+    "runs": [
+      {
+        "elapsed_s": 1.024,
+        "sha256": "b7f733a9377929ab4bea7146494642ec02c444cdfc81d6b4cc073d779b2e3324",
+        "bytes": 203564,
+        "seconds": 4.24,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 0.942,
+        "sha256": "b7f733a9377929ab4bea7146494642ec02c444cdfc81d6b4cc073d779b2e3324",
+        "bytes": 203564,
+        "seconds": 4.24,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "zh_question",
+    "input": "我是客舱 AI 乘务员，可以协助您查询航班信息和调节座椅。",
+    "language": "Chinese",
+    "runs": [
+      {
+        "elapsed_s": 1.222,
+        "sha256": "435c0fd70bf46e7820955408bf24a5624fb37ccd120328c5be71f170c977647d",
+        "bytes": 265004,
+        "seconds": 5.52,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 1.229,
+        "sha256": "435c0fd70bf46e7820955408bf24a5624fb37ccd120328c5be71f170c977647d",
+        "bytes": 265004,
+        "seconds": 5.52,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "zh_long",
+    "input": "您当前乘坐的是本次测试航班。请系好安全带，收好小桌板，保持座椅靠背直立。如果需要帮助，请联系乘务员。",
+    "language": "Chinese",
+    "runs": [
+      {
+        "elapsed_s": 2.619,
+        "sha256": "9e480432eda68aa858881e16399522331622e6456d919e4e7adce85e7fc749d8",
+        "bytes": 568364,
+        "seconds": 11.84,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 2.628,
+        "sha256": "9e480432eda68aa858881e16399522331622e6456d919e4e7adce85e7fc749d8",
+        "bytes": 568364,
+        "seconds": 11.84,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "en",
+    "input": "Hello, I am your cabin assistant. How can I help you today?",
+    "language": "English",
+    "runs": [
+      {
+        "elapsed_s": 1.127,
+        "sha256": "5be56635abe580494ce697bf37397842e84c52c8f0efd1023cdd8e19fd53d763",
+        "bytes": 222764,
+        "seconds": 4.64,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 1.111,
+        "sha256": "5be56635abe580494ce697bf37397842e84c52c8f0efd1023cdd8e19fd53d763",
+        "bytes": 222764,
+        "seconds": 4.64,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "ja",
+    "input": "こんにちは。客室アシスタントです。何かお手伝いできますか。",
+    "language": "Japanese",
+    "runs": [
+      {
+        "elapsed_s": 1.094,
+        "sha256": "db9db02085fbfe2bf4e3b69824f88a9d301722e04dd6bcc0053b918c1cf97713",
+        "bytes": 215084,
+        "seconds": 4.48,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 1.085,
+        "sha256": "db9db02085fbfe2bf4e3b69824f88a9d301722e04dd6bcc0053b918c1cf97713",
+        "bytes": 215084,
+        "seconds": 4.48,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "ko",
+    "input": "안녕하세요. 객실 도우미입니다. 무엇을 도와드릴까요?",
+    "language": "Korean",
+    "runs": [
+      {
+        "elapsed_s": 1.16,
+        "sha256": "6b81497ed0a1b2357a045a3dcae4c2b689e26bdf0359086f858e4c0ce8df4949",
+        "bytes": 234284,
+        "seconds": 4.88,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 1.179,
+        "sha256": "6b81497ed0a1b2357a045a3dcae4c2b689e26bdf0359086f858e4c0ce8df4949",
+        "bytes": 234284,
+        "seconds": 4.88,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "de",
+    "input": "Guten Tag, ich bin Ihr Kabinenassistent. Wie kann ich Ihnen helfen?",
+    "language": "German",
+    "runs": [
+      {
+        "elapsed_s": 1.27,
+        "sha256": "8e2b9489d5486971650d84ee1f021144f50ee1bddd7a39d75d51dfd7061be306",
+        "bytes": 253484,
+        "seconds": 5.28,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 1.284,
+        "sha256": "8e2b9489d5486971650d84ee1f021144f50ee1bddd7a39d75d51dfd7061be306",
+        "bytes": 253484,
+        "seconds": 5.28,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "fr",
+    "input": "Bonjour, je suis votre assistant de cabine. Comment puis-je vous aider ?",
+    "language": "French",
+    "runs": [
+      {
+        "elapsed_s": 1.117,
+        "sha256": "48429814a44d7a1c4cf50114ac09a6b0fb7d5b0bbd5dd91c4080087df2347f92",
+        "bytes": 222764,
+        "seconds": 4.64,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 1.116,
+        "sha256": "48429814a44d7a1c4cf50114ac09a6b0fb7d5b0bbd5dd91c4080087df2347f92",
+        "bytes": 222764,
+        "seconds": 4.64,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "es",
+    "input": "Hola, soy su asistente de cabina. ¿En qué puedo ayudarle?",
+    "language": "Spanish",
+    "runs": [
+      {
+        "elapsed_s": 1.087,
+        "sha256": "0e7c39522bc01439accdf60ccf39fa4d918271bbaa3383fb329ce34201cb976e",
+        "bytes": 218924,
+        "seconds": 4.56,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 1.076,
+        "sha256": "0e7c39522bc01439accdf60ccf39fa4d918271bbaa3383fb329ce34201cb976e",
+        "bytes": 218924,
+        "seconds": 4.56,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "pt",
+    "input": "Olá, sou o seu assistente de cabine. Como posso ajudar?",
+    "language": "Portuguese",
+    "runs": [
+      {
+        "elapsed_s": 0.949,
+        "sha256": "70945217bdeab31b010c041fd04577ac0798402521f9cec70a73c746b339a39c",
+        "bytes": 192044,
+        "seconds": 4.0,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 0.956,
+        "sha256": "70945217bdeab31b010c041fd04577ac0798402521f9cec70a73c746b339a39c",
+        "bytes": 192044,
+        "seconds": 4.0,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "it",
+    "input": "Buongiorno, sono il suo assistente di cabina. Come posso aiutarla?",
+    "language": "Italian",
+    "runs": [
+      {
+        "elapsed_s": 1.172,
+        "sha256": "4cd476474994776672de6b59abace7fc79bbe789881d5b0acb0d354d270c20f9",
+        "bytes": 238124,
+        "seconds": 4.96,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 1.177,
+        "sha256": "4cd476474994776672de6b59abace7fc79bbe789881d5b0acb0d354d270c20f9",
+        "bytes": 238124,
+        "seconds": 4.96,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "ru",
+    "input": "Здравствуйте! Я ваш помощник в салоне. Чем могу помочь?",
+    "language": "Russian",
+    "runs": [
+      {
+        "elapsed_s": 1.126,
+        "sha256": "7332d229b81e228b2cf7f3735a2c7d0edaca6ef6476305ecfbd12e4191fc5146",
+        "bytes": 226604,
+        "seconds": 4.72,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 1.129,
+        "sha256": "7332d229b81e228b2cf7f3735a2c7d0edaca6ef6476305ecfbd12e4191fc5146",
+        "bytes": 226604,
+        "seconds": 4.72,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "concurrent_same_text",
+    "runs": [
+      {
+        "elapsed_s": 1.895,
+        "sha256": "b7f733a9377929ab4bea7146494642ec02c444cdfc81d6b4cc073d779b2e3324",
+        "bytes": 203564,
+        "seconds": 4.24,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      },
+      {
+        "elapsed_s": 0.958,
+        "sha256": "b7f733a9377929ab4bea7146494642ec02c444cdfc81d6b4cc073d779b2e3324",
+        "bytes": 203564,
+        "seconds": 4.24,
+        "rate": 24000,
+        "channels": 1,
+        "width": 2
+      }
+    ],
+    "identical": true
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "zh_short",
+    "elapsed_s": 1.358,
+    "text": "已为您下发打开阅读灯的指令，请稍后。",
+    "language": [
+      "Chinese"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "zh_question",
+    "elapsed_s": 0.173,
+    "text": "我是客舱AI乘务员，可以协助您查询航班信息和调节座椅。",
+    "language": [
+      "Chinese"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "zh_long",
+    "elapsed_s": 0.301,
+    "text": "您当前乘坐的是本次测试航班，请系好安全带，收好小桌板，保持座椅靠背直立。如果需要帮助，请联系乘务员。",
+    "language": [
+      "Chinese"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "en",
+    "elapsed_s": 0.153,
+    "text": "Hello. I am your cabin assistant. How can I help you today?",
+    "language": [
+      "English"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "ja",
+    "elapsed_s": 0.167,
+    "text": "こんにちは、客室アシスタントです。何かお手伝いできますか？",
+    "language": [
+      "Japanese"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "ko",
+    "elapsed_s": 0.173,
+    "text": "안녕하세요. 객실 도움입니다. 무엇을 도와드릴까요?",
+    "language": [
+      "Korean"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "de",
+    "elapsed_s": 0.176,
+    "text": "Guten Tag. Ich bin Ihr Kabinenassistent. Wie kann ich Ihnen helfen?",
+    "language": [
+      "German"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "fr",
+    "elapsed_s": 0.162,
+    "text": "Bonjour, je suis votre assistant de cabine. Comment puis-je vous aider?",
+    "language": [
+      "French"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "es",
+    "elapsed_s": 0.171,
+    "text": "Hola, soy su asistente de cabina. ¿En qué puedo ayudarle?",
+    "language": [
+      "Spanish"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "pt",
+    "elapsed_s": 0.164,
+    "text": "Olá, sou o seu assistente de cabine. Como posso ajudar?",
+    "language": [
+      "Portuguese"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "it",
+    "elapsed_s": 0.183,
+    "text": "Buongiorno, sono il suo assistente di cabina. Come posso aiutarla?",
+    "language": [
+      "Italian"
+    ]
+  },
+  {
+    "test": "asr_roundtrip",
+    "sample": "ru",
+    "elapsed_s": 0.195,
+    "text": "Здравствуйте, я ваш помощник в салоне. Чем могу помочь?",
+    "language": [
+      "Russian"
+    ]
+  },
+  {
+    "test": "warm_shared_asr",
+    "elapsed_s": 0.19,
+    "text": "已为您下发打开阅读灯的指令，请稍后。",
+    "language": [
+      "Chinese"
+    ]
+  },
+  {
+    "test": "warm_isolated_asr",
+    "elapsed_s": 0.179,
+    "text": "已为您下发打开阅读灯的指令，请稍后。",
+    "language": [
+      "Chinese"
+    ]
+  },
+  {
+    "test": "restart_repeatability",
+    "before_sha256": "b7f733a9377929ab4bea7146494642ec02c444cdfc81d6b4cc073d779b2e3324",
+    "after": {
+      "elapsed_s": 1.032,
+      "sha256": "b7f733a9377929ab4bea7146494642ec02c444cdfc81d6b4cc073d779b2e3324",
+      "bytes": 203564,
+      "seconds": 4.24,
+      "rate": 24000,
+      "channels": 1,
+      "width": 2
+    },
+    "identical": true
+  },
+  {
+    "test": "temporary_servers",
+    "ports": [
+      18005,
+      18004
+    ],
+    "persistent_config_changed": false
+  },
+  {
+    "test": "cleanup",
+    "pid": 4895,
+    "returncode": -15
+  },
+  {
+    "test": "cleanup",
+    "pid": 4896,
+    "returncode": -15
+  },
+  {
+    "test": "cleanup",
+    "pid": 4912,
+    "returncode": -15
+  }
+]

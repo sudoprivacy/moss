@@ -191,6 +191,26 @@ export const serverFileConfigSchema = lazySchema(() =>
       ttsModel: z.string().default('qwen3-tts'),
       ttsVoice: z.string().default('vivian'),
       ttsLanguage: z.string().default('chinese'),
+      ttsGeneration: z.object({
+        temperature: z.number().finite().min(0).max(2).optional(),
+        topP: z.number().finite().gt(0).max(1).optional(),
+        topK: z.number().int().min(0).optional(),
+        repetitionPenalty: z.number().finite().gt(0).optional(),
+        instruct: z.string().min(1).optional(),
+        maxTokens: z.number().int().min(1).max(4096).optional(),
+        seed: z.number().int().min(0).max(4294967295).optional(),
+      }).strict().optional(),
+      ttsDeterministicRequired: z.boolean().default(false),
+      ttsCache: z.object({
+        maxEntries: z.number().int().min(0).max(1024).default(64),
+        maxBytes: z.number().int().min(0).max(256 * 1024 * 1024).default(16 * 1024 * 1024),
+        ttlMs: z.number().int().min(0).max(24 * 60 * 60 * 1000).default(30 * 60 * 1000),
+      }).optional(),
+      greetingFastPathEnabled: z.boolean().default(true),
+      dialogueMode: z.enum(['compact', 'agent']).default('compact'),
+      dialogueHistoryMaxBytes: z.number().int().min(0).max(16000).default(4096),
+      ttsTimeoutMs: z.number().int().min(1000).max(120000).default(30000),
+      asrTimeoutMs: z.number().int().min(1000).max(120000).default(30000),
       conversationLanguageMode: z.enum(['legacy', 'shadow', 'enabled']).default(defaultConversationLanguageMode),
       conversationTtsProfiles: z.record(z.string(), z.object({ voice: z.string().min(1), language: z.string().min(1), field: z.enum(['language', 'lang_code']).optional() })).default(defaultConversationTtsProfiles),
       ttsApiKey: z.string().optional(),
@@ -244,6 +264,12 @@ export const serverFileConfigSchema = lazySchema(() =>
       ttsModel: 'qwen3-tts',
       ttsVoice: 'vivian',
       ttsLanguage: 'chinese',
+      greetingFastPathEnabled: true,
+      dialogueMode: 'compact',
+      dialogueHistoryMaxBytes: 4096,
+      ttsTimeoutMs: 30000,
+      asrTimeoutMs: 30000,
+      ttsDeterministicRequired: false,
       conversationLanguageMode: defaultConversationLanguageMode,
       conversationTtsProfiles: defaultConversationTtsProfiles(),
       llmBaseUrl: 'http://127.0.0.1:8000/v1',
@@ -374,6 +400,22 @@ export type ServerConfig = {
     ttsModel: string
     ttsVoice: string
     ttsLanguage: string
+    ttsGeneration?: {
+      temperature?: number
+      topP?: number
+      topK?: number
+      repetitionPenalty?: number
+      instruct?: string
+      maxTokens?: number
+      seed?: number
+    }
+    ttsCache?: { maxEntries: number; maxBytes: number; ttlMs: number }
+    greetingFastPathEnabled?: boolean
+    dialogueMode?: 'compact' | 'agent'
+    dialogueHistoryMaxBytes?: number
+    ttsTimeoutMs?: number
+    asrTimeoutMs?: number
+    ttsDeterministicRequired?: boolean
     conversationLanguageMode?: 'legacy' | 'shadow' | 'enabled'
     conversationTtsProfiles?: Record<string, { voice: string; language: string; field?: 'language' | 'lang_code' }>
     ttsApiKey?: string

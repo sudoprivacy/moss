@@ -1,0 +1,74 @@
+{
+  "cabin": {
+    "dialogueMode": "compact",
+    "dialogueHistoryMaxBytes": 4096,
+    "greetingFastPathEnabled": true,
+    "ttsDeterministicRequired": true,
+    "ttsTimeoutMs": 30000,
+    "asrTimeoutMs": 30000,
+    "ttsGeneration": {
+      "topP": 1,
+      "topK": 50,
+      "repetitionPenalty": 1.05,
+      "seed": 42,
+      "maxTokens": 1024
+    },
+    "ttsCache": {
+      "maxEntries": 64,
+      "maxBytes": 16777216,
+      "ttlMs": 1800000
+    },
+    "conversationTtsProfiles": {
+      "zh": {
+        "voice": "Vivian",
+        "language": "Chinese",
+        "field": "lang_code"
+      },
+      "en": {
+        "voice": "Vivian",
+        "language": "English",
+        "field": "lang_code"
+      },
+      "de": {
+        "voice": "Vivian",
+        "language": "German",
+        "field": "lang_code"
+      },
+      "ja": {
+        "voice": "ono_anna",
+        "language": "Japanese",
+        "field": "lang_code"
+      },
+      "ko": {
+        "voice": "sohee",
+        "language": "Korean",
+        "field": "lang_code"
+      },
+      "fr": {
+        "voice": "Vivian",
+        "language": "French",
+        "field": "lang_code"
+      },
+      "es": {
+        "voice": "Vivian",
+        "language": "Spanish",
+        "field": "lang_code"
+      },
+      "pt": {
+        "voice": "Vivian",
+        "language": "Portuguese",
+        "field": "lang_code"
+      },
+      "it": {
+        "voice": "Vivian",
+        "language": "Italian",
+        "field": "lang_code"
+      },
+      "ru": {
+        "voice": "Vivian",
+        "language": "Russian",
+        "field": "lang_code"
+      }
+    }
+  }
+}

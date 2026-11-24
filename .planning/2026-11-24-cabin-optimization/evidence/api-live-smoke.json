@@ -1,0 +1,79 @@
+{
+  "real_models": true,
+  "real_device_calls": 0,
+  "agent_creations": 0,
+  "outcomes": [
+    {
+      "input": "你好",
+      "first_delta_ms": 42,
+      "done_ms": 1406,
+      "reply": "您好，请问有什么可以帮您？",
+      "mock_device_calls": 0,
+      "mock_broadcasts": 1,
+      "uploaded_sha256": "0fd8a3a146e0437d3f597fe2db094f36b7cc5947c8bbd5d425c6ef4ee81cee2d"
+    },
+    {
+      "input": "你好。",
+      "first_delta_ms": 7,
+      "done_ms": 8,
+      "reply": "您好，请问有什么可以帮您？",
+      "mock_device_calls": 0,
+      "mock_broadcasts": 1,
+      "uploaded_sha256": "0fd8a3a146e0437d3f597fe2db094f36b7cc5947c8bbd5d425c6ef4ee81cee2d"
+    },
+    {
+      "input": "你是谁？",
+      "first_delta_ms": 597,
+      "done_ms": 2550,
+      "reply": "我是您的专属客舱助手，可以为您调节灯光、座椅加热或按摩。",
+      "mock_device_calls": 0,
+      "mock_broadcasts": 1,
+      "uploaded_sha256": "68ad33133e53df36d6f7288e841b311b8944a3a2d768edfc6c2a6d6eb11a5f56"
+    },
+    {
+      "input": "帮我调整至办公模式。",
+      "first_delta_ms": 639,
+      "done_ms": 1606,
+      "reply": "已为您切换到办公模式，请稍候。",
+      "mock_device_calls": 1,
+      "mock_broadcasts": 1,
+      "uploaded_sha256": "80bdcc7e500cd4eb234aa423f1cc0eac1d6fca7dba4cc1849f516f0c30c2a2d8"
+    },
+    {
+      "input": "请查看当前座椅角度。",
+      "first_delta_ms": 812,
+      "done_ms": 2004,
+      "reply": "当前座椅角度约为 40%。",
+      "mock_device_calls": 0,
+      "mock_broadcasts": 1,
+      "uploaded_sha256": "71fad7f253192337d9eefb7df9494e1136850b21cddd1cfd8d6697de0e0a00bd"
+    },
+    {
+      "input": "请再查看当前座椅角度。",
+      "first_delta_ms": 946,
+      "done_ms": 2002,
+      "reply": "当前暂未获取到该设备的详细状态。",
+      "mock_device_calls": 0,
+      "mock_broadcasts": 1,
+      "uploaded_sha256": "748e4203959ba3d9a6b1bcfcc21769df998589a1c6d6f01f7eefdffc0bc929c0"
+    },
+    {
+      "input": "不要打开阅读灯",
+      "first_delta_ms": 4,
+      "done_ms": 626,
+      "reply": "没有执行设备操作。",
+      "mock_device_calls": 0,
+      "mock_broadcasts": 1,
+      "uploaded_sha256": "7bab5a515e976e5b5030c42a5a1c69b480761633074dc01cde61b3f8ebc3403f"
+    },
+    {
+      "input": "你好，请介绍一下你的功能",
+      "first_delta_ms": 583,
+      "done_ms": 2461,
+      "reply": "我是您的客舱助手，可调节座椅、灯光及模式。",
+      "mock_device_calls": 0,
+      "mock_broadcasts": 1,
+      "uploaded_sha256": "8bc7a71d7ca00050ed8a68a0fe9374fed20c29a8b9c04d9603e7bdc561d49592"
+    }
+  ]
+}

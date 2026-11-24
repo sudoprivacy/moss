@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, spyOn } from 'bun:test'
 import { createHmac } from 'crypto'
 import http from 'http'
 import { Database } from 'bun:sqlite'
@@ -11,6 +11,8 @@ import { createCabinApi } from '../api.js'
 import { CabinServices, formatCabinSessionPrompt, normalizeCabinHardwareReply, normalizeCabinPassengerReply } from '../service.js'
 import type { RuntimeService } from '../../runtimeService.js'
 import type { ServerConfig } from '../../types.js'
+import { message } from '../commandLanguage.js'
+import type { Language } from '../language.js'
 
 function signTokenBody(body: string, secret: string): string {
   return Buffer.from(createHmac('sha256', secret).update(body).digest())
@@ -105,6 +107,137 @@ function createCabinTestConfig(baseUrl: string): ServerConfig {
     },
   }
 }
+
+describe('ASR deadline', () => {
+  for (const phase of ['headers', 'success body', 'error body'] as const) {
+    it(`times out a stalled ${phase} even when upstream ignores abort`, async () => {
+      const config = createCabinTestConfig('http://asr.invalid').cabin
+      config.asrTimeoutMs = 15
+      config.controlTimeoutMs = 100_000
+      let signal: AbortSignal | undefined
+      let body: ReadableStreamDefaultController<Uint8Array> | undefined
+      const services = new CabinServices({ config, store: {} as never, fetchImpl: (async (_url, init) => {
+        signal = init?.signal as AbortSignal
+        if (phase === 'headers') return new Promise<Response>(() => {})
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) { body = controller } }), {
+          status: phase === 'error body' ? 503 : 200,
+        })
+      }) as typeof fetch })
+      try {
+        await expect(services.transcribe({ audio: Buffer.from('audio'), filename: 'test.wav' }))
+          .rejects.toThrow('ASR timeout after 15ms')
+        expect(signal?.aborted).toBe(true)
+      } finally {
+        body?.close()
+      }
+    })
+  }
+
+  it('defaults to 30000ms independently of control timeout and clears the deadline on success', async () => {
+    const config = createCabinTestConfig('http://asr.invalid').cabin
+    config.asrTimeoutMs = undefined
+    config.controlTimeoutMs = 1
+    const services = new CabinServices({ config, store: {} as never, fetchImpl: (async (_url, init) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal)
+      return Response.json({ text: '  你好  ', language: 'Chinese' })
+    }) as typeof fetch })
+    const schedule = spyOn(globalThis, 'setTimeout')
+    const clear = spyOn(globalThis, 'clearTimeout')
+    try {
+      await expect(services.transcribe({ audio: Buffer.from('audio'), filename: 'test.wav', detectLanguage: true }))
+        .resolves.toMatchObject({ text: '你好', language: 'zh' })
+      expect(schedule).toHaveBeenCalledTimes(1)
+      expect(schedule.mock.calls[0]?.[1]).toBe(30_000)
+      expect(clear).toHaveBeenCalledWith(schedule.mock.results[0]?.value)
+    } finally {
+      schedule.mockRestore()
+      clear.mockRestore()
+    }
+  })
+})
+
+describe('compact result integrity', () => {
+  const samples: Array<{ language: Language; text: string; completed: string; promised: string; introduction: string; consultation: string; variants?: string[] }> = [
+    { language: 'zh', text: '不要打开阅读灯', completed: '好的，已为您关闭阅读灯。', promised: '我会为您打开阅读灯。', introduction: '您好，我是客舱助手，可以介绍服务。', consultation: '阅读灯可以用来阅读，您想了解哪个功能？' },
+    { language: 'en', text: "Don't turn on the reading light", completed: 'I turned on the reading light.', promised: 'I will turn on the reading light.', introduction: 'Hello, I am your cabin assistant. I can help with cabin services.', consultation: 'You can use the reading light to read. What would you like to know?', variants: ['The reading light has been turned on.'] },
+    { language: 'de', text: 'Schalte das Leselicht nicht ein.', completed: 'Ich habe die Leselampe eingeschaltet.', promised: 'Ich werde die Leselampe einschalten.', introduction: 'Hallo, ich bin Ihr Kabinenassistent und kann Ihnen helfen.', consultation: 'Die Leselampe ist zum Lesen gedacht. Welche Funktion möchten Sie kennenlernen?' },
+    { language: 'ja', text: '読書灯をつけないでください', completed: '読書灯を点灯しました', promised: '読書灯を点灯します。', introduction: 'こんにちは。客室アシスタントです。サービスをご案内できます。', consultation: '読書灯は読書に使えます。どの機能について知りたいですか？', variants: ['読書灯をつけました。', '読書灯をつけます。', '読書灯を消しておきます。'] },
+    { language: 'ko', text: '독서등을 켜지 마세요', completed: '독서등을 켰습니다.', promised: '독서등을 켜겠습니다.', introduction: '안녕하세요. 객실 도우미입니다. 서비스를 안내할 수 있습니다.', consultation: '독서등은 책을 읽을 때 사용합니다. 어떤 기능이 궁금하세요?', variants: ['독서등을 켜 드렸습니다.', '독서등을 켜 드리겠습니다.'] },
+    { language: 'fr', text: "N’allumez pas la liseuse.", completed: 'J’ai allumé la liseuse.', promised: 'Je vais allumer la liseuse.', introduction: 'Bonjour, je suis votre assistant de cabine. Je peux vous aider.', consultation: 'La liseuse sert à lire. Quelle fonction voulez-vous connaître ?' },
+    { language: 'es', text: 'No enciendas la luz de lectura.', completed: 'He encendido la luz de lectura.', promised: 'Voy a encender la luz de lectura.', introduction: 'Hola, soy su asistente de cabina y puedo ayudarle.', consultation: 'La luz de lectura sirve para leer. ¿Qué función desea conocer?' },
+    { language: 'pt', text: 'Não acenda a luz de leitura.', completed: 'Acendi a luz de leitura.', promised: 'Vou acender a luz de leitura.', introduction: 'Olá, sou o seu assistente de cabine e posso ajudar.', consultation: 'A luz de leitura serve para ler. Qual função deseja conhecer?' },
+    { language: 'it', text: 'Non accendere la luce di lettura.', completed: 'Ho acceso la luce di lettura.', promised: 'Accenderò la luce di lettura.', introduction: 'Ciao, sono il suo assistente di cabina e posso aiutarla.', consultation: 'La luce di lettura serve per leggere. Quale funzione vuole conoscere?' },
+    { language: 'ru', text: 'Не включайте лампу для чтения.', completed: 'Я включил лампу для чтения.', promised: 'Я включу лампу для чтения.', introduction: 'Здравствуйте, я ваш помощник в салоне. Могу рассказать об услугах.', consultation: 'Лампа предназначена для чтения. Какая функция вас интересует?' },
+  ]
+  for (const sample of samples) {
+    it(`blocks unexecuted completion/promise in ${sample.language} and preserves introductions/consultation`, async () => {
+      let content = ''
+      const config = createCabinTestConfig('http://compact.invalid').cabin
+      const services = new CabinServices({ config, store: {} as never, fetchImpl: (async url => {
+        expect(String(url)).toBe('http://compact.invalid/v1/chat/completions')
+        return Response.json({ choices: [{ finish_reason: 'stop', message: { content } }] })
+      }) as typeof fetch })
+      const input = { context: { flightId: 'F1', flightDate: '2026-11-24', tabletId: 'pad', seatId: '01A', replyLanguage: sample.language }, messages: [], text: sample.text }
+      for (content of [sample.completed, sample.promised, ...sample.variants ?? []]) {
+        expect(await services.generateCompactReply(input)).toEqual({ reply: message(sample.language as Parameters<typeof message>[0], 'noAction') })
+      }
+      for (content of [sample.introduction, sample.consultation]) {
+        expect(await services.generateCompactReply(input)).toEqual({ reply: content })
+      }
+    })
+  }
+
+  it('uses current-intent authorization for polite control/mode requests and retains real status/failure/block results', async () => {
+    const config = createCabinTestConfig('http://compact.invalid').cabin
+    config.controlBaseUrl = 'http://hardware.invalid'
+    config.broadcastApiBaseUrl = 'http://hardware.invalid'
+    const context = { flightId: 'F1', flightDate: '2026-11-24', aircraftNo: 'B-TEST', tabletId: 'pad', seatId: '01A' }
+    let name = 'cabin_control'
+    let args: Record<string, unknown> = { command: 'seat.light', params: { on: true } }
+    let businessCode = 0
+    let statusData: Record<string, unknown> = { on: false, pwm: 0 }
+    const hardware: Array<{ url: string; body?: unknown }> = []
+    const services = new CabinServices({ config, store: {} as never, fetchImpl: (async (url, init) => {
+      if (String(url).endsWith('/chat/completions')) {
+        const body = JSON.parse(String(init?.body))
+        if (!body.tools) throw new Error('Chinese status should use the actual protocol formatter')
+        return Response.json({ choices: [{ finish_reason: 'tool_calls', message: {
+          content: '设备已经执行成功。', tool_calls: [{ id: 'selected', type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+        } }] })
+      }
+      hardware.push({ url: String(url), ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) })
+      return Response.json({ code: businessCode, data: { data: statusData } })
+    }) as typeof fetch })
+    const run = (text: string) => services.generateCompactReply({ context, text, messages: [] })
+    const control = await run('Could you please turn on the reading light?')
+    expect(control.slots).toMatchObject({ command: 'seat.light', execution_status: 'dispatched' })
+    expect(control.reply).toContain('下发')
+    expect(hardware.at(-1)?.url).toBe('http://hardware.invalid/admin-api/tcp-client/cmd/seat/light?seatNo=01A&on=true')
+    name = 'cabin_mode'; args = { mode: 'sleep' }
+    const mode = await run('Could you switch to sleep mode?')
+    expect(mode.slots).toMatchObject({ mode: 'sleep', execution_status: 'dispatched' })
+    expect(mode.reply).toContain('睡眠模式')
+    expect(hardware.at(-1)).toMatchObject({ url: 'http://hardware.invalid/admin-api/cabin/broadcast/mode-seat', body: { mode: 'sleep', seatNo: '01A', aircraftNo: 'B-TEST' } })
+    name = 'cabin_status'; args = { target_type: 'seat', status_key: 'reading_light' }
+    const status = await run('阅读灯现在开着吗？')
+    expect(status.slots).toMatchObject({ execution_status: 'succeeded', status_data: { on: false, pwm: 0 } })
+    expect(status.reply).toBe('当前阅读灯为关闭状态。')
+    businessCode = 500
+    name = 'cabin_control'; args = { command: 'seat.light', params: { on: true } }
+    const failed = await run('Could you turn on the reading light?')
+    expect(failed.slots?.execution_status).toBe('failed')
+    expect(failed.reply).toContain('失败')
+    businessCode = 0; statusData = {}; args = { command: 'seat.tray.close', params: {} }
+    const blocked = await run('Could you close the tray table?')
+    expect(blocked.slots?.execution_status).toBe('blocked')
+    expect(blocked.reply).not.toContain('已为您下发')
+    expect(hardware.filter(call => call.url.includes('/cmd/'))).toHaveLength(2)
+    const before = hardware.length
+    args = { command: 'seat.light', params: { on: true } }
+    await expect(run('Do not turn on the reading light')).rejects.toThrow('not authorized')
+    expect(hardware).toHaveLength(before)
+  })
+})
 
 async function readSse(response: Response): Promise<Array<{ event: string; data: Record<string, unknown> }>> {
   const body = await response.text()
@@ -406,6 +539,7 @@ describe('cabin binding context', () => {
   })
 
   it('streams ASR text before agent reply in voice chat and stores one user message', async () => {
+    const controlRequests: string[] = []
     const upstream = http.createServer((req, res) => {
       if (req.url === '/passenger') {
         res.writeHead(200, { 'content-type': 'application/json' })
@@ -434,9 +568,17 @@ describe('cabin binding context', () => {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({
           choices: [
-            { message: { content: '已为您下发关闭读书灯的指令，请稍候。' } },
+            { finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'light-off', type: 'function', function: {
+              name: 'cabin_control', arguments: JSON.stringify({ command: 'seat.light', params: { on: false } }),
+            } }] } },
           ],
         }))
+        return
+      }
+      if (req.url?.startsWith('/admin-api/tcp-client/cmd/')) {
+        controlRequests.push(req.url)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ code: 0 }))
         return
       }
       res.writeHead(404)
@@ -448,10 +590,9 @@ describe('cabin binding context', () => {
       store: { db },
       authService: { listAllOrganizations: () => ({ organizations: [{ id: 'org-1' }] }) },
     } as unknown as RuntimeService
-    const api = createCabinApi({
-      config: createCabinTestConfig(upstreamBaseUrl),
-      runtime,
-    })
+    const config = createCabinTestConfig(upstreamBaseUrl)
+    config.cabin.controlBaseUrl = upstreamBaseUrl
+    const api = createCabinApi({ config, runtime })
     const cabinServer = http.createServer(async (req, res) => {
       const pathname = new URL(req.url || '/', 'http://localhost').pathname
       const handled = await api.handle(req, res, pathname)
@@ -498,6 +639,8 @@ describe('cabin binding context', () => {
       text: '请帮我关闭读书灯',
     })
     expect(events.at(-1)?.data.reply_text).toBe('刘女士，已为您下发关闭读书灯的指令，请稍候。')
+    expect(events.at(-1)?.data.slots).toMatchObject({ command: 'seat.light', execution_status: 'dispatched' })
+    expect(controlRequests).toEqual(['/admin-api/tcp-client/cmd/seat/light?seatNo=01A&on=false'])
 
     const historyResponse = await fetch(`${cabinBaseUrl}/v1/ai-chat/history?limit=10`, {
       headers: {
@@ -563,6 +706,7 @@ describe('cabin binding context', () => {
     } as unknown as RuntimeService
     const config = createCabinTestConfig(upstreamBaseUrl)
     config.cabin.createMossSession = true
+    config.cabin.dialogueMode = 'agent'
     const api = createCabinApi({ config, runtime })
     const cabinServer = http.createServer(async (req, res) => {
       const pathname = new URL(req.url || '/', 'http://localhost').pathname
@@ -816,6 +960,18 @@ describe('cabin binding context', () => {
       userText: '请打开小桌板',
       reply: '好的，已为您打开小桌板，请稍后。请问还有其他需要帮助的吗？',
       context: { flightId: '2', flightDate: '2026-06-05', tabletId: 'PAX-PAD-0001', passengerName: '陈建国' },
+    })).toBe('已为您下发打开小桌板的指令，请稍候。')
+  })
+
+  it('requires dispatch evidence before normalizing a hardware request into an execution receipt', () => {
+    const context = { flightId: '2', flightDate: '2026-06-05', tabletId: 'pad' }
+    for (const reply of ['', '此工具无法执行操作。', '请确认您要调整的座椅角度。', '下发失败，请稍后重试。']) {
+      for (const hardwareDispatched of [undefined, false]) {
+        expect(normalizeCabinPassengerReply({ userText: '请打开小桌板', reply, context, hardwareDispatched })).toBe(reply)
+      }
+    }
+    expect(normalizeCabinPassengerReply({
+      userText: '请打开小桌板', reply: '已打开小桌板。', context, hardwareDispatched: true,
     })).toBe('已为您下发打开小桌板的指令，请稍候。')
   })
 

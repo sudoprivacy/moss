@@ -1,0 +1,31 @@
+{
+  "server": "10.88.242.29",
+  "production_services_modified": false,
+  "model_backend": "mlx-audio 0.5.1 native MLX",
+  "tts": {
+    "seed": 42,
+    "temperature": {
+      "Chinese": 0,
+      "other_tested_languages": 0.9
+    },
+    "top_p": 1,
+    "top_k": 50,
+    "repetition_penalty": 1.05,
+    "probe_max_tokens": 300,
+    "app_max_tokens": 1024,
+    "server": "cabin-tts-server.py",
+    "format": "24000Hz mono PCM16 WAV"
+  },
+  "coverage": {
+    "corpus_texts": 12,
+    "languages": 10,
+    "runs_per_text": 2,
+    "concurrent_requests": 2,
+    "restart_samples": 1
+  },
+  "quality_limits": [
+    "ASR is not a listening or speaker-identity test",
+    "Korean ASR reads 도우미 as 도움; listening acceptance required",
+    "No real UE playback or production hardware/broadcast calls"
+  ]
+}

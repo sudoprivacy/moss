@@ -25,6 +25,7 @@ import { orderChoice, orderReply } from './orderLanguage.js'
 import { comfortAction, comfortActions, comfortOffer as localizedComfortOffer, confirmsOffer } from './comfortLanguage.js'
 import { clarifyText, defaultConversationLanguageMode, languageCode, languageScope, wrongReplyLanguage, type Language } from './language.js'
 import { deniedCommand, hypotheticalCommand, hardwareReply, invalidSetting, isSpoken, message, readingLightQuestion, lightStatusReply } from './commandLanguage.js'
+import { greetingReply, isFixedSpeechReply } from './greeting.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -59,7 +60,7 @@ function mapServiceError(error: unknown): CabinHttpError {
   if (/ASR response missing text/i.test(message)) {
     return new CabinHttpError(400, 'ASR_NO_SPEECH', 'No valid speech was detected in the audio')
   }
-  if (/ASR request failed/i.test(message)) {
+  if (/ASR request failed|ASR timeout/i.test(message)) {
     return new CabinHttpError(500, 'ASR_FAILED', message)
   }
   if (/LLM request failed|Moss session|runner|socket/i.test(message)) {
@@ -725,7 +726,7 @@ export function createCabinApi(options: {
     runtime: options.runtime,
     logger: cabinLogger,
     createMossSession: async (context) => {
-      if (!cabinConfig.createMossSession) return `cabin-${randomUUID()}`
+      if (!cabinConfig.createMossSession || (cabinConfig.dialogueMode ?? 'compact') === 'compact') return `cabin-${randomUUID()}`
       const orgId = options.runtime.authService.listAllOrganizations().organizations[0]?.id
       if (!orgId) throw new Error('No organization available for cabin moss session')
       const created = await options.runtime.createSession({
@@ -988,6 +989,7 @@ export function createCabinApi(options: {
       toolCalls?: CabinToolCall[] | null
       emitDelta?: boolean
       routed?: string
+      cacheableAudio?: boolean
       ok?: boolean
     }): Promise<void> => {
       const assistantMessage = store.appendMessage({
@@ -999,12 +1001,13 @@ export function createCabinApi(options: {
         slots: input.slots,
         toolCalls: input.toolCalls,
       })
-      if (language && input.emitDelta !== false) writeSse(res, 'delta', { content: input.reply })
+      if (input.emitDelta !== false) writeSse(res, 'delta', { content: input.reply })
       const audioPlayback: CabinSeatAudioPlayback = await services.speakToSeat({
         context,
         text: input.reply,
         title: 'AI 对话',
         logContext,
+        cacheable: input.cacheableAudio ?? isFixedSpeechReply(input.routed),
       })
       if (audioPlayback.status !== 'skipped') {
         store.insertVoiceLog({
@@ -1034,9 +1037,6 @@ export function createCabinApi(options: {
           audio_playback: audioPlayback,
         },
       })
-      if (!language && input.emitDelta !== false) {
-        writeSse(res, 'delta', { content: input.reply })
-      }
       writeSse(res, 'done', {
         intent: assistantMessage.intent || '',
         slots: assistantMessage.slots || {},
@@ -1046,6 +1046,12 @@ export function createCabinApi(options: {
       res.end()
     }
     const textOnly = Boolean(language && !spoken)
+    const greeting = cabinConfig.greetingFastPathEnabled !== false && greetingReply(text, language)
+    if (greeting) {
+      const reply = !language || language === 'zh' ? normalizeCabinPassengerReply({ userText: text, reply: greeting, context }) : greeting
+      await completeReply({ reply, routed: 'greeting' })
+      return
+    }
     if (spoken && invalidSetting(text)) {
       await completeReply({ reply: message(spoken, 'clarify'), routed: 'invalid-device-setting' })
       return
@@ -1101,7 +1107,7 @@ export function createCabinApi(options: {
       if (spoken && spoken !== 'zh') {
         reply = hardwareReply(spoken, result.slots)
       } else if (!spoken || result.slots.execution_status === 'dispatched') {
-        reply = normalizeCabinPassengerReply({ userText: text, reply, context })
+        reply = normalizeCabinPassengerReply({ userText: text, reply, context, hardwareDispatched: result.slots.execution_status === 'dispatched' })
       }
       await completeReply({
         reply,
@@ -1127,7 +1133,7 @@ export function createCabinApi(options: {
         if (confirmedRoute) {
           writeSse(res, 'tool_call', confirmedRoute.toolCall)
           const result = await services.executeHardwareControl({ route: confirmedRoute, logContext })
-          const reply = normalizeCabinPassengerReply({ userText: lastAssistant.content, reply: result.reply, context })
+          const reply = normalizeCabinPassengerReply({ userText: lastAssistant.content, reply: result.reply, context, hardwareDispatched: result.slots.execution_status === 'dispatched' })
           await completeReply({
             reply,
             intent: result.intent,
@@ -1158,8 +1164,9 @@ export function createCabinApi(options: {
       return
     }
 
-    const useMoss = cabinConfig.createMossSession && !textOnly
-    const inferredTool = useMoss || language
+    const useCompact = (cabinConfig.dialogueMode ?? 'compact') === 'compact'
+    const useMoss = !useCompact && cabinConfig.createMossSession && !textOnly
+    const inferredTool = useCompact || useMoss || language
       ? null
       : services.inferToolCall({ context, text })
 
@@ -1178,7 +1185,16 @@ export function createCabinApi(options: {
       writeSse(res, 'delta', { content: delta })
     }
     try {
-      if (useMoss) {
+      if (useCompact) {
+        const result = await services.generateCompactReply({
+          context, messages: store.listMessages(conversation.id, 30), text, logContext, toolsEnabled: !textOnly,
+        })
+        reply = result.reply
+        mossToolCall = result.toolCall
+        mossIntent = result.intent
+        mossSlots = result.slots
+        if (mossToolCall) writeSse(res, 'tool_call', mossToolCall)
+      } else if (useMoss) {
         const mossResult = await services.generateReplyWithMossSession({
           mossSessionId: conversation.mossSessionId,
           conversationId: conversation.id,
@@ -1213,7 +1229,10 @@ export function createCabinApi(options: {
       res.end()
       return
     }
-    if (!language || (language === 'zh' && !mossToolCall)) reply = normalizeCabinPassengerReply({ userText: text, reply, context })
+    if ((!useCompact || !mossToolCall) && (!language || (language === 'zh' && !mossToolCall))) {
+      reply = normalizeCabinPassengerReply({ userText: text, reply, context,
+        hardwareDispatched: mossSlots?.execution_status === 'dispatched' && typeof mossSlots.command === 'string' })
+    }
     if (language && wrongReplyLanguage(reply, language) && (!mossToolCall || mossIntent === 'hardware_status_query')) reply = clarifyText[language]
     // Deltas are streamed live only for free-chat moss turns. Control turns (mossToolCall)
     // and buffered turns emit the full reply once, after the tool_call.
@@ -1225,6 +1244,7 @@ export function createCabinApi(options: {
       toolCalls: inferredTool ? [inferredTool.toolCall] : mossToolCall ? [mossToolCall] : null,
       emitDelta: !streamedIncrementally,
       routed: mossToolCall ? 'hardware-control' : undefined,
+      cacheableAudio: false,
     })
   }
 

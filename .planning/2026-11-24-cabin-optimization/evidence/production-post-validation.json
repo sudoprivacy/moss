@@ -1,0 +1,15 @@
+{
+  "files_sha256": {
+    "llm": "92e2b407ba7807a9dc5e6d328ea9b1b2e197f5c13dce021c38f01480d0b7e94f",
+    "audio": "b79342ca2012b11d74055fb65fb97edb765ede799e392329ba36985d831cda0e",
+    "compose": "9c95c0231605011bffe340eb5604b12dedfe91d3695f626e6520846cf3be508f"
+  },
+  "listening": {
+    "8000": true,
+    "8004": true,
+    "8005": false,
+    "18004": false,
+    "18005": false
+  },
+  "production_config_unchanged": true
+}

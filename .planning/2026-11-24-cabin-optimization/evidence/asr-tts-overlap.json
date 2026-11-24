@@ -1,0 +1,84 @@
+[
+  {
+    "test": "overlap_shared",
+    "runs": [
+      {
+        "tts": {
+          "elapsed_s": 1.293,
+          "sha256": "6ec97d7836286f7da5ebaeb4de832dd1100b7412b74c0247f933bee9080eef34",
+          "bytes": 203564,
+          "seconds": 4.24,
+          "rate": 24000,
+          "channels": 1,
+          "width": 2
+        },
+        "asr": {
+          "elapsed_s": 1.271,
+          "text": "已为您下发打开阅读灯的指令，请稍后。",
+          "language": [
+            "Chinese"
+          ]
+        }
+      },
+      {
+        "tts": {
+          "elapsed_s": 1.259,
+          "sha256": "6ec97d7836286f7da5ebaeb4de832dd1100b7412b74c0247f933bee9080eef34",
+          "bytes": 203564,
+          "seconds": 4.24,
+          "rate": 24000,
+          "channels": 1,
+          "width": 2
+        },
+        "asr": {
+          "elapsed_s": 1.24,
+          "text": "已为您下发打开阅读灯的指令，请稍后。",
+          "language": [
+            "Chinese"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "test": "overlap_isolated",
+    "runs": [
+      {
+        "tts": {
+          "elapsed_s": 1.328,
+          "sha256": "6ec97d7836286f7da5ebaeb4de832dd1100b7412b74c0247f933bee9080eef34",
+          "bytes": 203564,
+          "seconds": 4.24,
+          "rate": 24000,
+          "channels": 1,
+          "width": 2
+        },
+        "asr": {
+          "elapsed_s": 0.165,
+          "text": "已为您下发打开阅读灯的指令，请稍后。",
+          "language": [
+            "Chinese"
+          ]
+        }
+      },
+      {
+        "tts": {
+          "elapsed_s": 1.278,
+          "sha256": "6ec97d7836286f7da5ebaeb4de832dd1100b7412b74c0247f933bee9080eef34",
+          "bytes": 203564,
+          "seconds": 4.24,
+          "rate": 24000,
+          "channels": 1,
+          "width": 2
+        },
+        "asr": {
+          "elapsed_s": 0.16,
+          "text": "已为您下发打开阅读灯的指令，请稍后。",
+          "language": [
+            "Chinese"
+          ]
+        }
+      }
+    ]
+  }
+]

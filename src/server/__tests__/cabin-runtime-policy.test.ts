@@ -22,12 +22,17 @@ describe('cabin runtime policy', () => {
     } finally { catalog.mockRestore(); clearModelCache() }
   })
 
-  it('loads explicit recovery limits including false and zero', async () => {
+  it('loads explicit recovery and speech settings including false and zero', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cabin-config-'))
     try {
       const file = join(dir, 'server.json')
       const value = getDefaultServerConfig()
-      const policy = { replyTimeoutMs: 1200, sessionRecoveryEnabled: false, sessionRecoveryMaxAttempts: 0, contextReplayTurns: 0, serviceOrderCreateEnabled: false }
+      const policy = {
+        replyTimeoutMs: 1200, sessionRecoveryEnabled: false, sessionRecoveryMaxAttempts: 0,
+        contextReplayTurns: 0, serviceOrderCreateEnabled: false, greetingFastPathEnabled: false,
+        ttsGeneration: { temperature: 0, topP: 1, topK: 0, repetitionPenalty: 1.05 },
+        ttsCache: { maxEntries: 0, maxBytes: 1024, ttlMs: 1000 },
+      }
       await writeFile(file, JSON.stringify({ ...value, cabin: { ...value.cabin, ...policy } }))
       expect((await readServerConfig(file)).config.cabin).toMatchObject(policy)
     } finally { await rm(dir, { recursive: true, force: true }) }

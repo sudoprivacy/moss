@@ -55,6 +55,50 @@ function servicesWith(fetchImpl: typeof fetch, overrides: Partial<CabinConfig> =
 }
 
 describe('conversation seat audio', () => {
+  it('validates TTS capability and seed before reading/caching/playing audio, including require hot switches', async () => {
+    const settings = config({ ttsGeneration: { seed: 42 }, ttsDeterministicRequired: false })
+    let headers: Record<string, string> = {}
+    let ttsCalls = 0
+    let audioReads = 0
+    let broadcastCalls = 0
+    const logs: Array<{ upstream?: string; details?: Record<string, unknown> }> = []
+    const services = new CabinServices({
+      config: settings,
+      store: new CabinStore(new Database(':memory:') as unknown as DatabaseSync),
+      logger: { log: (event: typeof logs[number]) => logs.push(event) } as never,
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith('/audio/speech')) {
+          ttsCalls++
+          expect(JSON.parse(String(init?.body)).seed).toBe(42)
+          const result = new Response('RIFF-test', { headers: { 'content-type': 'audio/wav', ...headers } })
+          const read = result.arrayBuffer.bind(result)
+          result.arrayBuffer = async () => { audioReads++; return read() }
+          return result
+        }
+        broadcastCalls++
+        return response({ code: 0, data: { matchedCount: 1, sentCount: 1 } })
+      },
+    })
+    expect((await services.speech('固定回复', undefined, undefined, true)).cacheStatus).toBe('miss')
+    expect((await services.speech('固定回复', undefined, undefined, true)).cacheStatus).toBe('hit')
+    settings.ttsDeterministicRequired = true
+    await expect(services.speech('固定回复', undefined, undefined, true)).rejects.toThrow('does not acknowledge')
+    expect(ttsCalls).toBe(2)
+    expect(audioReads).toBe(1)
+    headers = { 'X-Cabin-TTS-Deterministic': 'seeded-serial-v1', 'X-Cabin-TTS-Seed': '41' }
+    await expect(services.speech('固定回复', undefined, undefined, true)).rejects.toThrow('did not use the requested seed')
+    expect(audioReads).toBe(1)
+    await expect(services.speakToSeat({ context, text: '不能播放未验证音频' })).resolves.toMatchObject({ status: 'failed' })
+    expect(broadcastCalls).toBe(0)
+    headers['X-Cabin-TTS-Seed'] = '42'
+    expect((await services.speech('固定回复', undefined, undefined, true)).cacheStatus).toBe('miss')
+    expect((await services.speech('固定回复', undefined, undefined, true)).cacheStatus).toBe('hit')
+    expect(audioReads).toBe(2)
+    expect(logs.filter(event => event.upstream === 'tts').at(-1)?.details).toMatchObject({ seed: 42, cache_status: 'hit' })
+    await expect(services.speakToSeat({ context, text: '验证成功音频' })).resolves.toMatchObject({ status: 'sent' })
+    expect(broadcastCalls).toBe(1)
+  })
+
   it('uses explicit voice profiles without filling missing or disabled languages from defaults', async () => {
     const requests: unknown[] = []
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -183,10 +227,13 @@ describe('conversation seat audio', () => {
     expect(calls).toBe(0)
   })
 
-  it('adds seat playback result to the SSE done event for a normal chat reply', async () => {
+  it('routes pure greetings without LLM, reuses audio, and falls back for requests or a disabled fast path', async () => {
     const requests: Array<{ pathname: string; aircraftNo?: string; seatNo?: string }> = []
     let ttsCalls = 0
     let broadcastCalls = 0
+    let llmCalls = 0
+    let releaseTts!: () => void
+    const ttsGate = new Promise<void>(resolve => { releaseTts = resolve })
     const upstream = http.createServer(async (req, res) => {
       const url = new URL(req.url || '/', 'http://localhost')
       if (url.pathname === '/admin-api/cabin/tablet-login/get-seat-context') {
@@ -209,12 +256,14 @@ describe('conversation seat audio', () => {
         return
       }
       if (url.pathname === '/v1/chat/completions') {
+        llmCalls += 1
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ choices: [{ message: { content: '您好，已收到您的请求。' } }] }))
+        res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '您好，已收到您的请求。' } }] }))
         return
       }
       if (url.pathname === '/tts') {
         ttsCalls += 1
+        await ttsGate
         res.writeHead(200, { 'content-type': 'audio/wav' })
         res.end(Buffer.from('RIFF-test-wave'))
         return
@@ -302,7 +351,23 @@ describe('conversation seat audio', () => {
         body: JSON.stringify({ content: '你好', source: 'text' }),
       })
       expect(result.status).toBe(200)
-      const body = await result.text()
+      const reader = result.body!.getReader()
+      const decoder = new TextDecoder()
+      let body = ''
+      while (!body.includes('event: delta')) {
+        const next = await reader.read()
+        if (next.done) break
+        body += decoder.decode(next.value, { stream: true })
+      }
+      expect(body).toContain('您好，请问有什么可以帮您？')
+      expect(body).not.toContain('event: done')
+      expect(llmCalls).toBe(0)
+      releaseTts()
+      for (;;) {
+        const next = await reader.read()
+        if (next.done) break
+        body += decoder.decode(next.value, { stream: true })
+      }
       expect(body).toContain('event: done')
       expect(body).toContain('"status":"sent"')
       expect(body).toContain('"request_id":"BC-sse-1"')
@@ -310,7 +375,27 @@ describe('conversation seat audio', () => {
       expect(requests).toEqual([{ pathname: '/admin-api/cabin/tablet-login/get-seat-context', aircraftNo: 'B-TEST', seatNo: '01A' }])
       expect(ttsCalls).toBe(1)
       expect(broadcastCalls).toBe(1)
+      const send = async (content: string) => {
+        const response = await fetch(`http://127.0.0.1:${cabinAddress.port}/v1/ai-chat/send`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-cabin-aircraft-no': 'B-TEST', 'x-cabin-seat-no': '01A' },
+          body: JSON.stringify({ content, source: 'text' }),
+        })
+        expect(response.status).toBe(200)
+        expect(await response.text()).toContain('event: done')
+      }
+      await send('你好。')
+      expect(llmCalls).toBe(0); expect(ttsCalls).toBe(1); expect(broadcastCalls).toBe(2)
+      await send('你好，请介绍一下你的功能')
+      expect(llmCalls).toBe(1); expect(ttsCalls).toBe(2)
+      config.cabin.greetingFastPathEnabled = false
+      await send('你好')
+      expect(llmCalls).toBe(2); expect(ttsCalls).toBe(3); expect(broadcastCalls).toBe(4)
+      const rows = db.prepare('SELECT role FROM cabin_messages ORDER BY created_at').all() as Array<{ role: string }>
+      expect(rows.map(row => row.role)).toEqual(['user','assistant','user','assistant','user','assistant','user','assistant'])
     } finally {
+      releaseTts()
+      cabinServer.closeAllConnections()
+      upstream.closeAllConnections()
       await new Promise<void>(resolve => cabinServer.close(() => resolve()))
       await new Promise<void>(resolve => upstream.close(() => resolve()))
     }

@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { createInterface } from 'readline'
 import type net from 'net'
 import type {
@@ -31,6 +31,12 @@ import { fetchWithTimeout } from './http.js'
 import { CabinBroadcastClient } from './broadcastClient.js'
 import { asrLanguage, clarifyText, defaultConversationTtsProfiles, languageNames, replyInstruction, textLanguage, type Language } from './language.js'
 import { deniedCommand, describesDevice, exactCommand, hardwareReply, hypotheticalCommand, isSpoken, message } from './commandLanguage.js'
+import { CabinSpeechCache, defaultSpeechCacheOptions } from './speechCache.js'
+import { audioSha256, wavMetadata } from './audioFingerprint.js'
+import { assertTtsBackend, isQwenTts, ttsGenerationOptions } from './ttsOptions.js'
+import { withDeadline } from './deadline.js'
+import { requestCompactDialogue } from './compactDialogue.js'
+import { speechText } from './speechText.js'
 
 type FetchLike = typeof fetch
 
@@ -126,10 +132,12 @@ export class CabinServices {
   private readonly orderClient: CabinOrderClient
   private readonly broadcastClient: CabinBroadcastClient
   private readonly conversationTtsProfiles: NonNullable<CabinConfig['conversationTtsProfiles']>
+  private readonly speechCache: CabinSpeechCache
 
   constructor(private readonly options: CabinServicesOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch
     this.conversationTtsProfiles = options.config.conversationTtsProfiles ?? defaultConversationTtsProfiles()
+    this.speechCache = new CabinSpeechCache({ ...defaultSpeechCacheOptions, ...options.config.ttsCache })
     this.orderClient = new CabinOrderClient(options.config, this.fetchImpl, options.logger)
     this.broadcastClient = new CabinBroadcastClient(options.config, this.fetchImpl)
   }
@@ -767,21 +775,29 @@ export class CabinServices {
     if (input.language) body.set('language', (input.detectLanguage && languageNames[input.language as Language]) || input.language)
     body.set('response_format', input.detectLanguage ? 'verbose_json' : 'json')
 
-    let response: Response
+    let payload: { text?: unknown; language?: unknown; segments?: unknown }
+    let status: number | undefined
     try {
-      response = await this.fetchImpl(this.options.config.asrUrl, {
-        method: 'POST',
-        body,
-        headers: this.options.config.asrApiKey
-          ? { authorization: `Bearer ${this.options.config.asrApiKey}` }
-          : undefined,
-      })
+      payload = await withDeadline(async signal => {
+        const response = await this.fetchImpl(this.options.config.asrUrl, {
+          method: 'POST',
+          body,
+          headers: this.options.config.asrApiKey
+            ? { authorization: `Bearer ${this.options.config.asrApiKey}` }
+            : undefined,
+          signal,
+        })
+        status = response.status
+        if (!response.ok) throw new Error(`ASR request failed: ${response.status} ${await response.text()}`)
+        return await response.json() as typeof payload
+      }, this.options.config.asrTimeoutMs ?? 30_000, 'ASR')
     } catch (error) {
       this.logOutbound({
         ...input.logContext,
         upstream: 'asr',
         method: 'POST',
         url: this.options.config.asrUrl,
+        status,
         ok: false,
         elapsedMs: Date.now() - start,
         errorMessage: error instanceof Error ? error.message : String(error),
@@ -789,22 +805,6 @@ export class CabinServices {
       })
       throw error
     }
-    if (!response.ok) {
-      const errorText = await response.text()
-      this.logOutbound({
-        ...input.logContext,
-        upstream: 'asr',
-        method: 'POST',
-        url: this.options.config.asrUrl,
-        status: response.status,
-        ok: false,
-        elapsedMs: Date.now() - start,
-        errorMessage: errorText,
-        model: this.options.config.asrModel,
-      })
-      throw new Error(`ASR request failed: ${response.status} ${errorText}`)
-    }
-    const payload = await response.json() as { text?: unknown; language?: unknown; segments?: unknown }
     const text = typeof payload.text === 'string' ? payload.text.trim() : ''
     if (!text) throw new Error('ASR response missing text')
     const elapsedMs = Date.now() - start
@@ -813,7 +813,7 @@ export class CabinServices {
       upstream: 'asr',
       method: 'POST',
       url: this.options.config.asrUrl,
-      status: response.status,
+      status,
       ok: true,
       elapsedMs,
       model: this.options.config.asrModel,
@@ -828,76 +828,63 @@ export class CabinServices {
     return { text, elapsedMs, language: asrLanguage(payload, input.language) }
   }
 
-  async speech(text: string, logContext?: CabinLogContext, profile?: { voice: string; language: string; field?: 'lang_code' | 'language' }): Promise<{ audio: Buffer; contentType: string; elapsedMs: number }> {
+  async speech(text: string, logContext?: CabinLogContext, profile?: { voice: string; language: string; field?: 'lang_code' | 'language' }, cacheable = false) {
     const start = Date.now()
-    let response: Response
+    const config = this.options.config
+    const generation = ttsGenerationOptions(config, profile?.language ?? config.ttsLanguage)
+    const payload = {
+      model: config.ttsModel,
+      voice: profile?.voice ?? config.ttsVoice,
+      input: speechText(text),
+      response_format: 'wav',
+      [profile?.field ?? (isQwenTts(config.ttsModel) ? 'lang_code' : 'language')]: profile?.language ?? config.ttsLanguage,
+      ...generation,
+    }
+    // Include upstream identity without logging the key or credentials.
+    const key = createHash('sha256').update(JSON.stringify([config.ttsUrl, config.ttsApiKey, config.ttsDeterministicRequired === true, payload])).digest('hex')
+    let status: number | undefined
     try {
-      response = await this.fetchImpl(this.options.config.ttsUrl, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(this.options.config.ttsApiKey
-            ? { authorization: `Bearer ${this.options.config.ttsApiKey}` }
-            : {}),
+      const speech = await this.speechCache.getOrGenerate(key, cacheable, () => withDeadline(async signal => {
+        const response = await this.fetchImpl(config.ttsUrl, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(config.ttsApiKey ? { authorization: `Bearer ${config.ttsApiKey}` } : {}),
+          },
+          body: JSON.stringify(payload),
+          signal,
+        })
+        status = response.status
+        if (!response.ok) throw new Error(`TTS request failed: ${response.status} ${await response.text()}`)
+        assertTtsBackend(response, config)
+        const audio = Buffer.from(await response.arrayBuffer())
+        if (!audio.length) throw new Error('TTS returned empty audio')
+        if (isQwenTts(config.ttsModel) && !wavMetadata(audio)) throw new Error('TTS returned invalid PCM WAV audio')
+        return { audio, contentType: response.headers.get('content-type') || 'audio/wav' }
+      }, config.ttsTimeoutMs ?? 30000, 'TTS'))
+      const elapsedMs = Date.now() - start
+      const sha256 = audioSha256(speech.audio)
+      this.logOutbound({
+        ...logContext, upstream: 'tts', method: 'POST', url: config.ttsUrl, status: status ?? 200,
+        ok: true, elapsedMs, model: config.ttsModel,
+        details: {
+          voice: payload.voice, language: profile?.language ?? config.ttsLanguage,
+          input_chars: text.length, audio_bytes: speech.audio.length, audio_sha256: sha256,
+          audio_format: wavMetadata(speech.audio), cache_status: speech.cacheStatus,
+          temperature: generation.temperature, top_p: generation.top_p, top_k: generation.top_k,
+          repetition_penalty: generation.repetition_penalty, max_tokens: generation.max_tokens,
+          seed: generation.seed,
+          instruct_chars: typeof generation.instruct === 'string' ? generation.instruct.length : undefined,
         },
-        body: JSON.stringify({
-          model: this.options.config.ttsModel,
-          voice: profile?.voice ?? this.options.config.ttsVoice,
-          input: text,
-          response_format: 'wav',
-          [profile?.field ?? 'language']: profile?.language ?? this.options.config.ttsLanguage,
-        }),
       })
+      return { ...speech, sha256, elapsedMs }
     } catch (error) {
       this.logOutbound({
-        ...logContext,
-        upstream: 'tts',
-        method: 'POST',
-        url: this.options.config.ttsUrl,
-        ok: false,
-        elapsedMs: Date.now() - start,
+        ...logContext, upstream: 'tts', method: 'POST', url: config.ttsUrl, status,
+        ok: false, elapsedMs: Date.now() - start, model: config.ttsModel,
         errorMessage: error instanceof Error ? error.message : String(error),
-        model: this.options.config.ttsModel,
       })
       throw error
-    }
-    if (!response.ok) {
-      const errorText = await response.text()
-      this.logOutbound({
-        ...logContext,
-        upstream: 'tts',
-        method: 'POST',
-        url: this.options.config.ttsUrl,
-        status: response.status,
-        ok: false,
-        elapsedMs: Date.now() - start,
-        errorMessage: errorText,
-        model: this.options.config.ttsModel,
-      })
-      throw new Error(`TTS request failed: ${response.status} ${errorText}`)
-    }
-    const arrayBuffer = await response.arrayBuffer()
-    const elapsedMs = Date.now() - start
-    this.logOutbound({
-      ...logContext,
-      upstream: 'tts',
-      method: 'POST',
-      url: this.options.config.ttsUrl,
-      status: response.status,
-      ok: true,
-      elapsedMs,
-      model: this.options.config.ttsModel,
-      details: {
-        voice: profile?.voice ?? this.options.config.ttsVoice,
-        language: profile?.language ?? this.options.config.ttsLanguage,
-        input_chars: text.length,
-        audio_bytes: arrayBuffer.byteLength,
-      },
-    })
-    return {
-      audio: Buffer.from(arrayBuffer),
-      contentType: response.headers.get('content-type') || 'audio/wav',
-      elapsedMs,
     }
   }
 
@@ -906,6 +893,7 @@ export class CabinServices {
     text: string
     title?: string
     logContext?: CabinLogContext
+    cacheable?: boolean
   }): Promise<CabinSeatAudioPlayback> {
     const startedAt = Date.now()
     if (this.options.config.conversationSeatAudioEnabled !== true) {
@@ -937,7 +925,9 @@ export class CabinServices {
       if (language && (!isSpoken(language) || !profile)) {
         return { status: 'skipped', elapsedMs: 0, error: 'no enabled conversation voice for this language' }
       }
-      const speech = await this.speech(input.text, input.logContext, profile)
+      // Existing Chinese receipt formatting may prepend a passenger salutation.
+      // Keep named-passenger contexts out of the shared public-reply cache.
+      const speech = await this.speech(input.text, input.logContext, profile, input.cacheable === true && !input.context.passengerName)
       const filename = `conversation_${input.logContext?.requestId || randomUUID()}.${audioExtension(speech.contentType)}`
       const result = await this.broadcastClient.sendAudioSeat({
         audio: speech.audio,
@@ -979,6 +969,10 @@ export class CabinServices {
           seat_no: seatNo,
           title: input.title || 'AI 对话',
           audio_bytes: speech.audio.length,
+          audio_sha256: result.audioSha256,
+          tts_audio_sha256: speech.sha256,
+          audio_format: wavMetadata(speech.audio),
+          tts_cache_status: speech.cacheStatus,
           playback_status: status,
           matched_count: matchedCount,
           sent_count: sentCount,
@@ -1008,6 +1002,72 @@ export class CabinServices {
         details: { aircraft_no: aircraftNo, seat_no: seatNo },
       })
       return { status: 'failed', elapsedMs: Date.now() - startedAt, error: message }
+    }
+  }
+
+  async generateCompactReply(input: {
+    context: CabinPassengerContext
+    messages: CabinMessage[]
+    text: string
+    logContext?: CabinLogContext
+    toolsEnabled?: boolean
+  }): Promise<{ reply: string; toolCall?: CabinToolCall; intent?: string; slots?: Record<string, unknown> }> {
+    const config = this.options.config
+    const language = input.context.replyLanguage
+    const spoken = language && isSpoken(language) ? language : 'zh'
+    const started = Date.now()
+    const ask = async (facts?: Record<string, unknown>) => {
+      const result = await requestCompactDialogue({
+        context: input.context, messages: facts ? [] : input.messages, text: input.text,
+        baseUrl: config.llmBaseUrl, model: config.llmModel, apiKey: config.llmApiKey,
+        timeoutMs: config.replyTimeoutMs ?? 45000, fetchImpl: this.fetchImpl,
+        historyMaxBytes: config.dialogueHistoryMaxBytes ?? 4096,
+        toolsEnabled: facts ? false : input.toolsEnabled, facts,
+      })
+      this.logOutbound({
+        ...input.logContext, upstream: 'llm-compact', method: 'POST',
+        url: `${config.llmBaseUrl.replace(/\/$/, '')}/chat/completions`, ok: true,
+        elapsedMs: result.elapsedMs, model: config.llmModel,
+        details: { kind: result.kind, request_bytes: result.requestBytes, history_messages: result.historyMessages, usage: result.usage, status_reply: !!facts },
+      })
+      return result
+    }
+    try {
+      const decision = await ask()
+      if (decision.kind === 'reply') return { reply: guardUnexecutedCabinReply(decision.reply, language, input.text) }
+      // requestCompactDialogue validates schema and current-turn authorization for
+      // control/mode decisions. Do not reclassify polite requests with legacy gates.
+      if (decision.kind === 'control') {
+        const route = buildRouteFromCommand(input.context, decision.command, decision.params)
+        if (!route) return { reply: message(spoken, 'clarify') }
+        const result = await this.executeHardwareControl({ route, logContext: input.logContext, reportTransportFailure: true })
+        return { ...result, reply: spoken === 'zh' ? result.reply : hardwareReply(spoken, result.slots) }
+      }
+      if (decision.kind === 'mode') {
+        const result = await this.executeModeSwitch({ context: input.context, spec: { cabinMode: decision.mode }, logContext: input.logContext })
+        return { ...result, reply: spoken === 'zh' ? result.reply : hardwareReply(spoken, result.slots) }
+      }
+      const result = await this.executeHardwareStatusQuery({
+        context: input.context, spec: { targetType: decision.targetType, statusKey: decision.statusKey }, logContext: input.logContext,
+      })
+      if (!result.ok) return { ...result, reply: message(spoken, 'failed') }
+      // Existing protocol-aware Chinese formatter uses actual fields and units.
+      // An empty status response must never become an invented physical state.
+      if (spoken === 'zh') return result
+      // A second bounded, tool-free request phrases actual scalar status data;
+      // it can never schedule an action or carry a runner transcript.
+      const raw = result.slots.status_data
+      const statusData = raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? Object.fromEntries(Object.entries(raw).filter(([key, value]) => key.length <= 80 &&
+          (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) || (typeof value === 'string' && value.length <= 120))).slice(0, 24))
+        : {}
+      if (!Object.keys(statusData).length) return { ...result, reply: unavailableStatusReply[spoken] }
+      const phrased = await ask({ status_key: decision.statusKey, execution_status: 'succeeded', status_data: statusData })
+      return { ...result, reply: phrased.kind === 'reply' ? phrased.reply : clarifyText[language ?? 'zh'] }
+    } catch (error) {
+      this.logOutbound({ ...input.logContext, upstream: 'llm-compact', method: 'POST', ok: false, elapsedMs: Date.now() - started,
+        model: config.llmModel, errorMessage: error instanceof Error ? error.message : String(error) })
+      throw error
     }
   }
 
@@ -1723,6 +1783,14 @@ export class CabinServices {
       details: event.details,
     })
   }
+}
+
+const unavailableStatusReply = {
+  zh: '当前暂未获取到该设备的详细状态。', en: 'Current device details are unavailable.',
+  de: 'Die aktuellen Gerätedaten sind nicht verfügbar.', ja: '現在の機器の詳細な状態を確認できません。',
+  ko: '현재 기기의 상세 상태를 확인할 수 없습니다.', fr: 'Les détails actuels de cet appareil sont indisponibles.',
+  es: 'Los detalles actuales del dispositivo no están disponibles.', pt: 'Os dados atuais do dispositivo não estão disponíveis.',
+  it: 'I dati attuali del dispositivo non sono disponibili.', ru: 'Текущие данные устройства недоступны.',
 }
 
 function buildPromptContext(context: CabinPassengerContext): Record<string, unknown> {
@@ -2587,7 +2655,7 @@ function formatHardwareStatusReply(key: CabinHardwareStatusKey, data: Record<str
     return `当前座椅角度约为 ${data.position}%。`
   }
   if (key === 'tray') {
-    const flipped = isTrayUnfolded(data) ? '展开' : '折叠'
+    const flipped = data.flipped === undefined ? '未知' : isTrayUnfolded(data) ? '展开' : '折叠'
     const state = data.open === undefined ? '未知' : isTruthyStatusFlag(data.open) ? '打开' : '关闭'
     return `当前小桌板处于${state}状态，桌板为${flipped}状态。`
   }
@@ -3370,8 +3438,9 @@ export function normalizeCabinPassengerReply(input: {
   userText: string
   reply: string
   context?: CabinPassengerContext
+  hardwareDispatched?: boolean
 }): string {
-  if (isCabinHardwareRequest(input.userText)) {
+  if (input.hardwareDispatched && isCabinHardwareRequest(input.userText)) {
     return normalizeCabinHardwareReply(input)
   }
   if (isWeakGreetingRequest(input.userText)) {
@@ -3387,6 +3456,30 @@ export function normalizeCabinPassengerReply(input: {
     return addPassengerSalutation(input.reply, input.context)
   }
   return sanitizedReply || input.reply
+}
+
+// Output checks only: these patterns never grant or deny tool authorization.
+const cabinExecutionSubject = /灯|燈|桌板|座椅|靠背|坐垫|通风|加热|按摩|模式|场景|指令|设备|読書灯|ライト|テーブル|座席|モード|指示|독서등|조명|테이블|좌석|모드|명령|light|lamp|tray|seat|heating|ventilation|massage|mode|scene|command|request|instruction|befehl|sitz|tisch|chauffage|liseuse|lampe|tablette|siège|commande|luz|mesa|asiento|orden|assento|comando|luce|tavolino|sedile|ламп|свет|столик|кресл|режим|команд/iu
+const cabinExecutionClaims = [
+  /(?:已(?:经)?|正在|(?:我|我们)(?:会|将|马上|现在))[^。！？\n]{0,40}?(?:下发|发送|执行|操作|打开|开启|关闭|调整|调节|调好|切换|完成)|(?:将|马上)(?:为您|为你|帮您|帮你)[^。！？\n]{0,24}?(?:下发|打开|关闭|调整|调节|切换)/u,
+  /\b(?:I(?:['’]ve| have|['’]ll| will| am going to)?|we(?:['’]ve| have|['’]ll| will| are going to)?) (?:already |now )?(?:turn(?:ed)?|open(?:ed)?|clos(?:e|ed)|adjust(?:ed)?|switch(?:ed)?|sen[dt]|execut(?:e|ed))\b|\b(?:has been|was|is now|will be) (?:turned|opened|closed|adjusted|switched|sent|dispatched|executed)\b|\b(?:command|request|instruction)\b.{0,70}\bis (?:sent|dispatched|executed)\b/iu,
+  /\b(?:ich|wir) (?:habe[n]?|werde[n]?)\b.{0,80}(?:geschaltet|schalten|geöffnet|öffnen|geschlossen|schließen|eingestellt|einstellen|gesendet|senden)|\b(?:wurde|wird)\b.{0,60}(?:geschaltet|geöffnet|geschlossen|eingestellt|gesendet)/iu,
+  /(?:点灯|消灯|開閉|調整|切り替え|送信|実行)(?:を)?(?:しました|します|いたします)|(?:開け|閉じ|つけ|消し|開き|閉め|切り替え|送り)(?:ました|ます)|(?:つけ|消し|開け|閉じ|調整し|切り替え)ておき(?:ました|ます)/u,
+  /(?:켰|껐|열었|닫았|조정했|변경했|전환했|보냈|전송했|실행했)습니다|(?:켜|끄|열|닫|조정하|변경하|전환하|보내|전송하|실행하)겠습니다|(?:켜|꺼|열어|닫아|조정해|변경해|전환해|보내)\s*드(?:렸습니다|리겠습니다|릴게요)/u,
+  /\bj['’]ai\b.{0,60}(?:allumé|éteint|ouvert|fermé|réglé|envoyé|changé)|\bje (?:vais|viens de)\b.{0,60}(?:allumer|éteindre|ouvrir|fermer|régler|envoyer|changer)|\b(?:a été|sera) (?:allumé\p{L}*|éteint\p{L}*|ouvert\p{L}*|fermé\p{L}*|envoyé\p{L}*)/iu,
+  /\b(?:he|hemos) (?:encendido|apagado|abierto|cerrado|ajustado|enviado|cambiado)|\b(?:voy|vamos) a (?:encender|apagar|abrir|cerrar|ajustar|enviar|cambiar)|\b(?:encenderé|apagaré|abriré|cerraré|ajustaré|enviaré|cambiaré)|\b(?:ha sido|será) (?:enviad\p{L}*|encendid\p{L}*|apagad\p{L}*)/iu,
+  /\b(?:acendi|apaguei|abri|fechei|ajustei|enviei|mudei)|\b(?:vou|vamos) (?:acender|apagar|abrir|fechar|ajustar|enviar|mudar)|\b(?:foi|será) (?:enviad\p{L}*|ligad\p{L}*|desligad\p{L}*)/iu,
+  /\b(?:ho|abbiamo) (?:acceso|spento|aperto|chiuso|regolato|inviato|cambiato)|\b(?:accenderò|spegnerò|aprirò|chiuderò|regolerò|invierò|cambierò)|\b(?:è stato|sarà) (?:inviat\p{L}*|acces\p{L}*|spent\p{L}*)/iu,
+  /(?<!\p{L})(?:я|мы)\s+(?:(?:уже|сейчас)\s+)?(?:включ|выключ|откр|закр|настро|отправ|переключ)\p{L}*|(?<!\p{L})(?:команда|запрос)\s+(?:будет\s+)?(?:отправлен|выполнен)\p{L}*/iu,
+]
+
+function guardUnexecutedCabinReply(reply: string, language: Language | undefined, userText: string): string {
+  // A text completion is never an execution receipt or a promise to execute.
+  // Require device/action context to avoid rewriting ordinary introductions.
+  const claimsExecution = cabinExecutionSubject.test(`${userText}\n${reply}`)
+    && cabinExecutionClaims.some(pattern => pattern.test(reply))
+  if (!claimsExecution) return reply
+  return language && !isSpoken(language) ? clarifyText[language] : message(language ?? 'zh', 'noAction')
 }
 
 export function normalizeCabinHardwareReply(input: {

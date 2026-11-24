@@ -2,11 +2,13 @@ import { basename } from 'path'
 import { readFile } from 'fs/promises'
 
 import type { CabinConfig } from './types.js'
+import { audioSha256 } from './audioFingerprint.js'
 import { fetchWithTimeout } from './http.js'
 
 type FetchLike = typeof fetch
 
 export type CabinBroadcastResult = {
+  audioSha256?: string
   ok: boolean
   skipped?: boolean
   status?: number
@@ -82,9 +84,11 @@ export class CabinBroadcastClient {
     }
     const url = `${baseUrl}/admin-api/cabin/broadcast/audio-seat`
     const start = Date.now()
+    const uploadAudio = new Uint8Array(input.audio)
+    const uploadSha256 = audioSha256(uploadAudio)
     try {
       const form = new FormData()
-      form.set('file', new Blob([new Uint8Array(input.audio)], { type: input.contentType }), input.filename)
+      form.set('file', new Blob([uploadAudio], { type: input.contentType }), input.filename)
       form.set('title', input.title)
       form.set('aircraftNo', input.aircraftNo)
       form.set('seatNo', input.seatNo)
@@ -95,6 +99,7 @@ export class CabinBroadcastClient {
       }, this.config.controlTimeoutMs ?? 10_000, 'broadcast audio-seat')
       const payload = await parseResponse(response)
       return {
+        audioSha256: uploadSha256,
         ok: response.ok && isOkEnvelope(payload),
         status: response.status,
         payload,
@@ -103,6 +108,7 @@ export class CabinBroadcastClient {
       }
     } catch (error) {
       return {
+        audioSha256: uploadSha256,
         ok: false,
         elapsedMs: Date.now() - start,
         error: stringifyError(error),

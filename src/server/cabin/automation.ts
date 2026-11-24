@@ -9,6 +9,10 @@ import type { CabinManagedSeat } from './types.js'
 import type { CabinHealthReportService } from './healthReports.js'
 import { CabinBroadcastClient } from './broadcastClient.js'
 import { fetchWithTimeout } from './http.js'
+import { assertTtsBackend, isQwenTts, ttsGenerationOptions } from './ttsOptions.js'
+import { speechText } from './speechText.js'
+import { audioSha256, wavMetadata } from './audioFingerprint.js'
+import { withDeadline } from './deadline.js'
 
 type FlightDataMessage = {
   mavpackettype?: string
@@ -1301,6 +1305,9 @@ export class CabinFlightAutomation {
       voice: this.config.cabin.ttsVoice,
       language: this.config.cabin.ttsLanguage,
       version: this.config.cabin.broadcastTtsVersion || 'flight-phase-v1',
+      endpoint: this.config.cabin.ttsUrl,
+      generation: ttsGenerationOptions(this.config.cabin),
+      deterministicRequired: this.config.cabin.ttsDeterministicRequired === true,
     })
     const existing = this.ttsInflight.get(cacheKey)
     if (existing) return existing
@@ -1366,40 +1373,47 @@ export class CabinFlightAutomation {
       },
     })
     try {
-      const response = await fetchWithTimeout(fetch, this.config.cabin.ttsUrl, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(this.config.cabin.ttsApiKey
-            ? { authorization: `Bearer ${this.config.cabin.ttsApiKey}` }
-            : {}),
-        },
-        body: JSON.stringify({
-          model: this.config.cabin.ttsModel,
-          voice: this.config.cabin.ttsVoice,
-          input: text,
-          response_format: 'wav',
-          language: this.config.cabin.ttsLanguage,
-        }),
-      }, this.config.cabin.controlTimeoutMs ?? 10_000, 'broadcast tts')
-      if (!response.ok) {
-        const errorText = await response.text()
-        this.log({
-          event: 'broadcast.tts.failed',
-          requestId,
-          phaseName,
+      const { response, audio } = await withDeadline(async signal => {
+        const response = await fetch(this.config.cabin.ttsUrl, {
           method: 'POST',
-          url: this.config.cabin.ttsUrl,
-          status: response.status,
-          ok: false,
-          elapsedMs: Date.now() - start,
-          error: errorText,
-          details: { cache_key: cacheKey },
+          headers: {
+            'content-type': 'application/json',
+            ...(this.config.cabin.ttsApiKey
+              ? { authorization: `Bearer ${this.config.cabin.ttsApiKey}` }
+              : {}),
+          },
+          body: JSON.stringify({
+            model: this.config.cabin.ttsModel,
+            voice: this.config.cabin.ttsVoice,
+            input: speechText(text),
+            response_format: 'wav',
+            [isQwenTts(this.config.cabin.ttsModel) ? 'lang_code' : 'language']: this.config.cabin.ttsLanguage,
+            ...ttsGenerationOptions(this.config.cabin),
+          }),
+          signal,
         })
-        throw new Error(`TTS request failed: ${response.status} ${errorText}`)
-      }
-      const audio = Buffer.from(await response.arrayBuffer())
-      if (!audio.length) throw new Error('TTS response was empty')
+        if (!response.ok) {
+          const errorText = await response.text()
+          this.log({
+            event: 'broadcast.tts.failed',
+            requestId,
+            phaseName,
+            method: 'POST',
+            url: this.config.cabin.ttsUrl,
+            status: response.status,
+            ok: false,
+            elapsedMs: Date.now() - start,
+            error: errorText,
+            details: { cache_key: cacheKey },
+          })
+          throw new Error(`TTS request failed: ${response.status} ${errorText}`)
+        }
+        const audio = Buffer.from(await response.arrayBuffer())
+        assertTtsBackend(response, this.config.cabin)
+        if (!audio.length) throw new Error('TTS response was empty')
+        if (isQwenTts(this.config.cabin.ttsModel) && !wavMetadata(audio)) throw new Error('TTS returned invalid PCM WAV audio')
+        return { response, audio }
+      }, this.config.cabin.ttsTimeoutMs ?? 30000, 'broadcast TTS')
       const metadataFile = join(dir, `${phaseName}_${cacheKey.slice(0, 12)}.json`)
       const tmpSuffix = `${process.pid}.${Date.now()}.tmp`
       const tmpAudioFile = `${file}.${tmpSuffix}`
@@ -1415,6 +1429,9 @@ export class CabinFlightAutomation {
         version: this.config.cabin.broadcastTtsVersion || 'flight-phase-v1',
         contentType: response.headers.get('content-type') || 'audio/wav',
         generatedAt: new Date().toISOString(),
+        audioSha256: audioSha256(audio),
+        audioFormat: wavMetadata(audio),
+        generation: ttsGenerationOptions(this.config.cabin),
       }, null, 2), 'utf8')
       await rename(tmpAudioFile, file)
       await rename(tmpMetadataFile, metadataFile)
@@ -1427,7 +1444,7 @@ export class CabinFlightAutomation {
         status: response.status,
         ok: true,
         elapsedMs: Date.now() - start,
-        details: { file, cache_key: cacheKey, audio_bytes: audio.length, title },
+        details: { file, cache_key: cacheKey, audio_bytes: audio.length, audio_sha256: audioSha256(audio), audio_format: wavMetadata(audio), title },
       })
       return { file, url, text, title, cacheKey, cacheHit: false }
     } catch (error) {
@@ -1810,6 +1827,8 @@ function createBroadcastCacheKey(input: {
   voice: string
   language: string
   version: string
+  endpoint?: string
+  generation?: Record<string, string | number>
 }): string {
   return createHash('sha256')
     .update(JSON.stringify(input))
