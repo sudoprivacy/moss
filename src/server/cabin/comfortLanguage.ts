@@ -15,7 +15,7 @@ const offers: Record<SpokenLanguage, Record<ComfortAction,string>> = {
   ru:{ recline:'Хотите откинуть спинку кресла?', heating:'Включить подогрев кресла?', ventilation:'Включить вентиляцию кресла?', massage:'Включить массаж кресла?' },
 }
 const requests: Record<ComfortAction,RegExp> = {
-  recline:/^(?:我(?:有点)?(?:累了|困了)|i(?: am|['’]m) tired|ich bin müde|眠いです|피곤해요|je suis fatiguée?|tengo sueño|estou com sono|ho sonno|я устал[а]?)$/iu,
+  recline:/^(?:我?(?:感觉)?(?:有点|有一点)?(?:累|困)(?:了)?|我?(?:有点|有一点)?想睡觉(?:了)?|i(?: am|['’]m) tired|ich bin müde|眠いです|피곤해요|je suis fatiguée?|tengo sueño|estou com sono|ho sonno|я устал[а]?)$/iu,
   heating:/^(?:我?(?:有点)?冷(?:了)?|i(?: am|['’]m) cold|mir ist kalt|寒いです|추워요|j['’]ai froid|tengo frío|estou com frio|ho freddo|мне холодно)$/iu,
   ventilation:/^(?:我?(?:有点)?热(?:了)?|i(?: am|['’]m) hot|mir ist warm|暑いです|더워요|j['’]ai chaud|tengo calor|estou com calor|ho caldo|мне жарко)$/iu,
   massage:/^(?:我腰酸|my back aches|mein rücken tut weh|腰が痛いです|허리가 아파요|j['’]ai mal au dos|me duele la espalda|tenho dores nas costas|mi fa male la schiena|у меня болит спина)$/iu,
@@ -26,5 +26,5 @@ export function comfortAction(text: string): ComfortAction | undefined {
 }
 export function comfortOffer(language: SpokenLanguage, action: ComfortAction): string { return offers[language][action] }
 export function confirmsOffer(text: string): boolean {
-  return /^(?:好|好的|可以|嗯|是的|ok|okay|yes|sure|ja|はい|네|예|oui|sí|sim|sì|да)[。.!！]?$/iu.test(text.trim())
+  return /^(?:好|好的|可以|行|嗯|嗯嗯|是的|需要|需要的|要|要的|ok|okay|yes|sure|ja|はい|네|예|oui|sí|sim|sì|да)[。.!！]?$/iu.test(text.trim())
 }

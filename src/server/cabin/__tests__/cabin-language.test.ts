@@ -69,8 +69,8 @@ describe('turn language', () => {
   })
   it('renders real order outcomes, not an unconditional acknowledgement', () => {
     const base = {intent:'service_order_create', ok:true, reply:'旧回执'}
-    expect(orderReply('de',{...base,slots:{execution_status:'succeeded',service_type_id:1,quantities:[2]}})).toContain('Decke × 2')
-    expect(orderReply('ja',{...base,slots:{execution_status:'failed'}})).toContain('失敗')
+    expect(orderReply('de',{...base,slots:{execution_status:'succeeded',service_type_id:1,quantities:[2]}})).toContain('2 Decken')
+    expect(orderReply('ja',{...base,slots:{execution_status:'failed'}})).toContain('注文を受け付けられません')
   })
   it('expires and consumes confirmation only within its identity scope', () => {
     const store = new CabinStore(new Database(':memory:') as unknown as DatabaseSync)

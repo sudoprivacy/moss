@@ -234,7 +234,7 @@ describe('compact result integrity', () => {
     expect(hardware.filter(call => call.url.includes('/cmd/'))).toHaveLength(2)
     const before = hardware.length
     args = { command: 'seat.light', params: { on: true } }
-    await expect(run('Do not turn on the reading light')).rejects.toThrow('not authorized')
+    await expect(run('Do not turn on the reading light')).resolves.toEqual({ reply: '请再具体说明您的需求。' })
     expect(hardware).toHaveLength(before)
   })
 })

@@ -17,6 +17,7 @@ import {
   CabinOrderClient,
   formatCancellationQuestion,
   formatCreateOrderReply,
+  formatCancelOrderReply,
   formatOrderListReply,
   isOrderSelection,
   looksLikeCabinOrderRequest,
@@ -35,8 +36,10 @@ import { CabinSpeechCache, defaultSpeechCacheOptions } from './speechCache.js'
 import { audioSha256, wavMetadata } from './audioFingerprint.js'
 import { assertTtsBackend, isQwenTts, ttsGenerationOptions } from './ttsOptions.js'
 import { withDeadline } from './deadline.js'
-import { requestCompactDialogue } from './compactDialogue.js'
+import { CompactToolRejectionError, requestCompactDialogue } from './compactDialogue.js'
 import { speechText } from './speechText.js'
+import { interpretComfortReply, type ComfortDecision } from './comfortConfirmation.js'
+import type { ComfortAction } from './comfortLanguage.js'
 
 type FetchLike = typeof fetch
 
@@ -417,9 +420,11 @@ export class CabinServices {
       slots: {
         order_id: candidate.orderId,
         order_no: candidate.orderNo,
+        service_type_id: candidate.serviceTypeId,
+        items: candidate.items,
         execution_status: ok ? 'succeeded' : 'failed',
       },
-      reply: ok ? '已为您取消服务订单。' : '抱歉，服务订单取消失败，请稍后再试。',
+      reply: ok ? formatCancelOrderReply(candidate) : '抱歉，服务订单取消失败，请稍后再试。',
       ok,
       toolCall: this.orderToolCall('cancel', { order_id: candidate.orderId }),
     }
@@ -1005,6 +1010,25 @@ export class CabinServices {
     }
   }
 
+  async interpretComfortReply(input: { action: ComfortAction; text: string; logContext?: CabinLogContext }): Promise<ComfortDecision> {
+    const config = this.options.config
+    const started = Date.now()
+    try {
+      const decision = await interpretComfortReply({ ...input, baseUrl: config.llmBaseUrl, model: config.llmModel,
+        apiKey: config.llmApiKey, timeoutMs: Math.min(config.replyTimeoutMs ?? 10000, 10000), fetchImpl: this.fetchImpl })
+      this.logOutbound({ ...input.logContext, upstream: 'llm-comfort-confirmation', method: 'POST', ok: true,
+        elapsedMs: Date.now() - started, model: config.llmModel, details: { action: input.action, decision } })
+      return decision
+    } catch (error) {
+      this.logOutbound({ ...input.logContext, upstream: 'llm-comfort-confirmation', method: 'POST', ok: false,
+        elapsedMs: Date.now() - started, model: config.llmModel,
+        errorMessage: error instanceof Error ? error.message : String(error) })
+      // Never execute on unavailable or malformed interpretation. The offer keeps
+      // its original expiry so the passenger may clarify on the next turn.
+      return 'unclear'
+    }
+  }
+
   async generateCompactReply(input: {
     context: CabinPassengerContext
     messages: CabinMessage[]
@@ -1066,7 +1090,9 @@ export class CabinServices {
       return { ...result, reply: phrased.kind === 'reply' ? phrased.reply : clarifyText[language ?? 'zh'] }
     } catch (error) {
       this.logOutbound({ ...input.logContext, upstream: 'llm-compact', method: 'POST', ok: false, elapsedMs: Date.now() - started,
-        model: config.llmModel, errorMessage: error instanceof Error ? error.message : String(error) })
+        model: config.llmModel, errorMessage: error instanceof Error ? error.message : String(error),
+        details: error instanceof CompactToolRejectionError ? { outcome: 'tool-rejected', execution_status: 'not_executed' } : undefined })
+      if (error instanceof CompactToolRejectionError) return { reply: message(spoken, 'clarify') }
       throw error
     }
   }
@@ -2295,6 +2321,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
 
   if (hasAnyText(text, ['座椅', '靠背', '坐垫', 'seat'])) {
     const position = extractSeatPositionValue(userText)
+      ?? (isMaximumSeatReclineRequest(text) ? 100 : null)
       ?? (hasAnyText(text, ['调直', '归位', '直立', '收起', 'upright']) ? 0 : null)
       ?? (hasAnyText(text, ['后仰一点', '放倒一点', '往后一点', '往后调一点', '稍微后仰', '稍微放倒']) ? 30 : null)
       ?? (hasAnyText(text, ['放倒', '后仰', '躺', '休息', '舒服', 'recline']) ? 60 : null)
@@ -2362,7 +2389,14 @@ function hasAnyText(text: string, words: string[]): boolean {
   return words.some(word => text.includes(word.toLowerCase()))
 }
 
+function isMaximumSeatReclineRequest(text: string): boolean {
+  return /^(?:请|帮我|给我|替我|麻烦)?(?:把)?(?:(?:座椅|靠背|坐垫)(?:放平|躺平|(?:放倒|后仰)(?:到|至)?(?:最大(?:状态|角度)?|底))|(?:放平|躺平)(?:座椅|靠背|坐垫))[。.!！]?$/u.test(text.trim())
+}
+
 function isHardwareStatusQuestion(text: string): boolean {
+  // “最大状态” describes an explicit target in this complete imperative.
+  // Keep questions such as “座椅是不是放平了” on the status path.
+  if (isMaximumSeatReclineRequest(text)) return false
   const mentionsHardware = hasAnyText(text, [
     '小桌板',
     '桌板',

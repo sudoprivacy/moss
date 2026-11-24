@@ -110,6 +110,216 @@ const seatHeaders = {
 }
 
 describe('cabin seat context mode', () => {
+  it('interprets natural confirmations with a scoped offer and rechecks it after model latency', async () => {
+    let decision = 'confirm'
+    let modelStatus = 200
+    let classifierCalls = 0
+    let gate: Promise<void> | undefined
+    const commands: string[] = []
+    const upstream = http.createServer(async (req, res) => {
+      const url = new URL(req.url!, 'http://localhost')
+      res.setHeader('content-type', 'application/json')
+      if (url.pathname.endsWith('get-seat-context')) return res.end(JSON.stringify({ code: 0, data: {
+        flightId: '2', flightDate: '2026-11-24', seatNo: '7A', tabletId: 'pad-7A', passenger: { language: 'zh-CN', passengerRef: 'p' },
+      } }))
+      if (url.pathname.includes('/cmd/')) { commands.push(url.search); return res.end('{"code":0}') }
+      if (url.pathname.endsWith('/chat/completions')) {
+        const body = await readJsonRequest(req)
+        const classify = (body.messages as Array<{ content: string }>)[0]!.content.startsWith('Classify the passenger')
+        if (classify) { classifierCalls++; await gate }
+        res.writeHead(classify ? modelStatus : 200)
+        return res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: {
+          content: classify ? JSON.stringify({ decision }) : '我可以为您介绍客舱服务。',
+        } }] }))
+      }
+      res.writeHead(404); res.end()
+    })
+    const base = await listen(upstream)
+    const { cabinBaseUrl, db } = await startCabinServer(base, { dialogueMode: 'compact', conversationLanguageMode: 'enabled', conversationSeatAudioEnabled: false })
+    const headers = { ...seatHeaders, 'x-cabin-seat-no': '7A', 'content-type': 'application/json' }
+    const chat = async (content: string, language = 'zh') => {
+      const response = await fetch(`${cabinBaseUrl}/v1/ai-chat/send`, { method: 'POST', headers, body: JSON.stringify({ content, language }) })
+      const text = await response.text()
+      expect(text).not.toContain('event: error')
+      return JSON.parse(text.split('event: done\ndata: ')[1]!.split('\n')[0]!)
+    }
+    for (const text of ['行，帮我调一下', '可以，我想休息', '那就按你建议的来吧', '听起来不错，麻烦你了']) {
+      await chat('我累了')
+      const before = commands.length
+      expect((await chat(text)).slots).toMatchObject({ execution_status: 'dispatched', command: 'seat.cushion', position: 60 })
+      expect(commands).toHaveLength(before + 1)
+      await chat(text)
+      expect(commands).toHaveLength(before + 1)
+    }
+    for (const [language, text] of [['en', 'That sounds good, go ahead'], ['de', 'Das klingt gut, machen Sie das bitte'],
+      ['ja', 'では、そのようにお願いします'], ['ko', '그렇게 해 주세요'], ['fr', 'Cela me convient, allez-y'],
+      ['es', 'Me parece bien, adelante'], ['pt', 'Parece bem, pode avançar'], ['it', 'Va bene così, proceda'], ['ru', 'Хорошо, сделайте так']] as const) {
+      await chat('我累了')
+      expect((await chat(text, language)).slots.execution_status).toBe('dispatched')
+    }
+    let count = commands.length
+    await chat('我累了'); await chat('不需要，先别动')
+    await chat('需要')
+    expect(commands).toHaveLength(count)
+    for (const [choice, text] of [['decline', '以后再说吧'], ['modify', '稍微低一点就行']] as const) {
+      await chat('我累了'); decision = choice; await chat(text); await chat('需要')
+      expect(commands).toHaveLength(count)
+    }
+    await chat('我累了'); decision = 'unclear'
+    expect((await chat('第二')).reply_text).toContain('座椅放倒到休息角度吗')
+    expect((await chat('需要')).slots.position).toBe(60)
+    count++
+    await chat('我累了'); decision = 'unrelated'; await chat('介绍一下服务'); await chat('需要')
+    expect(commands).toHaveLength(count)
+    await chat('我累了')
+    const callsBeforeDirect = classifierCalls
+    expect((await chat('把座椅调到30%')).slots.position).toBe(30)
+    expect(classifierCalls).toBe(callsBeforeDirect)
+    count++
+    await chat('我累了'); modelStatus = 503
+    expect((await chat('帮我按你建议的调')).reply_text).toContain('座椅放倒到休息角度吗')
+    expect(commands).toHaveLength(count)
+    modelStatus = 200; decision = 'confirm'
+    expect((await chat('需要')).slots.position).toBe(60)
+    count++
+    const waitForCalls = async (target: number) => {
+      for (let i = 0; i < 200 && classifierCalls < target; i++) await Bun.sleep(5)
+      expect(classifierCalls).toBe(target)
+    }
+    let release!: () => void
+    await chat('我累了')
+    gate = new Promise<void>(resolve => { release = resolve })
+    const start = classifierCalls
+    const replies = [chat('按刚才建议的调一下'), chat('按刚才建议的调一下')]
+    await waitForCalls(start + 2)
+    release(); await Promise.all(replies); gate = undefined
+    expect(commands).toHaveLength(++count)
+    await chat('我累了')
+    gate = new Promise<void>(resolve => { release = resolve })
+    const beforeReset = classifierCalls
+    const stale = chat('按刚才建议的调一下')
+    await waitForCalls(beforeReset + 1)
+    const reset = await fetch(`${cabinBaseUrl}/v1/ai-chat/reset`, { method: 'POST', headers })
+    expect(reset.status).toBe(200)
+    release(); expect((await stale).slots).toEqual({}); gate = undefined
+    expect(commands).toHaveLength(count)
+    await chat('我累了')
+    gate = new Promise<void>(resolve => { release = resolve })
+    const beforeExpiry = classifierCalls
+    const expired = chat('按刚才建议的调一下')
+    await waitForCalls(beforeExpiry + 1)
+    db.prepare('UPDATE cabin_comfort_offers SET expires = 0').run()
+    release(); expect((await expired).slots).toEqual({}); gate = undefined
+    expect(commands).toHaveLength(count)
+  })
+
+  it('confirms 7A comfort suggestions across ASR/text requests and clarifies rejected tools without executing them', async () => {
+    const commands: Array<{ seat: string | null; path: string; position: string | null }> = []
+    let modelCalls = 0
+    let recording = '需要。'
+    let modelFails = false
+    let toolArgs: Record<string, unknown> = { command: 'seat.cushion', params: { position: 100 } }
+    const upstream = http.createServer(async (req, res) => {
+      const url = new URL(req.url!, 'http://localhost')
+      res.setHeader('content-type', 'application/json')
+      if (url.pathname.endsWith('get-seat-context')) {
+        const seat = url.searchParams.get('seatNo') || '7A'
+        return res.end(JSON.stringify({ code: 0, data: { flightId: '2', flightDate: '2026-11-24', seatNo: seat,
+          tabletId: `pad-${seat}`, passenger: { passengerRef: `p-${seat}`, language: 'zh-CN' } } }))
+      }
+      if (url.pathname === '/asr') {
+        for await (const _ of req) { /* consume the test recording */ }
+        return res.end(JSON.stringify({ text: recording, language: 'Chinese' }))
+      }
+      if (url.pathname.includes('/cmd/')) {
+        commands.push({ seat: url.searchParams.get('seatNo'), path: url.pathname, position: url.searchParams.get('position') })
+        return res.end(JSON.stringify({ code: 0 }))
+      }
+      if (url.pathname.endsWith('/chat/completions')) {
+        modelCalls++
+        if (modelFails) { res.writeHead(503); return res.end('{}') }
+        return res.end(JSON.stringify({ choices: [{ finish_reason: 'tool_calls', message: {
+          content: '已为您调整座椅。', tool_calls: [{ id: 'proposed', type: 'function', function: {
+            name: 'cabin_control', arguments: JSON.stringify(toolArgs),
+          } }],
+        } }] }))
+      }
+      res.writeHead(404); res.end()
+    })
+    const base = await listen(upstream)
+    const { cabinBaseUrl, db } = await startCabinServer(base, { conversationLanguageMode: 'enabled',
+      dialogueMode: 'compact', conversationSeatAudioEnabled: false })
+    const headers = (seat = '7A') => ({ ...seatHeaders, 'x-cabin-seat-no': seat })
+    const chat = async (content: string, seat = '7A') => {
+      const response = await fetch(`${cabinBaseUrl}/v1/ai-chat/send`, { method: 'POST',
+        headers: { ...headers(seat), 'content-type': 'application/json' }, body: JSON.stringify({ content }) })
+      const events = (await response.text()).trim().split(/\n\n+/).map(chunk => ({
+        event: chunk.match(/^event:\s*(.+)$/m)?.[1], data: JSON.parse(chunk.match(/^data:\s*(.+)$/m)?.[1] || '{}'),
+      }))
+      return { done: events.find(e => e.event === 'done')?.data, error: events.find(e => e.event === 'error')?.data, events }
+    }
+    const asr = async (text: string) => {
+      recording = text
+      const form = new FormData(); form.set('audio', new Blob(['recording']), 'test.wav')
+      const response = await fetch(`${cabinBaseUrl}/v1/voice/query`, { method: 'POST', headers: headers(), body: form })
+      expect(response.status).toBe(200)
+      return (await response.json()).text as string
+    }
+    for (const feeling of ['我有点困了。', '我有点困。', '我感觉有点累。', '我有点想睡觉。', '我累了']) {
+      const before = commands.length
+      expect((await chat(await asr(feeling))).done.reply_text).toContain('座椅放倒到休息角度吗')
+      expect(commands).toHaveLength(before)
+      const confirmed = await chat(await asr('需要。'))
+      expect(confirmed.error).toBeUndefined()
+      expect(confirmed.done.slots).toMatchObject({ command: 'seat.cushion', execution_status: 'dispatched', position: 60 })
+      expect(commands.at(-1)).toMatchObject({ seat: '7A', position: '60' })
+      await chat('需要。')
+      expect(commands).toHaveLength(before + 1)
+    }
+    expect(modelCalls).toBe(0)
+    expect((await chat('我有点冷。')).done.reply_text).toContain('座椅加热吗')
+    const before = commands.length
+    await chat('需要。', '8A')
+    expect(commands).toHaveLength(before)
+    expect((await chat('需要。')).done.slots.command).toBe('seat.heating')
+    expect(commands.at(-1)?.seat).toBe('7A')
+    await chat('我累了'); await chat('不需要。'); await chat('需要。')
+    expect(commands).toHaveLength(before + 1)
+    await chat('我累了'); expect((await chat('第二。')).done.reply_text).toContain('座椅放倒到休息角度吗')
+    await chat('需要。')
+    expect(commands).toHaveLength(before + 2)
+    await chat('我累了')
+    await fetch(`${cabinBaseUrl}/v1/ai-chat/reset`, { method: 'POST', headers: headers() })
+    await chat('需要。')
+    expect(commands).toHaveLength(before + 2)
+    await chat('我累了')
+    db.prepare('UPDATE cabin_comfort_offers SET expires = 0').run()
+    await chat('需要。')
+    expect(commands).toHaveLength(before + 2)
+    for (const text of ['放平座椅。', '把座椅放倒到最大状态。']) {
+      const done = (await chat(text)).done
+      expect(done.slots).toMatchObject({ command: 'seat.cushion', position: 100, execution_status: 'dispatched' })
+    }
+    const safeCount = commands.length
+    for (const text of ['放倒到最大状态。', '打开遮光板。', '需要放到。']) {
+      const reply = await chat(text)
+      expect(reply.error).toBeUndefined()
+      expect(reply.done.reply_text).toBe('请再具体说明您的需求。')
+      expect(reply.done.intent).toBe('')
+      expect(reply.events.some(e => e.event === 'tool_call')).toBe(false)
+      expect(commands).toHaveLength(safeCount)
+    }
+    toolArgs = { command: 'seat.light', params: { on: true, seatNo: '8A' } }
+    expect((await chat('调一下灯光')).done.reply_text).toBe('请再具体说明您的需求。')
+    expect(commands).toHaveLength(safeCount)
+    modelFails = true
+    const failed = await chat('介绍一下服务')
+    expect(failed.done).toBeUndefined()
+    expect(failed.error).toMatchObject({ retriable: true })
+    expect(commands).toHaveLength(safeCount)
+    expect(modelCalls).toBeGreaterThan(0)
+  })
+
   it('never turns compact free text into a receipt or inferred tool event, including a real negative-command failure', async () => {
     let modelReply = ''
     let modelCalls = 0
@@ -256,7 +466,8 @@ describe('cabin seat context mode', () => {
       for (let tries = 0; tries < 100; tries++) {
         const text = await readFile(logFile, 'utf8').catch(() => '')
         rows = text.split('\n').slice(0, -1).map(line => JSON.parse(line) as Row)
-        if (rows.filter(row => row.type === 'inbound').length === 2 && rows.some(row => row.details?.phase === 'sse.done') && rows.some(row => row.details?.phase === 'order.receipt')) break
+        if (rows.filter(row => row.type === 'inbound').length === 2 && rows.some(row => row.details?.phase === 'sse.done') &&
+          rows.some(row => row.details?.phase === 'sse.first_text') && rows.some(row => row.details?.phase === 'order.receipt')) break
         await Bun.sleep(10)
       }
       for (const [response, upstream] of [[voice, 'asr'], [chat, 'service-order']] as const) {

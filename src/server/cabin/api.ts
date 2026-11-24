@@ -965,8 +965,9 @@ export function createCabinApi(options: {
     requestTrace.get(res)?.('chat.ready', { text_ref: textReference(conversation.id, text) })
     const language = context.replyLanguage
     const spoken = language && isSpoken(language) ? language : undefined
-    const scope = language ? languageScope(`${conversation.id}:${store.languageEpoch(conversation.id)}`, context) : undefined
-    const pendingComfort = scope ? store.takeComfortOffer(scope) : undefined
+    const comfortEpoch = store.languageEpoch(conversation.id)
+    const scope = language ? languageScope(`${conversation.id}:${comfortEpoch}`, context) : undefined
+    const pendingComfort = scope ? store.getComfortOffer(scope) : undefined
     const pendingOrderCancellation = store.getPendingOrderCancellation(conversation.id)
     const allowPendingSelection = !scope || store.takeOrderChoices(scope, pendingOrderCancellation?.candidates ?? [])
     const logContext = {
@@ -992,6 +993,7 @@ export function createCabinApi(options: {
       cacheableAudio?: boolean
       ok?: boolean
     }): Promise<void> => {
+      if (scope && pendingComfort && input.routed !== 'comfort-clarify') store.consumeComfortOffer(scope, pendingComfort)
       const assistantMessage = store.appendMessage({
         conversationId: conversation.id,
         role: 'assistant',
@@ -1094,9 +1096,49 @@ export function createCabinApi(options: {
       })
       return
     }
-    const confirmed = spoken && pendingComfort && confirmsOffer(text) ? comfortActions[pendingComfort] : undefined
-    const hardwareRoute = textOnly ? null : services.routeHardwareControl({ context, text: confirmed ?? text })
+    const nextComfort = scope && spoken ? comfortAction(text) : undefined
+    if (scope && spoken && nextComfort) {
+      store.recordComfortOffer(scope, nextComfort)
+      await completeReply({ reply: localizedComfortOffer(spoken, nextComfort), routed: 'comfort-offer' })
+      return
+    }
+    let confirmed: string | undefined
+    let hardwareRoute = textOnly ? null : services.routeHardwareControl({ context, text })
+    if (scope && spoken && pendingComfort && !hardwareRoute) {
+      const scopedText = `${comfortActions[pendingComfort.action]}。${text}`
+      const decision = deniedCommand(scopedText) || hypotheticalCommand(scopedText) ? 'decline'
+        : confirmsOffer(text) ? 'confirm' : await services.interpretComfortReply({ action: pendingComfort.action, text, logContext })
+      // Recheck after model latency. Atomic consumption prevents concurrent
+      // confirmations, resets, expired offers or a replacement offer being replayed.
+      const current = store.languageEpoch(conversation.id) === comfortEpoch && store.getComfortOffer(scope)
+      if (!current || current.id !== pendingComfort.id) {
+        await completeReply({ reply: message(spoken, 'clarify'), routed: 'no-pending-action' })
+        return
+      }
+      if (decision === 'confirm') {
+        if (!store.consumeComfortOffer(scope, pendingComfort)) {
+          await completeReply({ reply: message(spoken, 'clarify'), routed: 'no-pending-action' })
+          return
+        }
+        confirmed = comfortActions[pendingComfort.action]
+        hardwareRoute = services.routeHardwareControl({ context, text: confirmed })
+        if (!hardwareRoute) {
+          await completeReply({ reply: message(spoken, 'clarify'), routed: 'no-pending-action' })
+          return
+        }
+      } else if (decision === 'decline' || decision === 'modify') {
+        await completeReply({ reply: message(spoken, decision === 'decline' ? 'noAction' : 'clarify'), routed: 'comfort-declined' })
+        return
+      } else if (decision === 'unclear') {
+        await completeReply({ reply: `${message(spoken, 'clarify')} ${localizedComfortOffer(spoken, pendingComfort.action)}`,
+          routed: 'comfort-clarify' })
+        return
+      } else {
+        store.consumeComfortOffer(scope, pendingComfort)
+      }
+    }
     if (hardwareRoute) {
+      if (scope && pendingComfort) store.consumeComfortOffer(scope, pendingComfort)
       writeSse(res, 'tool_call', hardwareRoute.toolCall)
       const result = await services.executeHardwareControl({
         route: hardwareRoute,
@@ -1147,12 +1189,6 @@ export function createCabinApi(options: {
     }
 
     if (scope && spoken) {
-      const action = comfortAction(text)
-      if (action) {
-        store.recordComfortOffer(scope, action)
-        await completeReply({ reply: localizedComfortOffer(spoken, action), routed:'comfort-offer' })
-        return
-      }
       if (confirmsOffer(text)) {
         await completeReply({ reply: message(spoken,'clarify'), routed:'no-pending-action' })
         return

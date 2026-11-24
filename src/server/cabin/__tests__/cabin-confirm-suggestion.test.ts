@@ -7,6 +7,7 @@ import {
   normalizeCabinHardwareReply,
 } from '../service.js'
 import type { CabinConfig, CabinPassengerContext } from '../types.js'
+import { comfortAction, confirmsOffer } from '../comfortLanguage.js'
 
 const context: CabinPassengerContext = {
   flightId: 'F1',
@@ -38,6 +39,20 @@ describe('isAffirmationReply', () => {
     for (const text of ['好，帮我放倒座椅', '打开小桌板', '有点冷']) {
       expect(isAffirmationReply(text)).toBe(false)
     }
+  })
+})
+
+describe('scoped comfort confirmation', () => {
+  it('accepts natural comfort statements and bare confirmations including the recorded ASR punctuation', () => {
+    for (const text of ['我累了', '我有点困', '我有点困了。', '我感觉有点累。', '我有点想睡觉。']) {
+      expect(comfortAction(text)).toBe('recline')
+    }
+    for (const text of ['需要', '需要。', '需要的', '要', '要的。', '行', '嗯嗯', 'Yes.', 'Ja!']) expect(confirmsOffer(text)).toBe(true)
+  })
+
+  it('does not treat negatives, questions, conditions or ambiguous followups as permission', () => {
+    for (const text of ['不需要', '需要吗？', '需要放到。', '需要，但先别动', '如果需要', '第二。']) expect(confirmsOffer(text)).toBe(false)
+    for (const text of ['我不累了', '如果我累了', '我累了吗？', '我有点累，聊聊天', '我不想睡觉']) expect(comfortAction(text)).toBeUndefined()
   })
 })
 

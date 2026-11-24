@@ -71,6 +71,13 @@ describe('routeHardwareControl ceiling vs reading light', () => {
 })
 
 describe('routeHardwareControl seat recline defaults', () => {
+  it('maps explicit maximum recline requests to 100 and keeps status questions out of control', () => {
+    for (const text of ['放平座椅。', '把座椅放倒到最大状态。', '座椅后仰到最大角度']) {
+      expect(route(text)?.params.position).toBe(100)
+    }
+    for (const text of ['座椅是不是放平了', '座椅是否放倒到最大状态', '放倒到最大状态。']) expect(route(text)).toBeNull()
+  })
+
   it('defaults 后仰一点 to 30', () => {
     expect(route('座椅后仰一点')?.params.position).toBe(30)
   })

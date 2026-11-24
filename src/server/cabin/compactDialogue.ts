@@ -34,6 +34,9 @@ export type CompactDialogueResult = Metrics & (
   | { kind: 'mode'; mode: Mode }
 )
 
+/** A model proposal was rejected before execution; this needs clarification, not a retry. */
+export class CompactToolRejectionError extends Error {}
+
 type Rule = { type: 'integer'; minimum: number; maximum: number } | { type: 'boolean' } | { type: 'string'; enum: readonly string[] }
 const integer = (maximum: number): Rule => ({ type: 'integer', minimum: 0, maximum })
 const bool: Rule = { type: 'boolean' }
@@ -340,7 +343,12 @@ export async function requestCompactDialogue(input: CompactDialogueInput): Promi
   if (message.tool_calls != null && (!Array.isArray(message.tool_calls) || message.tool_calls.length !== 1)) fail('expected exactly one tool call')
   if (Array.isArray(message.tool_calls)) {
     if (choice.finish_reason !== 'tool_calls') fail('inconsistent tool finish reason')
-    return { ...parseTool(message.tool_calls[0], currentIntent(input.text)), ...metrics }
+    try {
+      return { ...parseTool(message.tool_calls[0], currentIntent(input.text)), ...metrics }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('Compact dialogue:')) throw new CompactToolRejectionError(error.message)
+      throw error
+    }
   }
   if (choice.finish_reason !== 'stop') fail('unexpected response finish reason')
   if (typeof message.content !== 'string' || !message.content.trim()) fail('empty response content')

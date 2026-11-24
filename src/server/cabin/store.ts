@@ -21,6 +21,7 @@ import { buildConversationKey } from './auth.js'
 import { digest, languageCode, textLanguage, type Language } from './language.js'
 import { exactCommand } from './commandLanguage.js'
 import { comfortActions, type ComfortAction } from './comfortLanguage.js'
+import type { ComfortOffer } from './comfortConfirmation.js'
 
 type Row = Record<string, unknown>
 
@@ -347,12 +348,30 @@ export class CabinStore {
 
   recordComfortOffer(scope: string, action: ComfortAction, time = Date.now()): void {
     this.db.prepare('DELETE FROM cabin_comfort_offers WHERE expires <= ?').run(time)
-    this.db.prepare('INSERT OR REPLACE INTO cabin_comfort_offers VALUES (?, ?, ?)').run(scope, action, time + 120_000)
+    // Keep the existing three-column table compatible with rollback images.
+    // Old versions safely ignore structured offers instead of replaying them.
+    this.db.prepare('INSERT OR REPLACE INTO cabin_comfort_offers (scope, action, expires) VALUES (?, ?, ?)')
+      .run(scope, JSON.stringify({ id: randomUUID(), action }), time + 120_000)
+  }
+
+  getComfortOffer(scope: string, time = Date.now()): ComfortOffer | undefined {
+    const row = this.db.prepare('SELECT action, expires FROM cabin_comfort_offers WHERE scope = ? AND expires > ?').get(scope, time) as Row | undefined
+    if (!row) return undefined
+    try {
+      const offer = JSON.parse(String(row.action))
+      return offer && typeof offer.id === 'string' && offer.id && Object.hasOwn(comfortActions, offer.action)
+        ? { id: offer.id, action: offer.action as ComfortAction, expires: Number(row.expires) } : undefined
+    } catch { return undefined }
+  }
+
+  consumeComfortOffer(scope: string, offer: ComfortOffer, time = Date.now()): boolean {
+    return !!this.db.prepare('DELETE FROM cabin_comfort_offers WHERE scope = ? AND action = ? AND expires > ? RETURNING scope')
+      .get(scope, JSON.stringify({ id: offer.id, action: offer.action }), time)
   }
 
   takeComfortOffer(scope: string, time = Date.now()): ComfortAction | undefined {
-    const row = this.db.prepare('DELETE FROM cabin_comfort_offers WHERE scope = ? RETURNING action, expires').get(scope) as Row | undefined
-    return row && Number(row.expires) > time && Object.hasOwn(comfortActions, String(row.action)) ? row.action as ComfortAction : undefined
+    const offer = this.getComfortOffer(scope, time)
+    return offer && this.consumeComfortOffer(scope, offer, time) ? offer.action : undefined
   }
 
   rememberOrderChoices(scope: string, candidates: CabinOrderCancellationCandidate[], time = Date.now()): void {

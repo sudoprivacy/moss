@@ -93,7 +93,10 @@ export class CabinOrderClient {
       context: input.context,
       logContext: input.logContext,
     })
-    return { ...response, orders: response.ok ? extractOrders(response.payload) : [] }
+    const list = orderList(response.payload)
+    const orders = response.ok ? extractOrders(response.payload) : []
+    const ok = response.ok && Array.isArray(list) && orders.length === list.length
+    return { ...response, ok, orders: ok ? orders : [] }
   }
 
   async cancel(input: {
@@ -102,7 +105,7 @@ export class CabinOrderClient {
     cancelReason: string
     logContext?: CabinLogContext
   }): Promise<OrderResponse> {
-    return this.request({
+    const response = await this.request({
       method: 'PUT',
       path: '/admin-api/cabin/service-order/cancel',
       context: input.context,
@@ -112,6 +115,7 @@ export class CabinOrderClient {
       },
       logContext: input.logContext,
     })
+    return { ...response, ok: response.ok && objectValue(response.payload, 'data') !== false }
   }
 
   private async request(input: {
@@ -371,42 +375,53 @@ export function resolveOrderSelection(
 export function formatOrderListReply(orders: CabinOrder[]): string {
   if (!orders.length) return '当前座位没有符合条件的服务订单。'
   const lines = orders.map(order => {
-    const itemText = formatOrderItems(order.items)
+    const itemText = formatOrderItems(order.items, order.serviceTypeId)
     const service = order.serviceTypeName || serviceTypeName(order.serviceTypeId)
-    const details = [service, itemText, order.statusName || `状态${order.status || ''}`, order.createTime]
+    const details = [itemText || service, order.statusName || '状态暂未知', order.createTime,
+      order.orderNo ? `订单号${order.orderNo}` : undefined]
       .filter(Boolean)
       .join('，')
     return `${details}。`
   })
-  return `当前座位的订单如下：\n${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}`
+  return `当前座位有${orders.length}笔服务订单：\n${lines.map((line, index) => `第${index + 1}笔，${line}`).join('\n')}`
 }
 
 export function formatCancellationQuestion(candidates: CabinOrderCancellationCandidate[]): string {
+  if (!candidates.length) return '当前座位没有符合条件的可取消服务订单。'
   const lines = candidates.map((candidate, index) => {
     const service = candidate.serviceTypeName || serviceTypeName(candidate.serviceTypeId)
-    const itemText = formatOrderItems(candidate.items)
-    const detail = [service, itemText, candidate.createTime, candidate.orderNo ? `订单号${candidate.orderNo}` : undefined]
+    const itemText = formatOrderItems(candidate.items, candidate.serviceTypeId)
+    const detail = [itemText || service, candidate.createTime, candidate.orderNo ? `订单号${candidate.orderNo}` : undefined]
       .filter(Boolean)
       .join('，')
-    return `${index + 1}. ${detail}`
+    return `第${index + 1}笔，${detail}`
   })
-  return `您有多笔可取消的服务订单：\n${lines.join('\n')}\n请问要取消哪一笔？`
+  return `您有${candidates.length}笔可取消的服务订单：\n${lines.join('\n')}\n请问要取消哪一笔？`
 }
 
 export function formatCreateOrderReply(serviceTypeId: 1 | 3, subItemIds: number[], quantities: number[]): string {
   const service = serviceTypeId === 1
-    ? `毛毯${quantities[0] || 1}条`
-    : subItemIds.map((id, index) => `${drinkName(id)}${quantities[index] || 1}杯`).join('、')
-  return `已为您创建${service}服务订单，请稍候。`
+    ? `${quantities[0] || 1}条毛毯`
+    : subItemIds.map((id, index) => `${quantities[index] || 1}杯${drinkName(id)}`).join('、')
+  return `已为您创建${service}的服务订单，请稍候。`
 }
 
-function extractOrders(payload: unknown): CabinOrder[] {
+export function formatCancelOrderReply(candidate: CabinOrderCancellationCandidate): string {
+  const items = formatOrderItems(candidate.items, candidate.serviceTypeId)
+  return `已为您取消${items ? `${items}的` : ''}服务订单。`
+}
+
+function orderList(payload: unknown): unknown {
   const data = objectValue(payload, 'data')
-  const list = Array.isArray(data)
+  return Array.isArray(data)
     ? data
     : data && typeof data === 'object'
       ? objectValue(data, 'list') || objectValue(data, 'records') || objectValue(data, 'rows')
-      : []
+      : undefined
+}
+
+function extractOrders(payload: unknown): CabinOrder[] {
+  const list = orderList(payload)
   if (!Array.isArray(list)) return []
   return list.map(normalizeOrder).filter((order): order is CabinOrder => Boolean(order))
 }
@@ -503,14 +518,25 @@ function itemName(item: Record<string, unknown>): string | undefined {
   return stringValue(item, 'name', 'itemName', 'item_name', 'subItemName', 'sub_item_name')
 }
 
-function formatOrderItems(items: Record<string, unknown>[]): string | undefined {
-  if (!items.length) return undefined
-  const parts = items.map(item => {
-    const name = itemName(item) || '服务项'
+export function orderItemDetails(items: Record<string, unknown>[], serviceTypeId?: string) {
+  return items.map(item => {
+    const id = Number(stringValue(item, 'subItemId', 'sub_item_id', 'itemId', 'item_id'))
+    const suppliedName = itemName(item)
+    const name = suppliedName || (serviceTypeId === '1' ? '毛毯' : serviceTypeId === '3' && DRINKS.some(drink => drink.id === id) ? drinkName(id) : '服务项')
+    const catalogId = /毛毯|毯子|blanket/iu.test(name) ? 0
+      : DRINKS.find(drink => suppliedName ? drink.names.some(alias => alias === name.toLowerCase()) : serviceTypeId === '3' && drink.id === id)?.id
     const quantity = stringValue(item, 'quantity', 'count', 'num')
-    return quantity ? `${name}${quantity}份` : name
+    const explicitUnit = stringValue(item, 'unit', 'unitName', 'unit_name')
+    const unit = explicitUnit && /^[\p{L}]{1,12}$/u.test(explicitUnit) ? explicitUnit
+      : catalogId === 0 ? '条' : catalogId !== undefined ? '杯' : undefined
+    return { name, quantity: quantity && /^\d+(?:\.\d+)?$/u.test(quantity) ? quantity : undefined, unit,
+      catalogId }
   })
-  return parts.join('、')
+}
+
+export function formatOrderItems(items: Record<string, unknown>[], serviceTypeId?: string): string | undefined {
+  return orderItemDetails(items, serviceTypeId).map(({ name, quantity, unit }) => quantity
+    ? unit ? `${quantity}${unit}${name}` : `${name}（数量${quantity}）` : name).join('、') || undefined
 }
 
 function serviceTypeName(id?: string): string {
