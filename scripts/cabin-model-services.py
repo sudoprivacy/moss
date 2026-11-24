@@ -492,8 +492,8 @@ GPU/统一内存压力与冷启动成本。缓存 64 是条目数，不是字节
 以上 gateway 安装和真实合成验收通过后，才部署配套 Moss 并按字段合并
 docs/cabin_optimization_20261124.config.json 的 cabin 设置；先备份现场 app 配置，
 保留 URL、模型绝对路径、凭据和其他未知配置，不用片段覆盖整个配置文件。
-推荐 ttsGeneration.seed=42、maxTokens=1024；删除旧的全局 temperature 字段，
-由配套 Moss 按语言选择中文0、其他已验语言0.9，
+推荐 ttsGeneration.seed=42、maxTokens=1024、temperature=0.9；覆盖旧零温度配置。
+生产中文个性化问候也出现零温度退化，各已验语言统一使用固定 seed 的串行采样，
 ttsDeterministicRequired=true；日语 ono_anna、韩语 sohee，其余配置所列语言 Vivian。
 HTTP 请求使用 max_tokens=1024。真实响应必须包含
 x-cabin-tts-deterministic: seeded-serial-v1 和 x-cabin-tts-seed: 42。

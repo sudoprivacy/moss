@@ -262,7 +262,7 @@ describe('greeting routing and sampler configuration', () => {
   it('uses safe sampling for Qwen languages and verifies the backend actually honored seed', () => {
     const config = { ttsModel: 'Qwen3-TTS', ttsDeterministicRequired: true, ttsGeneration: { seed: 42 } } as CabinConfig
     expect(ttsGenerationOptions(config)).toMatchObject({ temperature: 0.9, seed: 42, max_tokens: 1024 })
-    expect(ttsGenerationOptions(config, 'Chinese').temperature).toBe(0)
+    expect(ttsGenerationOptions(config, 'Chinese').temperature).toBe(0.9)
     expect(ttsGenerationOptions(config, 'Japanese').temperature).toBe(0.9)
     expect(ttsGenerationOptions(config, 'Korean').temperature).toBe(0.9)
     expect(() => assertTtsBackend(new Response(), config)).toThrow('acknowledge')

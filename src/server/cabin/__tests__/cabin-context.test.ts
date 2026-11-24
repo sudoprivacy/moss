@@ -1003,6 +1003,19 @@ describe('cabin binding context', () => {
     })).toBe('您好，客舱可为您提供餐饮、灯光和座椅相关服务，请告诉我您的具体需求。')
   })
 
+  it('omits masked passenger placeholders from spoken greetings', () => {
+    for (const passengerName of ['XX', 'xx', 'XX先生', '***', '张**', '匿名', '未知', 'null']) {
+      expect(normalizeCabinPassengerReply({
+        userText: '你好。', reply: '您好，请问有什么可以帮您？',
+        context: { passengerName, passengerGender: 'male' } as never,
+      })).toBe('您好，请问有什么可以帮您？')
+    }
+    expect(normalizeCabinPassengerReply({
+      userText: '你好。', reply: '您好，请问有什么可以帮您？',
+      context: { passengerName: 'Xavier', passengerGender: 'male' } as never,
+    })).toBe('Xavier，您好，请问有什么可以帮您？')
+  })
+
   it('removes internal skill boundary text from flight info replies', () => {
     const context = {
       flightId: '2',

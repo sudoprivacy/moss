@@ -1,16 +1,15 @@
 import type { CabinConfig } from './types.js'
-import { languageCode } from './language.js'
 
 export function isQwenTts(model: string): boolean {
   return /qwen3[-_]tts/i.test(model)
 }
 
-export function ttsGenerationOptions(config: CabinConfig, language = config.ttsLanguage): Record<string, number | string> {
+export function ttsGenerationOptions(config: CabinConfig, _language = config.ttsLanguage): Record<string, number | string> {
   const generation = config.ttsGeneration
   const defaults = isQwenTts(config.ttsModel)
-    // Chinese greedy decoding passed the corpus; Japanese/Korean require sampling.
-    // The dedicated seeded server serializes both paths, eliminating batch drift.
-    ? { temperature: languageCode(language) === 'zh' ? 0 : 0.9, top_p: 1, top_k: 50, repetition_penalty: 1.05, max_tokens: 1024 }
+    // Greedy decoding also degenerates for Chinese personalized greetings.
+    // Seeded serial sampling preserves repeatability without forcing temperature zero.
+    ? { temperature: 0.9, top_p: 1, top_k: 50, repetition_penalty: 1.05, max_tokens: 1024 }
     : {}
   return {
     ...defaults,

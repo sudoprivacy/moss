@@ -18,6 +18,7 @@ const llmUrl = required('CABIN_SMOKE_LLM_URL')
 const ttsUrl = required('CABIN_SMOKE_TTS_URL')
 const llmModel = required('CABIN_SMOKE_LLM_MODEL')
 const ttsModel = required('CABIN_SMOKE_TTS_MODEL')
+const maskedPassenger = process.env.CABIN_SMOKE_MASKED_NAME === '1'
 for (const endpoint of [llmUrl, ttsUrl]) {
   const url = new URL(endpoint)
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Smoke endpoints must use localhost SSH forwards')
@@ -35,6 +36,7 @@ const mock = http.createServer(async (req, res) => {
     let data: unknown
     if (url.pathname.endsWith('/get-seat-context')) {
       data = { code: 0, data: { aircraftNo: 'B-SMOKE', seatNo: '01A', flightId: 'SMOKE',
+        ...(maskedPassenger ? { passengerName: 'XX', passengerGender: 'male' } : {}),
         flight: { flightNo: 'SMOKE', flightDate: '2026-11-24' },
         passenger: { passengerRef: 'SMOKE', language: 'zh-CN' }, tabletAccessToken: 'local-smoke-only' } }
     } else if (url.pathname.endsWith('/audio-seat')) {
@@ -94,6 +96,7 @@ try {
       event: block.match(/^event: (.+)$/m)?.[1], data: JSON.parse(block.match(/^data: (.+)$/m)?.[1] ?? '{}'),
     }))
     const reply = events.filter(event => event.event === 'delta').map(event => event.data.content).join('')
+    if (maskedPassenger && reply.includes('XX')) throw new Error('Masked passenger placeholder was spoken')
     if (text === '请查看当前座椅角度。' && !reply.includes('40%')) throw new Error('Status changed the actual protocol value')
     if (text === '请再查看当前座椅角度。' && !reply.includes('暂未获取')) throw new Error('Empty status was hallucinated')
     if (text.startsWith('不要') && controls !== before.controls) throw new Error('Negative request executed control')

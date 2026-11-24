@@ -190,8 +190,11 @@ def encode_results(results, request, np, write, check):
                     or not np.isfinite(audio).all() or np.abs(audio).max() > 1.0):
                 raise ServiceError(422, "Generated audio must be finite normalized mono samples")
             total_samples += audio.size
-            if total_samples > SAMPLE_RATE * MAX_DURATION:
-                raise ServiceError(422, "Generated audio exceeds 120 seconds")
+            # A short personalized greeting produced 67.92s of unrecognizable
+            # audio below max_tokens. PCM validity and token limits do not catch it.
+            duration_limit = min(MAX_DURATION, max(12.0, len(request.text) * 0.8 + 6.0))
+            if total_samples > SAMPLE_RATE * duration_limit:
+                raise ServiceError(422, "Generated audio exceeds text duration limit; audio discarded")
             chunks.append(audio)
         check()
         if not chunks:

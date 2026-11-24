@@ -7,6 +7,7 @@
     "ttsTimeoutMs": 30000,
     "asrTimeoutMs": 30000,
     "ttsGeneration": {
+      "temperature": 0.9,
       "topP": 1,
       "topK": 50,
       "repetitionPenalty": 1.05,

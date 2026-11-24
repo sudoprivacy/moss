@@ -3348,6 +3348,8 @@ function extractOrderId(payload: unknown): string | undefined {
 function buildPassengerSalutation(context?: CabinPassengerContext): string {
   const rawName = context?.passengerName?.trim()
   if (!rawName) return ''
+  const unadorned = rawName.replace(/(?:先生|女士|小姐|太太|夫人)$/u, '').trim()
+  if (/[*＊×●•]/u.test(rawName) || /^(?:x{2,}|某某|匿名|未知|未提供|已脱敏|unknown|null|undefined|n\/a)$/iu.test(unadorned)) return ''
   if (/先生|女士|小姐|太太|夫人|sir|madam|miss|ms\.?|mr\.?/i.test(rawName)) return rawName
 
   const explicitTitle = context?.passengerTitle?.trim()

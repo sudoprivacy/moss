@@ -234,6 +234,12 @@ class EncodingTests(unittest.TestCase):
                         self.encode(results, max_tokens=10)
                 self.assertEqual(error.exception.status, 422)
 
+    def test_rejects_production_short_greeting_runaway_below_token_cap(self):
+        audio = FakeArray([0.1], size=round(67.92 * 24000))
+        with self.assertRaisesRegex(server.ServiceError, "text duration limit"):
+            self.encode([result(audio, token_count=849)],
+                        input="XX，您好，请问有什么可以帮您？", max_tokens=1024)
+
     def test_invalid_audio_metadata_and_duration(self):
         cases = [[], [result([])], [result([math.nan])], [result([math.inf])],
                  [result([1.01])], [result([-1.01])],

@@ -86,7 +86,7 @@ ASR proxy 的服务名从输入 compose 中唯一明确的 `UPSTREAM_URL: http:/
 
 先部署并验收 gateway，之后才部署配套 Moss、备份原 app 配置并按字段合并 [推荐片段](cabin_optimization_20261124.config.json)。不能用该片段替换整个生产配置；保留原 URL、模型绝对路径、凭据和其他业务设置。本工具不读写 app 配置，也不重启 Moss。
 
-当前推荐 cabin.ttsGeneration 配置 topP=1、topK=50、repetitionPenalty=1.05、seed=42、maxTokens=1024，并设置 cabin.ttsDeterministicRequired=true。**删除旧的 `cabin.ttsGeneration.temperature` 全局字段**，由应用根据最终 voice profile 的语言选择中文0、其他已验语言0.9；保留全局 temperature 会覆盖按语言默认值，因此仅合并缺少该字段的新片段不足以删除旧设置。HTTP 请求对应 max_tokens=1024。日语使用 ono_anna/Japanese，韩语使用 sohee/Korean，其余片段所列语言使用 Vivian 及各自语言。
+当前推荐 cabin.ttsGeneration 配置 topP=1、topK=50、repetitionPenalty=1.05、seed=42、maxTokens=1024，并设置 cabin.ttsDeterministicRequired=true。**设置 `cabin.ttsGeneration.temperature=0.9`，覆盖旧的零温度配置**。14:02 的生产个性化问候在中文 temperature=0 时生成了67.92秒不可识别音频，固定seed采样0.9则恢复4.64秒完整语音；因此中文也使用采样，不再使用零温度默认值。HTTP 请求对应 max_tokens=1024。日语使用 ono_anna/Japanese，韩语使用 sohee/Korean，其余片段所列语言使用 Vivian 及各自语言。
 
 真实合成响应必须包含 `x-cabin-tts-deterministic: seeded-serial-v1` 与 `x-cabin-tts-seed: 42`。stock HTTP schema 会忽略 seed，不能因为请求含 seed 就认为生效；stock 缺少能力确认头，新 app guard 会拒绝，因此不能在 gateway 验收前先合并严格配置。
 
