@@ -20,14 +20,14 @@ const llmModel = required('CABIN_SMOKE_LLM_MODEL')
 const ttsModel = required('CABIN_SMOKE_TTS_MODEL')
 const maskedPassenger = process.env.CABIN_SMOKE_MASKED_NAME === '1'
 const dialogueMode = process.env.CABIN_SMOKE_DIALOGUE_MODE ?? 'compact'
-if (!['compact', 'assistant-context'].includes(dialogueMode)) throw new Error('Unsupported smoke dialogue mode')
+if (!['compact', 'assistant-context', 'assistant-short'].includes(dialogueMode)) throw new Error('Unsupported smoke dialogue mode')
 for (const endpoint of [llmUrl, ttsUrl]) {
   const url = new URL(endpoint)
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Smoke endpoints must use localhost SSH forwards')
 }
 const rootDir = await mkdtemp(join(tmpdir(), 'cabin-live-smoke-'))
 const db = new Database(':memory:')
-let broadcasts = 0, controls = 0, statusQueries = 0
+let broadcasts = 0, controls = 0, statusQueries = 0, orderCalls = 0
 const hashes: string[] = []
 const mock = http.createServer(async (req, res) => {
   try {
@@ -50,6 +50,8 @@ const mock = http.createServer(async (req, res) => {
     } else if (url.pathname.endsWith('/hardware/status')) {
       statusQueries++
       data = { code: 0, data: { data: statusQueries === 1 ? { position: 40 } : {} } }
+    } else if (url.pathname.includes('/service-order/')) {
+      orderCalls++; data = { code: 0, data: [] }
     } else if (url.pathname.startsWith('/admin-api/')) {
       controls++; data = { code: 0, data: true }
     } else { res.writeHead(404); res.end(); return }
@@ -64,6 +66,7 @@ try {
   const mockUrl = await listen(mock)
   const settings = serverFileConfigSchema().parse({ cabin: {
     enabled: true, contextMode: 'seat', dialogueMode, assistantName: process.env.CABIN_ASSISTANT_NAME, createMossSession: true,
+    shortRulesPrewarm: process.env.CABIN_SMOKE_PREWARM === '1',
     passengerInfoUrl: `${mockUrl}/admin-api/cabin/tablet-login/get-seat-context`,
     controlBaseUrl: mockUrl, broadcastApiBaseUrl: mockUrl, broadcastApiKey: 'local-mock',
     broadcastEnabled: true, conversationSeatAudioEnabled: true,
@@ -75,14 +78,17 @@ try {
   const runtime = { store: { db }, authService: { listAllOrganizations: () => ({ organizations: [{ id: 'smoke' }] }) },
     createSession: () => { agentCreations++; throw new Error('Compact mode must not create Agent') } } as unknown as RuntimeService
   const api = createCabinApi({ config: { rootDir, cabin: settings } as ServerConfig, runtime })
+  await api.prepareShortDialogue()
+  if (controls || statusQueries || orderCalls || broadcasts || agentCreations) throw new Error('Prewarm side effect')
   cabin = http.createServer(async (req, res) => {
     if (!await api.handle(req, res, new URL(req.url!, 'http://localhost').pathname)) { res.writeHead(404); res.end() }
   })
   const cabinUrl = await listen(cabin)
   const outcomes: Array<Record<string, unknown>> = []
   const comparisonTurns = process.env.CABIN_SMOKE_DIALOGUE_MODE ? ['您怎么称呼我？', '眼睛快睁不开了，想眯一会儿', '需要'] : []
-  for (const text of ['你好', '你好。', '你是谁？', '帮我调整至办公模式。', '请查看当前座椅角度。', '请再查看当前座椅角度。', '不要打开阅读灯', '你好，请介绍一下你的功能', ...comparisonTurns]) {
-    const before = { controls, broadcasts }, started = performance.now()
+  const massageTurns = dialogueMode === 'assistant-short' ? ['坐久了腰背有点僵，想舒服一点', '不用了，先保持这样', '坐久了腰背有点僵，想舒服一点', '取消可乐订单'] : []
+  for (const text of ['你好', '你好。', '你是谁？', '帮我调整至办公模式。', '请查看当前座椅角度。', '请再查看当前座椅角度。', '不要打开阅读灯', '你好，请介绍一下你的功能', ...comparisonTurns, ...massageTurns]) {
+    const before = { controls, broadcasts, orderCalls }, started = performance.now()
     const response = await fetch(`${cabinUrl}/v1/ai-chat/send`, { method: 'POST',
       headers: { 'content-type': 'application/json', 'x-cabin-aircraft-no': 'B-SMOKE', 'x-cabin-seat-no': '01A' },
       body: JSON.stringify({ content: text, source: 'text' }), signal: AbortSignal.timeout(60000) })
@@ -104,9 +110,13 @@ try {
     if (text === '请再查看当前座椅角度。' && !reply.includes('暂未获取')) throw new Error('Empty status was hallucinated')
     if (text.startsWith('不要') && controls !== before.controls) throw new Error('Negative request executed control')
     if (text === comparisonTurns[1] && controls !== before.controls) throw new Error('Suggestion executed before confirmation')
-    if (dialogueMode === 'assistant-context' && text === comparisonTurns[2] && controls !== before.controls + 1) throw new Error('Confirmation failed to dispatch exactly once')
+    if (dialogueMode !== 'compact' && text === comparisonTurns[2] && controls !== before.controls + 1) throw new Error('Confirmation failed to dispatch exactly once')
+    if (text === massageTurns[0] && (!reply.includes('按摩') || controls !== before.controls)) throw new Error('Expected pending massage offer')
+    if (text === massageTurns[1] && (!reply.includes('没有执行') || orderCalls !== before.orderCalls || controls !== before.controls)) throw new Error('Decline routed incorrectly')
+    if (text === massageTurns[3] && (orderCalls === before.orderCalls || controls !== before.controls)) throw new Error('Explicit order cancellation lost')
     outcomes.push({ input: text, first_delta_ms: firstDeltaMs, done_ms: Math.round(performance.now() - started), reply,
-      mock_device_calls: controls - before.controls, mock_broadcasts: broadcasts - before.broadcasts, uploaded_sha256: hashes.at(-1) })
+      audio_ready_ms: events.find(event => event.event === 'done')?.data.audio_playback?.elapsed_ms,
+      mock_order_calls: orderCalls - before.orderCalls, mock_device_calls: controls - before.controls, mock_broadcasts: broadcasts - before.broadcasts, uploaded_sha256: hashes.at(-1) })
     console.error(JSON.stringify(outcomes.at(-1)))
   }
   if (agentCreations || hashes[0] !== hashes[1]) throw new Error('Agent/cache invariant failed')

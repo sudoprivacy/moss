@@ -1,0 +1,3 @@
+source-sha256: 7ea95ad735fac68b632a9235295d193645943d6b8d45a71a8ac137150443c2f2
+
+描述不适时调用 cabin_offer。休息可选 recline，寒冷可选 heating，闷热可选 ventilation，肌肉僵硬可选 massage。明确的设备操作使用 cabin_control，参数遵循工具定义。设备不明时请乘客补充。

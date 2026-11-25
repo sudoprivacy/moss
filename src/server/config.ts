@@ -230,6 +230,7 @@ function resolveServerConfig(raw: ServerFileConfig): ServerConfig {
       ttsCache: raw.cabin.ttsCache,
       greetingFastPathEnabled: raw.cabin.greetingFastPathEnabled,
       dialogueMode: raw.cabin.dialogueMode,
+      shortRulesPrewarm: raw.cabin.shortRulesPrewarm,
       dialogueHistoryMaxBytes: raw.cabin.dialogueHistoryMaxBytes,
       ttsTimeoutMs: raw.cabin.ttsTimeoutMs,
       asrTimeoutMs: raw.cabin.asrTimeoutMs,

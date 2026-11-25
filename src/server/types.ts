@@ -207,7 +207,8 @@ export const serverFileConfigSchema = lazySchema(() =>
         ttlMs: z.number().int().min(0).max(24 * 60 * 60 * 1000).default(30 * 60 * 1000),
       }).optional(),
       greetingFastPathEnabled: z.boolean().default(true),
-      dialogueMode: z.enum(['compact', 'assistant-context', 'agent']).default('compact'),
+      dialogueMode: z.enum(['compact', 'assistant-context', 'assistant-short', 'agent']).default('compact'),
+      shortRulesPrewarm: z.boolean().optional(),
       dialogueHistoryMaxBytes: z.number().int().min(0).max(16000).default(4096),
       ttsTimeoutMs: z.number().int().min(1000).max(120000).default(30000),
       asrTimeoutMs: z.number().int().min(1000).max(120000).default(30000),
@@ -411,7 +412,8 @@ export type ServerConfig = {
     }
     ttsCache?: { maxEntries: number; maxBytes: number; ttlMs: number }
     greetingFastPathEnabled?: boolean
-    dialogueMode?: 'compact' | 'assistant-context' | 'agent'
+    dialogueMode?: 'compact' | 'assistant-context' | 'assistant-short' | 'agent'
+    shortRulesPrewarm?: boolean
     dialogueHistoryMaxBytes?: number
     ttsTimeoutMs?: number
     asrTimeoutMs?: number

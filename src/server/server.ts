@@ -7376,9 +7376,12 @@ export function startServer(
       }
       resolvePort(port)
     })
+    if (cabinApi && config.cabin.dialogueMode === 'assistant-short') {
+      void seedBuiltinsReady.then(() => cabinApi.prepareShortDialogue()).then(() => server.listen(config.port, config.host)).catch(onError)
+    } else {
+      server.listen(config.port, config.host)
+    }
   })
-
-  server.listen(config.port, config.host)
 
   // ============================================================
   // 企业应用管理: PUBLIC corp-app callback listener (separate port)

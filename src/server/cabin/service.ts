@@ -1035,6 +1035,27 @@ export class CabinServices {
     }
   }
 
+  async shortRulesAllowComfort(): Promise<boolean> {
+    const config = this.options.config
+    const rules = await this.assistantRules(config.assistantName, 'assistant-short')
+    return rules.skills.includes('cabin-hardware-control')
+  }
+
+  async prepareShortDialogue(): Promise<void> {
+    const config = this.options.config
+    if (config.dialogueMode !== 'assistant-short') return
+    const rules = await this.assistantRules(config.assistantName, config.dialogueMode)
+    if (!config.shortRulesPrewarm) return
+    const result = await requestCompactDialogue({
+      context: { tabletId: 'prewarm', flightId: 'prewarm', flightDate: '', replyLanguage: 'zh' },
+      messages: [], text: '请介绍客舱服务。', assistantRules: rules, allowOffer: true, reviewedShortRules: true,
+      baseUrl: config.llmBaseUrl, model: config.llmModel, apiKey: config.llmApiKey,
+      timeoutMs: config.replyTimeoutMs ?? 45000, fetchImpl: this.fetchImpl,
+    })
+    this.logOutbound({ upstream: 'llm-compact', method: 'PREWARM', ok: true, elapsedMs: result.elapsedMs,
+      details: { rule_hash: rules.fingerprint, usage: result.usage } })
+  }
+
   async generateCompactReply(input: {
     context: CabinPassengerContext
     messages: CabinMessage[]
@@ -1047,7 +1068,8 @@ export class CabinServices {
     const language = input.context.replyLanguage
     const spoken = language && isSpoken(language) ? language : 'zh'
     const started = Date.now()
-    const rules = config.dialogueMode === 'assistant-context' ? await this.assistantRules(config.assistantName) : undefined
+    const mode = config.dialogueMode
+    const rules = mode === 'assistant-context' || mode === 'assistant-short' ? await this.assistantRules(config.assistantName, mode) : undefined
     const ask = async (facts?: Record<string, unknown>) => {
       const result = await requestCompactDialogue({
         context: input.context, messages: facts ? [] : input.messages, text: input.text,
@@ -1057,6 +1079,7 @@ export class CabinServices {
         toolsEnabled: facts ? false : input.toolsEnabled, facts,
         assistantRules: rules, passengerAddress: rules ? buildPassengerSalutation(input.context) || passengerDisplayName(input.context) : undefined,
         allowOffer: !facts && input.allowOffer,
+        reviewedShortRules: mode === 'assistant-short',
       })
       this.logOutbound({
         ...input.logContext, upstream: 'llm-compact', method: 'POST',

@@ -1,8 +1,8 @@
 import type { CabinMessage, CabinPassengerContext } from './types.js'
-import { deniedCommand, exactCommand, hypotheticalCommand } from './commandLanguage.js'
+import { deniedCommand, exactCommand, hypotheticalCommand, isSpoken, message as localizedMessage } from './commandLanguage.js'
 import { languageCode } from './language.js'
 import type { CabinAssistantRules } from './assistantContext.js'
-import { comfortActions, type ComfortAction } from './comfortLanguage.js'
+import { comfortActions, comfortOffer, type ComfortAction } from './comfortLanguage.js'
 
 export type CompactDialogueInput = {
   context: CabinPassengerContext
@@ -21,6 +21,7 @@ export type CompactDialogueInput = {
   assistantRules?: CabinAssistantRules
   passengerAddress?: string
   allowOffer?: boolean
+  reviewedShortRules?: boolean
 }
 
 type StatusKey = 'posture' | 'tray' | 'safety' | 'comfort' | 'reading_light' | 'glass_state' | 'ceiling_state'
@@ -380,5 +381,19 @@ export async function requestCompactDialogue(input: CompactDialogueInput): Promi
   }
   if (choice.finish_reason !== 'stop') fail('unexpected response finish reason')
   if (typeof message.content !== 'string' || !message.content.trim()) fail('empty response content')
-  return { kind: 'reply', reply: message.content.trim(), ...metrics }
+  const reply = message.content.trim()
+  if (input.reviewedShortRules) {
+    const language = input.context.replyLanguage ?? 'zh'
+    const possibleOffer = /[?？]|(?:吗|么|でしょうか|ましょうか|까요)[。！.!]?$/u.test(reply)
+      && (Object.values(topics).some(topic => topic.test(reply)) || /需要我|要我|would you like me|shall I/iu.test(reply))
+    if (isSpoken(language)) {
+      const normalized = language === 'zh' ? reply.replace(/按摩功能吗？$/u, '按摩吗？') : reply
+      const action = (Object.keys(comfortActions) as ComfortAction[]).find(key => comfortOffer(language, key) === normalized)
+      if (action && input.toolsEnabled !== false && currentIntent(input.text).canOffer && availableTools(input).some(tool => tool.function.name === 'cabin_offer')) {
+        return { kind: 'offer', action, ...metrics }
+      }
+      if (action || possibleOffer) return { kind: 'reply', reply: localizedMessage(language, 'clarify'), ...metrics }
+    }
+  }
+  return { kind: 'reply', reply, ...metrics }
 }

@@ -241,6 +241,10 @@ export function looksLikeCabinOrderRequest(text: string): boolean {
   return /(订单|点单|点餐|服务单|饮品|饮料|毛毯|毯子|可乐|橙汁|果汁|拿铁|汽水|碳酸|咖啡|喝|口渴|渴了|吃点|吃的|一杯|一条|来一|blanket|drink|order|thirsty)/i.test(text)
 }
 
+export function mentionsOrderTarget(text: string): boolean {
+  return looksLikeCabinOrderRequest(text) || Boolean(findDrink(text.toLowerCase())) || /点了什么|送到|配送|delivery/iu.test(text)
+}
+
 export function parseModelCabinOrderIntent(value: unknown): CabinOrderIntent | null {
   const candidate = unwrapModelOrderPayload(value)
   if (!candidate || typeof candidate.kind !== 'string') return null

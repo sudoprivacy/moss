@@ -20,7 +20,7 @@ import { CabinHealthReportService } from './healthReports.js'
 import { CabinStore } from './store.js'
 import { CabinLogger, type CabinLogContext, summarizeContext } from './logger.js'
 import type { CabinPassengerContext, CabinToolCall, CabinTokenPayload } from './types.js'
-import { isOrderSelection } from './orders.js'
+import { isOrderSelection, mentionsOrderTarget } from './orders.js'
 import { orderChoice, orderReply } from './orderLanguage.js'
 import { comfortAction, comfortActions, comfortOffer as localizedComfortOffer, confirmsOffer } from './comfortLanguage.js'
 import { clarifyText, defaultConversationLanguageMode, languageCode, languageScope, wrongReplyLanguage, type Language } from './language.js'
@@ -709,6 +709,7 @@ export function createCabinApi(options: {
   runtime: RuntimeService
   healthReports?: CabinHealthReportService
 }): {
+  prepareShortDialogue: () => Promise<void>
   handle: (req: http.IncomingMessage, res: http.ServerResponse, pathname: string) => Promise<boolean>
 } {
   const cabinConfig = options.config.cabin
@@ -1069,7 +1070,8 @@ export function createCabinApi(options: {
       return
     }
     const selection = scope && pendingOrderCancellation && allowPendingSelection ? orderChoice(text,pendingOrderCancellation.candidates) : undefined
-    const orderIntent = textOnly || selection ? null : await services.resolveOrderIntent({ context, text, logContext })
+    const comfortFollowup = pendingComfort && !selection && !mentionsOrderTarget(text)
+    const orderIntent = textOnly || selection || comfortFollowup ? null : await services.resolveOrderIntent({ context, text, logContext })
     if (!textOnly && (orderIntent || (allowPendingSelection && pendingOrderCancellation && isOrderSelection(selection ?? text)))) {
       const orderResult = await services.executeOrderIntent({
         context,
@@ -1098,6 +1100,10 @@ export function createCabinApi(options: {
     }
     const nextComfort = scope && spoken ? comfortAction(text) : undefined
     if (scope && spoken && nextComfort) {
+      if (cabinConfig.dialogueMode === 'assistant-short' && !await services.shortRulesAllowComfort()) {
+        await completeReply({ reply: message(spoken, 'clarify'), routed: 'no-pending-action' })
+        return
+      }
       store.recordComfortOffer(scope, nextComfort)
       await completeReply({ reply: localizedComfortOffer(spoken, nextComfort), routed: 'comfort-offer' })
       return
@@ -1116,6 +1122,10 @@ export function createCabinApi(options: {
         return
       }
       if (decision === 'confirm') {
+        if (cabinConfig.dialogueMode === 'assistant-short' && !await services.shortRulesAllowComfort()) {
+          await completeReply({ reply: message(spoken, 'noAction'), routed: 'no-pending-action' })
+          return
+        }
         if (!store.consumeComfortOffer(scope, pendingComfort)) {
           await completeReply({ reply: message(spoken, 'clarify'), routed: 'no-pending-action' })
           return
@@ -1568,6 +1578,7 @@ export function createCabinApi(options: {
   }
 
   return {
+    prepareShortDialogue: () => services.prepareShortDialogue(),
     async handle(req, res, pathname) {
       if (!cabinConfig.enabled || !pathname.startsWith('/v1/')) return false
       const requestId = cabinLogger.createRequestId()

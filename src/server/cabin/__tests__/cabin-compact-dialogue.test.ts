@@ -55,6 +55,17 @@ describe('installed assistant context', () => {
     await expect(toolHarness('cabin_offer', { action: 'recline', position: 100 }).run(input)).rejects.toThrow()
     await expect(toolHarness('cabin_control', { command: 'seat.cushion', params: { position: 100 } }).run(input)).rejects.toThrow()
   })
+
+  it('recovers the 3B massage question only when a scoped offer is allowed', async () => {
+    const options = { ...input, reviewedShortRules: true, context: { ...context, replyLanguage: 'zh' as const } }
+    const plain = harness(completion({ content: '需要我为您开启座椅按摩功能吗？' }))
+    expect(await plain.run(options)).toMatchObject({ kind: 'offer', action: 'massage' })
+    for (const variant of [{ toolsEnabled: false }, { allowOffer: false }, { assistantRules: { ...rules, skills: [] } }, { text: '不要开按摩' }]) {
+      expect(await plain.run({ ...options, ...variant })).toMatchObject({ kind: 'reply', reply: '请再具体说明您的需求。' })
+    }
+    expect(await harness(completion({ content: '需要我开启三档按摩吗？' })).run(options)).toMatchObject({ kind: 'reply', reply: '请再具体说明您的需求。' })
+    expect(await harness(completion({ content: '您想了解哪项服务？' })).run(options)).toMatchObject({ kind: 'reply', reply: '您想了解哪项服务？' })
+  })
 })
 
 const commandCases = [
