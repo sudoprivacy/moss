@@ -1,23 +1,31 @@
 import type { CabinConfig } from './types.js'
+import { languageCode } from './language.js'
+
+// Verified on the deployed Qwen CustomVoice model with the existing speaker,
+// sampler and seed. Scope to explicit Mandarin output, not text detection.
+const chineseBroadcastInstruct = '用清晰、平稳的普通话播报，完整读出每一个字，句首不要吞字。'
 
 export function isQwenTts(model: string): boolean {
   return /qwen3[-_]tts/i.test(model)
 }
 
-export function ttsGenerationOptions(config: CabinConfig, _language = config.ttsLanguage): Record<string, number | string> {
+export function ttsGenerationOptions(config: CabinConfig, language = config.ttsLanguage): Record<string, number | string> {
   const generation = config.ttsGeneration
-  const defaults = isQwenTts(config.ttsModel)
+  const qwen = isQwenTts(config.ttsModel)
+  const defaults = qwen
     // Greedy decoding also degenerates for Chinese personalized greetings.
     // Seeded serial sampling preserves repeatability without forcing temperature zero.
     ? { temperature: 0.9, top_p: 1, top_k: 50, repetition_penalty: 1.05, max_tokens: 1024 }
     : {}
+  const instruct = generation?.instruct
+    ?? (qwen && languageCode(language) === 'zh' ? chineseBroadcastInstruct : undefined)
   return {
     ...defaults,
     ...(generation?.temperature !== undefined ? { temperature: generation.temperature } : {}),
     ...(generation?.topP !== undefined ? { top_p: generation.topP } : {}),
     ...(generation?.topK !== undefined ? { top_k: generation.topK } : {}),
     ...(generation?.repetitionPenalty !== undefined ? { repetition_penalty: generation.repetitionPenalty } : {}),
-    ...(generation?.instruct !== undefined ? { instruct: generation.instruct } : {}),
+    ...(instruct !== undefined ? { instruct } : {}),
     ...(generation?.maxTokens !== undefined ? { max_tokens: generation.maxTokens } : {}),
     ...(generation?.seed !== undefined ? { seed: generation.seed } : {}),
   }

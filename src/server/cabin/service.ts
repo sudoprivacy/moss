@@ -875,11 +875,15 @@ export class CabinServices {
         details: {
           voice: payload.voice, language: profile?.language ?? config.ttsLanguage,
           input_chars: text.length, audio_bytes: speech.audio.length, audio_sha256: sha256,
+          speech_input_chars: payload.input.length,
+          speech_input_sha256: createHash('sha256').update(payload.input).digest('hex'),
           audio_format: wavMetadata(speech.audio), cache_status: speech.cacheStatus,
           temperature: generation.temperature, top_p: generation.top_p, top_k: generation.top_k,
           repetition_penalty: generation.repetition_penalty, max_tokens: generation.max_tokens,
           seed: generation.seed,
           instruct_chars: typeof generation.instruct === 'string' ? generation.instruct.length : undefined,
+          instruct_sha256: typeof generation.instruct === 'string'
+            ? createHash('sha256').update(generation.instruct).digest('hex') : undefined,
         },
       })
       return { ...speech, sha256, elapsedMs }

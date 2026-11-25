@@ -9,6 +9,8 @@ import type { CabinLogger } from '../logger.js'
 import { assertTtsBackend, ttsGenerationOptions } from '../ttsOptions.js'
 import { speechText } from '../speechText.js'
 
+const verifiedChineseInstruct = '用清晰、平稳的普通话播报，完整读出每一个字，句首不要吞字。'
+
 function diagnosticWav(): Buffer {
   const pcm = Buffer.alloc(4800)
   const head = Buffer.alloc(44)
@@ -130,6 +132,10 @@ describe('speech service integration', () => {
     expect(posts).toHaveLength(1); expect(seats.sort()).toEqual(['1A','2A','3A'])
     expect(posts[0]).toMatchObject({ temperature: 0, top_p: 1, top_k: 50, repetition_penalty: 1.05, voice: 'Vivian', lang_code: 'Chinese' })
     const tts = logs.filter(event => event.upstream === 'tts')
+    for (const event of tts) {
+      expect(event.details.speech_input_chars).toBe('已下发阅读灯指令。'.length)
+      expect(event.details.speech_input_sha256).toBe(audioSha256(Buffer.from('已下发阅读灯指令。')))
+    }
     expect(tts.map(event => event.details.cache_status).sort()).toEqual(['hit','miss','shared'])
     const uploads = logs.filter(event => event.upstream === 'conversation-audio-seat')
     expect(uploads).toHaveLength(3)
@@ -160,6 +166,44 @@ describe('speech service integration', () => {
     for (const change of changes) { change(); expect((await say()).cacheStatus).toBe('miss') }
     expect((await say('不同完整文本')).cacheStatus).toBe('miss')
     expect(calls).toBe(changes.length + 2)
+  })
+
+  it('uses the actual synthesis language for the verified prompt and isolates cached profiles', async () => {
+    const settings = config()
+    settings.ttsModel = 'qwen3-tts'
+    settings.ttsLanguage = 'English'
+    settings.ttsVoice = 'Vivian'
+    settings.ttsGeneration = { temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05, maxTokens: 1024, seed: 42 }
+    const requests: Record<string, unknown>[] = []
+    const logs: Array<Record<string, any>> = []
+    const services = new CabinServices({ config: settings, store: {} as never,
+      logger: { log: event => logs.push(event) } as CabinLogger,
+      fetchImpl: (async (_url, init) => {
+        requests.push(JSON.parse(String(init?.body)))
+        return new Response(diagnosticWav(), { headers: { 'content-type': 'audio/wav' } })
+      }) as typeof fetch })
+    const text = '已为您下发打开阅读灯的指令，请稍候。'
+    const chinese = { voice: 'Vivian', language: 'Chinese', field: 'lang_code' as const }
+    expect((await services.speech(text, undefined, chinese, true)).cacheStatus).toBe('miss')
+    for (const language of ['English', 'Japanese', 'auto']) {
+      await services.speech(text, undefined, { ...chinese, language }, true)
+      expect(requests.at(-1)).not.toHaveProperty('instruct')
+    }
+    expect((await services.speech(text, undefined, chinese, true)).cacheStatus).toBe('hit')
+    expect(requests).toHaveLength(4)
+    expect(requests[0]).toEqual({
+      model: 'qwen3-tts', voice: 'Vivian', lang_code: 'Chinese', input: text, response_format: 'wav',
+      temperature: 0.9, top_p: 1, top_k: 50, repetition_penalty: 1.05, max_tokens: 1024, seed: 42,
+      instruct: verifiedChineseInstruct,
+    })
+    const chineseLogs = logs.filter(event => event.upstream === 'tts' && event.details.language === 'Chinese')
+    expect(chineseLogs).toHaveLength(2)
+    for (const event of chineseLogs) {
+      expect(event.details.instruct_sha256).toBe(audioSha256(Buffer.from(verifiedChineseInstruct)))
+    }
+    settings.ttsGeneration.instruct = '用温和的普通话播报。'
+    expect((await services.speech(text, undefined, chinese, true)).cacheStatus).toBe('miss')
+    expect(requests.at(-1)?.instruct).toBe(settings.ttsGeneration.instruct)
   })
 
   it('never uploads invalid audio or a backend that silently ignores seed', async () => {
@@ -236,6 +280,24 @@ describe('audio diagnostics', () => {
 })
 
 describe('greeting routing and sampler configuration', () => {
+  it('defaults only Qwen Mandarin to the verified instruction and preserves explicit overrides', () => {
+    const config = { ttsModel: 'qwen3-tts', ttsLanguage: 'Chinese', ttsGeneration: { seed: 42 } } as CabinConfig
+    for (const language of ['Chinese', 'chinese', 'Mandarin', 'zh', 'zh-CN', 'zh_TW']) {
+      expect(ttsGenerationOptions(config, language).instruct).toBe(verifiedChineseInstruct)
+    }
+    expect(ttsGenerationOptions(config).instruct).toBe(verifiedChineseInstruct)
+    for (const language of ['English', 'Japanese', 'Korean', 'Cantonese', 'yue', 'auto', 'unknown']) {
+      expect(ttsGenerationOptions(config, language)).not.toHaveProperty('instruct')
+    }
+    expect(ttsGenerationOptions({ ...config, ttsModel: 'other-tts' })).not.toHaveProperty('instruct')
+    config.ttsGeneration = { seed: 0, temperature: 0, instruct: 'Read the original text calmly.' }
+    for (const language of ['Chinese', 'English']) {
+      expect(ttsGenerationOptions(config, language)).toMatchObject({
+        seed: 0, temperature: 0, instruct: 'Read the original text calmly.',
+      })
+    }
+  })
+
   it('accepts only whole greetings in the selected language', () => {
     expect(greetingReply(' 你好。 ', 'zh')).toContain('您好')
     expect(greetingReply('Hello!', 'en')).toContain('Hello')
