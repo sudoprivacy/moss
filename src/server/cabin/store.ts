@@ -893,6 +893,11 @@ export class CabinStore {
     return mapMessage(row)
   }
 
+  isLatestPassengerMessage(conversationId: string, messageId: string): boolean {
+    const row = this.db.prepare("SELECT id FROM cabin_messages WHERE conversation_id = ? AND role = 'user' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(conversationId) as Row | undefined
+    return row?.id === messageId
+  }
+
   listMessages(conversationId: string, limit: number, options: { beforeId?: string; afterId?: string } = {}): CabinMessage[] {
     const params: unknown[] = [conversationId]
     let cursorClause = ''

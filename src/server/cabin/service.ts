@@ -37,9 +37,10 @@ import { audioSha256, wavMetadata } from './audioFingerprint.js'
 import { assertTtsBackend, isQwenTts, ttsGenerationOptions } from './ttsOptions.js'
 import { withDeadline } from './deadline.js'
 import { CompactToolRejectionError, requestCompactDialogue } from './compactDialogue.js'
+import { cabinRuleCache } from './assistantContext.js'
 import { speechText } from './speechText.js'
 import { interpretComfortReply, type ComfortDecision } from './comfortConfirmation.js'
-import type { ComfortAction } from './comfortLanguage.js'
+import { comfortOffer, type ComfortAction } from './comfortLanguage.js'
 
 type FetchLike = typeof fetch
 
@@ -129,6 +130,7 @@ export class MossSubmittedTurnError extends Error {}
 class MossRunnerTerminalError extends Error {}
 
 export class CabinServices {
+  private readonly assistantRules = cabinRuleCache()
   private readonly inFlightTurns = new Set<string>()
   private readonly failedRetirements = new Set<string>()
   private readonly fetchImpl: FetchLike
@@ -1039,11 +1041,13 @@ export class CabinServices {
     text: string
     logContext?: CabinLogContext
     toolsEnabled?: boolean
-  }): Promise<{ reply: string; toolCall?: CabinToolCall; intent?: string; slots?: Record<string, unknown> }> {
+    allowOffer?: boolean
+  }): Promise<{ reply: string; offer?: ComfortAction; toolCall?: CabinToolCall; intent?: string; slots?: Record<string, unknown> }> {
     const config = this.options.config
     const language = input.context.replyLanguage
     const spoken = language && isSpoken(language) ? language : 'zh'
     const started = Date.now()
+    const rules = config.dialogueMode === 'assistant-context' ? await this.assistantRules(config.assistantName) : undefined
     const ask = async (facts?: Record<string, unknown>) => {
       const result = await requestCompactDialogue({
         context: input.context, messages: facts ? [] : input.messages, text: input.text,
@@ -1051,17 +1055,21 @@ export class CabinServices {
         timeoutMs: config.replyTimeoutMs ?? 45000, fetchImpl: this.fetchImpl,
         historyMaxBytes: config.dialogueHistoryMaxBytes ?? 4096,
         toolsEnabled: facts ? false : input.toolsEnabled, facts,
+        assistantRules: rules, passengerAddress: rules ? buildPassengerSalutation(input.context) || passengerDisplayName(input.context) : undefined,
+        allowOffer: !facts && input.allowOffer,
       })
       this.logOutbound({
         ...input.logContext, upstream: 'llm-compact', method: 'POST',
         url: `${config.llmBaseUrl.replace(/\/$/, '')}/chat/completions`, ok: true,
         elapsedMs: result.elapsedMs, model: config.llmModel,
-        details: { kind: result.kind, request_bytes: result.requestBytes, history_messages: result.historyMessages, usage: result.usage, status_reply: !!facts },
+        details: { kind: result.kind, request_bytes: result.requestBytes, history_messages: result.historyMessages, usage: result.usage, status_reply: !!facts,
+          ...(rules && { dialogue_mode: config.dialogueMode, rule_hash: rules.fingerprint, enabled_skills: rules.skills }) },
       })
       return result
     }
     try {
       const decision = await ask()
+      if (decision.kind === 'offer') return { reply: comfortOffer(spoken, decision.action), offer: decision.action }
       if (decision.kind === 'reply') return { reply: guardUnexecutedCabinReply(decision.reply, language, input.text) }
       // requestCompactDialogue validates schema and current-turn authorization for
       // control/mode decisions. Do not reclassify polite requests with legacy gates.
@@ -3383,11 +3391,17 @@ function extractOrderId(payload: unknown): string | undefined {
   return undefined
 }
 
-function buildPassengerSalutation(context?: CabinPassengerContext): string {
+function passengerDisplayName(context?: CabinPassengerContext): string {
   const rawName = context?.passengerName?.trim()
   if (!rawName) return ''
   const unadorned = rawName.replace(/(?:先生|女士|小姐|太太|夫人)$/u, '').trim()
   if (/[*＊×●•]/u.test(rawName) || /^(?:x{2,}|某某|匿名|未知|未提供|已脱敏|unknown|null|undefined|n\/a)$/iu.test(unadorned)) return ''
+  return rawName
+}
+
+function buildPassengerSalutation(context?: CabinPassengerContext): string {
+  const rawName = passengerDisplayName(context)
+  if (!rawName) return ''
   if (/先生|女士|小姐|太太|夫人|sir|madam|miss|ms\.?|mr\.?/i.test(rawName)) return rawName
 
   const explicitTitle = context?.passengerTitle?.trim()

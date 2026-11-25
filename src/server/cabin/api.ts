@@ -726,7 +726,7 @@ export function createCabinApi(options: {
     runtime: options.runtime,
     logger: cabinLogger,
     createMossSession: async (context) => {
-      if (!cabinConfig.createMossSession || (cabinConfig.dialogueMode ?? 'compact') === 'compact') return `cabin-${randomUUID()}`
+      if (!cabinConfig.createMossSession || cabinConfig.dialogueMode !== 'agent') return `cabin-${randomUUID()}`
       const orgId = options.runtime.authService.listAllOrganizations().organizations[0]?.id
       if (!orgId) throw new Error('No organization available for cabin moss session')
       const created = await options.runtime.createSession({
@@ -1200,7 +1200,7 @@ export function createCabinApi(options: {
       return
     }
 
-    const useCompact = (cabinConfig.dialogueMode ?? 'compact') === 'compact'
+    const useCompact = cabinConfig.dialogueMode !== 'agent'
     const useMoss = !useCompact && cabinConfig.createMossSession && !textOnly
     const inferredTool = useCompact || useMoss || language
       ? null
@@ -1224,7 +1224,17 @@ export function createCabinApi(options: {
       if (useCompact) {
         const result = await services.generateCompactReply({
           context, messages: store.listMessages(conversation.id, 30), text, logContext, toolsEnabled: !textOnly,
+          allowOffer: Boolean(scope && spoken),
         })
+        if (result.offer && scope && spoken) {
+          if (store.languageEpoch(conversation.id) !== comfortEpoch || !store.isLatestPassengerMessage(conversation.id, userMessage.id)) {
+            await completeReply({ reply: message(spoken, 'clarify'), routed: 'no-pending-action' })
+            return
+          }
+          store.recordComfortOffer(scope, result.offer)
+          await completeReply({ reply: result.reply, routed: 'comfort-offer' })
+          return
+        }
         reply = result.reply
         mossToolCall = result.toolCall
         mossIntent = result.intent

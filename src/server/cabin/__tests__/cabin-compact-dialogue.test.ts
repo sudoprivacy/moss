@@ -30,6 +30,33 @@ function toolHarness(name: string, args: unknown, content: string | null = '设�
   return harness(completion({ content, tool_calls: [tool(name, args)] }, 'tool_calls'))
 }
 
+describe('installed assistant context', () => {
+  const rules = { text: '服务规则'.repeat(1600), fingerprint: 'test', skills: ['cabin-hardware-control'] }
+  const input = { ...base, text: '眼睛快睁不开了', assistantRules: rules, allowOffer: true, passengerAddress: '林女士' }
+
+  it('preserves the full static prefix across seats and keeps private binding fields outside the request', () => {
+    const first = buildCompactDialogueRequest(input).body
+    const other = buildCompactDialogueRequest({ ...input, passengerAddress: '王女士', context: { ...context, seatId: '7B' } }).body
+    expect(first.messages[0]!.content).toContain(rules.text)
+    expect(other.messages[0]).toEqual(first.messages[0])
+    expect(JSON.stringify(first)).toContain('林女士')
+    expect(JSON.stringify(other)).not.toContain('林女士')
+    for (const privateValue of ['internal-tablet', 'secret-access-token', 'secret-tablet-token', 'internal-binding', 'internal-passenger']) expect(JSON.stringify(first)).not.toContain(privateValue)
+    expect(first.tools?.map(tool => tool.function.name)).toEqual(['cabin_control', 'cabin_offer'])
+    expect(buildCompactDialogueRequest(base).body.messages[0]!.content).not.toContain(rules.text)
+  })
+
+  it('accepts only a non-executing, single-action proposal for a scoped candidate turn', async () => {
+    const proposal = toolHarness('cabin_offer', { action: 'recline' })
+    expect(await proposal.run(input)).toMatchObject({ kind: 'offer', action: 'recline' })
+    for (const variant of [{ allowOffer: false }, { assistantRules: undefined }, { toolsEnabled: false }, { text: '我困了，不过别调座椅' }, { assistantRules: { ...rules, skills: [] } }]) {
+      await expect(proposal.run({ ...input, ...variant })).rejects.toThrow()
+    }
+    await expect(toolHarness('cabin_offer', { action: 'recline', position: 100 }).run(input)).rejects.toThrow()
+    await expect(toolHarness('cabin_control', { command: 'seat.cushion', params: { position: 100 } }).run(input)).rejects.toThrow()
+  })
+})
+
 const commandCases = [
   { command: 'seat.cushion', text: '请把座椅位置调整到100%', params: { position: 100 } },
   { command: 'seat.ventilation', text: '请把座椅通风调到3档', params: { level: 3 } },
