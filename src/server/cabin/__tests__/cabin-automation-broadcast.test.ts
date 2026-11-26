@@ -172,6 +172,9 @@ describe('CabinFlightAutomation external broadcasts', () => {
           data: { requestId: 'BC-error-1', matchedCount: 1, sentCount: 1 },
         })
       }
+      if (url.pathname === '/admin-api/tcp/state/cabin/light') {
+        return Response.json({ code: 0, data: { aircraftNo: 'B-WITHFLIGHT-01', light: {obj: 0, lightOpen: seatNormalized ? 0 : 1} } })
+      }
       if (url.pathname === '/admin-api/tcp/hardware/status') {
         const key = url.searchParams.get('key')
         const data = seatNormalized

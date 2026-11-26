@@ -187,6 +187,8 @@ export function ensureCabinTables(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS cabin_recent_language (scope TEXT PRIMARY KEY, language TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS cabin_recent_expiry ON cabin_recent_language(expires);
     CREATE TABLE IF NOT EXISTS cabin_comfort_offers (scope TEXT PRIMARY KEY, action TEXT NOT NULL, expires INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS cabin_lighting_turn (scope TEXT PRIMARY KEY, state TEXT NOT NULL, expires INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS cabin_chat_receipts (scope TEXT NOT NULL, client_id TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(scope, client_id));
     CREATE INDEX IF NOT EXISTS cabin_offer_expiry ON cabin_comfort_offers(expires);
     CREATE TABLE IF NOT EXISTS cabin_order_language_prompts (scope TEXT PRIMARY KEY, signature TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS cabin_order_prompt_expiry ON cabin_order_language_prompts(expires);
@@ -352,6 +354,22 @@ export class CabinStore {
     // Old versions safely ignore structured offers instead of replaying them.
     this.db.prepare('INSERT OR REPLACE INTO cabin_comfort_offers (scope, action, expires) VALUES (?, ?, ?)')
       .run(scope, JSON.stringify({ id: randomUUID(), action }), time + 120_000)
+  }
+
+  claimClientTurn(scope: string, clientId: string) {
+    const now = Date.now()
+    this.db.prepare('DELETE FROM cabin_chat_receipts WHERE expires <= ?').run(now)
+    return this.db.prepare('INSERT OR IGNORE INTO cabin_chat_receipts VALUES (?, ?, ?)').run(scope, clientId, now + 300_000).changes === 1
+  }
+
+  takeLightingTurn(scope: string) {
+    const row = this.db.prepare('DELETE FROM cabin_lighting_turn WHERE scope = ? RETURNING state, expires').get(scope) as Row | undefined
+    if (row && Number(row.expires) > Date.now()) return JSON.parse(String(row.state)) as { pending?: import('./seatLighting.js').LightSettings }
+  }
+
+  rememberLightingTurn(scope: string, pending?: import('./seatLighting.js').LightSettings) {
+    this.db.prepare('DELETE FROM cabin_lighting_turn WHERE expires <= ?').run(Date.now())
+    this.db.prepare('INSERT OR REPLACE INTO cabin_lighting_turn VALUES (?, ?, ?)').run(scope, JSON.stringify({pending}), Date.now()+120000)
   }
 
   getComfortOffer(scope: string, time = Date.now()): ComfortOffer | undefined {

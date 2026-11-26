@@ -34,30 +34,11 @@ describe('routeHardwareControl ceiling vs reading light', () => {
     expect(result?.params.on).toBe(true)
   })
 
-  it('routes 顶灯蓝色 to ceiling color with mapped RGB and default brightness', () => {
-    const result = route('把顶灯调成蓝色')
-    expect(result?.command).toBe('cabin.ceiling.color')
-    expect(result?.params).toMatchObject({ r: 0, g: 0, b: 255, brightness: 100 })
-  })
-
-  it('routes ceiling brightness-only requests to ceiling color with default white RGB', () => {
-    const result = route('把顶灯调亮一点')
-    expect(result?.command).toBe('cabin.ceiling.color')
-    expect(result?.path).toBe('/admin-api/tcp-client/cmd/cabin/ceiling/color')
-    expect(result?.params).toMatchObject({ r: 255, g: 255, b: 255, brightness: 80 })
-  })
-
-  it('routes ceiling explicit brightness percentage to ceiling color', () => {
-    const result = route('把顶灯亮度调到50%')
-    expect(result?.command).toBe('cabin.ceiling.color')
-    expect(result?.params).toMatchObject({ r: 255, g: 255, b: 255, brightness: 50 })
-  })
-
-  it('routes ceiling explicit brightness number without falling back to the default', () => {
-    const result = route('把顶灯调亮到70')
-    expect(result?.command).toBe('cabin.ceiling.color')
-    expect(result?.params).toMatchObject({ r: 255, g: 255, b: 255, brightness: 70 })
-  })
+  for (const text of ['把顶灯调成蓝色', '把顶灯调亮一点', '把顶灯亮度调到50%', '把顶灯调亮到70']) {
+    it(`requires seat state before routing ${text}`, () => {
+      expect(route(text)).toBeNull()
+    })
+  }
 
   it('routes ceiling color with explicit numeric brightness', () => {
     const result = route('把顶灯调成蓝色亮度80')

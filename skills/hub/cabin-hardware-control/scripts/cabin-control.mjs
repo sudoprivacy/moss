@@ -6,7 +6,8 @@ import { dirname } from 'path'
 
 // The only cabin scene presets the hardware backend accepts. Must stay in sync with
 // CABIN_SCENE_PRESETS in src/server/cabin/service.ts so both dispatch paths agree.
-const CABIN_SCENE_PRESETS = ['boarding', 'cruise', 'night', 'landing']
+const sceneWire = { boarding: 'flow', cruise: 'normal', night: 'breath', landing: 'flow', normal: 'normal', breath: 'breath', flow: 'flow' }
+const CABIN_SCENE_PRESETS = Object.keys(sceneWire)
 
 // Chinese/English synonyms folded onto a supported preset. Scenes the hardware does
 // not have (睡眠/休息) map to the closest supported one (night) instead of emitting
@@ -152,7 +153,7 @@ const COMMANDS = {
   'cabin.scene.clear': {
     device: 'cabin_scene',
     action: 'clear',
-    path: '/admin-api/tcp-client/cmd/cabin/scene/clear',
+    path: '/admin-api/tcp-client/cmd/cabin/scene',
     params: [
       { name: 'seatNo', arg: 'seat-no', required: true, type: 'seat' },
     ],
@@ -517,6 +518,13 @@ async function main() {
   if (!baseUrl) {
     fail('CONFIG_MISSING', 'CABIN_CONTROL_BASE_URL is not configured')
     return
+  }
+  if (commandName.startsWith('cabin.')) {
+    if (!/^0*[1-9]\d?[AB]$/iu.test(seatNo)) return fail('INVALID_ARGUMENT', 'A numbered A/B seat is required')
+    query.set('seatNo', seatNo.toUpperCase().replace(/^0+/, ''))
+    if (commandName === 'cabin.ceiling.color') query.set('brightness', String(Math.round(Number(query.get('brightness')) * 255 / 100)))
+    if (commandName === 'cabin.scene') query.set('preset', sceneWire[query.get('preset')])
+    if (commandName === 'cabin.scene.clear') query.set('preset', 'normal')
   }
   const url = new URL(`${baseUrl}${command.path}`)
   url.search = query.toString()

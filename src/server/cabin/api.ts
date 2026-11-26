@@ -8,6 +8,7 @@ import { buildConversationKey, issueCabinToken, verifyCabinTokenDetailed } from 
 import { CabinDemoState } from './demo.js'
 import {
   CabinServices,
+  buildRouteFromCommand,
   MossSubmittedTurnError,
   normalizeCabinPassengerReply,
   shouldBufferCabinReply,
@@ -26,6 +27,7 @@ import { comfortAction, comfortActions, comfortOffer as localizedComfortOffer, c
 import { clarifyText, defaultConversationLanguageMode, languageCode, languageScope, wrongReplyLanguage, type Language } from './language.js'
 import { deniedCommand, hypotheticalCommand, hardwareReply, invalidSetting, isSpoken, message, readingLightQuestion, lightStatusReply } from './commandLanguage.js'
 import { greetingReply, isFixedSpeechReply } from './greeting.js'
+import { boundLight, describeLight, lightingTurn } from './seatLighting.js'
 
 type JsonBody = Record<string, unknown>
 
@@ -961,6 +963,7 @@ export function createCabinApi(options: {
     text: string
     source: 'voice' | 'text'
     requestId: string
+    clientId?: string
   }): Promise<void> {
     const { res, context, conversation, text, source, requestId } = input
     requestTrace.get(res)?.('chat.ready', { text_ref: textReference(conversation.id, text) })
@@ -968,6 +971,14 @@ export function createCabinApi(options: {
     const spoken = language && isSpoken(language) ? language : undefined
     const comfortEpoch = store.languageEpoch(conversation.id)
     const scope = language ? languageScope(`${conversation.id}:${comfortEpoch}`, context) : undefined
+    const lightScope = scope ?? languageScope(`${conversation.id}:${comfortEpoch}`, context)
+    if (input.clientId && !store.claimClientTurn(lightScope, input.clientId)) {
+      const reply = spoken === 'en' ? 'This request has already been received.' : '已收到这次请求。'
+      writeSse(res, 'delta', { content: reply })
+      writeSse(res, 'done', { intent: 'duplicate', slots: {}, reply_text: reply })
+      res.end()
+      return
+    }
     const pendingComfort = scope ? store.getComfortOffer(scope) : undefined
     const pendingOrderCancellation = store.getPendingOrderCancellation(conversation.id)
     const allowPendingSelection = !scope || store.takeOrderChoices(scope, pendingOrderCancellation?.candidates ?? [])
@@ -1049,6 +1060,37 @@ export function createCabinApi(options: {
       res.end()
     }
     const textOnly = Boolean(language && !spoken)
+    const lastLight = store.takeLightingTurn(lightScope)
+    const lighting = (!language || spoken === 'zh') && lightingTurn(text, context.seatId, lastLight?.pending, !!lastLight)
+    if (lighting) {
+      const current = () => store.languageEpoch(conversation.id) === comfortEpoch && store.isLatestPassengerMessage(conversation.id,userMessage.id)
+      const clarify = (reply: string) => completeReply({reply,routed:'lighting-clarify'})
+      if (lighting.kind === 'reply') return clarify(lighting.reply)
+      const skill = lighting.kind === 'mode' ? 'cabin-mode-switch' : lighting.kind === 'status' ? 'cabin-hardware-status-query' : 'cabin-hardware-control'
+      if (!await services.allowsCabinSkill(skill) || !boundLight(context.seatId,cabinConfig.managedSeats)) return clarify('当前座位暂时无法使用这项服务。')
+      if (!current()) return clarify('这次请求已更新，请再说一次。')
+      if (lighting.kind === 'status' || lighting.kind === 'mode') {
+        const result = lighting.kind === 'mode' ? await services.executeModeSwitch({context,spec:{cabinMode:lighting.mode},logContext})
+          : await services.executeHardwareStatusQuery({context,spec:{targetType:'cabin',statusKey:'ceiling_state'},logContext})
+        const reply = lighting.kind === 'status' && result.ok ? describeLight(result.slots.status_data as Record<string,number>,text) : result.reply
+        if (lighting.kind === 'status' && current()) store.rememberLightingTurn(lightScope)
+        writeSse(res,'tool_call',result.toolCall)
+        return completeReply({...result,reply,toolCalls:[result.toolCall],routed:'lighting-'+lighting.kind})
+      }
+      const prepared = lighting.kind === 'settings' ? await services.prepareLightSettings(context, lighting.settings, logContext) : undefined
+      if (!current()) return clarify('这次请求已更新，请再说一次。')
+      if (prepared?.pending) {
+        store.rememberLightingTurn(lightScope,prepared.pending)
+        return clarify(prepared.reply)
+      }
+      const route = lighting.kind === 'switch' ? buildRouteFromCommand(context,'cabin.ceiling.light',{on:lighting.on})
+        : lighting.kind === 'scene' ? buildRouteFromCommand(context,'cabin.scene',{preset:lighting.preset}) : prepared?.route
+      if (!route) return clarify('请再具体说明您的灯光需求。')
+      const result = await services.executeHardwareControl({route,logContext,reportTransportFailure:true})
+      if (current() && result.slots.execution_status === 'dispatched') store.rememberLightingTurn(lightScope)
+      writeSse(res,'tool_call',result.toolCall)
+      return completeReply({...result,toolCalls:[result.toolCall],routed:'lighting-control'})
+    }
     const greeting = cabinConfig.greetingFastPathEnabled !== false && greetingReply(text, language)
     if (greeting) {
       const reply = !language || language === 'zh' ? normalizeCabinPassengerReply({ userText: text, reply: greeting, context }) : greeting
@@ -1330,6 +1372,7 @@ export function createCabinApi(options: {
     await streamChatReply({
       res,
       context: replyLanguage ? { ...context, replyLanguage } : context,
+      clientId: getHeader(req, 'idempotency-key'),
       conversation,
       text,
       source,
@@ -1408,6 +1451,7 @@ export function createCabinApi(options: {
       text: result.text,
       source,
       requestId,
+      clientId: getHeader(req, 'idempotency-key'),
     })
   }
 

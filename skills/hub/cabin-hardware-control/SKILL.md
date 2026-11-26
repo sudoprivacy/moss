@@ -2,7 +2,7 @@
 name: cabin-hardware-control
 displayName: 客舱硬件控制
 description: Use this skill when a cabin passenger asks to control real cabin hardware, especially opening or closing the tray table, seat-side devices, lights, seat posture, or other equipment through customer cabin control APIs. The skill must use server-provided cabin_context for seat identity.
-version: 1.3.2
+version: 1.4.0
 category: 客舱服务
 emoji: "🛫"
 ---
@@ -92,8 +92,8 @@ node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
 ```bash
 node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
   --command cabin.ceiling.color \
-  --seat-no "A" \
-  --column-no "A" \
+  --seat-no "3B" \
+  --column-no "B" \
   --r 20 \
   --g 20 \
   --b 20 \
@@ -103,8 +103,8 @@ node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
 ```bash
 node .nexus/sudocode/skills/cabin-hardware-control/scripts/cabin-control.mjs \
   --command cabin.scene \
-  --seat-no "A" \
-  --column-no "A" \
+  --seat-no "3B" \
+  --column-no "B" \
   --preset boarding
 ```
 
@@ -126,8 +126,8 @@ The script reads:
 - 阅读灯打开/关闭: `--command seat.light --on true|false`; if brightness is requested together, add `--pwm 0-1000`。例如：打开阅读灯、开个灯我看书、关闭阅读灯、灯太亮关掉、把灯关了、reading light on/off。
 - 阅读灯调亮/调暗/设置亮度: `--command seat.light.brightness --pwm 0-1000`。`pwm=0` 最暗，`pwm=1000` 最亮。乘客未给具体数值时，按固定默认值选择：灯太刺眼/柔和一点/暗一点/不要太亮 → `--pwm 300`；正常/中等亮度 → `--pwm 500`；亮一点/看不清/调亮/再亮一些 → `--pwm 700`。例如：阅读灯调亮、把灯调暗、灯光柔和一点、亮度调到70%、灯太刺眼暗一点、再亮一些。
 - 模糊灯光表达也是控制请求，不是闲聊或必须澄清的状态描述。若乘客说“舱里有点暗”“座舱光线太暗”“客舱太暗”“这里太暗”“光线不够”“有点看不清”“看书看不清”等，且没有明确指定“顶灯/舱灯/客舱灯/氛围灯”，默认控制乘客个人阅读灯：`--command seat.light.brightness --pwm 700`。不要先询问是否需要调亮，也不要输出面向乘客的确认话术。
-- 若同类模糊灯光表达明确提到“顶灯/舱灯/客舱灯/氛围灯”，默认控制客舱顶灯白光亮度：`--command cabin.ceiling.color --r 255 --g 255 --b 255 --brightness 80`。例如：顶灯太暗、客舱灯太暗、舱灯亮一点。
-- 若乘客说“灯太刺眼”“灯太亮”“光线晃眼”“不要这么亮”，且没有明确指定“顶灯/舱灯/客舱灯/氛围灯”，默认控制个人阅读灯：`--command seat.light.brightness --pwm 300`。若明确指定顶灯或舱灯，使用 `--command cabin.ceiling.color --r 255 --g 255 --b 255 --brightness 40`。
+- 本座氛围灯只调亮度时，从本灯位状态保留 RGB。只换颜色时保留本灯位亮度。信息不足时向乘客补问。
+- 若乘客说“灯太刺眼”“灯太亮”“光线晃眼”“不要这么亮”，且没有明确指定“顶灯/舱灯/客舱灯/氛围灯”，默认控制个人阅读灯：`--command seat.light.brightness --pwm 300`。
 - 座椅靠背/坐垫位置百分比: `--command seat.cushion --position 0-100`。例如：靠背调到40%、座椅放到一半、后仰70。
 - 座椅靠背/backrest/recline: always use `--command seat.cushion --position 0-100`; never use `seat.recline`。
 - 放倒座椅/躺下/往后躺/后仰/调舒服一点: use `--command seat.cushion`. If the passenger does not provide a percentage, use `--position 60`。例如：放倒座椅、往后躺、把椅子放平、座椅调舒服一点、recline my seat。（注意：仅当乘客给出明确控制动作时才发射；若只是“我想躺一会/我困了/想睡”等状态表达，按状态反问处理，不要直接发射。）
@@ -140,14 +140,14 @@ The script reads:
 - 座椅按摩: `--command seat.massage --level 1-3`。硬件档位只有 1/2/3；乘客未指定档位时默认 `--level 2`（中档）；说“关闭/关掉”时用 `--level 0`。仅当乘客明确要求控制座椅按摩时 emit，例如：打开座椅按摩、按摩一下、帮我揉揉、椅子给我揉揉、腰按摩、按摩强一点、按摩开到3档、seat massage。若乘客只说“腰有点酸/背有点疼/肩颈不舒服”这类状态表达，先反问是否需要开启座椅按摩，不要直接 emit。
 - 生理检测开始/停止: `--command seat.health.start` or `--command seat.health.stop`。例如：开始——开始生理检测、测一下身体数据、启动健康监测、采集体征；停止——停止生理检测、别测了、关闭健康监测、结束体征采集。
 - 客舱顶灯打开/关闭: `--command cabin.ceiling.light --on true|false`。例如：打开客舱顶灯、把舱灯打开、关闭顶灯、关掉客舱灯、ceiling light on/off。
-- 客舱顶灯颜色亮度: `--command cabin.ceiling.color --r 0-255 --g 0-255 --b 0-255 --brightness 0-100`。RGB 表示颜色，不表示亮度；乘客说“亮度低一点/暗一点/柔和一点”时只降低 `--brightness`，不要把 RGB 改小。常用颜色固定值：暖色/warm `--r 255 --g 180 --b 80`；白色/white `255 255 255`；蓝色/blue `0 0 255`；红色/red `255 0 0`；绿色/green `0 255 0`。未给亮度时默认 `--brightness 100`；柔和/低一点/暗一点默认 `--brightness 40`。例如：顶灯调成暖色、客舱灯光柔和点、顶灯亮度调到40%、换个氛围灯颜色。
+- `cabin.ceiling.color` 使用三个 0–255 的 RGB 值和 0–100 的亮度百分比。服务端在 HTTP 边界把百分比换算为 0–255。蓝色为 0,0,255，暖色为 255,180,80。
 - 客舱顶灯颜色 such as 蓝色/blue: use `--command cabin.ceiling.color`, not `cabin.ceiling.light`。例如：顶灯调成蓝色、换成白色灯、把顶灯变成红色。
-- 客舱场景切换: `--command cabin.scene --preset <value>`. `--preset` MUST be exactly one of the four hardware presets — no other value is valid:
+- 客舱灯效为 `normal` 常亮、`breath` 呼吸、`flow` 流水。以下别名保留兼容：
   - `boarding` — 登机 / 上机。例如：切到登机场景、登机模式、登机灯光。
   - `cruise` — 巡航 / 正常。例如：巡航场景、恢复正常模式、切回常规灯光。
-  - `night` — 睡眠 / 休息 / 夜间。例如：睡眠场景、休息模式、夜间模式、助眠灯光、准备睡觉、调暗休息。
+  - `night` — 夜间灯效，对应呼吸。
   - `landing` — 下机 / 降落。例如：下机场景、降落模式、落地灯光。
-  Map the passenger's words onto the closest preset (e.g. 睡眠/休息 → `night`). Never invent presets like `sleep`, `rest`, `dining`, `reading`, or `none`. 若乘客说的场景（如用餐/阅读/欢迎场景）没有对应的合法值，不要硬映射，改为追问澄清。
+  未识别的场景请乘客说明；睡眠模式属于座椅模式，想休息属于舒适建议。
   Business modes are forbidden here: 办公模式、工作模式、放松模式、休闲模式、睡眠模式、睡觉模式、个人模式、私人模式 are not hardware scene presets. For example, "帮我调整至办公模式" must use `cabin-mode-switch --mode office`, not `cabin.scene --preset cruise`; "帮我打开睡眠模式" must use `cabin-mode-switch --mode sleep`, not `cabin.scene --preset night`.
 - 清除客舱场景: `--command cabin.scene.clear`; never approximate this as `cabin.scene --preset none`。例如：清除场景、取消场景、退出场景模式、恢复默认灯光。
 

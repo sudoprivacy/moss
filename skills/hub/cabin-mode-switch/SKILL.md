@@ -2,7 +2,7 @@
 name: cabin-mode-switch
 displayName: 客舱模式切换
 description: Use this skill when a cabin passenger asks to switch the tablet/business cabin mode to office, relax, sleep, or personal. The skill emits a structured mode switch for the server to call the business broadcast API.
-version: 1.0.1
+version: 1.1.0
 category: 客舱服务
 emoji: "🛋️"
 ---
@@ -11,14 +11,14 @@ emoji: "🛋️"
 
 Use this skill when the passenger asks to switch cabin business mode. This is not the same as hardware scene control.
 
-The script only emits a structured request. The server calls `POST /admin-api/cabin/broadcast/mode-seat` and writes the passenger reply from the real result.
+The script emits a semantic mode. The server posts numeric mode (office=1, relax=2, sleep=3, personal=4), aircraftNo and seatNo to `/admin-api/cabin/broadcast/mode-seat`. It reports dispatch and delivery using the upstream response.
 
 Supported modes:
 
 - `office` - 办公模式 / 工作模式
 - `relax` - 放松模式 / 休闲模式
 - `sleep` - 睡眠模式 / 睡觉模式
-- `personal` - 个人模式 / 私人模式
+- `personal` - 个人模式 / 私人模式 / 个性模式
 
 ## How To Execute
 

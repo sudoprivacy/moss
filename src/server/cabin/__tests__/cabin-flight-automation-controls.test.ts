@@ -101,6 +101,9 @@ async function runPhase(
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = new URL(String(input))
     calls.push(`${url.pathname}${url.search}`)
+    if (url.pathname === '/admin-api/tcp/state/cabin/light') {
+      return Response.json({ code: 0, data: { aircraftNo: 'B-WITHFLIGHT-01', light: {obj: 0, lightOpen: state.ceilingLight === 'true' ? 1 : 0} } })
+    }
     if (url.pathname === '/admin-api/tcp/hardware/status') {
       const key = url.searchParams.get('key')
       const data = key === 'bag'
@@ -313,7 +316,7 @@ describe('CabinFlightAutomation baggage and hardware controls', () => {
     expect(store.listAlerts().alerts.some(alert => alert.alertType === 'HARDWARE_STATE_NOT_REACHED')).toBe(false)
     expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/seat/light')).length).toBe(1)
     expect(calls.filter(call => call.includes('/admin-api/tcp-client/cmd/cabin/ceiling/light')).length).toBe(1)
-    expect(calls.filter(call => call.includes('/admin-api/tcp/hardware/status?target=cabin&key=ceiling_state')).length).toBe(2)
+    expect(calls.filter(call => call === '/admin-api/tcp/state/cabin/light?aircraftNo=B-WITHFLIGHT-01')).toHaveLength(2)
     expect(calls.filter(call => call.includes('/admin-api/tcp/hardware/status?target=A&key=reading_light')).length).toBe(2)
   })
 

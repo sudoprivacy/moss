@@ -217,7 +217,7 @@ describe('compact result integrity', () => {
     const mode = await run('Could you switch to sleep mode?')
     expect(mode.slots).toMatchObject({ mode: 'sleep', execution_status: 'dispatched' })
     expect(mode.reply).toContain('睡眠模式')
-    expect(hardware.at(-1)).toMatchObject({ url: 'http://hardware.invalid/admin-api/cabin/broadcast/mode-seat', body: { mode: 'sleep', seatNo: '01A', aircraftNo: 'B-TEST' } })
+    expect(hardware.at(-1)).toMatchObject({ url: 'http://hardware.invalid/admin-api/cabin/broadcast/mode-seat', body: { mode: 3, seatNo: '01A', aircraftNo: 'B-TEST' } })
     name = 'cabin_status'; args = { target_type: 'seat', status_key: 'reading_light' }
     const status = await run('阅读灯现在开着吗？')
     expect(status.slots).toMatchObject({ execution_status: 'succeeded', status_data: { on: false, pwm: 0 } })

@@ -5,6 +5,7 @@ import WebSocket from 'ws'
 
 import type { ServerConfig } from '../types.js'
 import { CabinStore } from './store.js'
+import { lightState } from './seatLighting.js'
 import type { CabinManagedSeat } from './types.js'
 import type { CabinHealthReportService } from './healthReports.js'
 import { CabinBroadcastClient } from './broadcastClient.js'
@@ -742,9 +743,16 @@ export class CabinFlightAutomation {
       return null
     }
     const target = key === 'glass_state' || key === 'ceiling_state' ? 'cabin' : seat.seatNo
-    const url = new URL(`${baseUrl}/admin-api/tcp/hardware/status`)
-    url.searchParams.set('target', target)
-    url.searchParams.set('key', key)
+    const globalLights = key === 'ceiling_state'
+    const aircraft = seat.aircraftNo || this.config.cabin.aircraftNo
+    const url = new URL(baseUrl + (globalLights ? '/admin-api/tcp/state/cabin/light' : '/admin-api/tcp/hardware/status'))
+    if (globalLights) {
+      if (!aircraft) return null
+      url.searchParams.set('aircraftNo', aircraft)
+    } else {
+      url.searchParams.set('target', target)
+      url.searchParams.set('key', key)
+    }
     const start = Date.now()
     this.log({
       event: 'hardware.status.request',
@@ -782,6 +790,11 @@ export class CabinFlightAutomation {
         details: { payload },
       })
       if (!response.ok || !isOkEnvelope(payload)) return null
+      if (globalLights && aircraft) {
+        const light = lightState(payload, aircraft, 0)
+        if (light?.lightOpen === undefined) return null
+        return { aircraftNo: aircraft, target, key, data: { on: light.lightOpen === 1 } }
+      }
       const data = objectField(payload, 'data')
       if (!data) return null
       return {

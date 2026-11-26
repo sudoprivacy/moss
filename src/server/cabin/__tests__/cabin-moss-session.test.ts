@@ -262,10 +262,9 @@ describe('generateReplyWithMossSession · intent-first', () => {
     expect(requests[0].body).toMatchObject({
       aircraftNo: 'B-WITHFLIGHT-01',
       seatNo: '01A',
-      mode: 'sleep',
-      title: '睡眠模式',
+      mode: 3,
     })
-    expect(result.reply).toBe('已为您切换到睡眠模式，请稍候。')
+    expect(result.reply).toBe('已为您下发睡眠模式指令。')
     expect(result.toolCall?.name).toBe('cabin.mode.switch')
     expect(result.intent).toBe('cabin_mode_switch')
   })

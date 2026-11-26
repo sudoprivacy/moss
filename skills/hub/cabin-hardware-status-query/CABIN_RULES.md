@@ -1,3 +1,3 @@
-source-sha256: a6aecfb5e7082e563a76187447e65455dbc07703e486a2924599a6ac8504be50
+source-sha256: 51412fff478554727ec50e1818bd249cf607b55dbe0e3bc37a9da5ca1bfd201b
 
-乘客查询设备状态时使用 cabin_status，按返回的字段和单位答复。缺失字段保持未知。
+查询设备使用 cabin_status。氛围灯选 ceiling_state，服务端按本座查询，开关取 lightOpen，灯效取 preset，缺失字段保持未知。

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'crypto'
+import { boundLight, describeLight, describeLightEnglish, lightState, requestsOtherSeat, sceneWire, type LightSettings } from './seatLighting.js'
 import { createInterface } from 'readline'
 import type net from 'net'
 import type {
@@ -55,6 +56,7 @@ export type CabinSeatAudioPlayback = {
 }
 
 type CabinHardwareRoute = {
+  rawBrightness?: number
   intent: string
   slots: Record<string, unknown>
   toolCall: CabinToolCall
@@ -511,6 +513,7 @@ export class CabinServices {
     text: string
   }): CabinHardwareRoute | null {
     if (!this.options.config.controlBaseUrl) return null
+    if (requestsOtherSeat(input.text,input.context.seatId)) return null
     if (input.context.replyLanguage) {
       if (deniedCommand(input.text) || describesDevice(input.text) || hypotheticalCommand(input.text)) return null
       const command = exactCommand(input.text)
@@ -529,7 +532,9 @@ export class CabinServices {
     const baseUrl = this.options.config.controlBaseUrl?.replace(/\/+$/, '')
     const target = input.spec.targetType === 'cabin' ? 'cabin' : input.context.seatId || ''
     const toolCall = buildHardwareStatusToolCall(input.context, input.spec)
-    if (!baseUrl || !target) {
+    const light = input.spec.statusKey === 'ceiling_state' ? boundLight(input.context.seatId, this.options.config.managedSeats) : undefined
+    const aircraft = input.context.aircraftNo || this.options.config.aircraftNo
+    if (!baseUrl || !target || (input.spec.statusKey === 'ceiling_state' && (!light || !aircraft))) {
       return {
         intent: 'hardware_status_query',
         slots: {
@@ -546,9 +551,35 @@ export class CabinServices {
     return this.fetchHardwareStatus({
       target,
       key: input.spec.statusKey,
+      light: light && aircraft ? { ...light, aircraft } : undefined,
       toolCall,
       logContext: input.logContext,
     })
+  }
+
+  async prepareLightSettings(context: CabinPassengerContext, requested: LightSettings, logContext?: CabinLogContext) {
+    const settings = { ...requested }
+    let rawBrightness: number | undefined
+    if (!settings.rgb || settings.percent === undefined) {
+      const status = await this.executeHardwareStatusQuery({ context, spec:{targetType:'cabin',statusKey:'ceiling_state'}, logContext })
+      const state = (status.ok ? status.slots.status_data : {}) as Record<string, number>
+      if (!settings.rgb && [state.r,state.g,state.b].every(value => value !== undefined)) settings.rgb = [state.r!,state.g!,state.b!]
+      if (settings.percent === undefined && state.brightness !== undefined) {
+        rawBrightness = settings.relative ? undefined : state.brightness
+        settings.percent = Math.max(0,Math.min(100,Math.round(state.brightness * 100 / 255) + (settings.relative ?? 0)))
+      }
+    }
+    if (!settings.rgb || settings.percent === undefined) return { pending:requested, reply:!settings.rgb ? '氛围灯想配什么颜色？' : '氛围灯亮度要调到百分之多少？' }
+    const [r,g,b] = settings.rgb
+    const route = buildRouteFromCommand(context,'cabin.ceiling.color',{r,g,b,brightness:settings.percent})
+    if (route) route.rawBrightness = rawBrightness
+    return { route, reply:'无法确认本座灯位。' }
+  }
+
+  async allowsCabinSkill(skill: string) {
+    const config = this.options.config
+    if (config.dialogueMode !== 'assistant-short' && config.dialogueMode !== 'assistant-context') return true
+    return (await this.assistantRules(config.assistantName, config.dialogueMode)).skills.includes(skill)
   }
 
   async executeModeSwitch(input: {
@@ -561,7 +592,7 @@ export class CabinServices {
     const aircraftNo = input.context.aircraftNo || this.options.config.aircraftNo || input.context.aircraftId || ''
     const title = input.spec.title || CABIN_MODE_LABELS[input.spec.cabinMode]
     const toolCall = buildModeSwitchToolCall(input.context, input.spec)
-    if (!baseUrl || !seatNo || !aircraftNo) {
+    if (!baseUrl || !boundLight(seatNo, this.options.config.managedSeats) || !aircraftNo) {
       return {
         intent: 'cabin_mode_switch',
         slots: {
@@ -595,8 +626,7 @@ export class CabinServices {
               : {}),
           },
           body: JSON.stringify({
-            mode: input.spec.cabinMode,
-            title,
+            mode: { office:1, relax:2, sleep:3, personal:4 }[input.spec.cabinMode],
             aircraftNo,
             seatNo,
           }),
@@ -619,9 +649,9 @@ export class CabinServices {
       })
       return {
         intent: 'cabin_mode_switch',
-        slots: { ...toolCall.arguments, execution_status: 'failed' },
+        slots: { ...toolCall.arguments, execution_status: 'unknown' },
         toolCall,
-        reply: '当前暂时无法切换客舱模式，请稍后再试。',
+        reply: '尚未收到模式切换回执，请先确认本座设备状态。',
         ok: false,
         payload: null,
       }
@@ -656,8 +686,8 @@ export class CabinServices {
         execution_status: executionStatus,
       },
       toolCall,
-      reply: ok
-        ? `已为您切换到${title}，请稍候。`
+      reply: response.status === 429 || Number(businessCode) === 429 ? '本座模式切换过于频繁，请稍后再试。' : ok
+        ? (Number((payload as { data?: { sentCount?: number } })?.data?.sentCount) === 0 ? '模式指令已提交，座位屏幕暂未确认送达。' : `已为您下发${title}指令。`)
         : `${title}切换失败，请稍后再试。`,
       ok,
       payload,
@@ -685,8 +715,17 @@ export class CabinServices {
       if (guard) return guard
     }
 
-    const url = new URL(`${baseUrl}${input.route.path}`)
-    for (const [key, value] of Object.entries(input.route.params)) {
+    const params = { ...input.route.params }
+    if (input.route.command.startsWith('cabin.')) {
+      const bound = boundLight(String(params.seatNo), this.options.config.managedSeats)
+      if (!bound || !(input.route.slots.aircraft_no || this.options.config.aircraftNo)) return { intent:input.route.intent, slots:{ ...input.route.slots, execution_status:'failed' }, toolCall:input.route.toolCall, reply:'无法确认本座灯位。' }
+      params.seatNo = bound.seatNo
+      if (input.route.command === 'cabin.ceiling.color') params.brightness = input.route.rawBrightness ?? Math.round(Number(params.brightness) * 255 / 100)
+      if (input.route.command === 'cabin.scene') params.preset = sceneWire[String(params.preset)]!
+      if (input.route.command === 'cabin.scene.clear') params.preset = 'normal'
+    }
+    const url = new URL(`${baseUrl}${input.route.command === 'cabin.scene.clear' ? '/admin-api/tcp-client/cmd/cabin/scene' : input.route.path}`)
+    for (const [key, value] of Object.entries(params)) {
       url.searchParams.set(key, String(value))
     }
 
@@ -723,9 +762,9 @@ export class CabinServices {
       })
       return {
         intent: input.route.intent,
-        slots: input.reportTransportFailure ? { ...input.route.slots, execution_status: 'failed' } : input.route.slots,
+        slots: input.reportTransportFailure ? { ...input.route.slots, execution_status: input.route.command.startsWith('cabin.') ? 'unknown' : 'failed' } : input.route.slots,
         toolCall: input.route.toolCall,
-        reply: `${input.route.label}的指令下发失败，请稍后再试。`,
+        reply: input.route.command.startsWith('cabin.') ? '尚未收到灯光控制回执，请先查询本座灯光状态。' : `${input.route.label}的指令下发失败，请稍后再试。`,
       }
     }
 
@@ -1092,6 +1131,7 @@ export class CabinServices {
     }
     try {
       const decision = await ask()
+      if (decision.kind !== 'reply' && requestsOtherSeat(input.text,input.context.seatId)) return { reply:message(spoken,'noAction') }
       if (decision.kind === 'offer') return { reply: comfortOffer(spoken, decision.action), offer: decision.action }
       if (decision.kind === 'reply') return { reply: guardUnexecutedCabinReply(decision.reply, language, input.text) }
       // requestCompactDialogue validates schema and current-turn authorization for
@@ -1110,6 +1150,7 @@ export class CabinServices {
         context: input.context, spec: { targetType: decision.targetType, statusKey: decision.statusKey }, logContext: input.logContext,
       })
       if (!result.ok) return { ...result, reply: message(spoken, 'failed') }
+      if (decision.statusKey === 'ceiling_state' && spoken === 'en') return { ...result, reply:describeLightEnglish(result.slots.status_data as Record<string,number>,input.text) }
       // Existing protocol-aware Chinese formatter uses actual fields and units.
       // An empty status response must never become an invented physical state.
       if (spoken === 'zh') return result
@@ -1349,6 +1390,7 @@ export class CabinServices {
         // dispatch and authors the confirmation from the real outcome — structurally
         // impossible for the model to fabricate a "已下发" success.
         if (commandSpec) {
+          if (requestsOtherSeat(input.text,input.context.seatId)) return {reply:'这里只能控制本座设备。'}
           const route = buildRouteFromCommand(input.context, commandSpec.command, commandSpec.params)
           if (route && !(input.context.replyLanguage && (deniedCommand(input.text) || describesDevice(input.text) || hypotheticalCommand(input.text)))) {
             const result = await this.executeHardwareControl({ route, logContext: input.logContext, reportTransportFailure: !!input.context.replyLanguage })
@@ -1392,6 +1434,7 @@ export class CabinServices {
         }
 
         if (modeSwitchSpec) {
+          if (requestsOtherSeat(input.text,input.context.seatId)) return {reply:'这里只能控制本座设备。'}
           if (input.context.replyLanguage && isSpoken(input.context.replyLanguage) && (deniedCommand(input.text) || describesDevice(input.text) || hypotheticalCommand(input.text))) {
             return { reply: message(input.context.replyLanguage,'noAction') }
           }
@@ -1552,6 +1595,7 @@ export class CabinServices {
 
   private async fetchHardwareStatus(input: {
     target: string
+    light?: { aircraft: string; seatNo: string; obj: number }
     key: CabinHardwareStatusKey
     toolCall?: CabinToolCall
     logContext?: CabinLogContext
@@ -1568,9 +1612,14 @@ export class CabinServices {
         payload: null,
       }
     }
-    const url = new URL(`${baseUrl}/admin-api/tcp/hardware/status`)
-    url.searchParams.set('target', input.target)
-    url.searchParams.set('key', input.key)
+    const url = new URL(baseUrl + (input.light ? '/admin-api/tcp/state/cabin/light' : '/admin-api/tcp/hardware/status'))
+    if (input.light) {
+      url.searchParams.set('aircraftNo', input.light.aircraft)
+      url.searchParams.set('seatNo', input.light.seatNo)
+    } else {
+      url.searchParams.set('target', input.target)
+      url.searchParams.set('key', input.key)
+    }
 
     const start = Date.now()
     let response: Response
@@ -1616,7 +1665,7 @@ export class CabinServices {
       ? (payload as { code?: unknown }).code
       : undefined
     const ok = response.ok && (businessCode === 0 || businessCode === '0')
-    const data = extractHardwareStatusData(payload)
+    const data = input.light ? lightState(payload, input.light.aircraft, input.light.obj) ?? {} : extractHardwareStatusData(payload)
     this.logOutbound({
       ...input.logContext,
       upstream: 'hardware-status',
@@ -1640,7 +1689,7 @@ export class CabinServices {
         last_update_time: extractHardwareStatusLastUpdateTime(payload),
       },
       toolCall,
-      reply: ok ? formatHardwareStatusReply(input.key, data) : '当前暂时无法获取客舱设备状态，请稍后再试。',
+      reply: ok ? input.light ? describeLight(data as Record<string, number>) : formatHardwareStatusReply(input.key, data) : '当前暂时无法获取客舱设备状态，请稍后再试。',
       ok,
       payload,
       status: response.status,
@@ -2004,7 +2053,7 @@ type CabinParamSpec = {
 
 // The cabin scene presets the hardware backend actually accepts. Any other preset
 // token (e.g. an LLM-guessed "sleep"/"rest") must never reach the control API.
-const CABIN_SCENE_PRESETS = ['boarding', 'cruise', 'night', 'landing'] as const
+const CABIN_SCENE_PRESETS = Object.keys(sceneWire)
 
 type CabinCommandSpec = {
   path: string
@@ -2187,6 +2236,8 @@ export function buildRouteFromCommand(
       continue
     }
     const value = coerceCommandParam(paramSpec, raw)
+    if (command === 'cabin.ceiling.color' && (typeof raw !== 'number' && !/^\d+$/.test(String(raw)) || Number(raw) !== value)) return null
+    if (command === 'cabin.ceiling.light' && ![true, false, 'true', 'false'].includes(raw as boolean | string)) return null
     if (value === null) {
       if (paramSpec.required) return null
       continue
@@ -2245,17 +2296,7 @@ function buildHardwareRoute(context: CabinPassengerContext, userText: string): C
         slots: { target: 'ceiling_light', action: 'color', ...color },
       })
     }
-    const brightness = extractCeilingBrightness(text)
-    if (brightness !== null) {
-      return route({
-        intent: 'ceiling_light_brightness',
-        command: 'cabin.ceiling.color',
-        label: `客舱顶灯亮度调整到 ${brightness}%`,
-        path: '/admin-api/tcp-client/cmd/cabin/ceiling/color',
-        params: { r: 255, g: 255, b: 255, brightness },
-        slots: { target: 'ceiling_light', action: 'brightness', r: 255, g: 255, b: 255, brightness },
-      })
-    }
+    if (hasCeilingBrightnessIntent(text) || Object.keys(CEILING_COLORS).some(word => text.includes(word))) return null
     if (hasExplicitParameterSignal(text)) return null
     if (hasAnyText(text, ['关闭', '关掉', '关上', '熄灭', 'off'])) {
       return route({
@@ -2555,8 +2596,7 @@ function extractCeilingColor(text: string): { r: number; g: number; b: number; b
   for (const [word, rgb] of Object.entries(CEILING_COLORS)) {
     if (text.includes(word)) {
       const brightness = extractCeilingBrightnessValue(text)
-      if (brightness === null && hasCeilingBrightnessIntent(text) && hasExplicitParameterSignal(text)) return null
-      return { ...rgb, brightness: brightness ?? 100 }
+      return brightness === null ? null : { ...rgb, brightness }
     }
   }
   return null
@@ -2570,15 +2610,6 @@ function extractCeilingBrightnessValue(text: string): number | null {
   if (hasCeilingBrightnessIntent(text)) {
     const controlNumber = extractControlNumber(text, 3)
     if (controlNumber !== null) return clampInt(controlNumber, 0, 100)
-  }
-  return null
-}
-
-function extractCeilingBrightness(text: string): number | null {
-  const explicit = extractCeilingBrightnessValue(text)
-  if (explicit !== null) return explicit
-  if (hasCeilingBrightnessIntent(text) && !hasExplicitParameterSignal(text)) {
-    return hasAnyText(text, ['调暗', '暗一点', 'dimmer']) ? 30 : 80
   }
   return null
 }

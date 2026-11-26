@@ -1,3 +1,3 @@
-source-sha256: 7ea95ad735fac68b632a9235295d193645943d6b8d45a71a8ac137150443c2f2
+source-sha256: fe321403eb727bb03ff26ed4f1d7812692d0a95901de8bb9f827ce4340f01048
 
-描述不适时调用 cabin_offer。休息可选 recline，寒冷可选 heating，闷热可选 ventilation，肌肉僵硬可选 massage。明确的设备操作使用 cabin_control，参数遵循工具定义。设备不明时请乘客补充。
+明确设备操作使用 cabin_control。氛围灯只控制本座，RGB 和亮度百分比分开，缺值按本灯位状态补齐或追问。常亮 normal、呼吸 breath、流水 flow。描述不适时用 cabin_offer，休息 recline、寒冷 heating、闷热 ventilation、肌肉僵硬 massage。

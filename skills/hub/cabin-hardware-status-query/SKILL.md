@@ -2,7 +2,7 @@
 name: cabin-hardware-status-query
 displayName: 客舱硬件状态查询
 description: Use this skill when a cabin passenger asks for current cabin hardware state, such as seat angle, tray table state, reading light state, comfort levels, or cabin ceiling state. The skill emits a structured query for the server to execute.
-version: 1.0.0
+version: 1.1.0
 category: 客舱服务
 emoji: "🧭"
 ---
@@ -11,7 +11,7 @@ emoji: "🧭"
 
 Use this skill when the passenger asks what a device's current state is. Do not use it for control requests.
 
-The script only emits a structured query. The server calls the real hardware status API and asks the model to phrase the passenger reply from the real result.
+The script emits a semantic mode. The server posts numeric mode (office=1, relax=2, sleep=3, personal=4), aircraftNo and seatNo to `/admin-api/cabin/broadcast/mode-seat`. It reports dispatch and delivery using the upstream response.
 
 ## Query Shape
 
@@ -29,7 +29,7 @@ Supported status keys:
 - Seat comfort levels: `comfort`
 - Reading light: `reading_light`
 - Cabin glass: `glass_state`
-- Cabin ceiling light: `ceiling_state`
+- Cabin ceiling light: `ceiling_state` uses `GET /admin-api/tcp/state/cabin/light` with the bound aircraftNo and seatNo. Read lightOpen for power, preset for effect, and r/g/b/brightness for settings.
 
 ## Examples
 
